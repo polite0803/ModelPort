@@ -6,6 +6,7 @@ import {
   AGGREGATE_PLAN_ENTRIES,
   aggregateCostCounts,
   aggregateCostOf,
+  aggregateCostUsdOf,
   costBucketOfAggregateClass,
   isPlanEntry,
 } from '../../src/shared/aggregateCost.ts'
@@ -213,4 +214,89 @@ test('a missing cost field from an older main process degrades instead of crashi
   const detail = readFileSync('src/renderer/src/components/aggregate/AggregateDetail.tsx', 'utf-8')
   assert.match(detail, /model\.cost\s*\?\?/, '必须对缺失的 cost 字段就地补算')
   assert.doesNotMatch(detail, /costBadgeOf\(model\.cost/, '不能把可能为 undefined 的字段直接传给徽标')
+})
+
+/**
+ * 下面的都是 `aggregateCostUsdOf`：把分类变成金额。四个用例对应四条口径，
+ * 数字取自旁表里真实存在的条目，这样改了标价这些用例就会红，而不是跟着错。
+ */
+
+test('a model with no evidence has no money figure - and that is not $0', () => {
+  const cost = aggregateCostUsdOf({
+    entryId: 'entry_that_does_not_exist',
+    modelId: 'some-model',
+    usage: { promptTokens: 100_000, completionTokens: 20_000 },
+  })
+
+  assert.equal(cost, undefined, '没有证据必须是 undefined，渲染成 "-"；$0 是一个关于账单的断言')
+})
+
+test('free and in-plan models cost nothing in cash and are still counted as priced', () => {
+  // 官方点名免费 / 第三方零价 / 订阅套餐内：三者的请求时刻现金都是 0，
+  // 而 `costedRequests` 由调用方统计，所以界面能说出"$0，且这 12 条我确实算过"。
+  const official = aggregateCostUsdOf({
+    entryId: 'zai_api',
+    modelId: 'glm-4.7-flash',
+    usage: { promptTokens: 100_000, completionTokens: 20_000 },
+  })
+  const thirdParty = aggregateCostUsdOf({
+    entryId: 'zenmux',
+    modelId: 'deepseek/deepseek-v4-flash-free',
+    usage: { promptTokens: 100_000, completionTokens: 20_000 },
+  })
+  const inPlan = aggregateCostUsdOf({
+    entryId: 'glm-cn',
+    modelId: 'glm-5.3',
+    usage: { promptTokens: 100_000, completionTokens: 20_000 },
+  })
+
+  assert.equal(aggregateCostOf({ entryId: 'zai_api', modelId: 'glm-4.7-flash' }).class, 'free')
+  assert.equal(aggregateCostOf({ entryId: 'glm-cn', modelId: 'glm-5.3' }).class, 'included')
+  assert.equal(official, 0)
+  assert.equal(thirdParty, 0)
+  assert.equal(inPlan, 0, '套餐内的边际现金是 0，但这条不是"免费"——分类才是它的答案')
+})
+
+test('a priced model is billed input plus output, with cache reads at their own rate', () => {
+  // deepseek-v4-pro: input 0.66 / output 1.98 / cacheRead 0.022 (USD per 1M)。
+  const withoutCache = aggregateCostUsdOf({
+    entryId: 'deepseek',
+    modelId: 'deepseek-v4-pro',
+    usage: { promptTokens: 100_000, completionTokens: 20_000 },
+  })
+  const withCache = aggregateCostUsdOf({
+    entryId: 'deepseek',
+    modelId: 'deepseek-v4-pro',
+    usage: { promptTokens: 100_000, completionTokens: 20_000, cacheReadTokens: 40_000 },
+  })
+
+  // 上游没报命中 → 全部按 input 单价，这是没有证据时的保守读法。
+  assert.equal(withoutCache, (100_000 * 0.66 + 20_000 * 1.98) / 1e6)
+  // 报了的 40k 从 input 里挪到 cacheRead 档：`prompt_tokens` 含命中，
+  // 两边都算就是把这 40k 收两次费。
+  assert.equal(withCache, (60_000 * 0.66 + 40_000 * 0.022 + 20_000 * 1.98) / 1e6)
+  assert.ok((withCache ?? 0) < (withoutCache ?? 0), '命中必须让这一笔变便宜，不是变贵')
+})
+
+test('a cache-read claim above the reported input is clamped, not credited', () => {
+  // 上游自相矛盾（命中 > 输入）时按"全部输入都命中"处理：这是能把金额算小
+  // 的最接近事实的读法。负的 `billableInput` 会凭空造出一笔退款。
+  const clamped = aggregateCostUsdOf({
+    entryId: 'deepseek',
+    modelId: 'deepseek-v4-pro',
+    usage: { promptTokens: 100_000, completionTokens: 20_000, cacheReadTokens: 200_000 },
+  })
+
+  assert.equal(clamped, (100_000 * 0.022 + 20_000 * 1.98) / 1e6)
+  assert.ok(clamped !== undefined && clamped > 0)
+})
+
+test('garbage usage numbers never become a negative bill', () => {
+  const cost = aggregateCostUsdOf({
+    entryId: 'deepseek',
+    modelId: 'deepseek-v4-pro',
+    usage: { promptTokens: Number.NaN, completionTokens: -5 },
+  })
+
+  assert.equal(cost, 0, 'NaN 与负数都读作 0 个 token，金额不能是 NaN 更不能是负数')
 })

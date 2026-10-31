@@ -512,6 +512,44 @@ export function Channels() {
                   </div>
                 </div>
 
+                {creditState !== undefined && creditState !== 'loading'
+                  && creditState.accounts.length > 0
+                  && (creditState.reported < creditState.accounts.length || creditState.accounts.length > 1) && (
+                  <div className="rounded-md border p-2">
+                    <div className="mb-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                      <span>{t('channels.statCredits')}</span>
+                      <span>
+                        {t('channels.creditsReported', {
+                          reported: creditState.reported,
+                          total: creditState.accounts.length,
+                        })}
+                      </span>
+                    </div>
+                    {creditState.error !== undefined && (
+                      <p className="mb-1 text-xs text-destructive">{creditState.error}</p>
+                    )}
+                    <ul className="space-y-1">
+                      {creditState.accounts.map(account => (
+                        <li key={account.accountId} className="flex items-center justify-between gap-2 text-xs">
+                          <span className="min-w-0 truncate">
+                            {account.nickname}
+                            {account.enabled === false && (
+                              <span className="ml-1 text-muted-foreground">{t('channels.creditsDisabled')}</span>
+                            )}
+                          </span>
+                          {account.error !== undefined
+                            ? (
+                              <span className="min-w-0 truncate text-destructive" title={account.error}>
+                                {account.error}
+                              </span>
+                            )
+                            : <span className="font-medium">{account.remaining ?? '—'}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
                 <div className="space-y-2">
                   <div className="flex flex-wrap items-center gap-2">
                     <Button

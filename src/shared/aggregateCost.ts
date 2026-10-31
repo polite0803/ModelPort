@@ -135,6 +135,68 @@ export function aggregateCostOf(input: {
   return { class: 'unknown', evidence: 'none' }
 }
 
+/**
+ * 一条请求的上报用量。只接受上游自己报的数，`chars/4` 估算不在接受范围内。
+ */
+export interface PricedUsage {
+  promptTokens: number
+  completionTokens: number
+  /** 上游报的缓存命中输入 token，`promptTokens` 的**子集**。 */
+  cacheReadTokens?: number
+}
+
+function positiveTokens(value: number | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0
+}
+
+/**
+ * 由上游上报的用量算出这条请求的美元成本；回答不了就返回 `undefined`。
+ *
+ * 四条口径：
+ *
+ * - 先过 {@link aggregateCostOf} 的分类。`priced` 才乘价；`free` / `included`
+ *   记 0 并**算作已定价**（请求时刻的现金支出确实是 0）；`unknown` 返回
+ *   `undefined`，界面显示 "-"。把"没有证据"渲染成"$0"是这个功能唯一真正危险
+ *   的错法 —— 用户会以为自己在免费跑一个按量计价的模型。
+ * - `promptTokens` 含缓存命中（OpenAI 口径），所以命中部分按 `cacheRead` 单价、
+ *   其余按 `input` 单价；上游没报命中时全部按 `input` 计，那是没有证据时的
+ *   保守读法而不是猜测。
+ * - `cacheWrite` 单价在这里用不上：`UsageReading` 没有写缓存这个字段，凭空补
+ *   一个 0 等于假装看见了它。所以带显式缓存写入的渠道在这里是**低估**的。
+ * - 估算用量不该传进来。这条守卫在 `tokenAccounting.accumulateDayBucket` 里
+ *   又设了一次，两处都设是因为跨过去一次就是账单级的失真。
+ */
+export function aggregateCostUsdOf(input: {
+  entryId: string
+  modelId: string
+  freeModelsHint?: readonly string[]
+  usage: PricedUsage
+}): number | undefined {
+  const signal = aggregateCostOf({
+    entryId: input.entryId,
+    modelId: input.modelId,
+    ...(input.freeModelsHint ? { freeModelsHint: input.freeModelsHint } : {}),
+  })
+
+  if (signal.class === 'unknown') return undefined
+  if (signal.class !== 'priced') return 0
+
+  const price = aggregatePriceOf(input.entryId, input.modelId)
+  // `priced` 已经保证了有非零标价；这一层是给旁表被手改过的情况的：分类说有价、
+  // 查价查不到时，宁可不写数字，也不要按 0 单价算出一笔"免费"。
+  if (price === undefined) return undefined
+
+  const prompt = positiveTokens(input.usage.promptTokens)
+  const completion = positiveTokens(input.usage.completionTokens)
+  const cacheRead = Math.min(positiveTokens(input.usage.cacheReadTokens), prompt)
+
+  return (
+    (prompt - cacheRead) * price.input +
+    cacheRead * (price.cacheRead ?? price.input) +
+    completion * price.output
+  ) / 1_000_000
+}
+
 /** 五类计数，供界面汇总一行；`total` 由调用方给出以免这里再算一遍。 */
 export function aggregateCostCounts(
   signals: readonly AggregateCostSignal[]

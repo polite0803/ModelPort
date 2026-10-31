@@ -58,25 +58,32 @@ export function TokenUsageCard({ usage, className }: TokenUsageCardProps) {
         <p className="mt-3 text-sm text-[var(--text-dim)]">{t('dashboard.tokenUsage.noData')}</p>
       ) : (
         <div className="mt-3 space-y-2.5">
-          {/* Upstream-reported — the only pool that could match a bill. */}
-          <div className="flex items-baseline justify-between gap-3">
-            <span className="text-meta text-[var(--text-muted)]">
-              {t('dashboard.tokenUsage.upstream')}
-            </span>
-            <span className="stat-value tabular-nums text-base">{formatTokens(upstreamTotal)}</span>
-          </div>
+          {/*
+            Two labelled numbers, still never one total - only laid out side by
+            side, because this card spans most of the row's width and a single
+            column left the middle of it empty.
+          */}
+          <div className="grid gap-x-8 gap-y-2.5 sm:grid-cols-2">
+            {/* Upstream-reported — the only pool that could match a bill. */}
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="text-meta text-[var(--text-muted)]">
+                {t('dashboard.tokenUsage.upstream')}
+              </span>
+              <span className="stat-value tabular-nums text-base">{formatTokens(upstreamTotal)}</span>
+            </div>
 
-          {/* Estiamted — explicitly a local approximation, never a billing figure. */}
-          <div className="flex items-baseline justify-between gap-3">
-            <span className="text-meta text-[var(--text-muted)]">
-              {t('dashboard.tokenUsage.estimated')}
-            </span>
-            <span
-              className="tabular-nums text-[var(--text-dim)]"
-              title={t('dashboard.tokenUsage.estimatedHint')}
-            >
-              ≈ {formatTokens(estimatedTotal)}
-            </span>
+            {/* Estiamted — explicitly a local approximation, never a billing figure. */}
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="text-meta text-[var(--text-muted)]">
+                {t('dashboard.tokenUsage.estimated')}
+              </span>
+              <span
+                className="tabular-nums text-[var(--text-dim)]"
+                title={t('dashboard.tokenUsage.estimatedHint')}
+              >
+                ≈ {formatTokens(estimatedTotal)}
+              </span>
+            </div>
           </div>
 
           {coverageText && (
@@ -109,15 +116,38 @@ export function TokenUsageCard({ usage, className }: TokenUsageCardProps) {
         </div>
       )}
 
-      {/* Savings: compression that actually took effect today. */}
+      {/*
+        Savings: compression that actually took effect today. `compressionEnabled
+        === false` renders "-" instead of the 0, because with the switch off no
+        compression was ever allowed to run — that 0 is the absence of a source,
+        not a measurement that found nothing.
+      */}
       {hasAny && (
         <div className="mt-3 flex items-center gap-1.5 border-t border-[var(--border)] pt-2.5 text-meta">
           <TrendingDown className="h-3 w-3 text-[var(--success)]" />
           <span className="text-[var(--text-muted)]">{t('dashboard.tokenUsage.saved')}</span>
-          <span className="tabular-nums text-[var(--success)]">
-            {formatTokens(usage?.savedTokens ?? 0)}
-          </span>
-          <span className="text-[var(--text-dim)]">{t('dashboard.tokenUsage.savedHint')}</span>
+          {usage?.compressionEnabled === false ? (
+            <>
+              <span
+                className="tabular-nums text-[var(--text-dim)]"
+                title={t('dashboard.tokenUsage.savedDisabledHint')}
+              >
+                -
+              </span>
+              {/* The reason belongs in the row, not only in the tooltip: a bare
+                  "-" is still a claim the user would have to come back to decode. */}
+              <span className="text-[var(--text-dim)]">
+                {t('dashboard.tokenUsage.savedDisabled')}
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="tabular-nums text-[var(--success)]">
+                {formatTokens(usage?.savedTokens ?? 0)}
+              </span>
+              <span className="text-[var(--text-dim)]">{t('dashboard.tokenUsage.savedHint')}</span>
+            </>
+          )}
         </div>
       )}
     </Card>

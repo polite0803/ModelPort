@@ -47,6 +47,9 @@ function generateId(): string {
   return crypto.randomUUID()
 }
 
+/** Same length as `generateApiKey()` produces, so the caption shows a real shape. */
+const MASK_EXAMPLE_KEY = 'sk-1234567890abcdef1234567890abcdef1234567890abcdef'
+
 export default function ApiKeysPage({ embedded = false }: { embedded?: boolean }) {
   const { t } = useTranslation()
   const { config, updateConfig, fetchConfig } = useSettingsStore()
@@ -204,6 +207,12 @@ export default function ApiKeysPage({ embedded = false }: { embedded?: boolean }
           </Button>
         </CardHeader>
         <CardContent>
+          <p className="mb-4 text-sm text-muted-foreground">
+            {t('apiKeys.maskHint')}
+            <span className="ml-1 font-mono">
+              {MASK_EXAMPLE_KEY} → {maskKey(MASK_EXAMPLE_KEY)}
+            </span>
+          </p>
           {apiKeys.length === 0 ? (
             <div className="text-center py-12">
               <Key className="h-12 w-12 mx-auto text-muted-foreground mb-4" />

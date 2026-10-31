@@ -197,6 +197,172 @@ test('the day key is the local calendar day', () => {
   assert.equal(tokenDayKey(earlyMorning), '2026-10-29')
 })
 
+test('the per-provider split mirrors the global pools, pool by pool', () => {
+  let bucket: DayTokenBucket | undefined
+  bucket = accumulateDayBucket(bucket, {
+    promptTokens: 1000,
+    completionTokens: 500,
+    source: 'upstream',
+    providerId: 'deepseek',
+  })
+  bucket = accumulateDayBucket(bucket, {
+    promptTokens: 800,
+    completionTokens: 200,
+    source: 'estimated',
+    providerId: 'deepseek',
+  })
+  bucket = accumulateDayBucket(bucket, {
+    promptTokens: 10,
+    completionTokens: 5,
+    source: 'upstream',
+    providerId: 'kilo',
+  })
+
+  assert.deepEqual(bucket.byProvider?.deepseek, {
+    upstreamPrompt: 1000,
+    upstreamCompletion: 500,
+    estimatedPrompt: 800,
+    estimatedCompletion: 200,
+    requests: 2,
+    upstreamRequests: 1,
+    costUsd: 0,
+    costedRequests: 0,
+  })
+  assert.equal(bucket.byProvider?.kilo.upstreamPrompt, 10)
+  // The provider rows are a split of the same traffic, so both must add up.
+  assert.equal(bucket.upstreamPrompt, 1010)
+  assert.equal(bucket.requests, 3)
+})
+
+test('a request with no provider id accrues globally only', () => {
+  // 记不出是谁服务的，就不能编一个键出来 —— 全局池是事实，分表是"我们没记"。
+  const bucket = accumulateDayBucket(undefined, {
+    promptTokens: 100,
+    completionTokens: 10,
+    source: 'upstream',
+    providerId: '   ',
+  })
+
+  assert.equal(bucket.requests, 1)
+  assert.equal(bucket.upstreamPrompt, 100)
+  assert.equal(bucket.byProvider?.deepseek, undefined)
+  assert.deepEqual(Object.keys(bucket.byProvider ?? {}), [])
+})
+
+test('money only comes from upstream-reported usage', () => {
+  // 估算 token 乘标价不是"估算的费用"，而是一张核对不了的账单。
+  let bucket: DayTokenBucket | undefined
+  bucket = accumulateDayBucket(bucket, {
+    promptTokens: 100_000,
+    completionTokens: 20_000,
+    source: 'estimated',
+    providerId: 'deepseek',
+    costUsd: 0.1056,
+  })
+
+  assert.equal(bucket.byProvider?.deepseek.costUsd, 0)
+  assert.equal(bucket.byProvider?.deepseek.costedRequests, 0)
+  assert.equal(bucket.byProvider?.deepseek.estimatedPrompt, 100_000, 'token 照旧进估算池')
+
+  bucket = accumulateDayBucket(bucket, {
+    promptTokens: 100_000,
+    completionTokens: 20_000,
+    source: 'upstream',
+    providerId: 'deepseek',
+    costUsd: 0.1056,
+  })
+
+  assert.equal(bucket.byProvider?.deepseek.costUsd, 0.1056)
+  assert.equal(bucket.byProvider?.deepseek.costedRequests, 1)
+})
+
+test('an unpriced request costs nothing here and is not counted as priced', () => {
+  // `costUsd: undefined` = 没有价格证据；`0` = 有证据且不花钱。两者都必须让
+  // `costedRequests` 说出真话，否则界面无法区分 "$0" 和 "-"。
+  let bucket: DayTokenBucket | undefined
+  bucket = accumulateDayBucket(bucket, {
+    promptTokens: 10, completionTokens: 5, source: 'upstream', providerId: 'opencode_zen',
+  })
+  bucket = accumulateDayBucket(bucket, {
+    promptTokens: 10, completionTokens: 5, source: 'upstream', providerId: 'opencode_zen', costUsd: 0,
+  })
+
+  assert.equal(bucket.byProvider?.opencode_zen.costUsd, 0)
+  assert.equal(bucket.byProvider?.opencode_zen.costedRequests, 1, '只有真的算过的才进分母')
+  assert.equal(bucket.byProvider?.opencode_zen.requests, 2)
+})
+
+test('a sub-cent day of cheap requests is not floored to zero', () => {
+  // 计数全部 `Math.floor`，金额不能：把 $0.004 抹成 0 就是把"花过钱"抹成"免费"。
+  let bucket: DayTokenBucket | undefined
+  for (let i = 0; i < 3; i += 1) {
+    bucket = accumulateDayBucket(bucket, {
+      promptTokens: 100, completionTokens: 50, source: 'upstream', providerId: 'deepseek', costUsd: 0.0013,
+    })
+  }
+
+  assert.ok(Math.abs((bucket.byProvider?.deepseek.costUsd ?? 0) - 0.0039) < 1e-12)
+})
+
+test('a legacy bucket cannot poison the provider split', () => {
+  // 磁盘上的老桶既没有 `byProvider` 也没有 `upstreamCacheRead`。清洗必须补出
+  // 一个可用的空分表，而不是让下一笔请求把这一天写成 NaN。
+  const legacy = {
+    upstreamPrompt: 500,
+    upstreamCompletion: 10,
+    estimatedPrompt: 0,
+    estimatedCompletion: 0,
+    savedTokens: 0,
+    requests: 1,
+    upstreamRequests: 1,
+  } as unknown as DayTokenBucket
+
+  const next = accumulateDayBucket(legacy, {
+    promptTokens: 100,
+    completionTokens: 5,
+    source: 'upstream',
+    providerId: 'deepseek',
+    costUsd: 0.2,
+  })
+
+  assert.equal(next.upstreamPrompt, 600)
+  assert.equal(next.byProvider?.deepseek.upstreamPrompt, 100, '老日子已发生的流量不能被算成这个供应商的')
+  assert.ok(Number.isFinite(next.savedTokens))
+})
+
+test('a hand-edited provider map is sanitized like the day totals are', () => {
+  const cleaned = normalizeDayBucket({
+    requests: 2,
+    byProvider: {
+      deepseek: { upstreamPrompt: -9, upstreamRequests: 'abc', costUsd: -1, costedRequests: 4.7 },
+      '': { upstreamPrompt: 5 },
+      kilo: null,
+    },
+  })
+
+  assert.equal(cleaned.byProvider?.deepseek.upstreamPrompt, 0)
+  assert.equal(cleaned.byProvider?.deepseek.upstreamRequests, 0)
+  assert.equal(cleaned.byProvider?.deepseek.costUsd, 0, '一笔负的账单不是账单')
+  assert.equal(cleaned.byProvider?.deepseek.costedRequests, 4)
+  assert.equal(cleaned.byProvider?.[''], undefined, '空供应商名不能进表')
+  assert.equal(cleaned.byProvider?.kilo.upstreamPrompt, 0, 'null 条目要展开成零桶而不是崩掉')
+})
+
+test('provider split accrual never mutates the bucket it was given', () => {
+  const original = accumulateDayBucket(undefined, {
+    promptTokens: 10, completionTokens: 5, source: 'upstream', providerId: 'deepseek', costUsd: 0.1,
+  })
+  const before = JSON.stringify(original)
+
+  const next = accumulateDayBucket(original, {
+    promptTokens: 10, completionTokens: 5, source: 'upstream', providerId: 'deepseek', costUsd: 0.1,
+  })
+
+  assert.equal(JSON.stringify(original), before)
+  assert.notEqual(next.byProvider, original.byProvider)
+  assert.equal(next.byProvider?.deepseek.costUsd, 0.2)
+})
+
 /** Local helper so the savings test reads at a glance. */
 function summaryOf(bucket: DayTokenBucket) {
   return summarizeDay('2026-10-29', bucket)

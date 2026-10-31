@@ -1064,6 +1064,12 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     return storeManager.getTokenUsageHistory(days)
   })
 
+  // The whole retained day map, so the renderer can re-bucket it for any period
+  // the user picks without another round trip.
+  ipcMain.handle(IpcChannels.STATISTICS_GET_TOKEN_USAGE_DAYS, async () => {
+    return storeManager.getTokenUsageDays()
+  })
+
   ipcMain.handle(IpcChannels.APP_GET_VERSION, async (): Promise<string> => {
     return app.getVersion()
   })

@@ -46,6 +46,7 @@ import {
   summarizeDay,
   tokenDayKey,
   trimDays,
+  type DayTokenBucket,
   type DayTokenSummary,
 } from '../../shared/tokenAccounting.ts'
 import { sendRequestLog } from '../ipc/logBroadcast'
@@ -1727,6 +1728,8 @@ class StoreManager {
         totalLatency: 0,
         modelUsage: {},
         providerUsage: {},
+        providerSuccess: {},
+        providerLatency: {},
       }
     }
     
@@ -1744,6 +1747,18 @@ class StoreManager {
     
     if (providerId) {
       newStats.dailyStats[today].providerUsage[providerId] = (newStats.dailyStats[today].providerUsage[providerId] || 0) + 1
+
+      // Outcomes go on the day only when this build created that day's outcome
+      // maps. A day that began under a build which counted requests only has
+      // requests we cannot account for, so marking it covered would divide
+      // post-upgrade successes by the whole day's requests and report a success
+      // rate that is simply wrong. Such a day stays uncovered.
+      const daySuccesses = newStats.dailyStats[today].providerSuccess
+      const dayLatency = newStats.dailyStats[today].providerLatency
+      if (daySuccesses && dayLatency) {
+        daySuccesses[providerId] = (daySuccesses[providerId] || 0) + (success ? 1 : 0)
+        dayLatency[providerId] = (dayLatency[providerId] || 0) + (success ? latency : 0)
+      }
     }
     
     this.store!.set('statistics', newStats)
@@ -1782,6 +1797,10 @@ class StoreManager {
     savedTokens?: number
     /** 上游报的缓存命中输入 token；只在 `source === 'upstream'` 时入池。 */
     cacheReadTokens?: number
+    /** 服务这次请求的供应商；缺省就只累加全局池，不写分表。 */
+    providerId?: string
+    /** 这次请求的美元估算；`undefined` = 没有价格证据，不是 0。 */
+    costUsd?: number
     nowMs?: number
   }): void {
     this.ensureInitialized()
@@ -1792,12 +1811,37 @@ class StoreManager {
     this.store!.set('tokenUsage', trimDays({ ...stored, [day]: next }))
   }
 
+  /**
+   * Every retained day of token counters, normalized and keyed by local day.
+   *
+   * The whole map, not the answer to one window: the renderer sums it over
+   * whatever period the user picked, so changing the period is not a round trip.
+   * `statistics.get` already hands over `dailyStats` the same way.
+   *
+   * A day with no request is skipped rather than shipped as a zero bucket - "no
+   * bucket" and "0 requests" are the same distinction the card renders as "-".
+   */
+  getTokenUsageDays(): Record<string, DayTokenBucket> {
+    this.ensureInitialized()
+    const stored = this.store!.get('tokenUsage') ?? {}
+    const days: Record<string, DayTokenBucket> = {}
+    for (const [day, bucket] of Object.entries(stored)) {
+      const normalized = normalizeDayBucket(bucket)
+      if (normalized.requests > 0) days[day] = normalized
+    }
+    return days
+  }
+
   /** Today's token summary, or an all-zero bucket when nothing was recorded. */
   getTodayTokenUsage(nowMs: number = Date.now()): DayTokenSummary {
     this.ensureInitialized()
     const day = tokenDayKey(nowMs)
     const stored = this.store!.get('tokenUsage') ?? {}
-    return summarizeDay(day, normalizeDayBucket(stored[day]))
+    // 开关状态必须由这里给出，而不是让界面猜：`savedTokens` 是 0 有两种完全不同的
+    // 成因 —— 「压缩开着但没有可压的内容」是测量结果，「压缩被关掉」根本没有测量
+    // 发生。只读一个 config 布尔，不新增 IPC 通道。
+    const compressionEnabled = this.getConfig().compression?.enabled === true
+    return { ...summarizeDay(day, normalizeDayBucket(stored[day])), compressionEnabled }
   }
 
   /** Token summaries for the newest `days` local days, oldest first. */

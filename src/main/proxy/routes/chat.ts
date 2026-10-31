@@ -28,6 +28,8 @@ import { accountChannelManager } from '../../providers/accountChannels/manager'
 import { storeManager } from '../../store/store'
 import { AUTO_PREFERENCES, type AutoPreference } from '../../../shared/types'
 import { readOrEstimateUsage, usageInputText, type UsageReading } from '../quota/usage'
+import { aggregateCostUsdOf } from '../../../shared/aggregateCost.ts'
+import { getAggregateEntry } from '../../providers/aggregate/registry.ts'
 import { learnFromErrorBody, learnFromHeaders } from '../quota/observations'
 import { rejectionEntryFromContext } from '../rejectionLog'
 import { clientHeaderValue, identifyClientByUserAgent } from '../../../shared/clientProfile'
@@ -77,16 +79,18 @@ function autoPreferenceFromHeader(ctx: Context): AutoPreference | undefined {
  * 按日 token 计数在同一处写入，共用同一个 `UsageReading`，这样账本与仪表盘
  * 永远看同一个口径 —— 两处各读一次响应体是最容易产生分歧的地方。
  * `reading.source` 原样传下去，仪表盘必须把 upstream 与 estimated 分开显示。
+ * 费用也一样在这里算：它一旦离开这个函数去各算各的，"这一天的钱"就会和
+ * "这一天的 token"对不上。
  */
 function meterQuota(
-  providerId: string,
+  provider: { id: string; type?: string; aggregateId?: string },
   accountId: string,
   modelId: string,
   reading: UsageReading,
   savedTokens?: number
 ): void {
   try {
-    storeManager.getQuotaLedger().record(providerId, accountId, modelId, reading)
+    storeManager.getQuotaLedger().record(provider.id, accountId, modelId, reading)
   } catch (error) {
     console.error('[Chat] quota ledger record failed:', error)
   }
@@ -99,10 +103,39 @@ function meterQuota(
       savedTokens,
       // 上游没报就是 undefined，不是 0 —— 见 `TokenUsage.cacheReadTokens`。
       cacheReadTokens: reading.cacheReadTokens,
+      providerId: provider.id,
+      costUsd: estimateRequestCost(provider, modelId, reading),
     })
   } catch (error) {
     console.error('[Chat] token usage record failed:', error)
   }
+}
+
+/**
+ * 这条请求值多少美元，或者「这个数字不存在」。
+ *
+ * 只有聚合条目有第三方标价：账号渠道按积分倍率计费、builtin 与自定义端点一条
+ * 价格都没有。把它们都算成 `undefined` 而不是 0 是有意的 —— 0 是「知道不花钱」，
+ * undefined 是「没人生成过这个数」，仪表盘对后者的显示是 "-"。
+ */
+function estimateRequestCost(
+  provider: { id: string; type?: string; aggregateId?: string },
+  modelId: string,
+  reading: UsageReading
+): number | undefined {
+  if (provider.type !== 'aggregate') return undefined
+  // 估算的 token 数乘上标价不是「估算的费用」，而是一张核对不了的账单。
+  if (reading.source !== 'upstream') return undefined
+
+  const entry = getAggregateEntry(provider.aggregateId ?? provider.id)
+  if (entry === undefined) return undefined
+
+  return aggregateCostUsdOf({
+    entryId: entry.id,
+    modelId,
+    ...(entry.freeModelsHint ? { freeModelsHint: entry.freeModelsHint } : {}),
+    usage: reading,
+  })
 }
 
 
@@ -778,7 +811,7 @@ router.post('/completions', async (ctx: Context) => {
     if (!request.stream) {
       const outputText = String((result.body as Record<string, any> | undefined)?.choices?.[0]?.message?.content ?? '')
       meterQuota(
-        provider.id,
+        provider,
         account.id,
         actualModel,
         readOrEstimateUsage(usageInputText(request), outputText, result.body),
@@ -860,7 +893,7 @@ router.post('/completions', async (ctx: Context) => {
             })
           }
           meterQuota(
-            provider.id,
+            provider,
             account.id,
             actualModel,
             readOrEstimateUsage(usageInputText(request), collectedContent),
@@ -907,7 +940,7 @@ router.post('/completions', async (ctx: Context) => {
             })
           }
           meterQuota(
-            provider.id,
+            provider,
             account.id,
             actualModel,
             readOrEstimateUsage(usageInputText(request), collectedContent),

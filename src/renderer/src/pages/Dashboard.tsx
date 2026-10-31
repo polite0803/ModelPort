@@ -23,6 +23,7 @@ export function Dashboard() {
     proxyStatus,
     stats,
     providers,
+    providerWindow,
     activities,
     chartData,
     tokenUsage,
@@ -30,6 +31,7 @@ export function Dashboard() {
     error,
     lastUpdated,
     refreshData,
+    setProviderWindow,
   } = useDashboardStore()
   const { setProxyEnabled } = useSettingsStore()
   const hasLoadedRef = useRef(false)
@@ -152,10 +154,15 @@ export function Dashboard() {
           }}
         />
       </div>
-      {/* Row with Active Accounts (clickable) and Token Usage */}
-      <div className="mt-4 flex flex-col gap-4 lg:flex-row">
+      {/*
+        One column of the grid the stats row above already uses, plus the two
+        that are left: the card edges of both rows line up, and neither card is
+        a narrow strip next to a stretched one.
+      */}
+      <div className="mt-4 grid gap-4 lg:grid-cols-3">
         <div className="cursor-pointer" onClick={handleAddAccount}>
           <StatsCard
+            className="flex h-full flex-col justify-center"
             title={t('dashboard.activeAccountCount')}
             value={stats.activeAccounts}
             icon={Users}
@@ -165,8 +172,8 @@ export function Dashboard() {
             }}
           />
         </div>
-        <div className="flex-1">
-          <TokenUsageCard usage={tokenUsage} />
+        <div className="lg:col-span-2">
+          <TokenUsageCard className="h-full" usage={tokenUsage} />
         </div>
       </div>
 
@@ -185,7 +192,11 @@ export function Dashboard() {
       </div>
 
       <div className="mt-4 grid items-stretch gap-4 lg:grid-cols-2">
-        <ProviderStatusCard providers={providers} />
+        <ProviderStatusCard
+          providers={providers}
+          statsWindow={providerWindow}
+          onWindowChange={setProviderWindow}
+        />
         <RecentActivity activities={activities} onItemClick={handleActivityClick} />
       </div>
     </div>

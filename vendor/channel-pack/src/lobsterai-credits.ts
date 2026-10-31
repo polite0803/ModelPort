@@ -133,6 +133,18 @@ function readNumber(source: Record<string, unknown>, key: string): number {
   return 0
 }
 
+/**
+ * 该字段**是否存在且可读成数字**。
+ *
+ * `readNumber` 对缺失字段回 0，而 0 在余额里是个有内容的读数；凡是要把
+ * 「上游说 0 分」与「上游没给这个数」分开的地方，都必须先用本函数探一次。
+ */
+function hasNumericField(source: Record<string, unknown>, key: string): boolean {
+  const value = source[key]
+  if (typeof value === 'number') return Number.isFinite(value)
+  return typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(value.trim())
+}
+
 /** 从 JSON 安全读取非空数组。 */
 function readActions(source: Record<string, unknown>, key: string): string[] {
   const value = source[key]
@@ -281,34 +293,47 @@ export async function claimLobsteraiDailyCheckin(
   }
 }
 
+/** 余额查询的结果：`balance === null` 时**必须**带原因。 */
+export interface LobsteraiBalanceResult {
+  balance: CreditBalance | null
+  /**
+   * 查询失败的原因（优先用上游自己的文案，如「未登录」「登录已过期」）。
+   * 与「余额为 0」严格区分：0 是业务事实，null+error 才是没读到。
+   */
+  error?: string
+}
+
 /**
- * 查询账号积分余额。
+ * 查询账号积分余额（**带原因**版本）。
  *
  * 端点用 `profile-summary` 而非 `quota`（`client.go:282-283` 的注释）：
  * `/api/user/quota` 只显示 `freeCreditsTotal=300`，**不含活动积分**
  * （实测某账号 profile-summary 有 5297.72，quota 只有 300）。
  *
- * 返回 `null` 表示**查不到**（网络/信封问题），与「余额为 0」严格区分 ——
- * 失败时 UI 应显示原因而不是 0。
+ * 早先这层把网络失败、信封失败（`code:-1 未登录`）、字段缺失**统统压成
+ * `null`**，到 `collectCreditBalances` 只剩一句笼统的「余额查询失败」——
+ * 官网封禁、登录过期、上游改字段三种情况在界面上长得一模一样。
+ * 现在把上游自己的文案原样透出，失败原因可见。
  *
  * 结构对齐 `credits.ts` 的 {@link CreditBalance}，让 `CreditBalanceRow`
  * 组件能直接复用：`creditItems[]` → `packages[]`，`totalCreditsRemaining` → `total`。
  */
-export async function fetchLobsteraiCreditBalance(
+export async function fetchLobsteraiCreditBalanceDetailed(
   credential: LobsteraiCredential,
   product: LobsteraiProduct,
   fetcher: typeof fetch = fetch,
-): Promise<CreditBalance | null> {
+): Promise<LobsteraiBalanceResult> {
   const result = await requestJson(
     `${product.apiBase}${LOBSTERAI_PROFILE_SUMMARY_PATH}`, credential, product, fetcher,
   )
-  if (!result.ok) return null
+  if (!result.ok) return { balance: null, error: result.message }
   const envelope = parseLobsteraiEnvelope(result.body)
-  if (!envelope.ok) return null
+  if (!envelope.ok) return { balance: null, error: `上游返回：${envelope.message}` }
 
-  const packages: CreditPackage[] = []
   const items = envelope.data.creditItems
-  if (Array.isArray(items)) {
+  const itemsPresent = Array.isArray(items)
+  const packages: CreditPackage[] = []
+  if (itemsPresent) {
     for (const item of items) {
       if (typeof item !== 'object' || item === null) continue
       const record = item as Record<string, unknown>
@@ -372,14 +397,34 @@ export async function fetchLobsteraiCreditBalance(
   // 超额扣费/计量回滚等异常下可能下发负值，原样透出会让卡片显示「-12.5 积分」，
   // 既无意义又会误导用户以为欠费。
   const total = roundCredits(Math.max(0, readNumber(envelope.data, 'totalCreditsRemaining')))
-  // totalCreditsRemaining 为 0 且拿不到明细 → 视为「查不到」而非「余额为 0」：
-  // 该字段缺失时 readNumber 返回 0，会把解析失败伪装成 0 积分。
-  if (total === 0 && packages.length === 0) return null
+  const totalPresent = hasNumericField(envelope.data, 'totalCreditsRemaining')
+  // 两个口径都没有 → 「查不到」；有口径即使是 0 → 「就是 0 分」。
+  // 早先这里用 `total === 0 && packages.length === 0` 判失败，于是**真 0 分的
+  // 账号**与**字段缺失/解析失败**都是 null，UI 一律显示成查询失败。
+  if (!totalPresent && !itemsPresent) {
+    return { balance: null, error: '上游响应里没有积分字段（totalCreditsRemaining / creditItems 均缺失）' }
+  }
   // 失效包的余额同样 clamp：负值计入 expiredTotal 会让「另有 N 已失效」变成负数。
   const expiredTotal = roundCredits(
     packages.reduce((sum, pkg) => sum + (pkg.active ? 0 : Math.max(0, pkg.remaining)), 0),
   )
-  return { total, packages, expiredTotal }
+  return { balance: { total, packages, expiredTotal } }
+}
+
+/**
+ * 查询账号积分余额（**只要数值**的旧签名）。
+ *
+ * 保留给只关心「还有没有分」的调用方（`index.ts` 的余额门控：`null` 在那里
+ * 的含义是 fail-open 放行）。需要向用户交代原因的调用方
+ * （`credits.balances` → 账号卡片）请用
+ * {@link fetchLobsteraiCreditBalanceDetailed}。
+ */
+export async function fetchLobsteraiCreditBalance(
+  credential: LobsteraiCredential,
+  product: LobsteraiProduct,
+  fetcher: typeof fetch = fetch,
+): Promise<CreditBalance | null> {
+  return (await fetchLobsteraiCreditBalanceDetailed(credential, product, fetcher)).balance
 }
 
 /**

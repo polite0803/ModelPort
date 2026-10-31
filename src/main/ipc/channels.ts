@@ -118,6 +118,7 @@ export const IpcChannels = {
   STATISTICS_GET_TODAY: 'statistics:getToday',
   STATISTICS_GET_TOKEN_USAGE: 'statistics:getTokenUsage',
   STATISTICS_GET_TOKEN_USAGE_HISTORY: 'statistics:getTokenUsageHistory',
+  STATISTICS_GET_TOKEN_USAGE_DAYS: 'statistics:getTokenUsageDays',
 
   APP_GET_VERSION: 'app:getVersion',
   APP_CHECK_UPDATE: 'app:checkUpdate',

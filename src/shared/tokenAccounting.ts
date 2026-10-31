@@ -30,6 +30,36 @@
 
 import { localDayKey } from './localDay.ts'
 
+/**
+ * One local day's counters **for one provider**.
+ *
+ * The global bucket answers "how many tokens today"; this answers the same
+ * question per endpoint, which is what the provider statistics card needs. The
+ * two pools stay separate here for the same reason they do globally.
+ *
+ * `costUsd` obeys three rules that the accumulator enforces rather than
+ * convention: it folds **only** from upstream-reported usage (a `chars/4`
+ * estimate times a price is an invoice nobody could reconcile); a request with
+ * no price evidence contributes nothing, which is why `costedRequests` exists —
+ * "$0.00 over 3 of 40 requests" is a different fact from "$0.00 over 40 of 40";
+ * and a model inside a subscription counts as `$0` **cash at request time**,
+ * which is not the same claim as "the plan allowance is unlimited".
+ */
+export interface ProviderDayUsage {
+  upstreamPrompt: number
+  upstreamCompletion: number
+  estimatedPrompt: number
+  estimatedCompletion: number
+  requests: number
+  upstreamRequests: number
+  /** USD estimate; the sum of the priced requests of this day. */
+  costUsd: number
+  /** Requests whose cost was computable at all — the denominator for `costUsd`. */
+  costedRequests: number
+}
+
+export type ProviderDayUsageMap = Record<string, ProviderDayUsage>
+
 /** One day's counters. */
 export interface DayTokenBucket {
   /** Tokens the upstream itself reported. */
@@ -55,6 +85,13 @@ export interface DayTokenBucket {
   requests: number
   /** Requests whose usage came from the upstream rather than the estimator. */
   upstreamRequests: number
+  /**
+   * Same counters split by provider. Optional because a bucket written before
+   * this field existed simply has no split — reading it as "every provider had
+   * zero traffic" would erase the distinction between "not recorded" and
+   * "nothing served", which the card renders as "-" for exactly that reason.
+   */
+  byProvider?: ProviderDayUsageMap
 }
 
 export interface DayTokenSummary extends DayTokenBucket {
@@ -67,6 +104,15 @@ export interface DayTokenSummary extends DayTokenBucket {
    * never read as a mostly-measured one.
    */
   upstreamCoverage: number | null
+  /**
+   * Whether live-zone compression is switched on, attached by the store when it
+   * builds today's summary. `false` means `savedTokens` **cannot** be a
+   * measurement — nothing was allowed to compress, so the day's 0 is the absence
+   * of a source rather than a result. The card renders "-" for exactly that case.
+   *
+   * Absent means the producer never asked, which is not "off".
+   */
+  compressionEnabled?: boolean
 }
 
 /** Newest-first retention. 400 days is a bit over a year of history. */
@@ -91,6 +137,51 @@ function nonNegative(value: number | undefined): number {
 }
 
 /**
+ * Money is floored like nothing else here: a request can genuinely cost a
+ * fraction of a cent, and `nonNegative()` would turn the whole day's spend into
+ * 0 the moment every request was cheap.
+ */
+function nonNegativeAmount(value: number | undefined): number {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : 0
+}
+
+function emptyProviderUsage(): ProviderDayUsage {
+  return {
+    upstreamPrompt: 0,
+    upstreamCompletion: 0,
+    estimatedPrompt: 0,
+    estimatedCompletion: 0,
+    requests: 0,
+    upstreamRequests: 0,
+    costUsd: 0,
+    costedRequests: 0,
+  }
+}
+
+/** Clean one persisted per-provider map, key by key, so a hand-edited file cannot poison totals. */
+function normalizeProviderUsage(input: unknown): ProviderDayUsageMap {
+  const raw = (input ?? {}) as Record<string, unknown>
+  const next: ProviderDayUsageMap = {}
+
+  for (const [providerId, value] of Object.entries(raw)) {
+    if (!providerId.trim()) continue
+    const item = (value ?? {}) as Record<string, unknown>
+    const usage = emptyProviderUsage()
+    // Same rule as the day bucket: the field list lives in `emptyProviderUsage()`
+    // alone, so a counter added later is cleaned without anyone remembering.
+    for (const key of Object.keys(usage) as (keyof ProviderDayUsage)[]) {
+      usage[key] = key === 'costUsd'
+        ? nonNegativeAmount(item[key] as number)
+        : nonNegative(item[key] as number)
+    }
+    next[providerId] = usage
+  }
+
+  return next
+}
+
+/**
  * Fold one request into a day bucket. Pure: returns a new bucket, never mutates.
  *
  * Kept pure so the accumulation rule can be tested without a store, and so the
@@ -105,6 +196,18 @@ export function accumulateDayBucket(
     savedTokens?: number
     /** Cache-read input tokens, only meaningful when `source` is `upstream`. */
     cacheReadTokens?: number
+    /**
+     * The provider that served this request. Blank or absent means the per
+     * provider split is not written — the global pools still accrue, because
+     * "we did not record which endpoint" is not "no endpoint served it".
+     */
+    providerId?: string
+    /**
+     * USD for this request, or `undefined` when there is no price evidence.
+     * `0` is a claim ("this cost nothing"); absence is the fact ("unpriced"),
+     * and only a defined value increments `costedRequests`.
+     */
+    costUsd?: number
   }
 ): DayTokenBucket {
   // ⚠️ 走 `normalizeDayBucket` 而不是直接信任入参：调用方喂的是**磁盘上读出来**
@@ -117,7 +220,7 @@ export function accumulateDayBucket(
   const saved = nonNegative(input.savedTokens)
   const isUpstream = input.source === 'upstream'
 
-  return {
+  const next: DayTokenBucket = {
     upstreamPrompt: base.upstreamPrompt + (isUpstream ? prompt : 0),
     upstreamCompletion: base.upstreamCompletion + (isUpstream ? completion : 0),
     estimatedPrompt: base.estimatedPrompt + (isUpstream ? 0 : prompt),
@@ -128,6 +231,32 @@ export function accumulateDayBucket(
     requests: base.requests + 1,
     upstreamRequests: base.upstreamRequests + (isUpstream ? 1 : 0),
   }
+
+  const providerId = (input.providerId ?? '').trim()
+  if (providerId.length === 0) return next
+
+  const previous = base.byProvider?.[providerId] ?? emptyProviderUsage()
+  // 与 `upstreamCacheRead` 同一条理由：估算的 token 数乘上标价不是"估算的费用"，
+  // 而是一张谁也核对不了的账单。估算请求只进 token 池，永远不进 `costUsd`。
+  const cost = isUpstream && typeof input.costUsd === 'number' && Number.isFinite(input.costUsd) && input.costUsd >= 0
+    ? input.costUsd
+    : null
+
+  next.byProvider = {
+    ...base.byProvider,
+    [providerId]: {
+      upstreamPrompt: previous.upstreamPrompt + (isUpstream ? prompt : 0),
+      upstreamCompletion: previous.upstreamCompletion + (isUpstream ? completion : 0),
+      estimatedPrompt: previous.estimatedPrompt + (isUpstream ? 0 : prompt),
+      estimatedCompletion: previous.estimatedCompletion + (isUpstream ? 0 : completion),
+      requests: previous.requests + 1,
+      upstreamRequests: previous.upstreamRequests + (isUpstream ? 1 : 0),
+      costUsd: previous.costUsd + (cost ?? 0),
+      costedRequests: previous.costedRequests + (cost === null ? 0 : 1),
+    },
+  }
+
+  return next
 }
 
 /** Project a stored bucket into the report shape, adding the day key and coverage. */
@@ -168,10 +297,19 @@ export function normalizeDayBucket(input: unknown): DayTokenBucket {
   // 这条不是偷懒 —— 本次给接口加 `upstreamCacheRead` 时，如果这里仍是手抄清单，
   // 忘记加它就会让**旧文件读出来的桶**缺这个键，然后 `accumulateDayBucket`
   // 拿它去相加，把这一整天全部计数写成 `NaN`。
-  const next = emptyBucket()
-  for (const key of Object.keys(next) as (keyof DayTokenBucket)[]) {
+  //
+  // `emptyBucket()` 因此只放**数字**计数器：`byProvider` 是这层清洗唯一的例外，
+  // 它按自己的形状逐个供应商洗（下面），因为对它做一次 `Number()` 会把整张
+  // 分表抹成 0 —— 而抹掉它同样是丢数据，`accumulateDayBucket` 每一步都过这里。
+  const next: DayTokenBucket = emptyBucket()
+  // `Exclude<…, 'byProvider'>` is not a convenience: it is what keeps this loop
+  // assignable. `byProvider` is the one field whose clean-up is a map, so the
+  // `nonNegative()` write below would type it as a number.
+  const numericKeys = Object.keys(next) as Exclude<keyof DayTokenBucket, 'byProvider'>[]
+  for (const key of numericKeys) {
     next[key] = nonNegative(raw[key] as number)
   }
+  next.byProvider = normalizeProviderUsage(raw.byProvider)
   return next
 }
 

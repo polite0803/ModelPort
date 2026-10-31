@@ -3,6 +3,9 @@ import type { ProxyStatus, ProxyStatistics, Provider, Account, ProviderCheckResu
 import type { DailyTrendPoint } from '@shared/types'
 import { localDayKey, recentLocalDays } from '@shared/localDay'
 import { dailyTrendPoints, dayCountsOf, differenceInPoints, percentChange, successRateOf } from '@shared/trendMath'
+import { aggregateProviderUsage, aggregateProviderTokenUsage, DEFAULT_PROVIDER_WINDOW } from '@shared/providerUsage'
+import type { DailyProviderUsage, ProviderStatsWindow } from '@shared/providerUsage'
+import type { DayTokenBucket } from '@shared/tokenAccounting'
 import type { ProviderStats, ActivityItem, ChartDataPoint } from '@/components/dashboard'
 
 interface DashboardStats {
@@ -24,6 +27,13 @@ interface DashboardState {
   statistics: ProxyStatistics | null
   stats: DashboardStats
   providers: ProviderStats[]
+  /** The period the provider card is summing; `today` until the user picks one. */
+  providerWindow: ProviderStatsWindow
+  /**
+   * The last refresh's provider card inputs, kept so changing the period
+   * re-buckets what is already on screen instead of asking the main process again.
+   */
+  providerCard: ProviderCardInputs
   activities: ActivityItem[]
   chartData: ChartDataPoint[]
   /** Today's token counters; null until the first fetch resolves. */
@@ -37,12 +47,53 @@ interface DashboardState {
   setTokenUsage: (usage: DayTokenSummary | null) => void
   setStats: (stats: Partial<DashboardStats>) => void
   setProviders: (providers: ProviderStats[]) => void
+  setProviderWindow: (window: ProviderStatsWindow) => void
   setActivities: (activities: ActivityItem[]) => void
   addActivity: (activity: ActivityItem) => void
   setChartData: (data: ChartDataPoint[]) => void
   setLoading: (loading: boolean) => void
   setError: (error: string | null) => void
   refreshData: () => Promise<void>
+}
+
+/** What the provider card shows besides the windowed counters. */
+interface ProviderCardMeta {
+  id: string
+  name: string
+  status: ProviderStats['status']
+  /** Health-check probe latency: a property of right now, not of the window. */
+  latency?: number
+}
+
+interface ProviderCardInputs {
+  meta: ProviderCardMeta[]
+  days: Record<string, DailyProviderUsage>
+  /**
+   * Token buckets, a different store key with different retention: a provider
+   * can be counted here and absent there, so each column of the card is only as
+   * covered as its own source.
+   */
+  tokenDays: Record<string, DayTokenBucket>
+}
+
+const EMPTY_PROVIDER_CARD: ProviderCardInputs = { meta: [], days: {}, tokenDays: {} }
+
+const providerStatsOf = (inputs: ProviderCardInputs, window: ProviderStatsWindow): ProviderStats[] => {
+  const usage = aggregateProviderUsage(inputs.days, window)
+  const tokenUsage = aggregateProviderTokenUsage(inputs.tokenDays, window)
+
+  return inputs.meta.map((meta) => {
+    const counted = usage[meta.id]
+
+    return {
+      ...meta,
+      requestCount: counted?.requests ?? 0,
+      successRate: counted?.successRate,
+      avgLatencyMs: counted?.avgLatencyMs,
+      coveredFrom: counted?.coveredFrom,
+      tokens: tokenUsage[meta.id],
+    }
+  })
 }
 
 const convertLogsToActivities = (logs: LogEntry[], providers: Provider[]): ActivityItem[] => {
@@ -122,6 +173,8 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
     accountsTrend: null,
   },
   providers: [],
+  providerWindow: DEFAULT_PROVIDER_WINDOW,
+  providerCard: EMPTY_PROVIDER_CARD,
   activities: [],
   chartData: [],
   tokenUsage: null,
@@ -134,6 +187,10 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   setTokenUsage: (tokenUsage) => set({ tokenUsage }),
   setStats: (stats) => set((state) => ({ stats: { ...state.stats, ...stats } })),
   setProviders: (providers) => set({ providers }),
+  setProviderWindow: (window) => set((state) => ({
+    providerWindow: window,
+    providers: providerStatsOf(state.providerCard, window),
+  })),
   setActivities: (activities) => set({ activities }),
   addActivity: (activity) => set((state) => ({
     activities: [activity, ...state.activities].slice(0, 50),
@@ -159,8 +216,11 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
       // Token counters live in their own store key (bounded by days, not rows),
       // so they are fetched independently of the request-log window.
       const tokenUsagePromise = window.electronAPI?.statistics?.getTokenUsage?.() ?? Promise.resolve(null)
+      // The per-day split for the provider card. Fetched as the whole map so
+      // changing the period stays a local re-bucket, like the request counters.
+      const tokenDaysPromise = window.electronAPI?.statistics?.getTokenUsageDays?.() ?? Promise.resolve({})
 
-      const [proxyStatus, statistics, persistentStats, providers, accounts, providerStatuses, logs, tokenUsage] = await Promise.all([
+      const [proxyStatus, statistics, persistentStats, providers, accounts, providerStatuses, logs, tokenUsage, tokenDays] = await Promise.all([
         proxyStatusPromise,
         statisticsPromise,
         persistentStatsPromise,
@@ -169,7 +229,8 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
         providerStatusPromise,
         logsPromise,
         tokenUsagePromise,
-      ]) as [ProxyStatus | null, ProxyStatistics | null, any, Provider[], Account[], Record<string, ProviderCheckResult>, LogEntry[], DayTokenSummary | null]
+        tokenDaysPromise,
+      ]) as [ProxyStatus | null, ProxyStatistics | null, any, Provider[], Account[], Record<string, ProviderCheckResult>, LogEntry[], DayTokenSummary | null, Record<string, DayTokenBucket>]
 
       // The trend is computed here, from the rollup the `statistics.get` payload
       // already carries. A second channel for the same numbers only added a way to
@@ -222,37 +283,29 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
         latencyTrend,
       })
 
-      const providerUsage = persistentStats?.providerUsage ?? {}
       const requestLogsPromise = window.electronAPI?.requestLogs?.get?.({ limit: 100 }) ?? Promise.resolve([])
       const requestLogs = await requestLogsPromise as DashboardRequestLog[]
-      
-      const providerSuccessCount: Record<string, number> = {}
-      const providerTotalCount: Record<string, number> = {}
-      for (const log of requestLogs) {
-        if (log.providerId) {
-          providerTotalCount[log.providerId] = (providerTotalCount[log.providerId] || 0) + 1
-          if (log.status === 'success') {
-            providerSuccessCount[log.providerId] = (providerSuccessCount[log.providerId] || 0) + 1
+
+      // The card sums the daily per-provider buckets. They are the only
+      // time-addressed source, and unlike the request-log window they are not
+      // capped at the last N rows, so "近30天" really means 30 days.
+      const providerCard: ProviderCardInputs = {
+        meta: (providers ?? []).map((provider: Provider) => {
+          const check = providerStatuses?.[provider.id]
+
+          return {
+            id: provider.id,
+            name: provider.name,
+            status: check?.status ?? provider.status ?? 'unknown',
+            latency: check?.latency,
           }
-        }
+        }),
+        days: (persistentStats?.dailyStats ?? {}) as Record<string, DailyProviderUsage>,
+        tokenDays: tokenDays ?? {},
       }
-      
-      const providerStats: ProviderStats[] = (providers ?? []).map((provider: Provider) => {
-        const status = providerStatuses?.[provider.id]
-        const usage = providerUsage[provider.id] ?? 0
-        const successCount = providerSuccessCount[provider.id] ?? usage
-        const totalCount = providerTotalCount[provider.id] ?? usage
-        
-        return {
-          id: provider.id,
-          name: provider.name,
-          status: status?.status ?? provider.status ?? 'unknown',
-          requestCount: totalCount,
-          successCount: successCount,
-          latency: status?.latency,
-        }
-      })
-      setProviders(providerStats)
+
+      set({ providerCard })
+      setProviders(providerStatsOf(providerCard, get().providerWindow))
 
       const recentRequestLogs = requestLogs.slice(0, 10)
       if (recentRequestLogs && recentRequestLogs.length > 0) {

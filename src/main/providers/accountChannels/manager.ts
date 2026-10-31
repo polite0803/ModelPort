@@ -238,6 +238,9 @@ class AccountChannelManager {
       return {
         accountId: String(row.accountId ?? ''),
         nickname: String(row.nickname ?? row.accountId ?? ''),
+        // 逐账号读数要一路带到界面：只有渠道总额时，一个号查询失败就表现为
+        // 「总额凭空少了一截」，用户无法知道少了谁、为什么少（2026-11-01）。
+        enabled: row.enabled !== false,
         remaining,
         error: typeof row.error === 'string' ? row.error : undefined,
       }

@@ -57,6 +57,7 @@ import type {
   RouteMutationResult,
   RouteRemovalResult,
 } from '../../../shared/modelRouteName'
+import type { DayTokenBucket, DayTokenSummary } from '../../../shared/tokenAccounting'
 
 export type { 
   Provider, 
@@ -489,33 +490,14 @@ interface PersistentStatistics {
 }
 
 /**
- * One local day of token counters. Mirrors `shared/tokenAccounting.ts`.
- *
- * The two pools are separate fields on purpose: `upstream*` is what providers
- * actually reported (bill-reconcilable), `estimated*` is the `chars/4` fallback
- * used when they reported nothing. Merging them would read as fact while being
- * mostly arithmetic.
+ * One local day of token counters — **re-exported from the single source of
+ * truth**, not copied here. The two pools stay separate fields: `upstream*` is
+ * what providers actually reported (bill-reconcilable), `estimated*` is the
+ * `chars/4` fallback. A hand-written copy of this shape drifted within one
+ * release (it fell behind `upstreamCacheRead`), which is the whole reason the
+ * renderer reads the shared interface instead.
  */
-export interface DayTokenSummary {
-  day: string
-  upstreamPrompt: number
-  upstreamCompletion: number
-  estimatedPrompt: number
-  estimatedCompletion: number
-  /** Tokens compression actually removed (only requests where it took effect). */
-  savedTokens: number
-  /**
-   * Input tokens the upstream reported as **cache reads** (subset of
-   * `upstreamPrompt`). Accumulated only from upstream-reported usage, so a
-   * channel that never reports it stays 0 *with no claim attached* — this is
-   * not evidence that caching failed, only that we could not measure it.
-   */
-  upstreamCacheRead: number
-  requests: number
-  upstreamRequests: number
-  /** `upstreamRequests / requests`, or null when nothing was recorded. */
-  upstreamCoverage: number | null
-}
+export type { DayTokenSummary }
 
 interface DailyStatistics {
   date: string
@@ -525,6 +507,13 @@ interface DailyStatistics {
   totalLatency: number
   modelUsage: Record<string, number>
   providerUsage: Record<string, number>
+  /**
+   * Per-provider successes and latency sums for the day. Absent when the bucket
+   * was written by a build that recorded neither - not a zero, so a per-provider
+   * rate must skip the day instead of charging its requests as failures.
+   */
+  providerSuccess?: Record<string, number>
+  providerLatency?: Record<string, number>
 }
 
 interface StatisticsAPI {
@@ -534,6 +523,12 @@ interface StatisticsAPI {
   getTokenUsage: () => Promise<DayTokenSummary>
   /** The newest `days` local days of token counters, oldest first. */
   getTokenUsageHistory: (days?: number) => Promise<DayTokenSummary[]>
+  /**
+   * Every retained day of token counters keyed by local day, carrying the
+   * per-provider split (`byProvider`) the statistics card sums over the period
+   * the user picked.
+   */
+  getTokenUsageDays: () => Promise<Record<string, DayTokenBucket>>
 }
 
 interface TrayAPI {

@@ -71,6 +71,7 @@ import { buddyExpiringWindowDays } from './buddy-balance-rank.js'
 import { CODEBUDDY, WORKBUDDY, productById, type BuddyProduct } from './product.js'
 import { LOOMY_TASK_POINTS, LOOMY_TASK_TITLES } from './loomy-onboarding.js'
 import { LOBSTERAI } from './lobsterai-product.js'
+import { REFRESH_LEAD_MS } from './refresh.js'
 import { QODER, QODER_CN, type QoderProduct } from './qoder-product.js'
 import { TRAE } from './trae-product.js'
 import { CLINE } from './cline-product.js'
@@ -113,7 +114,7 @@ import { ZCODE_CAPTCHA_FALLBACK, type ZcodeCaptchaConfig } from './zcode-captcha
 import { buildCarrierPageHtml } from './zcode-carrier-page.js'
 import {
   claimLobsteraiDailyCheckin,
-  fetchLobsteraiCreditBalance,
+  fetchLobsteraiCreditBalanceDetailed,
 } from './lobsterai-credits.js'
 import {
   claimTraeDailyCheckin,
@@ -2738,9 +2739,29 @@ function registerChannelPackEndpoints(
           }
         }
         if (req.provider === LOBSTERAI.id) {
+          // 查询前先做一次凭据对账：余额路径拿的是**存着的** access_token，不会像
+          // 对话链路那样按需续期。`profile-summary` 对失效凭据回 HTTP 200 +
+          // `code:-1 未登录`，于是出现「聊天还能用、积分却查不到」的矛盾读数。
+          // 只对已过期/临期（不足 1 小时）的号刷一次；失败不打断查询，
+          // 原因随后由 fetchBalanceDetailed 原样透出。
+          for (const entry of accounts) {
+            if (entry.refreshable === false) continue
+            try {
+              const resolved = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
+              const credential = resolved === undefined ? undefined : parseLobsteraiCredential(resolved.value)
+              if (credential === undefined || !isLobsteraiRefreshable(credential)) continue
+              const expiresAt = lobsteraiCredentialExpiresAtMs(credential)
+              if (expiresAt !== undefined && expiresAt - Date.now() > REFRESH_LEAD_MS) continue
+              await lobsterai.refreshAccountCredential(entry.credentialRef, pool, entry.id)
+            } catch (caught) {
+              ctx.logger?.warn?.(
+                `[channel-pack] lobsterai 账号 ${entry.id} 的余额前置续期失败（按现凭据继续查询）: ${String(caught)}`,
+              )
+            }
+          }
           const values = await collectCreditBalances<LobsteraiCredential, typeof LOBSTERAI>(accounts, LOBSTERAI, {
             resolve: (ref) => ctx.credentials.resolve(ref),
-            fetchBalance: (credential, product) => fetchLobsteraiCreditBalance(credential, product),
+            fetchBalanceDetailed: (credential, product) => fetchLobsteraiCreditBalanceDetailed(credential, product),
             warn: (msg) => ctx.logger?.warn?.(msg),
           })
           // ⚠️ LobsterAI 也回传窗口天数（用户报障「账号的积分没按长期、临时方式

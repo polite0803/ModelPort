@@ -342,7 +342,7 @@ export interface AppConfig {
    * filled - see `normalizeConfig()` in `store.ts` for the migration itself.
    */
   routes?: Record<string, ModelRoute>
-  /** Live-zone context compression (off by default) */
+  /** Live-zone context compression (shipped default: on — see DEFAULT_COMPRESSION_CONFIG) */
   compression: CompressionConfig
   /** Output-side verbosity steering (off by default) */
   outputSteering: OutputSteeringConfig
@@ -574,6 +574,15 @@ export interface DailyStatistics {
   modelUsage: Record<string, number>
   /** Provider usage count */
   providerUsage: Record<string, number>
+  /**
+   * Successful requests per provider, written alongside `providerUsage`. Absent
+   * on buckets from a build that counted requests only - which is "not
+   * recorded", never 0, so a per-provider success rate must skip the day rather
+   * than charge it as failures.
+   */
+  providerSuccess?: Record<string, number>
+  /** Summed latency of this day's successful requests per provider. Same absence rule. */
+  providerLatency?: Record<string, number>
 }
 
 /**

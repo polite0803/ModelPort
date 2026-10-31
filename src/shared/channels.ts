@@ -94,7 +94,10 @@ export interface ChannelCredits {
   accounts: Array<{
     accountId: string
     nickname: string
+    /** `false` when the account is parked; its reading is shown but not summed into `remaining`. */
+    enabled?: boolean
     remaining?: number
+    /** Why this account returned nothing (upstream wording first, e.g. "未登录"). */
     error?: string
   }>
 }

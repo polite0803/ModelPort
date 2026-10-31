@@ -45,6 +45,7 @@ import type {
   ChannelRpcResult,
   ChannelView,
 } from '../shared/channels'
+import type { DayTokenBucket, DayTokenSummary } from '../shared/tokenAccounting'
 
 const proxyAPI = {
   start: (port?: number): Promise<boolean> => 
@@ -378,25 +379,9 @@ interface DailyStatistics {
   totalLatency: number
   modelUsage: Record<string, number>
   providerUsage: Record<string, number>
-}
-
-/**
- * One local day of token counters. Mirrors `shared/tokenAccounting.ts`, which
- * this preload file cannot import directly (it is a bridge, not a renderer).
- *
- * The upstream-reported and `chars/4`-estimated pools are separate fields, not
- * one total: only the first pool could ever be reconciled against a bill.
- */
-interface DayTokenSummary {
-  day: string
-  upstreamPrompt: number
-  upstreamCompletion: number
-  estimatedPrompt: number
-  estimatedCompletion: number
-  savedTokens: number
-  requests: number
-  upstreamRequests: number
-  upstreamCoverage: number | null
+  /** Absent on buckets written before outcomes were recorded; never read as 0. */
+  providerSuccess?: Record<string, number>
+  providerLatency?: Record<string, number>
 }
 
 const statisticsAPI = {
@@ -416,6 +401,14 @@ const statisticsAPI = {
   /** The newest `days` local days of token counters, oldest first. */
   getTokenUsageHistory: (days?: number): Promise<DayTokenSummary[]> =>
     ipcRenderer.invoke(IpcChannels.STATISTICS_GET_TOKEN_USAGE_HISTORY, days),
+
+  /**
+   * Every retained day of token counters, keyed by local day, including the
+   * per-provider split. Handed over whole because the period the card sums over
+   * is the user's choice, made after this call.
+   */
+  getTokenUsageDays: (): Promise<Record<string, DayTokenBucket>> =>
+    ipcRenderer.invoke(IpcChannels.STATISTICS_GET_TOKEN_USAGE_DAYS),
 }
 
 interface UpdateProgressInfo {

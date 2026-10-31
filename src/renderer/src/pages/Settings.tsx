@@ -5,7 +5,6 @@ import {
   AppearanceSettings,
   GeneralSettings,
   DataManagement,
-  SecuritySettings,
   ManagementApiSettings,
 } from '@/components/settings'
 import { About } from '@/pages/About'
@@ -63,7 +62,6 @@ export function Settings() {
         <TabsContent value="dataSecurity">
           <div className="space-y-6">
             <DataManagement />
-            <SecuritySettings />
           </div>
         </TabsContent>
 
