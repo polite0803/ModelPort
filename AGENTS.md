@@ -858,6 +858,13 @@ that path.
   `api_error`. A failure after the stream started is an `data: {"error": ...}` frame, never
   assistant text, and every stream carries exactly one `[DONE]`.
 - `usage` is `null` unless the upstream reported real token counts; it is never fabricated.
+- History trimming never empties the history: `TokenLimitStrategy` always keeps the newest
+  non-system message, even when that message alone exceeds `maxTokens` (and even when the system
+  prompt by itself does). Shipping `messages: []` is not "compression" - the account-channel gateway
+  rejects it with `messages must be a non-empty array`, which reads to the client as "you sent no
+  messages" rather than "your message was too long" (reproduced live 2026-11-01 at `maxTokens: 8000`:
+  24 000 chars 200, 26 000 chars 400). `estimateTokens` here is `ceil(length / 3)`, deliberately not
+  the CJK-aware estimator the router uses.
 - Built-in providers silently drop `response_format`, `stream_options`, `logit_bias`, `seed`,
   `max_tokens`, `top_p`, `stop`, `frequency_penalty` and `presence_penalty` in
   `proxy/parameterPolicy.ts`, because OpenAI-compatible clients send them by default and a `400`
@@ -904,16 +911,20 @@ that path.
   hard upstream rejection. It is resolved by `store/modelServing.ts::contextWindowOf` from
   `Provider.modelCapabilities`, so it covers exactly what the syncs could prove (builtin sync,
   account-channel sync via the pack's `/v1/models` view). User aliases carry nothing. Route
-  entries (`auto` plus every enabled `AppConfig.routes` name) carry the **smallest window among
-  the candidates in service** - `autoRouter::advertisedContextFloor` feeding the pure
+  entries (`auto` plus every enabled `AppConfig.routes` name) carry the **smallest window among the
+  candidates that route can actually serve** - `autoRouter::advertisedContextFloor(route)` (and
+  `advertisedContextFloors(routes)` for the list, one pool walk for all routes) feeding the pure
   `autoRouting.ts::advertisedContextFloorOf`. Rules that keep it truthful: it is a floor, never an
-  average (a route can land on any candidate, so a number above the smallest one is a lie); an
-  unannotated candidate counts as `UNANNOTATED_CONTEXT_FLOOR`, i.e. the same number
+  average (a route can land on any candidate in its own pool, so a number above the smallest one is
+  a lie); an unannotated candidate counts as `UNANNOTATED_CONTEXT_FLOOR`, i.e. the same number
   `satisfiesCapability` filters on, so the advertised value and the admission decision can never
-  disagree; it is computed on the *unfiltered* pool, so a `poolStrategies` entry that drops
-  small-window candidates can only make the true floor larger, never smaller; transient state
-  (cooldown, quota, daily limit) is deliberately not deducted, because a number that shrinks
-  between requests is worse than a conservative one. An empty pool omits the key.
+  disagree; it is computed on **that route's** pool after `poolStrategies` and the manual
+  include/exclude (candidates those steps drop no longer participate, which is why a route pinned to
+  big-window models advertises that window instead of the global worst case; a pool narrowed to one
+  model reports that model's own window); transient state (cooldown, quota, daily limit) is
+  deliberately not deducted - `collectCandidates` takes `ignoreTransientAvailability` for exactly
+  this - because a number that shrinks between requests is worse than a conservative one. An empty
+  pool omits the key, which is the same route's own 503 rather than somebody else's window.
 - Tool call ids are `call_<requestId>-<n>`. Managed markup that fails to parse is stripped from
   content while the surrounding text is preserved. The anthropic wire maps upstream `tool_use`
   blocks to native OpenAI `tool_calls`.
