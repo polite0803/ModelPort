@@ -595,21 +595,6 @@ interface ToolCallingAPI {
   }>
 }
 
-interface OpencodeCapability {
-  status: string
-  reason: string
-  checkedAt: number
-}
-
-interface OpencodeAPI {
-  getCapabilities: () => Promise<Record<string, OpencodeCapability>>
-  probeModels: () => Promise<{
-    success: boolean
-    capabilities: Record<string, OpencodeCapability>
-    detail?: string
-  }>
-}
-
 interface ChannelsAPI {
   list: () => Promise<{ success: boolean; reason?: string; channels: ChannelView[] }>
   accountCounts: () => Promise<Record<string, { total: number; enabled: number }>>
@@ -629,7 +614,6 @@ interface ElectronAPI {
   proxy: ProxyAPI
   store: StoreAPI
   providers: ProvidersAPI
-  opencode: OpencodeAPI
   aggregate: AggregateAPI
   channels: ChannelsAPI
   accounts: AccountsAPI

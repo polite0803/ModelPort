@@ -22,18 +22,16 @@ import {
 import { useProvidersStore } from '@/stores/providersStore'
 import { useProxyStore } from '@/stores/proxyStore'
 import { useToast } from '@/hooks/use-toast'
-import { Search, Copy, CheckCircle2, XCircle, Cpu, Check, Square, Database, ChevronLeft, ChevronRight, Loader2, Stethoscope, Ban } from 'lucide-react'
+import { Search, Copy, CheckCircle2, XCircle, Cpu, Check, Square, Database, ChevronLeft, ChevronRight, Loader2, Ban } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Switch } from '@/components/ui/switch'
 import type { Account, CatalogueModel } from '@/types/electron'
 import type { ChannelCredits, CostBucket } from '@shared/channels'
 import { costBucketOf } from '@shared/channels'
 import { aggregateCostOf } from '@shared/aggregateCost'
-import opencodeIcon from '@/assets/providers/opencode.svg'
 import modelMappingIcon from '@/assets/providers/model-mapping.svg'
 
 const providerIcons: Record<string, string> = {
-  opencode: opencodeIcon,
   mapping: modelMappingIcon,
 }
 
@@ -72,8 +70,6 @@ interface ModelInfo {
   served: boolean
   /** 只有目录行带来源；模型映射别名行由「模型映射」页签管理，这一页不给它开关 */
   source?: 'builtin' | 'custom' | 'fetched'
-  /** OpenCode：该模型能不能按信封产出工具调用 */
-  capability?: { status: string; reason: string; checkedAt: number }
   /** 来自渠道包目录的模态声明；没有声明时为 unknown */
   modality: Modality
   /** 上游消耗权重为 0 才是免费；undefined 表示没有费用信息，不能当成免费 */
@@ -176,16 +172,6 @@ const ModelRow = memo(({ model, isSelected, onSelect, t, credits, onToggleServed
               {credit.remaining}
             </sup>
           ) : null}
-          {model.capability && (
-            <Badge
-              variant={model.capability.status === 'tool-capable' ? 'secondary' : 'outline'}
-              title={model.capability.reason}
-            >
-              {model.capability.status === 'tool-capable'
-                ? t('models.toolCapable')
-                : t('models.chatOnly')}
-            </Badge>
-          )}
         </div>
       </TableCell>
       <TableCell>
@@ -241,8 +227,6 @@ export function ModelList() {
   const [selectAll, setSelectAll] = useState(false)
   const [currentPage, setCurrentPage] = useState(1)
   const [catalogueMap, setCatalogueMap] = useState<Record<string, CatalogueModel[]>>({})
-  const [capabilities, setCapabilities] = useState<Record<string, { status: string; reason: string; checkedAt: number }>>({})
-  const [probing, setProbing] = useState(false)
   const [serving, setServing] = useState(false)
   const [modalityFilter, setModalityFilter] = useState<'all' | Modality>('all')
   const [costFilter, setCostFilter] = useState<'all' | CostBucket>('all')
@@ -301,22 +285,6 @@ export function ModelList() {
   useEffect(() => {
     loadCatalogue()
   }, [loadCatalogue, modelsLastUpdated])
-
-  const hasOpencode = providers.some(p => p.id === 'opencode')
-
-  const loadCapabilities = useCallback(async () => {
-    if (!window.electronAPI?.opencode) return
-    try {
-      const result = await window.electronAPI.opencode.getCapabilities()
-      setCapabilities(result ?? {})
-    } catch (error) {
-      console.error('Failed to load OpenCode capabilities:', error)
-    }
-  }, [])
-
-  useEffect(() => {
-    loadCapabilities()
-  }, [loadCapabilities, modelsLastUpdated])
 
   /**
    * Catalogue facts come only from upstream declarations: the channel pack
@@ -404,24 +372,6 @@ export function ModelList() {
   useEffect(() => {
     void loadCredits()
   }, [loadCredits, modelsLastUpdated])
-
-  const runProbe = async () => {
-    if (!window.electronAPI?.opencode) return
-    setProbing(true)
-    try {
-      const result = await window.electronAPI.opencode.probeModels()
-      if (result.success) {
-        setCapabilities(result.capabilities ?? {})
-        toast({ title: t('models.probeDone'), description: t('models.probeDoneDesc') })
-      } else {
-        toast({ title: t('models.probeFailed'), description: result.detail })
-      }
-    } catch (error) {
-      toast({ title: t('models.probeFailed'), description: String(error) })
-    } finally {
-      setProbing(false)
-    }
-  }
   
   const modelList = useMemo(() => {
     const models: ModelInfo[] = []
@@ -479,7 +429,6 @@ export function ModelList() {
           status,
           served: model.served,
           source: model.source,
-          capability: provider.id === 'opencode' ? capabilities[model.actualModelId] : undefined,
           modality: toModality(supportsImage),
           free,
           weight,
@@ -509,7 +458,7 @@ export function ModelList() {
     }
     
     return models
-  }, [providers, accounts, modelMappings, catalogueMap, capabilities, freeFlags, weightFlags, modalityFlags, t])
+  }, [providers, accounts, modelMappings, catalogueMap, freeFlags, weightFlags, modalityFlags, t])
   
   const filteredModels = useMemo(() => {
     let filtered = modelList
@@ -856,21 +805,6 @@ export function ModelList() {
           </div>
           
           <div className="flex items-center gap-2">
-            {hasOpencode && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={runProbe}
-                disabled={probing}
-              >
-                {probing ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                ) : (
-                  <Stethoscope className="h-4 w-4 mr-2" />
-                )}
-                {t('models.probeModels')}
-              </Button>
-            )}
             <Button
               variant="outline"
               size="sm"

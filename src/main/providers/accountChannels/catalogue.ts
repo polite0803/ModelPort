@@ -1,5 +1,5 @@
 /**
- * The twelve account channels shipped by the vendored pack.
+ * The thirteen account channels shipped by the vendored pack.
  *
  * This is metadata only: login flows, account pools, credit claims and model
  * catalogues all come from `vendor/channel-pack` at runtime. The ids here must
@@ -95,6 +95,16 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
     vendor: '腾讯',
     loginKind: 'browser',
     description: '浏览器授权 WorkBuddy 国际版账号，共享一份每日额度；后端没有签到接口。',
+  },
+  {
+    id: 'opencode',
+    name: 'OpenCode',
+    vendor: 'OpenCode',
+    // 这一家不跳浏览器：要么加一条匿名槽（免费车道，无需凭据），要么粘贴 API key。
+    loginKind: 'api-key',
+    credentialAdd: { withKey: 'opencode.addAccount', anonymous: 'opencode.addAnonymous' },
+    description:
+      'OpenCode 免费车道：匿名槽无需凭据即可用，按出口 IP 限流；粘贴 API key 可解锁收费模型。没有每日签到接口。',
   },
 ]
 

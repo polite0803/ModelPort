@@ -39,8 +39,6 @@ export const IpcChannels = {
   PROVIDERS_EXPORT: 'providers:export',
   PROVIDERS_IMPORT: 'providers:import',
   PROVIDERS_UPDATE_MODELS: 'providers:updateModels',
-  OPENCODE_GET_CAPABILITIES: 'opencode:getCapabilities',
-  OPENCODE_PROBE_MODELS: 'opencode:probeModels',
   PROVIDERS_GET_EFFECTIVE_MODELS: 'providers:getEffectiveModels',
   PROVIDERS_GET_MODEL_CATALOGUE: 'providers:getModelCatalogue',
   PROVIDERS_SET_MODELS_SERVED: 'providers:setModelsServed',

@@ -1,29 +1,16 @@
 /**
  * Endpoint 校验策略
  *
- * 绝大多数供应商走 HTTP，endpoint 必须是 http(s)。但走本机运行时的供应商（OpenCode）
- * 不会真的发起 HTTP 请求，它的 endpoint 只是一个占位 scheme，所以不能套这条规则。
- *
- * 判定依据只认内置配置本身（runtimeModels），不接受调用方自报——否则任意自定义
- * 供应商都能借此绕过 endpoint 校验。
+ * 供应商的 endpoint 必须是 http(s)。「走本机运行时、endpoint 只是占位 scheme」那一档
+ * 已于 2026-11-01 随 OpenCode 内置供应商一起退役，所以这里不再有任何例外。
  */
-import { getBuiltinProvider } from './builtin/index.ts'
 
 export interface EndpointValidation {
   valid: boolean
   errors: string[]
 }
 
-/** 这个供应商是否由本机运行时驱动（而不是 HTTP 端点）。 */
-export function isRuntimeBackedProvider(
-  providerId?: string,
-  type?: 'builtin' | 'custom'
-): boolean {
-  if (type !== 'builtin' || !providerId) return false
-  return getBuiltinProvider(providerId)?.runtimeModels === true
-}
-
-export function validateApiEndpoint(endpoint: string, allowNonHttp = false): EndpointValidation {
+export function validateApiEndpoint(endpoint: string): EndpointValidation {
   const errors: string[] = []
   const value = (endpoint ?? '').trim()
 
@@ -38,11 +25,7 @@ export function validateApiEndpoint(endpoint: string, allowNonHttp = false): End
     errors.push('Invalid API endpoint format')
   }
 
-  if (allowNonHttp) {
-    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) {
-      errors.push('Local runtime endpoint must look like <scheme>://<target>')
-    }
-  } else if (!value.startsWith('http://') && !value.startsWith('https://')) {
+  if (!value.startsWith('http://') && !value.startsWith('https://')) {
     errors.push('API endpoint must start with http:// or https://')
   }
 

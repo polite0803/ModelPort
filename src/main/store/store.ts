@@ -654,7 +654,7 @@ class StoreManager {
           description: builtinConfig.description,
           supportedModels: builtinConfig.supportedModels,
           modelMappings: builtinConfig.modelMappings,
-          supportsModelFetch: Boolean(builtinConfig.modelsFetch) || builtinConfig.runtimeModels === true,
+          supportsModelFetch: Boolean(builtinConfig.modelsFetch),
         }
         providers.push(newProvider)
         this.store!.set('providers', providers)
@@ -665,8 +665,8 @@ class StoreManager {
   }
 
   /**
-   * 有些内置供应商不需要任何凭据（OpenCode 走本机运行时）。但负载均衡要有一个
-   * active 账号才肯把请求发出去，所以给它们配一个空的本地账号。
+   * 不需要凭据的供应商（无 key 的自定义端点、聚合条目、账号渠道的本地记录）也得有
+   * 一个 active 账号，否则负载均衡不肯把请求发出去，所以给它们配一个空的本地账号。
    */
   ensureLocalAccount(providerId: string): void {
     // 只看 store 有没有建好：这个方法会被 initialize() 内部的启动同步调用，

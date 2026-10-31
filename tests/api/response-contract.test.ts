@@ -60,7 +60,7 @@ test('no fabricated token usage anywhere in the proxy', () => {
 
 test('streams terminate with exactly one done sentinel', () => {
   assert.match(read('stream.ts'), /let doneSent = false/)
-  assert.match(read('adapters/opencode.ts'), /data: \[DONE\]\\n\\n/)
+  assert.match(read('adapters/anthropic.ts'), /data: \[DONE\]\\n\\n/)
 })
 
 test('stop() force-closes lingering connections', () => {

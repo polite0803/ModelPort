@@ -150,7 +150,11 @@ test('A/请求级：createRoute 之后同一个代理实例（未重启）的下
   assert.equal(single.status, 200)
   assert.equal(single.json.id, 'fast')
   assert.equal(single.json.owned_by, 'auto-router')
-  assert.equal(single.json.context_window, 32000)
+  // 这条路由的池被 `vision-capable` 剔空了（两家供应商都没声明视觉），所以广告里
+  // **没有**窗口可说 —— 与它自己请求时的 503 同源。改之前这里报的是全局池的 32000：
+  // 一个与这条路由无关、来自它根本不会路由的模型的数（下界逐路由算，见 A＋B 改动）。
+  assert.equal('context_window' in (single.json as Record<string, unknown>), false,
+    '池被剔空时省略键，而不是借用别家路由的窗口')
 })
 
 // --------------------------------- A：池策略 / prefer / 名字解析都逐请求现读

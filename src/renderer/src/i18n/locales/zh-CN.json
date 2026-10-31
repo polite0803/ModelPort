@@ -163,10 +163,8 @@
     "providerOffline": "供应商离线",
     "statusUnknown": "状态未知",
     "statusReasons": {
-      "runtime_running": "本机 OpenCode 运行时正在运行",
-      "runtime_not_running": "本机 OpenCode 运行时已安装但还没启动，首次请求时会自动拉起",
-      "runtime_not_installed": "本机还没装 OpenCode 运行时，首次使用会用 npx 下载（可能需要数十秒）",
-      "runtime_failed": "本机 OpenCode 运行时启动失败：{{error}}"
+      "channel_runtime_running": "账号渠道运行时正在运行",
+      "channel_runtime_stopped": "账号渠道运行时还没启动；发起请求时会自动拉起"
     },
     "latency": "延迟",
     "checkFailed": "检测失败",
@@ -298,13 +296,6 @@
     "providerNameRequired": "请输入名称",
     "apiEndpointRequired": "请输入 API 地址",
     "apiEndpointInvalid": "API 地址无效"
-  },
-  "opencode": {
-    "name": "OpenCode",
-    "description": "OpenCode 免费模型池：由本机 OpenCode 运行时驱动，无需凭据；单轮约 30-60 秒",
-    "token": "无需填写",
-    "tokenPlaceholder": "免费池不需要凭据，直接添加账号即可",
-    "tokenHelp": "首次请求会自动启动本机 OpenCode 运行时（优先用已安装的，找不到则用 npx 兜底）；模型按计费为 0 筛选"
   },
   "proxy": {
     "title": "代理设置",
@@ -984,12 +975,6 @@
     "help": "帮助"
   },
   "models": {
-    "probeModels": "体检模型能力",
-    "toolCapable": "支持工具",
-    "chatOnly": "仅对话",
-    "probeDone": "体检完成",
-    "probeDoneDesc": "已逐个探测模型能否按信封产出工具调用",
-    "probeFailed": "体检失败",
     "title": "模型管理",
     "description": "查看和管理可用模型及模型映射配置",
     "modelList": "模型列表",
@@ -1519,7 +1504,8 @@
       "browser": "浏览器登录",
       "device-code": "设备码",
       "sms": "短信验证",
-      "oauth": "OAuth 授权"
+      "oauth": "OAuth 授权",
+      "api-key": "粘贴 API key"
     },
     "login": {
       "title": "登录 {{name}}",
@@ -1532,8 +1518,25 @@
         "browser": "已在系统浏览器打开授权页面；完成登录后本页会自动更新。若没有弹出，请检查系统浏览器。",
         "device-code": "请在打开的页面里完成设备授权；完成后本页会自动更新。",
         "sms": "请在打开的页面里完成短信验证；完成后本页会自动更新。",
-        "oauth": "已在系统浏览器打开授权页面；同意授权后本页会自动更新。"
+        "oauth": "已在系统浏览器打开授权页面；同意授权后本页会自动更新。",
+        "api-key": "这一家不跳浏览器：加一条匿名槽即可使用免费车道（无需凭据），或粘贴你自己的 API key 解锁收费模型。"
       }
+    },
+    "credential": {
+      "title": "{{name}} 添加账号",
+      "hint": "这一家不跳浏览器：加一条匿名槽即可使用免费车道；也可以粘贴自己的 API key 解锁收费模型。",
+      "keyLabel": "API key",
+      "keyPlaceholder": "sk-…（在 opencode.ai/auth 生成）",
+      "nicknameLabel": "备注名（可选）",
+      "nicknamePlaceholder": "例如：主力号",
+      "addKey": "用这把 key 添加",
+      "addAnonymous": "加一条匿名槽",
+      "anonymousHint": "匿名槽不需要凭据，但按出口 IP 限额；额度用尽时同一出口的多条槽会一起失败。",
+      "addedKey": "已添加 API key 账号",
+      "addedAnonymous": "已添加匿名通道",
+      "keyRequired": "请先填入 API key，或者改点「加一条匿名槽」。",
+      "failed": "添加失败",
+      "misconfigured": "这个渠道没有声明加账号的方法，无法从界面添加。"
     }
   },
   "statusReasons": {},

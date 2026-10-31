@@ -127,11 +127,6 @@ export interface BuiltinProviderConfig extends Omit<Provider, 'createdAt' | 'upd
    * and the UI must not offer it.
    */
   modelsFetch?: ModelsFetchConfig
-  /**
-   * Model list comes from a local runtime instead of an HTTP endpoint (OpenCode).
-   * The provider still offers the online-update action, just not over HTTP.
-   */
-  runtimeModels?: boolean
 }
 
 export type { ModelsFetchReader, ModelsFetchConfig, FetchedModel, ModelsFetchFailure, ModelsFetchResult }

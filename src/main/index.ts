@@ -9,7 +9,6 @@ import { UpdaterManager } from './updater'
 import { storeManager } from './store/store'
 import { aggregateProviderManager } from './providers/aggregate'
 import { detectHiddenLaunch, reconcileAutoStart } from './autostartHost'
-import { opencodeService } from './opencode/service'
 
 // Keep the Electron profile directory stable across product renames.
 // safeStorage seals store.key and every stored credential against this profile
@@ -116,7 +115,6 @@ async function initializeApp(): Promise<void> {
   })
 
   app.on('will-quit', () => {
-    opencodeService.stop()
     cleanup()
   })
 }

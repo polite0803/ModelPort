@@ -17,9 +17,7 @@ import { proxyStatusManager } from './status'
 import { storeManager } from '../store/store'
 import { DEFAULT_AUTO_ROUTING_CONFIG } from '../../shared/types'
 import { wrapStreamWithPlan } from './toolCalling/streamPlanWrapper'
-import { OpencodeAdapter, buildCompletion, createDeferredCompletionStream } from './adapters/opencode'
 import { AnthropicAdapter } from './adapters/anthropic'
-import { renderTranscript } from '../opencode/prompt.ts'
 import { ToolCallingEngine } from './toolCalling/ToolCallingEngine'
 import type { ToolCallingTransformResult } from './toolCalling/types'
 import { sessionManager } from './sessionManager'
@@ -109,12 +107,6 @@ export class RequestForwarder {
   })
 
   private readonly providerForwarders: ProviderForwarder[] = [
-    {
-      name: 'opencode',
-      matches: OpencodeAdapter.isOpencodeProvider,
-      forward: (request, account, provider, actualModel, startTime) =>
-        this.forwardOpencode(request, account, provider, actualModel, startTime),
-    },
     {
       name: 'anthropic-messages',
       matches: AnthropicAdapter.isAnthropicProvider,
@@ -998,84 +990,6 @@ export class RequestForwarder {
     return out
   }
 
-
-  /**
-   * OpenCode：驱动本机运行时完成一次 agent 回合。
-   * 免费模型单轮 30–60 秒，且它不是 token 流，所以流式响应是一次性分片（见 adapters/opencode.ts）。
-   */
-  private async forwardOpencode(
-    request: ChatCompletionRequest,
-    account: Account,
-    provider: Provider,
-    actualModel: string,
-    startTime: number
-  ): Promise<ForwardResult> {
-    const id = `chatcmpl-${Date.now().toString(36)}`
-    try {
-      // 工具清单仍走托管层的判定（tool_choice / 强制工具），
-      // 但 opencode 的档案让托管层既不注入提示也不解析响应 —— 工具由 OpenCode 的信封翻译。
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
-      const tools = transformed.plan.toolChoiceMode === 'none' ? [] : (transformed.tools ?? [])
-      // 先把转录渲染出来：图片这类不支持的内容要在**开流之前**就报 400，
-      // 否则流已经发出去了，只能以一个错误帧收场。
-      const prompt = renderTranscript(transformed.messages as never)
-      const adapter = new OpencodeAdapter(provider, account)
-      const runTurn = () =>
-        adapter.chatCompletion({
-          model: actualModel,
-          messages: transformed.messages as never,
-          prompt,
-          stream: request.stream,
-          tools: tools as never,
-          toolChoice: transformed.plan.toolChoiceMode,
-          forcedToolName: transformed.plan.forcedToolName ?? null,
-          parallelToolCalls: transformed.plan.parallelToolCalls,
-          signal: request.signal,
-        })
-
-      if (request.stream) {
-        // 响应头先走：一个回合 30–60 秒（首次还要拉起运行时），
-        // 等回合跑完再开流的话，客户端的响应头超时（AxAgent 是 10 秒）
-        // 会先判失败再回退，这条链路永远打不通。
-        const deferred = createDeferredCompletionStream(id, actualModel)
-        void runTurn().then(
-          reply => deferred.complete(reply),
-          error => deferred.fail(error),
-        )
-        return {
-          success: true,
-          status: 200,
-          headers: { 'Content-Type': 'text/event-stream' },
-          stream: deferred.stream,
-          skipTransform: true,
-          latency: Date.now() - startTime,
-          deferred: true,
-        }
-      }
-
-      const reply = await runTurn()
-      const latency = Date.now() - startTime
-
-      return {
-        success: true,
-        status: 200,
-        body: buildCompletion(id, actualModel, reply),
-        latency,
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      // 免费池配额用完是限流，不是我们这边的故障：报 429，客户端才知道该退避
-      const quotaExhausted = /free usage limit/i.test(message)
-      // 图片这类我们吃不下的内容属于请求问题，不是网关故障
-      const unsupported = error instanceof Error && error.name === 'UnsupportedContentError'
-      return {
-        success: false,
-        status: unsupported ? 400 : quotaExhausted ? 429 : 502,
-        error: message,
-        latency: Date.now() - startTime,
-      }
-    }
-  }
 
   /**
    * Build URL

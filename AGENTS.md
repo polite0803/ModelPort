@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project Overview
 
-ModelPort is an Electron desktop application that provides an OpenAI-compatible API proxy for standard HTTP model endpoints. It ships four provider classes: the `opencode` local runtime, a 74-entry aggregate catalogue of key-based / key-less endpoints (see "Aggregate Provider Catalogue"), the twelve account channels served by the vendored channel pack (see "Account Channels"), and user-defined custom providers. It runs on macOS, Windows, and Linux.
+ModelPort is an Electron desktop application that provides an OpenAI-compatible API proxy for standard HTTP model endpoints. It ships three provider classes: a 74-entry aggregate catalogue of key-based / key-less endpoints (see "Aggregate Provider Catalogue"), the thirteen account channels served by the vendored channel pack (see "Account Channels"), and user-defined custom providers. It runs on macOS, Windows, and Linux.
 
 ## Build Commands
 
@@ -114,7 +114,7 @@ src/
 │   ├── providers/          # Provider configurations
 │   │   ├── builtin/        # Built-in provider configs (one file per provider)
 │   │   ├── aggregate/      # Aggregate catalogue (registry data + manager)
-│   │   ├── accountChannels/ # Twelve login channels: catalogue, vault, manager, runtimeState
+│   │   ├── accountChannels/ # Thirteen login channels: catalogue, vault, manager, runtimeState
 │   │   └── custom.ts       # Custom provider support
 │   ├── store/              # Persistent storage (electron-store)
 │   │   ├── store.ts        # Main store manager with IPC bridge
@@ -156,11 +156,11 @@ To add a new provider:
 `src/main/store/types.ts` needs no edit: it re-exports `builtinProviders` as `BUILTIN_PROVIDERS`.
 
 ### Online Model List Update
-Only two model-list sources exist after the web-provider retirement, and
-`src/main/providers/modelListSource.ts` decides between them in this order:
+One model-list source exists after the web-provider retirement and the OpenCode runtime
+retirement: `src/main/providers/modelListSource.ts` answers `http` for a builtin that declares
+`modelsFetch`, and `unsupported` for everything else. The `runtime` branch is gone with the
+flag it keyed on (`runtimeModels`).
 
-- `runtime` - a builtin that declares `runtimeModels: true` (today only `opencode`). The list
-  comes from the local runtime, not from an endpoint, so it has no `modelsFetch` at all.
 - `http` - a builtin that declares `modelsFetch` (`url`, optional `method`/`body`, `reader`,
   `auth`, extra `headers`). `src/main/providers/modelCatalog.ts` makes the request;
   `modelListReaders.ts` turns the payload into `{ displayName, actualModelId }` pairs.
@@ -483,8 +483,25 @@ cannot route to advertises something that never answers.
 
 ### Account Channels
 
-Twelve browser/device-code login channels - `lobsterai`, `qoder`, `qodercn`, `trae`, `cline`, `loomy`,
-`raccoon`, `minimax`, `zcode`, `gemini`, `workbuddy`, `buddy` - are not HTTP endpoints either. Each one is a DSH
+Thirteen login channels - `lobsterai`, `qoder`, `qodercn`, `trae`, `cline`, `loomy`,
+`raccoon`, `minimax`, `zcode`, `gemini`, `workbuddy`, `buddy`, `opencode` - are not HTTP endpoints
+either. Twelve prove ownership through a browser / device-code / OAuth flow; `opencode` is the
+exception (`loginKind: 'api-key'`): the pack adds an anonymous slot or a pasted `sk-` key and opens
+no browser, so `account.create` has no branch for it and the host must call `opencode.addAccount` /
+`opencode.addAnonymous` instead. Three consequences follow, and each has a gate:
+
+- the add-account UI branches on `channelAddFlowOf(loginKind)` (`shared/channels.ts`): `redirect`
+  runs the browser flow + `login.poll`, `credential` opens a local form that posts the method names
+  the catalogue declares in `credentialAdd` - so a new `api-key` channel is data, not a UI fork;
+- the host must resync itself after those methods (`accountChannels/rpcSync.ts`,
+  `resyncsAfterChannelRpc` + `notifyChanged()`), because the pack **does not** broadcast `changed`
+  for `opencode.addAccount` / `opencode.addAnonymous` - skip it and the slot lands in the pool while
+  the provider record never appears, leaving the card stuck at "not configured" behind a "success"
+  toast;
+- the two gates live in `tests/channels/rpc-resync.test.ts` and `tests/channels/catalogue.test.ts`
+  (method-name ownership, flow mapping, locale parity, and the wiring itself).
+
+Each one is a DSH
 "channel pack" provider that owns its own login flow, account pool, daily credit claim and model
 gating. The upstream implementation is **vendored as source**, not as a bundle:
 
@@ -528,7 +545,7 @@ argument reads its state, a boolean writes it).
 
 The model catalogue comes from `model.list`, **not** from `bridge.models()` — with exactly one
 exception: `model.list` carries no context window, so `manager.models()` pulls the OpenAI-shaped
-`/v1/models` view **once per cache refresh** (shared by all twelve channels) and merges only
+`/v1/models` view **once per cache refresh** (shared by all thirteen channels) and merges only
 `context_window` into the catalogue (`modelCatalog.ts::attachContextWindows`). The view cannot say a
 model's multiplier or its `disabled` / `dead` state, which is why `model.list` stays authoritative.
 `model.list` returns `{models: [{id, name, disabled, dead, isFree?}]}` and is the only place
@@ -570,7 +587,7 @@ renewed through `channels:rpc('account.refresh', {accountId})` and the pool orde
 pool order, so reordering is how a user picks the preferred account.
 
 `manager.ts` mirrors that state into provider records. It only writes one when the channel has at
-least one account, so the provider list never grows twelve unusable rows; records are
+least one account, so the provider list never grows thirteen unusable rows; records are
 `type: 'account'`, `apiEndpoint: channel://<id>` (a placeholder that is never requested),
 `supportsModelFetch: false`, an identity `supportedModels` / `modelMappings` plus the global
 `config.modelMappings` entry carrying `preferredProviderId`, and a credential-less local account so
@@ -776,96 +793,33 @@ exactly this result, so "which model gets routed, and by which step was it dropp
 reading. `RoutePreviewResult` lives in `shared/types.ts` because the renderer cannot import from
 `main/proxy`; `autoRouter.ts` re-exports it.
 
-### Runtime-backed Providers (OpenCode)
-OpenCode does not talk HTTP: a builtin can declare `runtimeModels: true` in `builtin/<provider>.ts`,
-which means its model list comes from a local runtime instead of an endpoint. Three places treat that
-flag differently from a normal provider, and all three are easy to get wrong:
+### OpenCode: three lanes, one shipped
 
-- **The endpoint is a placeholder.** `apiEndpoint: 'opencode://local'` is never requested; it exists
-  so the provider record stays complete. `providers:add` therefore must not apply the
-  http/https rule to it: `CustomProviderManager.validate` asks `isRuntimeBackedProvider(id, type)`
-  (`providers/endpointPolicy.ts`), which only answers yes when the **shipped builtin config** says
-  `runtimeModels` - a caller-supplied flag would let any custom provider skip the check.
-- **A local account has to exist.** A credential-less provider still needs one active account or the
-  load balancer refuses to route, so `storeManager.ensureLocalAccount()` creates an empty active
-  account for every builtin with no `credentialFields`. It runs inside `initialize()`, before
-  `isInitialized` is set, so it must check `this.store` and never `ensureInitialized()`.
-- **Status checks must not send HTTP.** Probing `opencode://local` is axios's "Unsupported protocol
-  opencode:". `ProviderChecker.checkProviderStatus` answers `unknown` (runtime not started yet) or
-  `online` (already running) from `opencodeService.getState()` instead, and never starts the runtime
-  as a side effect of a status check.
+"OpenCode" names three unrelated things in this repo; only the third is live.
 
-The same flag decides where the model list comes from: `providers/modelListSource.ts` resolves
-`runtime` **before** `http`, because a runtime-backed provider has no `modelsFetch` at all and would
-otherwise be reported as "does not support online updates".
-
-A runtime-backed provider answers slowly (one agent turn is 30-60s), so its streaming request must
-not wait for that turn before opening the stream: `forwardOpencode` returns a
-`createDeferredCompletionStream()` that already carries the role chunk, so the response headers go
-out at once and the body follows. Otherwise any client with a response-header deadline (AxAgent:
-10s) fails the request before the answer exists. `ForwardResult.deferred` marks that case, and the
-route then records the total elapsed time instead of the time to first byte.
-
-The envelope is constrained at the decoding layer, not just in the prompt: `opencode/envelopeSchema.ts`
-builds `calls[].items` as an `anyOf` over the tools actually offered (each name is a `const`, its
-parameter schema is inlined) and turns `tool_choice: required`/a forced function into `minItems: 1`
-and `parallel_tool_calls: false` into `maxItems: 1`. Two constraints are deliberately **not**
-enforced, because the runtime hard-codes `toolChoice: "required"` for every `format: json_schema`
-turn: `required` on a call is `['name']` only (`arguments` may be omitted), and
-`additionalProperties` is `true` at both levels. Anything stricter turns a harmless extra field or a
-missing `arguments` into `InvalidToolInputError`, which the runtime rewrites into its `invalid` tool
-and the whole turn is lost. What must stay strict is the tool-name `const` and the inlined parameter
-schema. `usage` is reported in the OpenAI shape
-(prompt = input + cache read/write, completion = output + reasoning, plus the `*_details` fields)
-because the upstream reports it; it stays `null` when it does not, and the contract's "never
-fabricated" rule still holds. Non-text content (images) is rejected with 400 before the stream
-opens instead of being dropped silently.
-
-**`invalid` is the runtime's trash can, not a tool the model called.** `opencode-ai@1.19.4` ships a
-builtin tool literally named `invalid` (description `"Do not use"`) and removes it from the model's
-`activeTools`. It only appears through `experimental_repairToolCall`: when the model names a tool
-that is not in the table (`NoSuchToolError`) or passes arguments that fail the schema
-(`InvalidToolInputError`), the runtime rewrites that call to `tool: "invalid"` and stashes the truth
-in `state.input = {tool, error}`. So `part.tool === 'invalid'` means "the model did not speak in the
-envelope this time", **not** "the model touched a native tool". The old fence exempted only
-`StructuredOutput` and `status: 'error'`, so it flagged `invalid` as native activity and reported the
-self-contradictory `native_tool_activity ... tool "invalid"`, killing a turn the runtime would have
-retried and corrected. `bridge.ts::findNativeToolActivity` now applies three rules in order: an
-envelope short-circuits everything (the runtime retries, and `agent.steps` leaves room for it);
-`invalid` never counts as a native tool; only a native tool that actually **executed** with no
-envelope is a violation (permission-denied attempts come back `status: 'error'` and do not count).
-Genuine `invalid` turns now throw `envelope_violation`, split by source into `unknown_tool_call`
-(the model fired an external tool name as a native function - a prompt problem) and
-`envelope_schema_mismatch` (right tool, schema too tight). `probe.ts` caches both for 10 minutes
-only and `adapters/opencode.ts::resolveTools` deliberately does **not** downgrade the model to
-chat-only for them: they describe our prompt and schema, not model capability, and downgrading locks
-the model out of tool use for the whole TTL.
-
-**Do not re-add agent-level `tools: {bash: false, …}`.** In `opencode-ai@1.19.4` that key is marked
-`@deprecated` in the schema, the agent-config merge loop copies every other field but skips `tools`,
-and `ToolRegistry.tools()` does not filter by permission. Only the top-level `config.tools` is
-translated (into permission rules), and even that gates execution rather than hiding a tool. Native
-tools are therefore held off by `permission` alone - `bash/edit/read/glob/grep/list/webfetch/
-websearch/task/todowrite/question/lsp/doom_loop/skill/external_directory` all `deny` - plus the
-`/permission` poll that rejects everything, and the model will still *see* them.
-
-Two more facts about that path, both measured on 2026-10-27:
-
-- **Turns can run in parallel.** The runtime supports concurrent sessions (one session per
-  request); the service used to serialize them, which multiplied the wait by the client's
-  concurrency. Measured: 3 serial turns 10.3s vs 3 parallel turns 2.6s and 4 parallel turns 3.6s,
-  all successful. `opencode/concurrency.ts` admits `MAX_CONCURRENT_TURNS = 10` - the client
-  (AxAgent) fans out 10 agent nodes per round, so a lower cap just multiplies its wait - and queues
-  the rest; the capability probe shares that budget. Only 4 has a measurement behind it; the quota
-  was exhausted before 6/8/10 could be measured, so treat 10 as "matched to the client", not
-  "verified".
-- **The free pool has a quota, and running out of it fails silently.** After roughly twenty-odd
-  turns the runtime stops answering, does not report an error on the session API, and only writes
-  `level=ERROR ... error.error="AI_APICallError: Free usage limit reached..."` to its own log. The
-  bridge watches that log per session id and aborts the request, so the turn fails in ~3s with the
-  reason instead of hanging for the 5-minute timeout; the forwarder maps it to 429. A dead runtime
-  process must also be replaced, not reused: `ensureStarted()` drops a bridge whose child died and
-  starts a new one, otherwise every later request fails with "Failed to create session: HTTP 0".
+- **Retired 2026-11-01 - the builtin `opencode` provider (local runtime).** It spawned
+  `opencode-ai@1.19.4` (npx fallback) and drove its loopback HTTP/SSE server. The subsystem is
+  gone: `src/main/opencode/`, `providers/builtin/opencode.ts`, `proxy/adapters/opencode.ts`, the
+  `providerForwarders` entry, the `runtimeModels` flag, the `runtime` branch of
+  `modelListSource`, the endpoint-policy runtime exemption, the `opencode` entry in
+  `toolCalling/providerProfiles`, and the `opencode:*` capability-probe IPC slice. Why: the free
+  lane validates the **client shape** (`User-Agent: opencode/<channel>/<version>/<client>` with
+  major >= 2; a 1.x client is rejected with `403 FreeTierError`), while the npm `opencode-ai`
+  line is frozen at 1.19.5 (zero 2.x versions) and `opencode.ai/install` refuses to install 2.x
+  - so the runtime this app could distribute can never be a client the server accepts. Every
+  envelope / `permission` / `invalid`-tool finding that used to be documented here was read off
+  1.19.4 line by line and is **not** re-verified against 2.x (whose `packages/opencode/src/server`
+  no longer even exists); git history has them.
+- **Aggregate entries `opencode_zen` (`/zen/v1`) and `opencode_go` (`/zen/go/v1`)** - keyed HTTP,
+  unrelated to the runtime, unchanged.
+- **The account channel `opencode`** (see "Account Channels") - the channel pack's own v2-shaped
+  lane at `https://opencode.ai/inference`: anonymous slots need no credential, a pasted key
+  unlocks paid models, and each account can carry its own exit proxy because the free lane is
+  capped per source IP. Probe 2026-11-01 from this machine: `GET /inference/v1/models` -> 200,
+  `POST /inference/v1/chat/completions` -> `429 FreeUsageLimitError` + `retry-after`. The 403/429
+  split is the whole diagnosis: 403 means the client shape was rejected, 429 means the shape
+  passed and this exit IP's anonymous allowance is spent. Onboarding the lane makes OpenCode
+  reachable and honestly labelled, not immediately usable.
 
 ### IPC Communication
 All main-renderer communication uses IPC channels defined in `src/main/ipc/channels.ts`. The naming convention is `domain:action` (e.g., `proxy:start`, `accounts:add`).
@@ -878,8 +832,9 @@ field and no `parentMessageId` handling in `SessionConfig`.
 
 ### Tool Prompt Injection
 Tool calling for clients without native support is handled by `src/main/proxy/toolCalling/`
-(the engine plus per-client protocol adapters under `protocols/`). Only `opencode` has a
-`providerProfiles` entry today; other providers are treated as native-tool providers.
+(the engine plus per-client protocol adapters under `protocols/`). The `providerProfiles`
+registry has been empty since the OpenCode runtime retirement (its `opencode` profile was the only
+member), so every shipped provider goes through the default profile.
 `services/promptInjectionService.ts` and `proxy/prompt/` are not wired into the live request path.
 
 ### Session Management Flow
@@ -961,8 +916,7 @@ that path.
   between requests is worse than a conservative one. An empty pool omits the key.
 - Tool call ids are `call_<requestId>-<n>`. Managed markup that fails to parse is stripped from
   content while the surrounding text is preserved. The anthropic wire maps upstream `tool_use`
-  blocks to native OpenAI `tool_calls`; `opencode` streams go through
-  `toolCalling/streamPlanWrapper.ts`.
+  blocks to native OpenAI `tool_calls`.
 - `/v1/management/sessions*` is retired and answers 501: there is no server-side session table.
 
 ## Data Storage
@@ -1431,7 +1385,7 @@ const providerIcons: Record<string, string> = {
 | Type | Description | Used by | Credential Field |
 |------|-------------|-----------|------------------|
 | `token` | generic API key | aggregate providers, custom | `apiKey` (aggregate) / `token` (custom) |
-| `userToken` | single opaque token | `opencode` (runtime-backed; the local account is credential-less) | `token` |
+| `userToken` | single opaque token | (no shipped provider since the OpenCode runtime retirement) | `token` |
 | `cookie` | cookie bundle | custom cookie-based endpoints | provider-defined |
 
 ### Web Search Mode Implementation
@@ -1532,6 +1486,8 @@ builtin provider, force-overwrites `apiEndpoint`, `chatPath`, `supportedModels`,
   `userModelOverrides`);
 - a builtin provider whose id no longer exists in code is deleted from the store at startup.
 
-Example: to change the `opencode` model list, edit only `src/main/providers/builtin/opencode.ts`.
+Example: there is currently no builtin to edit - `builtinProviders` has been empty since the
+OpenCode runtime retirement, and `tests/store/provider-sync.test.ts` plus
+`tests/providers/provider-endpoint-policy.test.ts` pin that the runtime-backed wiring stayed removed.
 Aggregate entries are data, not code: edit `src/main/providers/aggregate/registry.ts` (and the
 counts asserted in `tests/aggregate/registry.test.ts`).

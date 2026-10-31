@@ -2,7 +2,7 @@ import { storeManager } from '../store/store'
 import type { Provider, AuthType } from '../../shared/types'
 import type { CredentialField } from '../store/types'
 import { getBuiltinProvider } from './builtin/index.ts'
-import { isRuntimeBackedProvider, validateApiEndpoint } from './endpointPolicy.ts'
+import { validateApiEndpoint } from './endpointPolicy.ts'
 import { syncBuiltinProvider } from '../store/providerSync.ts'
 
 export interface CustomProviderData {
@@ -44,17 +44,8 @@ export class CustomProviderManager {
     return { valid: errors.length === 0, errors }
   }
 
-  /**
-   * 本机运行时供应商（OpenCode）不走 HTTP，endpoint 只是一个占位 scheme，
-   * 所以不能套用 http/https 这条规则。判定依据取自内置配置本身，
-   * 不接受调用方自报——否则任意自定义供应商都能借此绕过 endpoint 校验。
-   */
-  private static usesLocalRuntime(data: CustomProviderData): boolean {
-    return isRuntimeBackedProvider(data.id, data.type)
-  }
-
-  private static validateApiEndpoint(endpoint: string, allowNonHttp = false): CustomProviderValidation {
-    return validateApiEndpoint(endpoint, allowNonHttp)
+  private static validateApiEndpoint(endpoint: string): CustomProviderValidation {
+    return validateApiEndpoint(endpoint)
   }
 
   private static validateAuthType(authType: AuthType): CustomProviderValidation {
@@ -130,7 +121,7 @@ export class CustomProviderManager {
     const nameValidation = this.validateName(data.name, data.id)
     errors.push(...nameValidation.errors)
     
-    const endpointValidation = this.validateApiEndpoint(data.apiEndpoint, this.usesLocalRuntime(data))
+    const endpointValidation = this.validateApiEndpoint(data.apiEndpoint)
     errors.push(...endpointValidation.errors)
     
     const authTypeValidation = this.validateAuthType(data.authType)

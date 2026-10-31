@@ -20,6 +20,7 @@ import type {
   ChannelModelInfo,
   ChannelView,
 } from '../../../shared/channels'
+import { channelAddFlowOf } from '../../../shared/channels'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
@@ -32,12 +33,27 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Switch } from '@/components/ui/switch'
+import { Input } from '@/components/ui/input'
 import { useToast } from '@/hooks/use-toast'
 
 interface LoginState {
   channel: ChannelView
   accountId?: string
   phase: 'starting' | 'waiting' | 'failed'
+  error?: string
+}
+
+/**
+ * 表单型登录（`api-key`）的对话框状态。
+ *
+ * 与 {@link LoginState} 分开：那一套是「跳浏览器 + 轮询登录结果」的状态机，
+ * 这里没有跳转也没有轮询，提交即落库。
+ */
+interface CredentialAddState {
+  channel: ChannelView
+  apiKey: string
+  nickname: string
+  busy: boolean
   error?: string
 }
 
@@ -58,6 +74,7 @@ export function Channels() {
   const [autoCheckin, setAutoCheckin] = useState<ChannelAutoCheckin | null>(null)
   const [autoCheckinBusy, setAutoCheckinBusy] = useState(false)
   const [login, setLogin] = useState<LoginState | null>(null)
+  const [credentialAdd, setCredentialAdd] = useState<CredentialAddState | null>(null)
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const autoCheckinTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loginRef = useRef<LoginState | null>(null)
@@ -184,6 +201,50 @@ export function Channels() {
       await window.electronAPI.channels.rpc('account.delete', { accountId: current.accountId })
       void refresh()
     }
+  }
+
+  const openCredentialAdd = (channel: ChannelView) => {
+    setCredentialAdd({ channel, apiKey: '', nickname: '', busy: false })
+  }
+
+  /**
+   * 提交表单型登录。两种形态共用一个入口，靠 mode 选渠道包方法：
+   * 匿名槽不需要 key，贴 key 那条必须给出形状正确的值（形状由渠道包再校验一次）。
+   */
+  const submitCredentialAdd = async (mode: 'key' | 'anonymous') => {
+    const current = credentialAdd
+    if (current === null || current.busy) return
+    const method = mode === 'key'
+      ? current.channel.credentialAdd?.withKey
+      : current.channel.credentialAdd?.anonymous
+    if (method === undefined) {
+      setCredentialAdd({ ...current, error: t('channels.credential.misconfigured') })
+      return
+    }
+    const apiKey = current.apiKey.trim()
+    if (mode === 'key' && apiKey.length === 0) {
+      setCredentialAdd({ ...current, error: t('channels.credential.keyRequired') })
+      return
+    }
+    setCredentialAdd({ ...current, busy: true, error: undefined })
+    const nickname = current.nickname.trim()
+    const payload = mode === 'key'
+      ? { apiKey, ...(nickname.length > 0 ? { nickname } : {}) }
+      : (nickname.length > 0 ? { nickname } : {})
+    const result = await window.electronAPI.channels.rpc(method, payload)
+    if (!result.ok) {
+      setCredentialAdd(prev => prev === null ? null : {
+        ...prev,
+        busy: false,
+        error: result.error?.message ?? t('channels.credential.failed'),
+      })
+      return
+    }
+    setCredentialAdd(null)
+    toast({
+      title: t(mode === 'key' ? 'channels.credential.addedKey' : 'channels.credential.addedAnonymous'),
+    })
+    void refresh()
   }
 
   const toggleAutoCheckin = async (enabled: boolean) => {
@@ -717,7 +778,15 @@ export function Channels() {
                 )}
 
                 <div className="mt-auto flex flex-wrap items-center gap-2">
-                  <Button size="sm" disabled={busy} onClick={() => void startLogin(channel)}>
+                  <Button
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => {
+                      // 表单型渠道不跳浏览器：直接开本地对话框收 key / 加匿名槽。
+                      if (channelAddFlowOf(channel.loginKind) === 'credential') openCredentialAdd(channel)
+                      else void startLogin(channel)
+                    }}
+                  >
                     <Plus className="mr-1 h-3.5 w-3.5" />
                     {t('channels.addAccount')}
                   </Button>
@@ -774,6 +843,83 @@ export function Channels() {
           <DialogFooter>
             <Button variant="outline" onClick={() => void cancelLogin()}>
               {login?.phase === 'failed' ? t('common.close') : t('common.cancel')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={credentialAdd !== null}
+        onOpenChange={open => { if (!open && credentialAdd?.busy !== true) setCredentialAdd(null) }}
+      >
+        <DialogContent className="sm:max-w-[460px]">
+          <DialogHeader>
+            <DialogTitle>{t('channels.credential.title', { name: credentialAdd?.channel.name })}</DialogTitle>
+            <DialogDescription>{t('channels.credential.hint')}</DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3 text-sm">
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground" htmlFor="channel-credential-key">
+                {t('channels.credential.keyLabel')}
+              </label>
+              <Input
+                id="channel-credential-key"
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                disabled={credentialAdd?.busy === true}
+                value={credentialAdd?.apiKey ?? ''}
+                placeholder={t('channels.credential.keyPlaceholder')}
+                onChange={event => setCredentialAdd(current => current === null
+                  ? null
+                  : { ...current, apiKey: event.target.value, error: undefined })}
+              />
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground" htmlFor="channel-credential-nickname">
+                {t('channels.credential.nicknameLabel')}
+              </label>
+              <Input
+                id="channel-credential-nickname"
+                autoComplete="off"
+                disabled={credentialAdd?.busy === true}
+                value={credentialAdd?.nickname ?? ''}
+                placeholder={t('channels.credential.nicknamePlaceholder')}
+                onChange={event => setCredentialAdd(current => current === null
+                  ? null
+                  : { ...current, nickname: event.target.value })}
+              />
+            </div>
+
+            {credentialAdd?.error !== undefined && (
+              <p className="text-destructive">{credentialAdd.error}</p>
+            )}
+            <p className="text-xs text-muted-foreground">{t('channels.credential.anonymousHint')}</p>
+          </div>
+
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              disabled={credentialAdd?.busy === true}
+              onClick={() => setCredentialAdd(null)}
+            >
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="secondary"
+              disabled={credentialAdd?.busy === true || credentialAdd?.channel.credentialAdd?.anonymous === undefined}
+              onClick={() => void submitCredentialAdd('anonymous')}
+            >
+              {t('channels.credential.addAnonymous')}
+            </Button>
+            <Button
+              disabled={credentialAdd?.busy === true || credentialAdd?.channel.credentialAdd?.withKey === undefined}
+              onClick={() => void submitCredentialAdd('key')}
+            >
+              {credentialAdd?.busy === true && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              {t('channels.credential.addKey')}
             </Button>
           </DialogFooter>
         </DialogContent>

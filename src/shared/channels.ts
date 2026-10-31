@@ -9,7 +9,19 @@
  */
 
 /** How the user proves ownership of a channel account. */
-export type ChannelLoginKind = 'browser' | 'device-code' | 'sms' | 'oauth'
+export type ChannelLoginKind = 'browser' | 'device-code' | 'sms' | 'oauth' | 'api-key'
+
+/**
+ * 添加账号的交互形态。
+ *
+ * - `redirect`：宿主让渠道包生成登录地址，在系统浏览器里完成，界面轮询 `login.poll`；
+ * - `credential`：不跳浏览器，界面自己收 key / 加匿名槽，直接调渠道包那两个方法。
+ */
+export type ChannelAddFlow = 'redirect' | 'credential'
+
+export function channelAddFlowOf(kind: ChannelLoginKind): ChannelAddFlow {
+  return kind === 'api-key' ? 'credential' : 'redirect'
+}
 
 /** Static description of one channel; shipped as data, never mutated. */
 export interface ChannelDefinition {
@@ -19,6 +31,13 @@ export interface ChannelDefinition {
   /** Company behind the assistant, shown under the name. */
   vendor: string
   loginKind: ChannelLoginKind
+  /**
+   * 表单型登录（`api-key`）的加账号方法名 —— 渠道包 RPC。
+   *
+   * 跳转型渠道统一走 `account.create`，方法名不随渠道变化；表单型没有统一入口
+   * （`account.create` 对它没有分支），所以方法名必须由目录声明，界面只照着调。
+   */
+  credentialAdd?: { withKey: string; anonymous?: string }
   /** One-line description of what the account unlocks. */
   description: string
   /**
@@ -58,6 +77,7 @@ export interface ChannelView {
   name: string
   vendor: string
   loginKind: ChannelLoginKind
+  credentialAdd?: { withKey: string; anonymous?: string }
   description: string
   /** A provider record exists, so its models are routable. */
   configured: boolean

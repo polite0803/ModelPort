@@ -15,6 +15,7 @@
 import { storeManager } from '../store/store'
 import type { Account, Provider, UserModelMarks } from '../store/types'
 import type {
+  AutoPoolStrategy,
   AutoPoolStrategyId,
   AutoPreference,
   ModelCapability,
@@ -43,9 +44,7 @@ import {
   profileRequest,
   providerMeetsContract,
   rankCandidates,
-  resolveCapabilityDetail,
   type AutoRoutingStrategy,
-  type CapabilityLayers,
   type MissingRequirement,
   type PoolStrategyCandidate,
   type RequestProfile,
@@ -246,17 +245,6 @@ function capabilityHintsFor(
   }
 }
 
-/** 四层标注 → `resolveCapabilityDetail` 的入参；口径只在 autoRouting 里定义一次 */
-function capabilityLayersOfHints(hints: CandidateHints): CapabilityLayers {
-  return {
-    ...(hints.manual === undefined ? {} : { manual: hints.manual }),
-    ...(hints.record === undefined ? {} : { record: hints.record }),
-    ...(hints.official === undefined ? {} : { aggregateOfficial: hints.official }),
-    ...(hints.thirdParty === undefined ? {} : { thirdParty: hints.thirdParty }),
-  }
-}
-
-
 class AutoRouter {
   private seed = 0
   /**
@@ -271,38 +259,60 @@ class AutoRouter {
   private sticky = new Map<string, StickyRoute>()
 
   /**
-   * `/v1/models` 的 `auto` 条目所用的窗口：现在在服务的候选里最小的那个。
+   * `/v1/models` 的 `context_window`：**这条路由自己的候选池**里最小的那个窗口。
    *
-   * 候选来源与 `select` 一致（启用的供应商 + 有活跃账号 + 在服务的模型），但**不**扣
-   * 冷却、额度与当日用量 —— 那三样每个请求都在变，广告一个随后会变小的数，等于让
-   * 客户端按它拿不到的上界安排字节。全库没有任何标注时按 64000 参与（与放行判据同源）。
+   * 采集与 `select` 同源（同一个 `collectCandidates`，同一套池策略与手动增删折叠），
+   * 差别只有两处，都是广告语义要求的：
+   * - 不扣冷却、额度与当日用量（`ignoreTransientAvailability`）—— 那三样每个请求都
+   *   在变，广告一个随后会变小的数，等于让客户端按它拿不到的上界安排字节；
+   * - 不扣请求画像与契约过滤 —— vision/tools/context/`n` 是请求属性而不是路由配置。
+   *
+   * 未标注窗口的候选按 `UNANNOTATED_CONTEXT_FLOOR`（64000）参与，与放行判据同源。
+   * 被池策略或 `excludeModels` 剔掉的候选**不再参与**，所以一条只钉了几家大窗模型
+   * 的路由会广告那些模型自己的窗口，而不是被全局最悲观的候选压到 64K；候选收敛到
+   * 一个模型时（同一模型的多个账号算一个），最小值就是那个模型的窗口。
+   * 空池返回 `undefined`：没有候选就没有可说的，键必须省略而不是写个默认值。
    */
-  advertisedContextFloor(): number | undefined {
-    const windows: (number | undefined)[] = []
-    const marks = storeManager.getUserModelMarks()
+  advertisedContextFloor(route?: ModelRoute): number | undefined {
+    return this.floorOfPool(this.advertisedPool(), route)
+  }
 
-    for (const provider of storeManager.getProviders().filter(p => p.enabled)) {
-      const accounts = storeManager
-        .getAccountsByProviderId(provider.id, true)
-        .filter(account => account.status === 'active')
-      if (accounts.length === 0) continue
-
-      for (const model of storeManager.getEffectiveModels(provider.id)) {
-        // 通配符名不是上游真实模型，不能作候选，也就不该决定这个下界
-        if (model.displayName.endsWith('*')) continue
-        windows.push(
-          resolveCapabilityDetail(
-            provider.id,
-            model.displayName,
-            capabilityLayersOfHints(
-              capabilityHintsFor(provider, model.displayName, model.actualModelId, marks)
-            )
-          ).contextTokens
-        )
-      }
+  /**
+   * 批量版：`/v1/models` 一次广告多条路由。
+   *
+   * 候选池只走一遍 —— 逐路由各走一遍会把 `quotaBlockReason` 与日志聚合重复 N 次；
+   * 每条路由只做自己的池策略与手动增删折叠。键是路由名。
+   */
+  advertisedContextFloors(routes: readonly ModelRoute[]): Map<string, number | undefined> {
+    const pool = this.advertisedPool()
+    const floors = new Map<string, number | undefined>()
+    for (const route of routes) {
+      if (!floors.has(route.name)) floors.set(route.name, this.floorOfPool(pool, route))
     }
+    return floors
+  }
 
-    return advertisedContextFloorOf(windows)
+  /** 广告下界用的候选池：与请求无关（空 messages，故渠道工具门与工具负载都不参与），且不扣瞬时可用性 */
+  private advertisedPool(): PoolStrategyCandidate[] {
+    const probe = { messages: [] } as unknown as ChatCompletionRequest
+    return this.collectCandidates(probe, Date.now(), { ignoreTransientAvailability: true }).rankInputs
+  }
+
+  /** 一条路由在给定池上的下界；不传 `route` 时回退 legacy 全局池策略（与 `select` 同口径） */
+  private floorOfPool(pool: readonly PoolStrategyCandidate[], route?: ModelRoute): number | undefined {
+    const strategies: readonly AutoPoolStrategy[] = route?.poolStrategies
+      ?? storeManager.getConfig().autoRouting?.poolStrategies
+      ?? []
+    const afterStrategies = applyPoolStrategiesWithTrace(pool, strategies).kept
+    const { kept } = applyManualModelSelection(
+      afterStrategies,
+      pool,
+      route?.includeModels ?? [],
+      route?.excludeModels ?? []
+    )
+    return advertisedContextFloorOf(
+      kept.map(candidate => capabilityOfCandidate(candidate).contextTokens)
+    )
   }
 
   /**
@@ -312,7 +322,15 @@ class AutoRouter {
    * `select` 与 `preview` 必须共用这一份，否则预览会显示一批实际路由拿不到的
    * 模型，用户照着修配置反而越修越错。
    */
-  private collectCandidates(request: ChatCompletionRequest, now: number): {
+  private collectCandidates(request: ChatCompletionRequest, now: number, options: {
+    /**
+     * 广告口径用：`true` 时不扣「当日用量打满」与「额度已耗尽」这两类**瞬时**剔除。
+     *
+     * `/v1/models` 的 `context_window` 是客户端安排压缩时机的依据，一个会随每次请求
+     * 缩小的数比一个保守的数更糟；请求决策仍然照扣（默认 `false`）。
+     */
+    ignoreTransientAvailability?: boolean
+  } = {}): {
     rankInputs: PoolStrategyCandidate[]
     candidatesByKey: Map<string, AutoCandidate>
     skipped: Set<string>
@@ -365,15 +383,17 @@ class AutoRouter {
         }
 
         for (const account of accounts) {
-          if (account.dailyLimit && (account.todayUsed ?? 0) >= account.dailyLimit) {
-            continue
-          }
+          if (!options.ignoreTransientAvailability) {
+            if (account.dailyLimit && (account.todayUsed ?? 0) >= account.dailyLimit) {
+              continue
+            }
 
-          // 额度已打满的候选根本不进排序，失败切换才不会浪费一次上游请求
-          const quotaBlocked = quotaBlockReason(provider, account.id, model.actualModelId)
-          if (quotaBlocked !== undefined) {
-            skipped.add(`${provider.id}/${model.displayName}:${quotaBlocked}`)
-            continue
+            // 额度已打满的候选根本不进排序，失败切换才不会浪费一次上游请求
+            const quotaBlocked = quotaBlockReason(provider, account.id, model.actualModelId)
+            if (quotaBlocked !== undefined) {
+              skipped.add(`${provider.id}/${model.displayName}:${quotaBlocked}`)
+              continue
+            }
           }
 
           const runtime = accountRuntime.snapshot(account.id, now)

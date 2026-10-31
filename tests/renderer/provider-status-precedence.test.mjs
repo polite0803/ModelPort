@@ -23,10 +23,12 @@ test('卡片上的状态取现场检查结果，不取落库的旧快照', () =>
   assert.equal(refreshCalls.length, 2)
 })
 
-test('运行时进程自己退出时，服务状态跟着退出', () => {
-  const bridgeSource = readFileSync(join(root, 'src/main/opencode/bridge.ts'), 'utf8')
-  const serviceSource = readFileSync(join(root, 'src/main/opencode/service.ts'), 'utf8')
+test('渠道 worker 自己退出时，服务状态跟着退出', () => {
+  // 原来这条钉的是本机 OpenCode 运行时的桥；那个供应商已退役，而渠道 worker 是
+  // 现在唯一由本应用托管的子进程，同一个保证必须钉在它身上。
+  const bridgeSource = readFileSync(join(root, 'src/main/channelPack/bridge.ts'), 'utf8')
+  const stateSource = readFileSync(join(root, 'src/main/providers/accountChannels/runtimeState.ts'), 'utf8')
 
-  assert.match(bridgeSource, /child\.on\('exit',[\s\S]*?this\.onExit\?\.\(\)/)
-  assert.match(serviceSource, /new OpencodeBridge\([\s\S]*?running: false/)
+  assert.match(bridgeSource, /worker\.on\('exit',[\s\S]*?markChannelRuntimeStopped\(/)
+  assert.match(stateSource, /export function markChannelRuntimeStopped\([\s\S]*?running = false/)
 })

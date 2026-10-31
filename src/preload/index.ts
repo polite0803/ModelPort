@@ -664,17 +664,6 @@ const trayAPI = {
     ipcRenderer.send('tray:quit-app'),
 }
 
-const opencodeAPI = {
-  getCapabilities: (): Promise<Record<string, { status: string; reason: string; checkedAt: number }>> =>
-    ipcRenderer.invoke(IpcChannels.OPENCODE_GET_CAPABILITIES),
-
-  probeModels: (): Promise<{
-    success: boolean
-    capabilities: Record<string, { status: string; reason: string; checkedAt: number }>
-    detail?: string
-  }> => ipcRenderer.invoke(IpcChannels.OPENCODE_PROBE_MODELS),
-}
-
 const aggregateAPI = {
   list: (): Promise<AggregateListResult> =>
     ipcRenderer.invoke(IpcChannels.AGGREGATE_LIST),
@@ -782,7 +771,6 @@ const electronAPI = {
   proxy: proxyAPI,
   store: storeAPI,
   providers: providersAPI,
-  opencode: opencodeAPI,
   aggregate: aggregateAPI,
   channels: channelsAPI,
   accounts: accountsAPI,

@@ -62,6 +62,8 @@ import { GeminiAuth } from './gemini-auth.js'
 import { registerGeminiLlm } from './gemini-adapter.js'
 import { GEMINI } from './gemini.js'
 import type { GeminiCredential } from './gemini.js'
+import { describeGeminiIdentity, publishAntigravityHubRelease, antigravityHubReleaseStale } from './gemini-identity.js'
+import { fetchAntigravityHubRelease } from './gemini-hub-manifest.js'
 import { createGeminiSigStore } from './gemini-sigstore.js'
 import { registerOpencodeLlm } from './opencode-adapter.js'
 // ⚠️ opencode 的 RPC 由 `channel-pack-rpc.ts` 的 handleMethod 统一分派
@@ -1054,7 +1056,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   //      **必须逐层字母序序列化** —— 上游对字段顺序敏感，原版靠 Go 的 map
   //      键自动排序实现；TS 的 `JSON.stringify` 按插入序，故走
   //      `marshalAlphabetical`（见 `gemini.ts`）。
-  //   2. 五个身份头**逐字写死**（`geminiHeaders`），且流式请求**刻意不带
+  //   2. 身份头按 Antigravity hub 的形状现拼（`gemini-identity.ts`），且流式请求**刻意不带
   //      `Accept`**（与抓包一致）。
   //   3. `thoughtSignature` 是**跨轮状态**：`functionCall` 上的签名要落盘、
   //      下一轮按「工具名 + 规范化参数」回填，否则多轮工具调用必被上游拒。
@@ -1067,6 +1069,29 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   // 服务名由 GeminiAuth 依 product.id 派生，注册为 ctx.geminiAuth。
   // 不注册斜杠命令：入口在 Channel Pack 的 Gemini 面板。
   const gemini = new GeminiAuth(ctx, { fetchImpl: network.fetch })
+  /**
+   * 身份头的版本/changelist **从自动更新站现取**（6 小时缓存）。
+   *
+   * ⚠️ 写死一定会腐：2026-11-01 按第三方实现退档值写死 `2.24.0`，更新站当天回答
+   * `2.28.2`，而这条线闸门的主语就是 **client**。取不到时 `publish` 不动已有值
+   * （`gemini-identity.ts`），所以这里失败只记一行日志，绝不退到空 UA。
+   * ⚠️ 这里是**唯一的接线点**：`gemini-identity.ts` 与 `gemini-hub-manifest.ts` 都要保持
+   * 「值层面零导入」才能被 `node --test` 直接单测，所以「判 TTL → 取 → 发布」的胶水
+   * 住在本文件，适配器通过 `refreshHubRelease` 选项回调，不自己复制一份。
+   */
+  const refreshGeminiHubRelease = async (): Promise<void> => {
+    if ((process.env.DSH_GEMINI_HUB_MANIFEST ?? '').trim() === '0') return
+    if (!antigravityHubReleaseStale()) return
+    const release = await fetchAntigravityHubRelease({
+      platform: process.platform,
+      arch: process.arch,
+      fetchImpl: network.fetch,
+    })
+    publishAntigravityHubRelease(release)
+    ctx.logger.info(`[channel-pack] gemini 身份版本：${describeGeminiIdentity()}`)
+  }
+  // 不 await：启动路径不为一行版本号多等一秒；取到后**下一条**请求就换新号。
+  void refreshGeminiHubRelease().catch(() => {})
   const geminiSigStore = createGeminiSigStore(ctx)
   // ⚠️ 项目号探测缓存必须**在这里建一次、长期复用** —— 每次 `stream()` 现造
   // 等于没有跨请求缓存，每轮推理都会多打一次 `loadCodeAssist`。
@@ -1074,6 +1099,8 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   const geminiAdapter = registerGeminiLlm(ctx, {
     fetchImpl: network.fetch,
     projectFetcher: network.fetch,
+    // 身份版本号的现取接线（见上面 `refreshGeminiHubRelease` 的注释）。
+    refreshHubRelease: refreshGeminiHubRelease,
     credentialRef: credentialRef(GEMINI.defaultCredentialRef),
     resolveCredential: async (modelId?: string) => {
       // ⚠️ provider 实参用 GEMINI.id 而非字面量（同 minimax 的既有约定：

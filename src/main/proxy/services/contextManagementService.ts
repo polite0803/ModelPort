@@ -218,18 +218,25 @@ export class TokenLimitStrategy {
     )
 
     const availableTokens = this.config.maxTokens - systemTokens
+    // 最新一条永远保留：裁到「一条都装不下」不是省 token，而是把请求变成
+    // 没有要回答的话。账号渠道的网关会直接拒（`messages must be a non-empty
+    // array`），内置供应商则回一句离题的话 —— 两种都比超预算的原文更难排查。
+    const newestMessage = nonSystemMessages[nonSystemMessages.length - 1]
 
     if (availableTokens <= 0) {
+      const result = newestMessage === undefined
+        ? systemMessages
+        : [...systemMessages, newestMessage]
       console.warn(
         `[TokenLimitStrategy] System messages already exceed token limit ` +
-          `(${systemTokens} > ${this.config.maxTokens})`
+          `(${systemTokens} > ${this.config.maxTokens}); keeping the newest message anyway`
       )
       return {
-        messages: systemMessages,
+        messages: result,
         originalCount,
-        processedCount: systemMessages.length,
+        processedCount: result.length,
         strategyName: 'tokenLimit',
-        trimmed: true,
+        trimmed: result.length < originalCount,
       }
     }
 
@@ -246,6 +253,13 @@ export class TokenLimitStrategy {
       } else {
         break
       }
+    }
+
+    // 最新一条自己就超预算时上面的循环一条也不留 —— 这时超的只是它，裁掉它
+    // 也并不能让请求变短，只会把「压缩」变成「清空」。
+    if (keptNonSystemMessages.length === 0 && newestMessage !== undefined) {
+      keptNonSystemMessages.push(newestMessage)
+      currentTokens = estimateTokens(newestMessage.content)
     }
 
     const result = [...systemMessages, ...keptNonSystemMessages]

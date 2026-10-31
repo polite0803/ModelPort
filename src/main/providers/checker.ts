@@ -1,7 +1,5 @@
 import axios, { AxiosError } from 'axios'
 import { getBuiltinProvider } from './builtin/index.ts'
-import { opencodeService } from '../opencode/service.ts'
-import { resolveOpencodeLauncher } from '../opencode/runtime.ts'
 import { channelRuntimeState } from './accountChannels/runtimeState.ts'
 import type { Provider, ProviderCheckResult, Account } from '../../shared/types'
 import type { BuiltinProviderConfig } from '../store/types'
@@ -29,9 +27,6 @@ export class ProviderChecker {
         : null
       
       if (builtinConfig) {
-        if (builtinConfig.runtimeModels) {
-          return this.checkRuntimeProvider(builtinConfig)
-        }
         return await this.checkBuiltinProvider(builtinConfig)
       }
 
@@ -95,45 +90,6 @@ export class ProviderChecker {
         latency: Date.now() - startTime,
         error: error instanceof Error ? error.message : 'Connection failed',
       }
-    }
-  }
-
-  /**
-   * 本机运行时供应商没有 HTTP 端点可探：apiEndpoint 只是占位 scheme，
-   * 拿它去发 HTTP 就是 axios 的 "Unsupported protocol opencode:"。
-   * 这里只报"运行时现在是不是已经在跑"——状态检查不该顺手把运行时拉起来，
-   * 那要几十秒，而首次请求本来就会自动拉起。
-   */
-  private static checkRuntimeProvider(config: BuiltinProviderConfig): ProviderCheckResult {
-    const state = opencodeService.getState()
-
-    if (state.running) {
-      return {
-        providerId: config.id,
-        status: 'online',
-        latency: 0,
-        reason: 'runtime_running',
-      }
-    }
-
-    if (state.lastError) {
-      return {
-        providerId: config.id,
-        status: 'offline',
-        latency: 0,
-        reason: 'runtime_failed',
-        error: state.lastError,
-      }
-    }
-
-    // 装没装是两回事：没装的话首次使用要走 npx 下载，得多等一会儿
-    const installed = resolveOpencodeLauncher().source !== 'npx fallback'
-
-    return {
-      providerId: config.id,
-      status: 'unknown',
-      latency: 0,
-      reason: installed ? 'runtime_not_running' : 'runtime_not_installed',
     }
   }
 

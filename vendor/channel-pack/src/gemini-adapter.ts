@@ -64,8 +64,18 @@ import {
   type GeminiModelEntry,
   type GeminiProduct,
 } from './gemini.js'
+import {
+  collapseGeminiTiers,
+  geminiCatalogFamilies,
+  parseGeminiAvailableModels,
+} from './gemini-models.js'
 import { consumeGeminiSse, translateGeminiRequest } from './gemini-messages.js'
 import { persistGeminiProject, resolveGeminiProject } from './gemini-project.js'
+import {
+  GEMINI_ACCESS_GATE_ERROR_CODE,
+  classifyGeminiAccessGate,
+  geminiAccessGateMessage,
+} from './gemini-access-gate.js'
 import type { GeminiSigStore } from './gemini-sigstore.js'
 
 /** 最多换几个账号（含起始账号）。 */
@@ -192,6 +202,14 @@ export interface GeminiAdapterOptions {
   /** 账号池（目录门控、黑名单、限流切号）。 */
   accountPool?: AccountPool
   /**
+   * 续期身份头的版本/changelist（由 `index.ts` 接线：判 TTL → 打更新站 → 发布）。
+   *
+   * ⚠️ 适配器**不直接 import** `gemini-hub-manifest.ts` / `gemini-identity.ts` 的值：
+   * 那两个模块要保持值层面零导入才能被 `node --test` 直接单测。取不到时本回调不该抛，
+   * 目录路径不能为一行版本号失败。
+   */
+  refreshHubRelease?: () => Promise<void>
+  /**
    * 内联一张图片为**原始字节**（由调用方桥接 `ctx.attachments.readImage`）。
    */
   readImage?: (attachment: unknown) => Promise<{ data: Uint8Array; mediaType: string }>
@@ -251,6 +269,15 @@ export interface GeminiAdapterOptions {
 export class GeminiAdapter extends LlmAdapter {
   private readonly product: GeminiProduct
 
+  /**
+   * 上游准入表缓存（`undefined` = 这个进程还没拉到过）。
+   *
+   * ⚠️ 只缓存**非空**结果：空目录会把 `applyChannel` 的「有账号但没模型」判成关掉渠道。
+   */
+  private catalog?: { at: number; entries: readonly GeminiModelEntry[] }
+  /** 共用的在途刷新：并发目录请求只打一次上游。 */
+  private catalogRefresh?: Promise<void>
+
   constructor(private readonly options: GeminiAdapterOptions) {
     super()
     this.product = options.product ?? GEMINI
@@ -262,13 +289,98 @@ export class GeminiAdapter extends LlmAdapter {
   }
 
   /**
-   * 静态模型表（用户拍板：不拉远端目录）。
+   * 目录来源：优先上游的**准入表**（`/v1internal:fetchAvailableModels`，按当前凭据
+   * 回答这个账号能用哪些模型），拉不到时用静态表兜底。
    *
-   * ⚠️ 静态表**每次现算**（纯本地、零成本），不做任何缓存 —— 缓存只会带来
-   * 「表被改过但进程还拿着旧值」这一种故障。
+   * ⚠️ 2026-11-01 改：这里原先恒返回静态表（当时的拍板是「静态表，不拉远端目录」）。
+   * 那条线 2026-06-18 停服之后目录**按档位变**（免费档与 Pro / Ultra 可用集不同，
+   * 2026-11-02 免费档还要再下线几档），写死一行必然对一部分账号漏报、对另一部分虚报。
+   *
+   * ⚠️ 拉取失败或形状不认识 ⇒ **保留上一份**，没有上一份才用静态表。绝不让一次失败
+   * 变成空目录 —— 空目录在 `accountChannels/manager.ts::applyChannel` 里会把整条渠道关掉。
+   *
+   * ⚠️ 本方法是**同步**的（`listAllModels()` 的契约要求同步），所以它只读缓存；
+   * 拉取由 {@link refreshCatalog} 在异步路径里做。
    */
   private loadModels(): readonly GeminiModelEntry[] {
-    return geminiFallbackEntries()
+    const catalog = this.catalog
+    return catalog !== undefined && catalog.entries.length > 0
+      ? catalog.entries
+      : geminiFallbackEntries()
+  }
+
+  /** 当前目录里的族名集合 —— `geminiModelSpec` 的准入表（校验与目录同源）。 */
+  private catalogFamilies(): Set<string> {
+    return geminiCatalogFamilies(this.loadModels())
+  }
+
+  /**
+   * 拉上游准入表并刷新缓存（TTL 内直接返回）。
+   *
+   * ⚠️ 失败**不抛**：目录是优化，拉不到就用上一份/静态表，不能让一次目录故障把对话
+   * 路径打断。原因只进日志（`EMPTY_RESPONSE` / HTTP 状态原样带上）。
+   */
+  async refreshCatalog(signal?: AbortSignal): Promise<void> {
+    const now = Date.now()
+    if (this.catalog !== undefined && now - this.catalog.at < GEMINI_CATALOG_TTL_MS) return
+    if (this.catalogRefresh === undefined) {
+      this.catalogRefresh = (async () => {
+        // 长跑的会话也要跟上更新站 bump 的版本号：取目录（≤5 分钟一次）时顺手续一次身份。
+        // ⚠️ 走**注入的回调**而不是自己 import manifest：`gemini-hub-manifest.ts` 与
+        // `gemini-identity.ts` 都要保持值层面零导入才能被单测直接 `import()`，
+        // 「判 TTL → 取 → 发布」的胶水只住在一个地方（`index.ts`）。
+        await this.options.refreshHubRelease?.().catch(() => undefined)
+        const credential = await this.options.resolveCredential().catch(() => undefined)
+        if (credential === undefined || credential.access_token === '') return
+        const probe = await resolveGeminiProject({ credential, cache: this.options.projectCache })
+        const project = probe.project
+        const body = project === '' ? '{}' : marshalAlphabetical({ project })
+        for (const endpoint of GEMINI_ENDPOINTS) {
+          try {
+            const response = await (this.options.fetchImpl ?? fetch)(
+              `${endpoint}${GEMINI_FETCH_MODELS_PATH}`,
+              {
+                method: 'POST',
+                headers: geminiHeaders(credential, { includeAccept: true }),
+                body,
+                ...(signal === undefined ? {} : { signal }),
+              },
+            )
+            if (!response.ok) continue
+            const text = await response.text().catch(() => '')
+            if (text === '') continue
+            const entries = collapseGeminiTiers(
+              parseGeminiAvailableModels(JSON.parse(text) as unknown),
+              GEMINI_EFFORT_IDS,
+              {
+                // 上游不报模态，所以图片能力沿用静态表的值；目录里新增的族一律 false
+                // —— **不把未知当支持**，误报图片能力会让上游直接拒图。
+                supportsImage: (family) =>
+                  geminiFallbackEntries().some((entry) => entry.id === family && entry.supportsImage),
+              },
+            )
+            // 空目录不覆盖已有缓存（见 loadModels 的注释）。
+            if (entries.length > 0) this.catalog = { at: Date.now(), entries }
+            return
+          } catch {
+            // 换下一个端点再试一次；三个都失败就保留旧目录。
+          }
+        }
+      })().finally(() => {
+        this.catalogRefresh = undefined
+      })
+    }
+    await this.catalogRefresh
+  }
+
+  /**
+   * 异步路径专用：先刷准入表（TTL 内直接返回），再读目录。
+   *
+   * ⚠️ 失败不影响返回 —— {@link loadModels} 自己会退到上一份缓存或静态表。
+   */
+  private async catalogured(): Promise<readonly GeminiModelEntry[]> {
+    await this.refreshCatalog().catch(() => {})
+    return this.loadModels()
   }
 
   /**
@@ -298,7 +410,7 @@ export class GeminiAdapter extends LlmAdapter {
     // **必须返回空数组而不能抛错**（抛错会多一条 provider 报错）。
     if (!await providerCatalogVisible(this.options.accountPool, this.product.id)) return []
 
-    const all = this.loadModels()
+    const all = await this.catalogured()
     const disabled = this.options.accountPool?.disabledModelsFor(this.product.id)
     const listed = disabled === undefined || disabled.size === 0
       ? all
@@ -487,7 +599,7 @@ export class GeminiAdapter extends LlmAdapter {
       && declared?.efforts.some((item) => String(item.id) === requested) === true
       ? requested
       : undefined
-    const spec = geminiModelSpec(options.model, effort)
+    const spec = geminiModelSpec(options.model, effort, this.catalogFamilies())
 
     const images = await this.collectInlineImages(options.messages, entry, options.model)
 
@@ -513,7 +625,6 @@ export class GeminiAdapter extends LlmAdapter {
     const projectCache = this.options.projectCache ?? new Map<string, string>()
 
     let endpointIdx = 0
-    let endpointSwitched = false
     let droppedSignatures = false
     let refreshedOnce = false
     let rotations = 0
@@ -552,6 +663,18 @@ export class GeminiAdapter extends LlmAdapter {
             ...options.signal === undefined ? {} : { signal: options.signal },
           })
           if (probe.error !== undefined) {
+            // `loadCodeAssist` 是这条线**最先**撞上 Google 闸门的地方：出口地区不受
+            // 支持、个人版已停服、账号无许可都在这里以 4xx 浮现。旧实现把它一律归成
+            // `SERVER`（可重试），用户只看到「项目号探测失败」这句内部话术，读不出
+            // 「这条线不该再打」。判据与推理失败共用 `gemini-access-gate.ts`。
+            const probeGate = classifyGeminiAccessGate(probe.errorStatus ?? 0, probe.errorText ?? '')
+            if (probeGate !== undefined) {
+              throw new LlmError(
+                geminiAccessGateMessage(probeGate, probe.errorText ?? probe.error),
+                GEMINI_ACCESS_GATE_ERROR_CODE,
+                ...(probe.errorStatus === undefined ? {} : { status: probe.errorStatus }),
+              )
+            }
             throw new LlmError(
               `gemini: 项目号探测失败，未发推理（与原版一致）— ${probe.error}`,
               'SERVER',
@@ -657,6 +780,18 @@ export class GeminiAdapter extends LlmAdapter {
         lastFailure = { status: response.status, text }
         const status = response.status
 
+        // 0. **确定性闸门**（出口地区不受支持 / 个人版这条线已停服 / 账号无许可）
+        // → 立刻失败，不换端点也不换号。
+        //
+        // ⚠️ 必须排在签名重试、换端点、换号**之前**：这三条都不是「这一台机器或这一个
+        // 账号」的问题。旧实现里 403 进了 `endpointFirst`，`endpointFirst` 又进了
+        // `rotatable`，于是一次「这条线已经停服」要付 1 次换端点 + 最多 2 轮换号
+        // （每轮都重新跨线程解析凭据、重新加密整段历史），最后仍把上游裸 JSON 端给用户。
+        const gate = classifyGeminiAccessGate(status, text)
+        if (gate !== undefined) {
+          throw new LlmError(geminiAccessGateMessage(gate, text), GEMINI_ACCESS_GATE_ERROR_CODE, { status })
+        }
+
         // 1. 签名被拒 → 去签重试一次（同账号同端点）。
         if (isGeminiSignatureError(text) && !droppedSignatures) {
           droppedSignatures = true
@@ -696,10 +831,13 @@ export class GeminiAdapter extends LlmAdapter {
           throw this.classifyFailure(status, text)
         }
 
-        // 2. 先换端点（廉价兜底，一次）。
-        if ((endpointFirst || status === 429) && !endpointSwitched) {
-          endpointSwitched = true
-          endpointIdx = endpointIdx === 0 ? 1 : 0
+        // 2. 逐个换端点（廉价兜底，每个端点最多一次）。
+        //
+        // ⚠️ 原来是 `endpointIdx === 0 ? 1 : 0` 的二元翻转 + 一次性布尔闸门，那是
+        // 端点只有两个时的写法。第三个端点（Antigravity 生产 host，GCP 条款账号该去的
+        // 那个）加进来后必须按顺序前进，否则 `GEMINI_ENDPOINTS[2]` 永远打不到。
+        if ((endpointFirst || status === 429) && endpointIdx + 1 < GEMINI_ENDPOINTS.length) {
+          endpointIdx += 1
           continue
         }
 
@@ -734,7 +872,6 @@ export class GeminiAdapter extends LlmAdapter {
               credential = next.credential as unknown as GeminiCredential
               // 换号后重置端点与去签状态：新账号值得从默认端点、带签名再试一次。
               endpointIdx = 0
-              endpointSwitched = false
               droppedSignatures = false
               refreshedOnce = false
               continue

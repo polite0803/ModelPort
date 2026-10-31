@@ -163,10 +163,8 @@
     "providerOffline": "Provider is offline",
     "statusUnknown": "Status unknown",
     "statusReasons": {
-      "runtime_running": "The local OpenCode runtime is running",
-      "runtime_not_running": "The local OpenCode runtime is installed but not started; it starts automatically on the first request",
-      "runtime_not_installed": "No OpenCode runtime is installed on this machine; the first use downloads it with npx (may take tens of seconds)",
-      "runtime_failed": "The local OpenCode runtime failed to start: {{error}}"
+      "channel_runtime_running": "The account-channel runtime is running",
+      "channel_runtime_stopped": "The account-channel runtime is not started yet; a request starts it"
     },
     "latency": "Latency",
     "checkFailed": "Check failed",
@@ -298,13 +296,6 @@
     "providerNameRequired": "Name is required",
     "apiEndpointRequired": "API endpoint is required",
     "apiEndpointInvalid": "API endpoint is invalid"
-  },
-  "opencode": {
-    "name": "OpenCode",
-    "description": "OpenCode free model pool driven by a local OpenCode runtime - no credential needed, ~30-60s per reply",
-    "token": "Not required",
-    "tokenPlaceholder": "The free pool needs no credential; just add an account",
-    "tokenHelp": "The first request starts a local OpenCode runtime (installed binary first, npx as fallback); models are filtered by zero cost"
   },
   "proxy": {
     "title": "Proxy Settings",
@@ -984,12 +975,6 @@
     "help": "Help"
   },
   "models": {
-    "probeModels": "Probe model capabilities",
-    "toolCapable": "Tool capable",
-    "chatOnly": "Chat only",
-    "probeDone": "Probe finished",
-    "probeDoneDesc": "Checked which models can express tool calls as an envelope",
-    "probeFailed": "Probe failed",
     "title": "Model Management",
     "description": "View and manage available models and model mapping configuration",
     "modelList": "Model List",
@@ -1519,7 +1504,8 @@
       "browser": "Browser login",
       "device-code": "Device code",
       "sms": "SMS verification",
-      "oauth": "OAuth"
+      "oauth": "OAuth",
+      "api-key": "Paste an API key"
     },
     "login": {
       "title": "Sign in to {{name}}",
@@ -1532,8 +1518,25 @@
         "browser": "The authorisation page was opened in your system browser. This page updates as soon as you finish.",
         "device-code": "Finish the device authorisation in the page that opened. This page updates automatically.",
         "sms": "Complete the SMS verification in the page that opened. This page updates automatically.",
-        "oauth": "The authorisation page was opened in your system browser. This page updates once you approve."
+        "oauth": "The authorisation page was opened in your system browser. This page updates once you approve.",
+        "api-key": "This channel opens no browser: add an anonymous slot to use the free lane without a credential, or paste your own API key to unlock paid models."
       }
+    },
+    "credential": {
+      "title": "Add an account to {{name}}",
+      "hint": "This channel opens no browser: add an anonymous slot to use the free lane, or paste your own API key to unlock paid models.",
+      "keyLabel": "API key",
+      "keyPlaceholder": "sk-… (created at opencode.ai/auth)",
+      "nicknameLabel": "Label (optional)",
+      "nicknamePlaceholder": "e.g. main",
+      "addKey": "Add with this key",
+      "addAnonymous": "Add an anonymous slot",
+      "anonymousHint": "Anonymous slots need no credential but are capped per source IP; when the allowance runs out, every slot on the same exit fails together.",
+      "addedKey": "API key account added",
+      "addedAnonymous": "Anonymous channel added",
+      "keyRequired": "Enter an API key first, or use “Add an anonymous slot”.",
+      "failed": "Could not add the account",
+      "misconfigured": "This channel declares no add-account method, so the UI cannot add one."
     }
   },
   "statusReasons": {},

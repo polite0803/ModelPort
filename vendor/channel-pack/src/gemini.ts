@@ -11,10 +11,12 @@
  * 两个 sessionId / `aicode-consumers` / `v1internal` 全部 0 命明文），
  * 静态取证失效。详见 `docs/GEMINI-PORT-PLAN.md` §九。
  *
- * ## 三条必须保留的上游对齐细节（计划 §2.2）
+ * ## 三条必须保留的上游对齐细节（计划 §2.2，第 1 条已于 2026-11-01 改写）
  *
- * 1. **身份五头逐字写死、不许随机**（{@link GEMINI_IDENTITY_HEADERS}）。
- *    ⚠️ 且**不带** `x-goog-api-key` / `x-goog-api-client`。
+ * 1. **身份头按 Antigravity 的形状现拼**（`gemini-identity.ts`）。原来这里是
+ *    「五头逐字写死」，基准是 `cmdc-pak` 抓到的值；那条线 2026-06-18 已被 Google
+ *    停服，而停服句的主语就是 client，所以带着 `cmdc-pak` 字样的指纹要换掉。
+ *    ⚠️ 仍然**不带** `x-goog-api-key` / `x-goog-api-client`。
  * 2. **流式请求刻意不带 `Accept` 头** —— 抓包一致。见 {@link geminiHeaders}
  *    的 `includeAccept` 开关（默认 false）。
  * 3. **信封逐层字母序序列化**（{@link marshalAlphabetical}）。Go 的
@@ -66,13 +68,29 @@ export const GEMINI_ENDPOINT_DAILY = 'https://daily-cloudcode-pa.googleapis.com'
 /** 沙箱端点（`client.go` 的 `EndpointSandbox`）。 */
 export const GEMINI_ENDPOINT_SANDBOX = 'https://daily-cloudcode-pa.sandbox.googleapis.com'
 /**
- * 端点轮换顺序（原版 `NewClient` 的初始 `endpoints`）。
+ * 生产端点（Antigravity 的 `APIEndpoint`）。
+ *
+ * ⚠️ 2026-11-01 新增：现役实现按**档位**选端点 ——
+ * `paidTier.usesGcpTos === true`（Standard / Enterprise，走 GCP 条款的账号）打
+ * `cloudcode-pa.googleapis.com`，消费者档仍打 daily。本仓此前只有 daily + daily 沙箱，
+ * 所以**GCP 条款账号永远打不到自己该去的那个 host**。
+ */
+export const GEMINI_ENDPOINT_PROD = 'https://cloudcode-pa.googleapis.com'
+/**
+ * 端点轮换顺序。
  *
  * ⚠️ 用户 2026-10-03 澄清：**两端点的差异未获实验支持**（404 与 project 两类
  * 失败在两端点上行为完全一致）。换端点**零成本无害**，但**不能当 quota 的
  * 有效解法** —— 主救场手段是**换账号**。
+ *
+ * 顺序取 daily → prod → sandbox（与现役实现拉模型清单的尝试顺序一致）：消费者档
+ * 第一枪就打对的 host，GCP 条款账号则在换端点时补上 prod。
  */
-export const GEMINI_ENDPOINTS: readonly string[] = [GEMINI_ENDPOINT_DAILY, GEMINI_ENDPOINT_SANDBOX]
+export const GEMINI_ENDPOINTS: readonly string[] = [
+  GEMINI_ENDPOINT_DAILY,
+  GEMINI_ENDPOINT_PROD,
+  GEMINI_ENDPOINT_SANDBOX,
+]
 
 /** 非流式推理路径。 */
 export const GEMINI_GENERATE_PATH = '/v1internal:generateContent'
@@ -80,6 +98,14 @@ export const GEMINI_GENERATE_PATH = '/v1internal:generateContent'
 export const GEMINI_STREAM_PATH = '/v1internal:streamGenerateContent?alt=sse'
 /** 配额查询路径（**Summary 变体**，请求体见 `gemini-credits.ts`）。 */
 export const GEMINI_QUOTA_PATH = '/v1internal:retrieveUserQuotaSummary'
+/**
+ * 准入表路径：上游**按当前凭据**回答这个账号能用哪些模型（含窗口与输出上限）。
+ *
+ * ⚠️ 响应里的 `models` 是**以模型 id 为键的对象**，不是数组（解析见 `gemini-models.ts`）。
+ */
+export const GEMINI_FETCH_MODELS_PATH = '/v1internal:fetchAvailableModels'
+/** 准入表缓存 TTL：档位变了要在几分钟内跟上新，又不能每轮目录都打一次上游。 */
+export const GEMINI_CATALOG_TTL_MS = 300_000
 /**
  * 账号档位 / 项目探测路径。
  *
@@ -101,18 +127,18 @@ export const GEMINI_LOAD_CODE_ASSIST_BODY = '{"metadata":{"ideType":"ANTIGRAVITY
 // ---------------------------------------------------------------------------
 
 /**
- * 上游身份五头。
+ * 上游身份头。
  *
- * ⚠️ **逐字写死**：任何一个字符不同都可能被上游识别为非官方客户端。
- * ⚠️ **不要**加 `x-goog-api-key` / `x-goog-api-client` —— 原版不带。
+ * ⚠️ 2026-11-01 起**不再逐字写死**旧那组 `cmdc-pak` 头：UA 形状已经不是 Antigravity 的
+ * （现役是 `antigravity/hub/<version> (aidev_client; os_type=…; arch=…; cl=…)`，而
+ * `4.3.0` 不在 `2.x` 版本序列里），而且 UA 与 `x-machine-id` 里都直接写着第三方工具名
+ * `cmdc-pak` —— 官方停服句的主语就是 **client**，把自己申报成一个已下架的第三方客户端
+ * 是自我否决。构造规则与出处见 `gemini-identity.ts`。
+ *
+ * ⚠️ 仍然**不加** `x-goog-api-key` / `x-goog-api-client` —— 这条线不用 API key。
  */
-export const GEMINI_IDENTITY_HEADERS: Readonly<Record<string, string>> = Object.freeze({
-  'User-Agent': 'antigravity/4.3.0 (cmdc-pak)',
-  'x-client-name': 'antigravity',
-  'x-client-version': '4.3.0',
-  'x-machine-id': 'cmdc-pak',
-  'x-vscode-sessionid': 'proxy',
-})
+export { GEMINI_LEGACY_IDENTITY_HEADERS } from './gemini-identity.js'
+import { geminiIdentityHeaders } from './gemini-identity.js'
 
 /** 信封里的 `userAgent` 字段（与 `x-client-name` 同值）。 */
 export const GEMINI_UPSTREAM_USER_AGENT = 'antigravity'
@@ -347,9 +373,12 @@ export function geminiAccountLabel(credential: GeminiCredential): string | undef
 /**
  * 构造推理请求头。
  *
- * ⚠️ `includeAccept` 默认 **false**：流式请求**刻意不带 `Accept` 头**
- *（抓包一致）。调用方若要发非流式请求，可显式传 true。
- * ⚠️ 身份五头**逐字**注入，且**不注入** `x-goog-api-key`。
+ * ⚠️ `includeAccept` 默认 **false**：流式请求**刻意不带 `Accept`**（抓包一致）。
+ *    调用方若要发非流式请求，可显式传 true。
+ * ⚠️ 身份头**每次调用现取**（`geminiIdentityHeaders()`）而不是模块加载时冻结：
+ *    `DSH_GEMINI_*` 覆盖项要在 worker 启动后仍然生效，打包成常量就只能在构建期钉死。
+ *    默认只发 `User-Agent`（Antigravity hub 形状），旧五件套靠
+ *    `DSH_GEMINI_LEGACY_IDENTITY_HEADERS=1` 恢复。
  */
 export function geminiHeaders(
   credential: GeminiCredential,
@@ -358,7 +387,7 @@ export function geminiHeaders(
   const headers = new Headers()
   headers.set('Authorization', `Bearer ${credential.access_token}`)
   headers.set('Content-Type', 'application/json')
-  for (const [key, value] of Object.entries(GEMINI_IDENTITY_HEADERS)) headers.set(key, value)
+  for (const [key, value] of Object.entries(geminiIdentityHeaders())) headers.set(key, value)
   if (options.includeAccept === true) headers.set('Accept', 'application/json')
   return headers
 }
@@ -522,22 +551,28 @@ export function geminiCanonicalModelId(modelId: string): string {
  *
  * ⚠️ 模型名必须带档位后缀 —— 它是上游的准入钥匙（见文件头实测）。
  *
- * ⚠️ **`modelId` 严格校验**：静态表（{@link GEMINI_FALLBACK_MODELS}）只暴露
- * `gemini-3.8-flash` 一个模型，upstream 恒为 `gemini-3.8-flash-<tier>`。
- * 曾经「任何 id 都放行」是有意的宽容（网关实测 `gemini/gemini-9.9-fake`、
- * `gemini/totally-bogus` 均 200 并正常作答 —— 名字根本没参与上游请求），
- * 但宽容的代价是**用户写错模型名时静默跑出 3.8 的答案且无任何征兆**
- * （不报错、不降级、答案就是不对，极难排查），故改为拒绝：未知 id 直接抛
- * `INVALID_REQUEST`，不发上游请求。带档位的 3.8 名（`gemini-3.8-flash-high`
- * 等，来自限流标记 / 探测链路）经 {@link geminiCanonicalModelId} 归一化后
- * 放行。
- * **加第二个模型时必须先用 `modelId` 选 upstream** —— 否则表里两个模型会撞车
- * （用户选 A、实际跑 B），症状与上述宽容完全相同。
+ * ⚠️ **`modelId` 严格校验**：曾经「任何 id 都放行」是有意的宽容（网关实测
+ * `gemini/gemini-9.9-fake`、`gemini/totally-bogus` 均 200 并正常作答 —— 名字根本没参与
+ * 上游请求），但宽容的代价是**用户写错模型名时静默跑出别家的答案且无任何征兆**
+ * （不报错、不降级、答案就是不对，极难排查），故改为拒绝：不在准入表里的 id 直接抛
+ * `INVALID_REQUEST`，不发上游请求。带档位的名字（`gemini-3.8-flash-high` 等，来自限流
+ * 标记 / 探测链路）经 {@link geminiCanonicalModelId} 归一化后放行。
+ *
+ * ⚠️ 2026-11-01：准入表**不再写死成 `gemini-3.8-flash` 一个常量**，而是调用方传进来的
+ * 目录族名集合（`gemini-models.ts::geminiCatalogFamilies`）。理由：免费档/Pro/Ultra 能用的
+ * 模型不同，而且 2026-11-02 起免费档还要再下线几档 —— 目录是按账号档位变的。
+ * **严格性本身不变**：表里没有的照旧拒绝。不传参数时退到静态表的族名，行为与今天逐字一致。
  */
-export function geminiModelSpec(modelId: string, effort?: string): GeminiModelSpec {
-  if (geminiCanonicalModelId(modelId) !== GEMINI_UPSTREAM_FLASH) {
+export function geminiModelSpec(
+  modelId: string,
+  effort?: string,
+  allowedFamilies?: ReadonlySet<string>,
+): GeminiModelSpec {
+  const family = geminiCanonicalModelId(modelId)
+  const permitted = allowedFamilies ?? new Set(geminiFallbackEntries().map((entry) => entry.id))
+  if (!permitted.has(family)) {
     throw new LlmError(
-      `gemini: 模型 "${modelId}" 不在本 provider 目录中（仅支持 ${GEMINI_UPSTREAM_FLASH}）`,
+      `gemini: 模型 "${modelId}" 不在本 provider 目录中（本账号可用：${[...permitted].join('、') || '无'}）`,
       'INVALID_REQUEST',
       // ⚠️ `status` 只落在 `LlmError.failure`（不是顶层属性），且网关的
       // `failureToOpenAiError` 两处都要读 —— 见 `openai-gateway/stream.ts`。
@@ -546,7 +581,7 @@ export function geminiModelSpec(modelId: string, effort?: string): GeminiModelSp
   }
   const tier = geminiEffortToTier(effort)
   return {
-    upstream: `${GEMINI_UPSTREAM_FLASH}-${tier}`,
+    upstream: `${family}-${tier}`,
     tier,
     thinkingBudget: geminiThinkingBudget(tier),
     includeThoughts: true,

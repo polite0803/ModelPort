@@ -358,5 +358,5 @@ parentPort?.on('message', async (message: Record<string, any>) => {
   }
 })
 
-apply(ctx, { disableOpencode: true })
+apply(ctx)
 send({ type: 'ready', providers: [...adapters.keys()] })

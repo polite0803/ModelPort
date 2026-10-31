@@ -32,7 +32,7 @@ import { bootstrapStore, loadModule } from '../routes/harness.mjs'
 const SHIPPED_BARE_ID = 'big-pickle'
 /** 旧版同步写在 `fetchedModels` 里的裸展示名（改名迁移的靶子）。 */
 const LEGACY_SYNCED_ID = 'legacy-runtime-model'
-/** 启动同步会抹掉的一行：一个随包清单里已经不存在的旧展示名。 */
+/** 目录里的一行旧模型：没有任何同步会来抹它，它也不该因此变成排除项。 */
 const STALE_ROW = 'opencode/model-retired-by-sync'
 
 /** 退役供应商（`RETIRED_PROVIDER_IDS`）：它的整份 overrides 应当被删，而不是变成排除项。 */
@@ -41,18 +41,21 @@ const RETIRED_ID = 'deepseek'
 const INITIAL_DATA = {
   providers: [
     {
+      // 载体是**账号渠道**记录：`opencode` 已于 2026-11-01 从内置运行时改判为渠道，
+      // 内置注册表清空后它不再被启动同步重写，也不该被「内置 id 不在代码里就删记录」
+      // 那条规则删掉——这正是这组判据要钉住的新形态。
       id: 'opencode',
       name: 'OpenCode',
-      type: 'builtin',
-      authType: 'userToken',
-      apiEndpoint: 'https://stale.example',
-      chatPath: '/stale',
+      type: 'account',
+      authType: 'token',
+      apiEndpoint: 'channel://opencode',
+      chatPath: '/chat/completions',
       headers: {},
       enabled: true,
       createdAt: 1,
       updatedAt: 2,
-      // 一份陈旧的目录：启动同步 (`initializeDefaultProviders` → `syncBuiltinProvider`)
-      // 会用随包配置整张重写它，包括把 STALE_ROW 挤出去、把新名字写进来。
+      // 一份带旧行的目录：没有任何随包配置会来重写它，STALE_ROW 会一直留在目录里
+      // （下面的判据正是钉这一点），且它绝不因此变成排除项。
       supportedModels: [`opencode/${SHIPPED_BARE_ID}`, STALE_ROW],
       modelMappings: {
         [`opencode/${SHIPPED_BARE_ID}`]: SHIPPED_BARE_ID,
@@ -96,7 +99,6 @@ const INITIAL_DATA = {
 const harness = await bootstrapStore({ initialData: INITIAL_DATA })
 const sm = harness.storeManager as any
 
-const { opencodeConfig } = await loadModule('main/providers/builtin/opencode.ts')
 const aggregateManagerMod = await loadModule('main/providers/aggregate/manager.ts')
 const aggregateProviderManager = aggregateManagerMod.aggregateProviderManager
 
@@ -123,21 +125,13 @@ function customProvider(id: string, models: string[], overridesExtra: Record<str
 
 // ============================================================ 1) 启动期（真 initialize）
 
-test('R1-启动：随包清单整张重写供应商记录，新出现的名字未经任何用户动作即在服', () => {
-  const shipped: string[] = opencodeConfig.supportedModels
-  assert.ok(shipped.includes(`opencode/${SHIPPED_BARE_ID}`), 'fixture: 停用的靶子必须在随包清单里')
-
-  const servedNames = sm.getEffectiveModels('opencode').map((m: any) => m.displayName)
-  const newlyShipped = shipped.filter(name => name !== `opencode/${SHIPPED_BARE_ID}`)
-  assert.ok(newlyShipped.length >= 5, 'fixture: 启动同步要真的带进一批旧记录里没有的名字')
-  for (const name of newlyShipped) {
-    assert.ok(servedNames.includes(name), `${name} 是启动同步新写进来的，必须默认在服`)
-  }
-
-  // 反面：被启动同步挤出去的旧行（STALE_ROW）只是从目录消失，绝没有被写成排除项。
+test('R1-启动：内置注册表已清空，启动同步不再改写任何供应商记录', () => {
+  // 唯一的内置供应商（opencode 本机运行时）已于 2026-11-01 退役。这一条断言的是
+  // 退役后的**可观察后果**：没有随包清单去重写，夹具里那行旧模型原样留着。
+  // 有人加回内置供应商时这条会红，提醒他补回「同步重写目录」那组判据。
   const catalogue = sm.getModelCatalogue('opencode').map((m: any) => m.displayName)
-  assert.ok(!catalogue.includes(STALE_ROW), '同步重写了 supportedModels，旧行不再列出')
-  assert.ok(!overrides().opencode.excludedModels.includes(STALE_ROW), '模型从目录消失不等于用户停用它')
+  assert.ok(catalogue.includes(STALE_ROW), '没有随包清单可重写：旧行必须仍在目录里')
+  assert.ok(!overrides().opencode.excludedModels.includes(STALE_ROW), '模型在不在目录里都不构成停用')
 })
 
 test('R1-启动：唯一的停用项来自用户，改名迁移只搬动旧名，不新增排除项', () => {
@@ -226,15 +220,15 @@ test('R1-clearAll：回到出厂清单后，所有可用模型都在服（排除
   assert.deepEqual(overrides(), {}, 'clearAll 之后不存在任何停用账本')
   assert.equal(sm.hasModelOverrides('opencode'), false)
 
-  // 出厂清单在没有任何用户动作的前提下整张在服。
-  sm.ensureProviderExists('opencode')
-  const shipped: string[] = opencodeConfig.supportedModels
+  // 出厂清单在没有任何用户动作的前提下整张在服。载体换成自定义供应商：
+  // 内置注册表已随 opencode 退役清空，`ensureProviderExists` 不再有随包清单可取。
+  sm.addProvider(customProvider('factory', ['Factory-A', 'Factory-B', 'Factory-C']) as never)
   assert.deepEqual(
-    sm.getEffectiveModels('opencode').map((m: any) => m.displayName),
-    shipped,
-    '内建出厂清单默认全部启用（served = !excluded.has(name)，而 excluded 为空）',
+    sm.getEffectiveModels('factory').map((m: any) => m.displayName),
+    ['Factory-A', 'Factory-B', 'Factory-C'],
+    '出厂清单默认全部启用（served = !excluded.has(name)，而 excluded 为空）',
   )
-  assert.deepEqual(overrides(), {}, '创建内建记录本身不写停用账本')
+  assert.deepEqual(overrides(), {}, '创建供应商记录本身不写停用账本')
 })
 
 // =============================================== 3) provider 变更（非 retire / 非改名）
@@ -404,56 +398,6 @@ test('R1-聚合删除：remove() 不写排除项；重建后的清单同样默�
   }
 })
 
-// ============================== 5) OpenCode 运行时目录同步（结构性过滤仍在）
-
-test('R1-运行时同步：zeroCost+openai 的过滤没被放宽；通过过滤的新模型一律在服', async () => {
-  sm.clearAll()
-  sm.ensureProviderExists('opencode')
-
-  const { opencodeService } = await loadModule('main/opencode/service.ts')
-  const { fetchProviderModels } = await loadModule('main/providers/modelCatalog.ts')
-  const realModels = opencodeService.models
-
-  // 本机 OpenCode 运行时是进程边界（真跑要 spawn），这里只替这一个边界：
-  // 过滤与展示名拼接走的都是 `modelCatalog.ts` 的原码。
-  opencodeService.models = async () => [
-    { id: 'free-openai', name: 'Free OpenAI', zeroCost: true, protocol: 'openai' },
-    { id: 'paid-openai', name: 'Paid OpenAI', zeroCost: false, protocol: 'openai' },
-    { id: 'free-anthropic', name: 'Free Anthropic', zeroCost: true, protocol: 'anthropic' },
-  ]
-  try {
-    const result = await fetchProviderModels('opencode')
-    assert.equal(result.ok, true, `runtime sync failed: ${JSON.stringify(result)}`)
-    // `src/main/providers/modelCatalog.ts:39-42` 的过滤原样生效。
-    assert.deepEqual(result.models, [{ displayName: 'opencode/free-openai', actualModelId: 'free-openai' }])
-
-    const applied = sm.applyFetchedModels('opencode', result.models)
-    assert.equal(applied.addedCount, 1)
-
-    const served = sm.getEffectiveModels('opencode').map((m: any) => m.displayName)
-    assert.ok(served.includes('opencode/free-openai'), '同步进来的新模型未经用户动作即在服')
-
-    const catalogue = sm.getModelCatalogue('opencode').map((m: any) => m.displayName)
-    assert.equal(catalogue.includes('opencode/paid-openai'), false, '被过滤掉的模型根本不该进目录')
-    assert.equal(catalogue.includes('opencode/free-anthropic'), false, '被过滤掉的模型根本不该进目录')
-
-    const after = overrides()
-    assert.deepEqual(after.opencode.excludedModels || [], [], '一次 fetched 合并不写任何排除项')
-    assert.deepEqual(after.opencode.addedModels, [], '合并不动用户手加的模型')
-    assert.deepEqual(
-      sm.getModelCatalogue('opencode').filter((m: any) => m.source === 'fetched').map((m: any) => [m.displayName, m.served]),
-      [['opencode/free-openai', true]],
-      '通过过滤的只有这一条，而且一进目录就在服',
-    )
-    assert.equal(
-      JSON.stringify(after).includes('paid-openai') || JSON.stringify(after).includes('free-anthropic'),
-      false,
-      '被过滤掉的模型也不许被写进排除名单（它们应当不存在于目录里）',
-    )
-  } finally {
-    opencodeService.models = realModels
-  }
-})
 
 // =========================== 6) 账号通道目录同步（过滤 + 改名迁移）
 

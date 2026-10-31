@@ -36,6 +36,7 @@ import type { ModelCapabilityHint } from '../../../shared/types'
 import { ACCOUNT_CHANNELS, getChannelDefinition } from './catalogue'
 import { attachContextWindows, capabilityHintOf, readModelList } from './modelCatalog'
 import { channelRuntimeState } from './runtimeState'
+import { resyncsAfterChannelRpc } from './rpcSync'
 import { ChannelCredentialVault } from './vault'
 
 interface PackProviderStatus {
@@ -94,9 +95,7 @@ class AccountChannelManager {
         dataDir: this.dataDir,
         vault,
         onChanged: () => {
-          this.modelsCache = null
-          void this.syncProviders()
-          this.onChanged?.()
+          this.notifyChanged()
         },
         onLog: (level, message) => {
           if (level === 'error') console.error(`[ChannelPack] ${message}`)
@@ -152,6 +151,7 @@ class AccountChannelManager {
         name: channel.name,
         vendor: channel.vendor,
         loginKind: channel.loginKind,
+        credentialAdd: channel.credentialAdd,
         description: channel.description,
         configured: provider !== undefined && provider.type === 'account',
         enabled: provider?.enabled === true,
@@ -471,7 +471,17 @@ class AccountChannelManager {
         void shell.openExternal(value.loginUrl)
       }
     }
+    // 渠道包没有为所有改动账号池的方法广播 `changed`（opencode 的两个加账号方法就不发），
+    // 这里补一次镜像：否则账号进了池子、provider 记录却没出现，卡永远停在「未配置」。
+    if (result.ok && resyncsAfterChannelRpc(method)) this.notifyChanged()
     return result
+  }
+
+  /** 账号池或模型目录可能变了：清缓存、重建 provider 记录、通知界面。 */
+  private notifyChanged(): void {
+    this.modelsCache = null
+    void this.syncProviders()
+    this.onChanged?.()
   }
 
   setEnabled(id: string, enabled: boolean): ChannelOperationResult {

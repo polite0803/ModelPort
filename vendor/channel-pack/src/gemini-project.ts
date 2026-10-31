@@ -47,6 +47,17 @@ export interface GeminiProjectProbe {
   project: string
   /** 非空 = 探测失败 ⇒ 调用方**不发推理**。 */
   error?: string
+  /**
+   * 失败那次的 HTTP 状态码（网络层失败时**没有**）。
+   *
+   * ⚠️ 必须带出来：`loadCodeAssist` 是这条线上最先打到上游的请求，Google 对
+   * 「出口地区不受支持」「个人版已停服」「账号无许可」的判定**先**在这里浮现。
+   * 只带 `error` 文本串的话，`gemini-access-gate.ts` 的判据拿不到状态码，
+   * `entitlement` 那条（要求 403 并列）就永远命中不了。
+   */
+  errorStatus?: number
+  /** 失败那次的响应正文（供闸门判据；网络层失败时为空串）。 */
+  errorText?: string
   /** 本次是否**真的打了** `loadCodeAssist`（命中缓存时为 false）。 */
   probed?: boolean
 }
@@ -131,13 +142,19 @@ export async function resolveGeminiProject(
   // 三级：现探
   const fetcher = options.fetcher ?? fetch
   const timeoutMs = options.timeoutMs ?? GEMINI_CREDITS_TIMEOUT_MS
-  const endpoints = options.endpoints ?? [GEMINI_ENDPOINT_SANDBOX, GEMINI_ENDPOINT_DAILY]
+  const endpoints = options.endpoints ?? [
+    GEMINI_ENDPOINT_SANDBOX,
+    GEMINI_ENDPOINT_DAILY,
+    GEMINI_ENDPOINT_PROD,
+  ]
   // 自带超时与调用方信号取交集（调用方的更短超时必须能提前打断）。
   const timeoutSignal = AbortSignal.timeout(timeoutMs)
   const signal = options.signal === undefined
     ? timeoutSignal
     : AbortSignal.any([options.signal, timeoutSignal])
   let lastError = ''
+  let lastStatus: number | undefined
+  let lastText = ''
 
   for (const endpoint of endpoints) {
     try {
@@ -148,7 +165,12 @@ export async function resolveGeminiProject(
         signal,
       })
       if (!response.ok) {
-        lastError = `loadCodeAssist HTTP ${response.status}`
+        const body = await response.text().catch(() => '')
+        lastStatus = response.status
+        lastText = body
+        lastError = body === ''
+          ? `loadCodeAssist HTTP ${response.status}`
+          : `loadCodeAssist HTTP ${response.status} — ${body.slice(0, 300)}`
         continue
       }
       const text = await response.text().catch(() => '')
@@ -166,10 +188,17 @@ export async function resolveGeminiProject(
       return { project: GEMINI_DEFAULT_PROJECT, probed: true }
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error)
+      lastStatus = undefined
+      lastText = ''
     }
   }
 
-  return { project: '', error: lastError === '' ? 'loadCodeAssist 探测失败' : lastError }
+  return {
+    project: '',
+    error: lastError === '' ? 'loadCodeAssist 探测失败' : lastError,
+    ...(lastStatus === undefined ? {} : { errorStatus: lastStatus }),
+    ...(lastText === '' ? {} : { errorText: lastText }),
+  }
 }
 
 /**

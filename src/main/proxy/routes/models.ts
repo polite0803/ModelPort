@@ -31,11 +31,13 @@ function providerCatalogueNames(): Set<string> {
 }
 
 /**
- * 合成条目：路由不是模型，没有上游目录可查，所以带的是**候选里最小的那个窗口**
- * （`autoRouter::advertisedContextFloor`，未标注按 64000 参与）—— 这是可证的下界，
- * 不是编的数：路由会落到任意候选上，广告比某个候选更大的窗口就是让它把请求发给
- * 装不下的那一家。池策略只会**剔掉**候选（剔掉小窗的会让真实下界更大），所以用
- * 未筛池算出的数只会偏保守，不会偏大。空池省略键。
+ * 合成条目：路由不是模型，没有上游目录可查，所以带的是**那条路由自己的候选池**里
+ * 最小的那个窗口（`autoRouter::advertisedContextFloor`，未标注按 64000 参与）——
+ * 这是可证的下界，不是编的数：路由会落到它池里的任意候选上，广告比某个候选更大的
+ * 窗口就是让它把请求发给装不下的那一家。池策略与手动移除只会**剔掉**候选（剔掉小窗
+ * 的会让这条路由的真实下界变大），所以按路由自己的池算不会把数说大；手动加回的模型
+ * 也参与，因为那条路由真的会把请求交给它。候选收敛到一个模型时就是那个模型自己的
+ * 窗口。空池省略键。
  * owned_by 沿用 legacy 的 `auto-router`：所有路由都由同一个路由引擎服务，客户端
  * 按 owned_by 分组时不该把它们拆开。
  */
@@ -70,11 +72,15 @@ router.get('/models', async (ctx: Context) => {
   // 排序由 enabledModelRoutes 显式给出，不依赖 Record 的迭代顺序（纯数字名如
   // `2026` 会被 JS 整数键提升而插到最前）。
   const config = storeManager.getConfig()
-  const routeFloor = autoRouter.advertisedContextFloor()
-  for (const route of enabledModelRoutes(config.routes)) {
+  const enabledRoutes = enabledModelRoutes(config.routes)
+  // 下界按**每条路由自己的池**算：一次采集、逐路由折叠（`advertisedContextFloors`）。
+  // 用全局未筛池会让一条只钉了大窗模型的路由被别家小窗模型压到 64K，报出来的数
+  // 跟这条路由毫无关系。
+  const routeFloors = autoRouter.advertisedContextFloors(enabledRoutes)
+  for (const route of enabledRoutes) {
     if (addedNames.has(route.name)) continue
     addedNames.add(route.name)
-    models.push(routeEntry(route.name, now, routeFloor))
+    models.push(routeEntry(route.name, now, routeFloors.get(route.name)))
   }
 
   for (const provider of providers) {
@@ -157,7 +163,7 @@ router.get('/models/:model', async (ctx: Context) => {
     ctx.body = routeEntry(
       route.name,
       Math.floor(Date.now() / 1000),
-      autoRouter.advertisedContextFloor()
+      autoRouter.advertisedContextFloor(route)
     )
     return
   }
