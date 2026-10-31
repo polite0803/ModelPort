@@ -81,6 +81,12 @@ interface DashboardRequestLog {
   latency: number
   userInput?: string
   errorMessage?: string
+  client?: { id: string; label: string; version?: string }
+}
+
+const clientLabelOf = (client: DashboardRequestLog['client']): string | undefined => {
+  if (!client?.label) return undefined
+  return client.version ? `${client.label} ${client.version}` : client.label
 }
 
 const convertRequestLogsToActivities = (logs: DashboardRequestLog[]): ActivityItem[] => {
@@ -95,6 +101,7 @@ const convertRequestLogsToActivities = (logs: DashboardRequestLog[]): ActivityIt
       modelName: log.model,
       actualModel: log.actualModel,
       accountName: log.accountName,
+      clientLabel: clientLabelOf(log.client),
       latency: log.latency,
       statusCode: log.statusCode,
     }

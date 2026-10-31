@@ -13,6 +13,7 @@ export interface ActivityItem {
   modelName?: string
   actualModel?: string
   accountName?: string
+  clientLabel?: string
   latency?: number
   statusCode?: number
 }
@@ -115,6 +116,12 @@ export function RecentActivity({
               )}
               <div className="flex items-center gap-1.5 pl-4 text-caption text-[var(--text-dim)]">
                 <span>{formatTime(item.timestamp)}</span>
+                {item.clientLabel && (
+                  <>
+                    <span>·</span>
+                    <span>{item.clientLabel}</span>
+                  </>
+                )}
                 {item.providerName && (
                   <>
                     <span>·</span>

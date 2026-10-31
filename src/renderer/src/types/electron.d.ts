@@ -448,6 +448,8 @@ interface RequestLogEntry {
   isStream: boolean
   errorMessage?: string
   errorStack?: string
+  /** Caller identified from User-Agent by the proxy; `other` keeps the raw product name */
+  client?: { id: string; label: string; version?: string }
 }
 
 interface RequestLogFilter {
