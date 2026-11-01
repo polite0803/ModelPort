@@ -411,6 +411,12 @@ export function AnthropicInboundSettings() {
               {plan !== null && (
                 <div className="space-y-2 text-sm">
                   {/* 四类结果各占一句：并成一个数字就看不出「少了的那些去了哪」。 */}
+                  {plan.create.length === 0 && plan.alreadyVisible.length === 0 && plan.skipped.length === 0 ? (
+                    // 三个数全 0 不是失败，是「目录里没有真 Claude 模型」。不点名这一句，
+                    // 界面会被读成「档位那节也没救、这里也没结果」的死路。
+                    <p className="text-muted-foreground">{t('anthropicInbound.discoveryNothingFound')}</p>
+                  ) : (
+                    <>
                   <p>{t('anthropicInbound.discoveryCreate', { total: plan.create.length })}</p>
                   {plan.create.map(route => (
                     <p key={route.name} className="font-mono text-xs text-muted-foreground">
@@ -440,6 +446,8 @@ export function AnthropicInboundSettings() {
                       {t(`anthropicInbound.discoveryReason.${entry.reason}`)}
                     </p>
                   ))}
+                    </>
+                  )}
                 </div>
               )}
 
