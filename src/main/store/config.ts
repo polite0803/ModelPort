@@ -15,6 +15,7 @@ import { normalizeToolCallingConfig } from '../../shared/toolCalling'
 import { isMappingActive } from './modelServing'
 import { validateRoutesForWrite } from './modelRoutes'
 import { isLoopbackHost } from '../proxy/authPolicy'
+import { validateHttpsConfig } from '../../shared/httpsConfig'
 
 /**
  * Config Manager class
@@ -333,6 +334,8 @@ export class ConfigManager {
     if (config.proxyHost !== undefined && !isLoopbackHost(config.proxyHost)) {
       errors.push('Proxy host must be 127.0.0.1, ::1 or localhost')
     }
+
+    errors.push(...validateHttpsConfig(config))
 
     if (config.enableApiKey !== undefined && typeof config.enableApiKey !== 'boolean') {
       errors.push('enableApiKey must be a boolean')

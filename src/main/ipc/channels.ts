@@ -6,6 +6,12 @@ export const IpcChannels = {
   PROXY_GET_STATISTICS: 'proxy:getStatistics',
   PROXY_RESET_STATISTICS: 'proxy:resetStatistics',
 
+  // Extra TLS listener (Claude Desktop's gateway refuses plain HTTP). Status is
+  // read-only; installing the generated certificate into the OS trust store is
+  // always a user click, never a silent startup action.
+  TLS_STATUS: 'tls:status',
+  TLS_INSTALL_TRUST: 'tls:install-trust',
+
   CONFIG_GET: 'config:get',
   CONFIG_UPDATE: 'config:update',
   CONFIG_CHANGED: 'config:changed',

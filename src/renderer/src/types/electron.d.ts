@@ -34,6 +34,8 @@ import type {
   ModelCapabilityHint,
   RoutePreviewResult,
   RoutePreviewSample,
+  TlsStatus,
+  TlsTrustResult,
 } from '../../../shared/types'
 import type {
   AggregateDetail,
@@ -131,11 +133,16 @@ interface ProxyAPI {
   onStatusChanged: (callback: (status: ProxyStatus) => void) => () => void
 }
 
+interface TlsAPI {
+  getStatus: () => Promise<TlsStatus>
+  installTrust: () => Promise<TlsTrustResult>
+}
+
 interface StoreAPI {
   get: <T>(key: string) => Promise<T | undefined>
-  set: <T>(key: string, value: T) => Promise<void>
-  delete: (key: string) => Promise<void>
   clearAll: () => Promise<void>
+  onInitError: (callback: (error: { message: string | null }) => void) => () => void
+  retryInit: () => Promise<{ success: boolean; error?: string }>
 }
 
 interface ProvidersAPI {
@@ -639,6 +646,7 @@ interface AnthropicDiscoveryAPI {
 
 interface ElectronAPI {
   proxy: ProxyAPI
+  tls: TlsAPI
   store: StoreAPI
   providers: ProvidersAPI
   aggregate: AggregateAPI

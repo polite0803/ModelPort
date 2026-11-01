@@ -75,6 +75,10 @@ export default defineConfig({
           'js-sha3',
           'mime-types',
           'zstd-codec',
+          // TLS: the packaged asar has no node_modules, so the certificate
+          // generator and its node-forge dependency must be rolled into the
+          // main bundle (same reason as electron-store below).
+          'selfsigned',
           // ⚠️ electron-store 必须放进 exclude（= 打进 bundle），不能留作 external。
           //
           // 打包产物里根本没有 node_modules：`package.json` 的 build.files 排除了

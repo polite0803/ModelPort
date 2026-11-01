@@ -5,6 +5,10 @@ import type { ProxyStatus, ProxyStatistics, LoadBalanceStrategy, ModelMapping, A
 export interface ProxyConfig {
   port: number
   host: string
+  httpsEnabled: boolean
+  httpsPort: number
+  httpsCertPath?: string
+  httpsKeyPath?: string
   timeout: number
   retryCount: number
   /** Absent = 代理内置默认（anthropic wire 必填的 max_tokens 兜底） */
@@ -52,6 +56,8 @@ interface ProxyState {
 const DEFAULT_PROXY_CONFIG: ProxyConfig = {
   port: 8080,
   host: '127.0.0.1',
+  httpsEnabled: false,
+  httpsPort: 8443,
   timeout: 60000,
   retryCount: 3,
   maxConnections: 100,
@@ -176,6 +182,10 @@ export const useProxyStore = create<ProxyState>((set, get) => ({
             ...DEFAULT_PROXY_CONFIG,
             port: config.proxyPort,
             host: config.proxyHost || '127.0.0.1',
+            httpsEnabled: config.httpsEnabled ?? false,
+            httpsPort: config.httpsPort ?? 8443,
+            httpsCertPath: config.httpsCertPath,
+            httpsKeyPath: config.httpsKeyPath,
             timeout: config.requestTimeout,
             retryCount: config.retryCount,
             defaultMaxOutputTokens: config.defaultMaxOutputTokens,

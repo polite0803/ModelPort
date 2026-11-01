@@ -8,10 +8,11 @@ import { app, safeStorage, BrowserWindow } from 'electron'
 import { homedir } from 'os'
 import { join } from 'path'
 import { copyFileSync, existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs'
-import { randomBytes } from 'crypto'
+import { randomBytes, randomUUID } from 'crypto'
 import {
   StoreSchema,
   AppConfig,
+  ApiKey,
   Account,
   Provider,
   LogEntry,
@@ -107,6 +108,13 @@ type StoreType = any
  * Storage Manager Class
  * Responsible for data persistence and encryption
  */
+/**
+ * 密文前缀。没有它的时候明文与密文在盘上长得一样：`decryptData` 解不开就把原值返回，
+ * 调用方随即把一串 base64 当作 API Key 发给上游 —— 换机器、密钥库重置或 `store.key`
+ * 丢失之后，每个请求都 401，而没有任何地方说明「凭据已损坏」。
+ */
+const CIPHERTEXT_PREFIX = 'v1:'
+
 class StoreManager {
   private store: StoreType | null = null
   private isInitialized: boolean = false
@@ -178,7 +186,11 @@ class StoreManager {
       this.initializationError = null
       // 播种必须在 `isInitialized` 之后：它复用 `createRoute` 与 `updateConfig`，
       // 两者第一行都是 `ensureInitialized()`。
-      this.seedPresetRoutes()
+      await this.seedRoutes()
+      // 旧格式凭据收敛到 `v1:` 前缀；全新安装生成一把默认 Key。两者都复用
+      // `updateConfig` / 公开读接口，所以同样必须排在 `isInitialized` 之后。
+      this.migrateCredentialFormat()
+      this.seedFirstRunApiKey()
     } catch (error) {
       console.error('[Store] Failed to initialize storage:', error)
       this.initializationError = error instanceof Error ? error : new Error(String(error))
@@ -280,6 +292,7 @@ class StoreManager {
     })
 
     if (plan === 'unencrypted') {
+      this.credentialsDegradedAtInit = true
       if (this.dataFileExistedBeforeInit) {
         console.warn('[Store] OS keystore unavailable; data.json is stored unencrypted')
       }
@@ -759,6 +772,15 @@ class StoreManager {
    * 用户与运维都不知道凭据正以明文落盘。
    */
   private plaintextStorageWarned = false
+  private credentialsDegradedAtInit = false
+
+  /**
+   * 凭据是否以明文落盘：初始化时由 `planKeySetup` 判定，或写入时发生降级。
+   * 启动流程据此弹一次提示 —— 只写应用日志等于静默，打包后的 GUI 里没人翻日志。
+   */
+  isCredentialEncryptionDegraded(): boolean {
+    return this.credentialsDegradedAtInit || this.plaintextStorageWarned
+  }
 
   private warnPlaintextStorage(reason: string): void {
     if (this.plaintextStorageWarned) return
@@ -769,7 +791,7 @@ class StoreManager {
   /**
    * Encrypt Sensitive Data
    * @param data Data to encrypt
-   * @returns Encrypted string
+   * @returns 带 `v1:` 前缀的密文；密钥库不可用时按降级口径返回原明文
    */
   encryptData(data: string): string {
     if (!safeStorage.isEncryptionAvailable()) {
@@ -785,7 +807,7 @@ class StoreManager {
         this.warnPlaintextStorage('roundtrip-failed')
         return data
       }
-      return encrypted.toString('base64')
+      return `${CIPHERTEXT_PREFIX}${encrypted.toString('base64')}`
     } catch (error) {
       console.error('Failed to encrypt data:', error)
       this.warnPlaintextStorage('encrypt-threw')
@@ -795,19 +817,29 @@ class StoreManager {
 
   /**
    * Decrypt Sensitive Data
-   * @param encryptedData Encrypted data
-   * @returns Decrypted string
+   *
+   * 带 `v1:` 前缀：解得开返回明文，解不开返回 `null` —— **不再把密文当明文回退**，
+   * 那正是「换机器后每个请求都 401、错误信息里却是一串像 Key 的 base64」的成因。
+   * 不带前缀：先试解一次（旧版密文没有前缀），解得开就按密文、解不开就当明文。
    */
-  decryptData(encryptedData: string): string {
-    try {
-      if (safeStorage.isEncryptionAvailable()) {
-        const buffer = Buffer.from(encryptedData, 'base64')
-        return safeStorage.decryptString(buffer)
+  decryptData(value: string): string | null {
+    if (value.startsWith(CIPHERTEXT_PREFIX)) {
+      if (!safeStorage.isEncryptionAvailable()) return null
+      try {
+        return safeStorage.decryptString(Buffer.from(value.slice(CIPHERTEXT_PREFIX.length), 'base64'))
+      } catch (error) {
+        console.error('Failed to decrypt data:', error)
+        return null
       }
-    } catch (error) {
-      console.error('Failed to decrypt data:', error)
     }
-    return encryptedData
+    // 无前缀的旧值：先试一次「它是不是旧版密文」，解得开就按密文处理；解不开当明文。
+    // 这条让 accounts 与独立存放的渠道包凭据在迁移完成前都还能用 —— 只给某一个文件
+    // 写迁移会漏掉另一个。
+    if (safeStorage.isEncryptionAvailable()) {
+      const legacyPlain = this.tryDecryptUnprefixed(value)
+      if (legacyPlain !== null) return legacyPlain
+    }
+    return value
   }
 
   /**
@@ -832,12 +864,114 @@ class StoreManager {
    */
   decryptCredentials(encryptedCredentials: Record<string, string>): Record<string, string> {
     const decrypted: Record<string, string> = {}
-    
+    let damaged = 0
+
     for (const [key, value] of Object.entries(encryptedCredentials)) {
-      decrypted[key] = this.decryptData(value)
+      const plain = this.decryptData(value)
+      if (plain === null) {
+        // 跳过这个字段而不是把密文当明文：上游会拿到缺凭据的请求并正常 401，
+        // 用户也从应用日志里看到「请重新登录」，而不是对着一个假 Key 排查。
+        damaged++
+        continue
+      }
+      decrypted[key] = plain
     }
-    
+
+    if (damaged > 0) this.warnCorruptedCredentials(damaged)
     return decrypted
+  }
+
+  private corruptedCredentialWarned = false
+
+  private warnCorruptedCredentials(count: number): void {
+    if (this.corruptedCredentialWarned) return
+    this.corruptedCredentialWarned = true
+    this.addLog('error', `有 ${count} 个凭据字段无法解密（系统密钥库或 store.key 已变化），请重新登录对应账号`)
+  }
+
+  /**
+   * 把旧格式（无 `v1:` 前缀）的凭据一次性收敛到带前缀的格式。
+   *
+   * 旧版本写进盘的值有两种可能：明文（密钥库缺失时降级写入）或密文（正常加密但无前缀）。
+   * 判别不靠猜：拿它按 base64 试解一次，解得开就是旧密文、按明文重新加封；解不开就是
+   * 明文、直接加封。密钥库不可用时不动它（本来也只能明文存），另有降级告警。
+   */
+  private migrateCredentialFormat(): void {
+    const accounts = (this.store!.get('accounts') as Account[] | undefined) ?? []
+    if (accounts.length === 0) return
+
+    let changed = 0
+    const migrated = accounts.map((account) => {
+      if (!account.credentials) return account
+      let accountChanged = false
+      const credentials: Record<string, string> = {}
+
+      for (const [field, raw] of Object.entries(account.credentials)) {
+        if (typeof raw !== 'string' || raw === '' || raw.startsWith(CIPHERTEXT_PREFIX)) {
+          credentials[field] = raw
+          continue
+        }
+        const legacyPlain = this.tryDecryptUnprefixed(raw)
+        const plaintext = legacyPlain === null ? raw : legacyPlain
+        if (safeStorage.isEncryptionAvailable()) {
+          credentials[field] = this.encryptData(plaintext)
+          accountChanged = true
+        } else {
+          credentials[field] = raw
+        }
+      }
+
+      if (!accountChanged) return account
+      changed++
+      return { ...account, credentials }
+    })
+
+    if (changed > 0) {
+      // 改的是凭据的存储形态，回滚代码读不了带前缀的值：先留一份密文快照再写。
+      const backupPath = this.backupDataFile('credential-migration')
+      this.store!.set('accounts', migrated)
+      console.log(
+        `[Store] Migrated credentials to ${CIPHERTEXT_PREFIX} format for ${changed} account(s)` +
+          (backupPath ? `; backup at ${backupPath}` : ''),
+      )
+    }
+  }
+
+  /** 旧格式密文的试解：解得开返回明文，解不开（含"其实是明文"）返回 `null`。 */
+  private tryDecryptUnprefixed(value: string): string | null {
+    if (!safeStorage.isEncryptionAvailable()) return null
+    try {
+      return safeStorage.decryptString(Buffer.from(value, 'base64'))
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 全新安装且没有任何 API Key 时生成一把。
+   *
+   * 只对全新安装生效（初始化前 `data.json` 不存在）：存量用户已经在无 Key 状态跑着客户端，
+   * 替他们加 Key 会让所有客户端突然 401；那部分人的暴露面由「无 Key 时不回
+   * `Access-Control-Allow-Origin`」与「`/stats` 需鉴权」收紧。
+   *
+   * **不把 Key 写进日志**：日志里出现明文凭据正是前面刚清掉的那类问题；用户可在
+   * API Keys 页面查看与重新生成。
+   */
+  private seedFirstRunApiKey(): void {
+    if (this.dataFileExistedBeforeInit) return
+    if ((this.getConfig().apiKeys ?? []).length > 0) return
+
+    const apiKey: ApiKey = {
+      id: randomUUID(),
+      name: '默认密钥',
+      key: `sk-mp-${randomBytes(24).toString('hex')}`,
+      enabled: true,
+      createdAt: Date.now(),
+      usageCount: 0,
+      description: '首次启动自动生成，可在 API Keys 页面重新生成',
+    }
+    this.updateConfig({ apiKeys: [apiKey] })
+    this.addLog('info', '首次启动已生成默认 API Key，可在「API Keys」页面查看或重新生成')
   }
 
   // ==================== Provider Operations ====================
@@ -1032,11 +1166,20 @@ class StoreManager {
     }
 
     if (updates.credentials) {
-      updatedAccount.credentials = this.encryptCredentials(updates.credentials)
+      // 「留空 = 不修改」：渲染层拿不到已存的凭据（列表不带、编辑框只显示空），所以编辑
+      // 账号时提交的表单里那些字段本来就是空的。把它们当作「清空」会把账号凭据写没；
+      // 这里按字段合并：只覆盖提交了非空值的字段，其余保留原值。
+      const provided = Object.fromEntries(
+        Object.entries(updates.credentials).filter(
+          ([, value]) => typeof value === 'string' && value.trim() !== '',
+        ),
+      )
+      const base = this.decryptCredentials(accounts[index].credentials)
+      updatedAccount.credentials = this.encryptCredentials({ ...base, ...provided })
       // 只记元数据（动了哪个账号、哪些凭据字段）。这里原本连着四条输出：明文旧凭据、
       // 解密后的旧凭据、加密后的新值、以及两者是否相同 —— 以控制台方式启动、带
       // `--enable-logging`、或任何接走 stdout 的采集，都等于把全部上游凭据抄进日志。
-      console.log('[Store] Update account:', { id, changedCredentialFields: Object.keys(updates.credentials) })
+      console.log('[Store] Update account:', { id, changedCredentialFields: Object.keys(provided) })
     }
 
     accounts[index] = updatedAccount
@@ -1315,7 +1458,13 @@ class StoreManager {
   }
 
   /**
-   * 一次性播种「协议路由」（`auto` 那条迁移的同一套建法，只是面向另一套入站协议）。
+   * 启动时的一次性建表：`auto` 那条迁移的同一套建法，管两类预置路由。
+   *
+   * 1. **预设路由**（协议名 + 三档）：来源是静态种子表；
+   * 2. **Anthropic 可发现路由**：来源是当前目录里真实的 `claude*` / `anthropic*` 模型
+   *    （每条钉死那一个模型）。这一类**必须**在启动时跑：R2 之后 `/v1/models` 只广告
+   *    路由名，而 Claude 客户端只认自己那张名字表 —— 只挂在设置页按钮上的话，
+   *    「从没点过」的安装就一条 Claude 路由都没有，客户端看到 0 个可用模型。
    *
    * 判据是记档键里有没有这个名字，**不是**路由表是否为空：删掉以后每次读取都重新造
    * 出来，等于用出厂值推翻「这个名字不再被路由」。与 `routes` 键同一理由。
@@ -1327,14 +1476,13 @@ class StoreManager {
    * 失败不带上启动：播种是可用性增益，不是存储能否读出来的前提；但也不许静默，
    * 单独记一条 error 让界面与 ndjson 都看得见。
    */
-  private seedPresetRoutes(): void {
+  private async seedRoutes(): Promise<void> {
     try {
       const config = this.getConfig()
-      const pending = pendingPresetRouteSeeds(config.seededPresetRoutes)
-      if (pending.length === 0) return
-
+      const recorded = [...(config.seededPresetRoutes ?? [])]
       const handled: string[] = []
-      for (const seed of pending) {
+
+      for (const seed of pendingPresetRouteSeeds(recorded)) {
         const result = this.createRoute({
           name: seed.name,
           ...presetRouteFields(
@@ -1361,11 +1509,35 @@ class StoreManager {
         )
       }
 
-      this.updateConfig({
-        seededPresetRoutes: [...(config.seededPresetRoutes ?? []), ...handled],
-      })
+      // Anthropic 可发现路由：动态 import 避开 `store → anthropicRoutes → store` 的静态环，
+      // 且只有走启动播种这条路时才加载它。
+      const { applyAnthropicRoutes } = await import('./anthropicRoutes.ts')
+      const anthropic = applyAnthropicRoutes({ skipNames: [...recorded, ...handled] })
+      if (anthropic.ok) {
+        handled.push(...anthropic.created.map(route => route.name))
+        const byReason = new Map<string, number>()
+        for (const skip of anthropic.plan.skipped) {
+          byReason.set(skip.reason, (byReason.get(skip.reason) ?? 0) + 1)
+        }
+        // 「0 条」必须能解释：客户端那边看到空清单时，这里要能说出缺的是哪一类。
+        this.addLog('info', `Anthropic discoverable routes seeded: ${anthropic.created.length}`, {
+          data: {
+            created: anthropic.created.map(route => route.name),
+            failed: anthropic.failed,
+            skipped: Object.fromEntries(byReason),
+          },
+        })
+      } else {
+        this.addLog('warn', `Anthropic discoverable routes not seeded: ${anthropic.error.code}`)
+      }
+
+      if (handled.length > 0) {
+        this.updateConfig({
+          seededPresetRoutes: [...new Set([...recorded, ...handled])],
+        })
+      }
     } catch (error) {
-      this.addLog('error', `Preset route seeding failed: ${error instanceof Error ? error.message : String(error)}`)
+      this.addLog('error', `Route seeding failed: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -2482,7 +2654,9 @@ class StoreManager {
    * Generate Unique ID
    */
   generateId(): string {
-    return `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`
+    // 应用日志的条目主键。`Math.random` 不是加密随机、序列可预测，一旦出现「按 id 读
+    // 日志」的入口（管理 API 或导出），可枚举就会变成问题。`requestLogs` 那边已同口径。
+    return randomUUID()
   }
 
   /**

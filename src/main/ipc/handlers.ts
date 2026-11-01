@@ -19,6 +19,7 @@ import { getBuiltinProviders, getBuiltinProvider } from '../providers/builtin'
 import { oauthManager } from '../oauth/manager'
 import { fetchProviderModels } from '../providers/modelCatalog'
 import { proxyServer } from '../proxy/server'
+import { getTlsStatus, installCertificateTrust, loadTlsMaterial } from '../proxy/tls'
 import { autoRouter } from '../proxy/autoRouter'
 import type { RoutePreviewResult, RoutePreviewSample } from '../proxy/autoRouter'
 import { proxyStatusManager } from '../proxy/status'
@@ -32,6 +33,7 @@ import { setTitleBarTheme } from '../window/manager'
 import type { Provider, Account, ProxyStatus, ProviderCheckResult, OAuthResult, AuthType, CredentialField, LogLevel, LogEntry, ProviderVendor, ModelRoute, ModelCapabilityHint } from '../../shared/types'
 import type { RouteListResult, RouteMutationResult, RouteRemovalResult, RoutePoolSizesResult } from '../../shared/modelRouteName'
 import type { SessionConfig, SessionRecord, ManagementApiConfig, AppConfig } from '../store/types'
+import type { TlsStatus, TlsTrustResult } from '../../shared/types'
 import type { ProviderType } from '../oauth/types'
 import type { ModelsFetchFailure } from '../store/types'
 
@@ -228,11 +230,47 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     proxyStatusManager.resetStatistics()
   })
 
+  ipcMain.handle(IpcChannels.TLS_STATUS, async (): Promise<TlsStatus> => {
+    return getTlsStatus(storeManager.getConfig(), proxyServer.getHttpsRuntimeStatus())
+  })
+
+  ipcMain.handle(IpcChannels.TLS_INSTALL_TRUST, async (): Promise<TlsTrustResult> => {
+    try {
+      const config = storeManager.getConfig()
+      const material = proxyServer.getHttpsMaterial() ?? loadTlsMaterial(config)
+      return await installCertificateTrust(material)
+    } catch (error) {
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : 'Failed to prepare the HTTPS certificate',
+        trusted: null,
+      }
+    }
+  })
+
   ipcMain.handle(IpcChannels.CONFIG_GET, async () => {
     return storeManager.getConfig()
   })
 
   ipcMain.handle(IpcChannels.CONFIG_UPDATE, async (_, updates: Partial<AppConfig>) => {
+    const current = storeManager.getConfig()
+    // Only the HTTPS/proxy pair is checked here: the renderer writes through
+    // this channel and used to skip `ConfigManager.validate` entirely, so an
+    // HTTPS port equal to the proxy port would only surface as a confusing
+    // bind failure at the next start.
+    const validation = ConfigManager.validate({
+      proxyPort: updates.proxyPort ?? current.proxyPort,
+      httpsEnabled: updates.httpsEnabled ?? current.httpsEnabled,
+      httpsPort: updates.httpsPort ?? current.httpsPort,
+      httpsCertPath: updates.httpsCertPath ?? current.httpsCertPath,
+      httpsKeyPath: updates.httpsKeyPath ?? current.httpsKeyPath,
+    })
+    if (!validation.valid) {
+      const message = validation.errors.join('; ')
+      storeManager.addLog('warn', `Rejected configuration update: ${message}`)
+      throw new Error(message)
+    }
+
     const newConfig = storeManager.updateConfig(updates)
 
     broadcastConfigChanged(newConfig)

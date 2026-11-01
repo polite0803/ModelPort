@@ -85,16 +85,22 @@ export function planAnthropicRoutes(): AnthropicDiscoveryResult {
  *
  * 这里**故意再算一次**而不是接受 UI 传回来的方案：客户端连点两次、或两个入口同时写，
  * 拿旧方案落库会把别人刚建的路由覆盖掉。重算的代价是一次本机遍历，换来的是幂等。
+ *
+ * `skipNames` 只给启动播种用：记档里记过、但用户后来删掉的名字不再建 —— 少了这一格，
+ * 每次启动都会把用户删掉的 `claude-*` 复活，与「删除后这个名字不再被路由」冲突。
+ * UI 那条路不传，行为不变。
  */
-export function applyAnthropicRoutes(): AnthropicRouteApplyResult {
+export function applyAnthropicRoutes(options: { skipNames?: readonly string[] } = {}): AnthropicRouteApplyResult {
   const input = collectInput()
   if (input === null) return storageFailure()
 
   const plan = planAnthropicDiscovery(input)
+  const skip = new Set((options.skipNames ?? []).map(name => name.trim().toLowerCase()))
   const created: AnthropicDiscoveryRoute[] = []
   const failed: Array<{ name: string; message: string }> = []
 
   for (const route of plan.create) {
+    if (skip.has(route.name.trim().toLowerCase())) continue
     const result = storeManager.createRoute({
       name: route.name,
       enabled: true,

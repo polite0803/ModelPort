@@ -599,6 +599,13 @@ export interface AnthropicInboundConfig {
 export interface AppConfig {
   proxyPort: number
   proxyHost: string
+  /** Adds a TLS listener; the HTTP listener on `proxyPort` stays as-is. */
+  httpsEnabled: boolean
+  httpsPort: number
+  /** Custom PEM certificate; absent means the app-managed self-signed cert. */
+  httpsCertPath?: string
+  /** Custom PEM private key; required together with `httpsCertPath`. */
+  httpsKeyPath?: string
   loadBalanceStrategy: LoadBalanceStrategy
   modelMappings: Record<string, ModelMapping>
   theme: Theme
@@ -740,6 +747,41 @@ export interface ProxyStatus {
   host: string
   uptime: number
   connections: number
+}
+
+/** Certificate the HTTPS listener presents. Never carries the private key. */
+export interface TlsCertificateInfo {
+  source: 'managed' | 'custom'
+  certPath: string
+  keyPath: string
+  subject: string
+  issuer: string
+  fingerprint256: string
+  validFrom: string
+  validTo: string
+  subjectAltName: string | null
+  selfSigned: boolean
+}
+
+export interface TlsStatus {
+  enabled: boolean
+  /** Whether the HTTPS listener is actually accepting connections. */
+  running: boolean
+  host: string
+  port: number
+  /** Base URL to paste into a client (no `/v1`); null when disabled or not running. */
+  url: string | null
+  certificate: TlsCertificateInfo | null
+  /** null = this platform has no cheap trust-store probe. */
+  trusted: boolean | null
+  /** Why the listener is enabled but not running. */
+  error: string | null
+}
+
+export interface TlsTrustResult {
+  ok: boolean
+  message: string
+  trusted: boolean | null
 }
 
 export interface ProxyStatistics {
@@ -1144,6 +1186,10 @@ export interface StatisticsResponse {
 export interface ConfigUpdateRequest {
   proxyPort?: number
   proxyHost?: string
+  httpsEnabled?: boolean
+  httpsPort?: number
+  httpsCertPath?: string
+  httpsKeyPath?: string
   loadBalanceStrategy?: LoadBalanceStrategy
   theme?: Theme
   autoStart?: boolean

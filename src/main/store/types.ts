@@ -279,6 +279,17 @@ export interface AppConfig {
   proxyPort: number
   /** Proxy service bind address */
   proxyHost: string
+  /**
+   * Extra TLS listener. HTTP keeps listening on `proxyPort`; this only adds
+   * `httpsPort` for clients that refuse plain HTTP (Claude Desktop's gateway).
+   */
+  httpsEnabled: boolean
+  /** TLS listener port; must differ from `proxyPort` while enabled. */
+  httpsPort: number
+  /** Custom PEM certificate; absent means the app-managed self-signed cert. */
+  httpsCertPath?: string
+  /** Custom PEM private key; must be set together with `httpsCertPath`. */
+  httpsKeyPath?: string
   /** Load balance strategy */
   loadBalanceStrategy: LoadBalanceStrategy
   /** Model mapping configuration */
@@ -830,6 +841,8 @@ export function normalizeModelMappingsWithDefaults(
 export const DEFAULT_CONFIG: AppConfig = {
   proxyPort: 8080,
   proxyHost: '127.0.0.1',
+  httpsEnabled: false,
+  httpsPort: 8443,
   loadBalanceStrategy: 'round-robin',
   modelMappings: {},
   theme: 'system',

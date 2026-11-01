@@ -678,7 +678,9 @@ export function Providers() {
           provider={selectedProvider}
           onBack={handleBackToAccounts}
           onEdit={async () => {
-            const fullAccount = await window.electronAPI.accounts.getById(selectedAccount.id, true)
+            // 不再向主进程要明文凭据：编辑框用空值 + 「留空 = 不修改」表达这一层，
+            // 真实 Key 只在主进程内部解密使用。
+            const fullAccount = await window.electronAPI.accounts.getById(selectedAccount.id)
             setEditingAccount(fullAccount || selectedAccount)
             setViewMode('accounts')
             setShowAddAccountDialog(true)
@@ -704,7 +706,8 @@ export function Providers() {
           accounts={providerAccounts}
           onAddAccount={() => setShowAddAccountDialog(true)}
           onEditAccount={async (account) => {
-            const fullAccount = await window.electronAPI.accounts.getById(account.id, true)
+            // 同上：编辑框不再预填真实凭据。
+            const fullAccount = await window.electronAPI.accounts.getById(account.id)
             setEditingAccount(fullAccount || account)
             setShowAddAccountDialog(true)
           }}

@@ -7,6 +7,7 @@ import { useProvidersStore } from '@/stores/providersStore'
 import { localAccountCounts, mergeChannelCounts } from '@/lib/accountCounts'
 import type { AccountCounts } from '@/lib/accountCounts'
 import type { Provider, Account } from '@/types/electron'
+import { buildProxyUrl } from '@shared/httpsConfig'
 import iconsPng from '@/assets/icons/icons.png'
 
 interface ProviderInfo {
@@ -25,6 +26,8 @@ export function TrayView() {
   const [proxyLoading, setProxyLoading] = useState(false)
   const [port, setPort] = useState(8080)
   const [host, setHost] = useState('127.0.0.1')
+  const [httpsEnabled, setHttpsEnabled] = useState(false)
+  const [httpsPort, setHttpsPort] = useState(8443)
   const [copied, setCopied] = useState(false)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null)
@@ -45,6 +48,8 @@ export function TrayView() {
       if (config) {
         setPort(config.proxyPort || 8080)
         setHost(config.proxyHost || '127.0.0.1')
+        setHttpsEnabled(config.httpsEnabled ?? false)
+        setHttpsPort(config.httpsPort ?? 8443)
       }
     }
     
@@ -58,6 +63,8 @@ export function TrayView() {
     const unsubscribeConfig = window.electronAPI?.config?.onConfigChanged?.((config) => {
       setPort(config.proxyPort || 8080)
       setHost(config.proxyHost || '127.0.0.1')
+      setHttpsEnabled(config.httpsEnabled ?? false)
+      setHttpsPort(config.httpsPort ?? 8443)
     })
 
     return () => {
@@ -97,6 +104,8 @@ export function TrayView() {
       if (config) {
         setPort(config.proxyPort || 8080)
         setHost(config.proxyHost || '127.0.0.1')
+        setHttpsEnabled(config.httpsEnabled ?? false)
+        setHttpsPort(config.httpsPort ?? 8443)
       }
       await loadAccountCounts(providersData, accountsData)
     } catch (error) {
@@ -133,7 +142,7 @@ export function TrayView() {
   }
 
   const handleCopyUrl = async () => {
-    const url = `http://${host}:${port}`
+    const url = buildProxyUrl(host, httpsEnabled ? httpsPort : port, httpsEnabled)
     await navigator.clipboard.writeText(url)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
@@ -247,7 +256,7 @@ export function TrayView() {
                 className="flex items-center gap-1.5 group"
               >
                 <code className="text-subtitle font-mono font-semibold text-[var(--text-primary)] truncate">
-                  {host}:{port}
+                  {buildProxyUrl(host, httpsEnabled ? httpsPort : port, httpsEnabled)}
                 </code>
                 {copied ? (
                   <Check size={12} className="text-success flex-shrink-0" />

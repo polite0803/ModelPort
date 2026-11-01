@@ -6,12 +6,15 @@
 import Koa, { type Context, type Next } from 'koa'
 import Router from '@koa/router'
 import bodyParser from 'koa-bodyparser'
+import { app } from 'electron'
 import { Server as HttpServer } from 'http'
+import { createServer as createHttpsServer, type Server as HttpsServer } from 'https'
 import routes from './routes'
 import managementRoutes from './routes/management'
 import { proxyStatusManager } from './status'
 import { storeManager } from '../store/store'
 import { sessionManager } from './sessionManager'
+import { loadTlsMaterial, type TlsMaterial, type TlsRuntimeStatus } from './tls'
 import {
   checkStartupSecurity,
   corsAllowHeaders,
@@ -123,8 +126,13 @@ export class ProxyServer {
   private app: Koa
   private router: Router
   private server: HttpServer | null = null
+  private httpsServer: HttpsServer | null = null
   private port: number = 8080
   private host: string = '127.0.0.1'
+  private httpsPort: number = 8443
+  private httpsHost: string = '127.0.0.1'
+  private httpsError: string | null = null
+  private httpsMaterial: TlsMaterial | null = null
 
   constructor() {
     this.app = new Koa()
@@ -298,7 +306,9 @@ export class ProxyServer {
     this.router.get('/', async (ctx) => {
       ctx.body = {
         name: 'ModelPort Proxy',
-        version: '1.1.2',
+        // 运行期取版本：这里原来硬编码 `1.1.2`，与 package.json 的 1.4.x 已经差了一个
+        // 大版本，排查时按这个数去对文档会直接对错。
+        version: app.getVersion(),
         description: 'OpenAI (chat / completions / responses) + Anthropic API compatible proxy service',
         endpoints: [
           'POST /v1/chat/completions',
@@ -312,19 +322,13 @@ export class ProxyServer {
       }
     })
 
+    // 这是唯一免鉴权的端点，只回答「活着没有」。原来还带 uptime 与四个计数，等于给
+    // 本机任意进程（以及任何能直连回环的脚本）一份运行情报；完整统计在鉴权后的
+    // `/stats` 里，这里不需要重复一遍。
     this.router.get('/health', async (ctx) => {
-      const status = proxyStatusManager.getRunningStatus()
-      const statistics = proxyStatusManager.getStatistics()
-
       ctx.body = {
-        status: status.isRunning ? 'running' : 'stopped',
-        uptime: status.uptime,
-        statistics: {
-          totalRequests: statistics.totalRequests,
-          successRequests: statistics.successRequests,
-          failedRequests: statistics.failedRequests,
-          activeConnections: statistics.activeConnections,
-        },
+        ok: true,
+        status: proxyStatusManager.getRunningStatus().isRunning ? 'running' : 'stopped',
       }
     })
 
@@ -437,7 +441,7 @@ export class ProxyServer {
       return false
     }
 
-    return new Promise((resolve) => {
+    const started = await new Promise<boolean>((resolve) => {
       try {
         this.server = this.app.listen(this.port, this.host, () => {
           proxyStatusManager.start()
@@ -467,6 +471,75 @@ export class ProxyServer {
         resolve(false)
       }
     })
+
+    if (!started) {
+      return false
+    }
+
+    const config = storeManager.getConfig()
+    if (config.httpsEnabled) {
+      await this.startHttps(config.httpsPort || 8443)
+    }
+
+    return true
+  }
+
+  /**
+   * Adds the TLS listener. A certificate failure is recorded on the status
+   * instead of failing the whole start: the HTTP listener is already serving,
+   * and the settings page can show exactly which part went wrong.
+   */
+  private async startHttps(port: number): Promise<void> {
+    this.httpsHost = this.host
+    this.httpsPort = port
+    this.httpsError = null
+
+    let material: TlsMaterial
+    try {
+      material = loadTlsMaterial(storeManager.getConfig())
+    } catch (error) {
+      this.httpsError = error instanceof Error ? error.message : 'Failed to load the HTTPS certificate'
+      storeManager.addLog('error', `HTTPS listener not started: ${this.httpsError}`)
+      return
+    }
+    this.httpsMaterial = material
+
+    await new Promise<void>((resolve) => {
+      try {
+        const httpsServer = createHttpsServer(
+          { key: material.key, cert: material.cert },
+          this.app.callback(),
+        )
+        this.httpsServer = httpsServer
+
+        httpsServer.once('error', (err: NodeJS.ErrnoException) => {
+          this.httpsServer = null
+          this.httpsError =
+            err.code === 'EADDRINUSE'
+              ? `HTTPS port ${this.httpsPort} is already in use`
+              : err.message
+          storeManager.addLog('error', `HTTPS listener failed: ${this.httpsError}`)
+          resolve()
+        })
+
+        httpsServer.listen(this.httpsPort, this.httpsHost, () => {
+          storeManager.addLog(
+            'info',
+            `HTTPS listener started on ${this.httpsHost}:${this.httpsPort} (${material.source} certificate)`,
+          )
+          resolve()
+        })
+
+        httpsServer.on('close', () => {
+          this.httpsServer = null
+        })
+      } catch (error) {
+        this.httpsServer = null
+        this.httpsError = error instanceof Error ? error.message : 'Failed to start the HTTPS listener'
+        storeManager.addLog('error', `HTTPS listener failed: ${this.httpsError}`)
+        resolve()
+      }
+    })
   }
 
   /**
@@ -494,43 +567,57 @@ export class ProxyServer {
   async stop(): Promise<boolean> {
     // 停服前把攒着的 Key 用量落盘，否则最后一个 flush 间隔内的计数会丢。
     flushKeyUsage()
-    if (!this.server) {
+    if (!this.server && !this.httpsServer) {
       return false
     }
-    
+
     sessionManager.destroy()
     autoRouter.reset()
 
-    const server = this.server
+    const servers = [this.server, this.httpsServer].filter(
+      (server): server is HttpServer | HttpsServer => server !== null,
+    )
+    this.server = null
+    this.httpsServer = null
+    this.httpsError = null
+
     return new Promise((resolve) => {
-      let settled = false
+      let remaining = servers.length
+      let failed = false
       const forceTimer = setTimeout(() => {
-        (server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.()
+        for (const server of servers) {
+          (server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.()
+        }
       }, 5000)
 
-      const finish = (value: boolean) => {
-        if (settled) return
-        settled = true
+      const finishOne = (ok: boolean) => {
+        if (!ok) failed = true
+        remaining -= 1
+        if (remaining > 0) return
+
         clearTimeout(forceTimer)
-        resolve(value)
-      }
-
-      ;(server as unknown as { closeIdleConnections?: () => void }).closeIdleConnections?.()
-
-      server.close((err) => {
-        if (err) {
-          storeManager.addLog('error', `Failed to stop server: ${err.message}`)
-          finish(false)
+        if (failed) {
+          resolve(false)
           return
         }
 
-        this.server = null
         proxyStatusManager.stop()
-
         storeManager.addLog('info', 'Proxy server stopped')
+        resolve(true)
+      }
 
-        finish(true)
-      })
+      for (const server of servers) {
+        ;(server as unknown as { closeIdleConnections?: () => void }).closeIdleConnections?.()
+
+        server.close((err) => {
+          if (err) {
+            storeManager.addLog('error', `Failed to stop server: ${err.message}`)
+            finishOne(false)
+            return
+          }
+          finishOne(true)
+        })
+      }
     })
   }
 
@@ -554,6 +641,21 @@ export class ProxyServer {
    */
   getPort(): number {
     return this.port
+  }
+
+  /** Snapshot for the settings page: whether TLS is listening and why not. */
+  getHttpsRuntimeStatus(): TlsRuntimeStatus {
+    return {
+      running: this.httpsServer !== null,
+      host: this.httpsHost,
+      port: this.httpsPort,
+      error: this.httpsError,
+    }
+  }
+
+  /** Certificate already loaded by a start; null before the first HTTPS start. */
+  getHttpsMaterial(): TlsMaterial | null {
+    return this.httpsMaterial
   }
 
   /**

@@ -22,6 +22,8 @@ import type {
   ModelCapabilityHint,
   RoutePreviewResult,
   RoutePreviewSample,
+  TlsStatus,
+  TlsTrustResult,
 } from '../shared/types'
 import type {
   RouteListResult,
@@ -73,15 +75,21 @@ const proxyAPI = {
   },
 }
 
+const tlsAPI = {
+  getStatus: (): Promise<TlsStatus> =>
+    ipcRenderer.invoke(IpcChannels.TLS_STATUS),
+
+  installTrust: (): Promise<TlsTrustResult> =>
+    ipcRenderer.invoke(IpcChannels.TLS_INSTALL_TRUST),
+}
+
 const storeAPI = {
   get: <T>(key: string): Promise<T | undefined> => 
     ipcRenderer.invoke(IpcChannels.STORE_GET, key),
-  
-  set: <T>(key: string, value: T): Promise<void> => 
-    ipcRenderer.invoke(IpcChannels.STORE_SET, key, value),
-  
-  delete: (key: string): Promise<void> => 
-    ipcRenderer.invoke(IpcChannels.STORE_DELETE, key),
+
+  // 没有 `set` / `delete`：整份配置走 `config:update`（主进程深合并），厂商/账号/路由
+  // 各有专用通道。通用写通道曾让渲染层能绕过 `encryptCredentials` 把明文凭据写进
+  // data.json，现在主进程对未登记键直接拒绝，这层也一并撤掉，不留「调用必失败」的面。
   
   clearAll: (): Promise<void> => 
     ipcRenderer.invoke(IpcChannels.STORE_CLEAR_ALL),
@@ -796,6 +804,7 @@ const channelsAPI = {
 
 const electronAPI = {
   proxy: proxyAPI,
+  tls: tlsAPI,
   store: storeAPI,
   providers: providersAPI,
   aggregate: aggregateAPI,

@@ -15,6 +15,9 @@ import { mkdir, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { storeManager } from '../../store/store'
 
+/** 解不开的凭据只报一次，避免每个请求都往应用日志里写一条。 */
+let corruptedCredentialReported = false
+
 export interface CredentialDescriptor {
   configured: boolean
   source: string
@@ -73,7 +76,17 @@ export class ChannelCredentialVault {
     const name = this.nameOf(ref)
     const stored = this.load()[name]
     if (typeof stored !== 'string' || stored.length === 0) return undefined
-    return { value: storeManager.decryptData(stored) }
+    const value = storeManager.decryptData(stored)
+    // 解不开的密文不再当明文交出去（那会让上游收到一串 base64 并回 401，而用户以为 Key
+    // 是对的）。按「凭据不可用」返回 undefined，并在应用日志里留一条可见的错误。
+    if (value === null) {
+      if (!corruptedCredentialReported) {
+        corruptedCredentialReported = true
+        storeManager.addLog('error', `凭据「${name}」无法解密（系统密钥库或 store.key 已变化），请重新填写`)
+      }
+      return undefined
+    }
+    return { value }
   }
 
   async describe(ref: unknown): Promise<CredentialDescriptor> {

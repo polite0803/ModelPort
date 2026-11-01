@@ -788,6 +788,17 @@ capability needs no seed-level gate anyway: it is enforced per request (channel
 `capabilities.tools === false`, `maxTools`). `auto` itself is left untouched by the seed, so existing
 configs keep their behavior.
 
+The same startup pass also runs the Anthropic discovery (`shared/anthropicDiscovery.ts` via
+`store/anthropicRoutes.ts`). It has to: a route that only appears when someone clicks a button in
+settings means every install that never clicked has zero Claude routes, and after R2 a bare model
+name is no longer advertised for Claude's own name filter to see. Names are the leaf segment of real
+`claude*` / `anthropic*` models, one route per model, `pinModels` set so the name cannot drift, and
+the same recorded-name list is passed as `skipNames` so a route the user deleted is not re-created.
+A catalogue entry without an active account yields no route and is deliberately *not* recorded, so
+activating the account later lets the next start add it. The summary log
+(`Anthropic discoverable routes seeded: N`) carries the skip reasons - the only way to explain a
+client-side empty list (no active account / name not routable / name already taken).
+
 **Capability is tri-state and unknown is a real answer.** `ModelCapability` (vision/tools/reasoning)
 is `yes | no | unknown`; `contextTokens` is `undefined` when unknown and never defaulted to a number.
 `resolveCapabilityDetail()` in `proxy/autoRouting.ts` merges six ordered layers, per field: manual

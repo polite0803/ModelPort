@@ -140,6 +140,22 @@ async function setupApp(): Promise<void> {
 
   await registerIpcHandlers(mainWindow)
 
+  // 凭据加密降级必须让人看见：打包后的 GUI 里没人看 stdout，只写一条应用日志等于静默
+  // 明文落盘。这里只提示、不阻断 —— 阻断会让这些机器直接无法使用。
+  if (!storeManager.hasInitializationError() && storeManager.isCredentialEncryptionDegraded()) {
+    void dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: '凭据未加密',
+      message: '系统密钥库不可用，上游凭据将以明文保存在本机。',
+      detail: [
+        '常见场景：Linux 缺少 libsecret/keyring、精简版系统、容器内运行。',
+        '处理办法：安装系统密钥库后重启应用即可恢复加密；在此之前请限制 ~/.modelport 的访问权限。',
+      ].join('\n'),
+      buttons: ['知道了'],
+      noLink: true,
+    })
+  }
+
   // 免验证（keyless）聚合条目自动开通：建记录、启用并拉取上游模型清单。
   // 异步执行不阻塞启动，失败只告警；存储初始化失败时直接跳过。
   if (!storeManager.hasInitializationError()) {

@@ -80,6 +80,9 @@ export function AddAccountDialog({
   const [isSubmitting, setIsSubmitting] = useState(false)
 
   const isEditing = !!editingAccount
+  // 编辑已有账号时，凭据不再下发到渲染层（主进程只回密文、列表页根本不带），表单里这些
+  // 字段留空；主进程按「留空 = 不修改」合并。所以必填校验在这里放宽。
+  const hasStoredCredentials = isEditing && Object.keys(editingAccount?.credentials ?? {}).length > 0
   const builtinProvider = provider as BuiltinProviderConfig | null
   const credentialFields: CredentialField[] = builtinProvider?.credentialFields || getDefaultCredentialFields(provider?.authType, t)
 
@@ -88,7 +91,8 @@ export function AddAccountDialog({
       if (editingAccount) {
         setName(editingAccount.name)
         setDailyLimit(editingAccount.dailyLimit?.toString() || '')
-        setCredentials(editingAccount.credentials || {})
+        // 不预填已存凭据：那份值在渲染层是密文，回填再保存等于把密文重新加密一遍。
+        setCredentials({})
       } else {
         resetForm()
       }
@@ -114,7 +118,7 @@ export function AddAccountDialog({
     if (!provider) return
 
     const requiredFields = credentialFields.filter(f => f.required)
-    const missingFields = requiredFields.filter(f => !credentials[f.name])
+    const missingFields = requiredFields.filter(f => !credentials[f.name] && !hasStoredCredentials)
     
     if (missingFields.length > 0) {
       setValidationResult({
@@ -156,7 +160,7 @@ export function AddAccountDialog({
     }
 
     const requiredFields = credentialFields.filter(f => f.required)
-    const missingFields = requiredFields.filter(f => !credentials[f.name])
+    const missingFields = requiredFields.filter(f => !credentials[f.name] && !hasStoredCredentials)
     
     if (missingFields.length > 0) {
       setValidationResult({
@@ -237,6 +241,10 @@ export function AddAccountDialog({
               onChange={handleCredentialChange}
               t={t}
             />
+
+            {hasStoredCredentials && (
+              <p className="text-xs text-muted-foreground">{t('providers.credentialsKeepHint')}</p>
+            )}
 
             {validationResult.error && (
               <div className="flex items-center gap-2 text-sm text-error bg-error-soft p-3 rounded-lg">
