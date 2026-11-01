@@ -586,6 +586,16 @@ export interface AppConfig {
    * default (`DEFAULT_MAX_OUTPUT_TOKENS`) - never a silent 4096 baked into code.
    */
   defaultMaxOutputTokens?: number
+  /**
+   * Trailing-tool guard: when the outbound history ends with a `role:"tool"`
+   * message, append one minimal user turn so "keep working" is re-anchored at the
+   * tail. Optional **and on unless explicitly `false`** — agent clients always send
+   * that shape from turn 2 on, and 2026-11-01 captures on this gateway show
+   * `I don't see a request in your message` / an `ask_user` refusal only from turn 2
+   * onward (turn 1 never). Declared twice (`store/types.ts` too), like every other
+   * config field.
+   */
+  trailingUserGuard?: boolean
   apiKeys: ApiKey[]
   enableApiKey: boolean
   oauthProxyMode: 'system' | 'none'

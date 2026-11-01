@@ -434,6 +434,8 @@
     "retryCountHelp": "Automatic retry count after request failure (0-10 times)",
     "outputCapFallback": "Fallback output cap",
     "outputCapFallbackHelp": "The Anthropic protocol requires max_tokens: when the client sends neither spelling and no per-model parameter is set, this value is used. Leave empty for the built-in default of 4096.",
+    "trailingUserGuard": "Trailing tool-result guard",
+    "trailingUserGuardHelp": "When an agent turn ends with a tool result, append one minimal user message so the model keeps working instead of answering \"I don't see a request\". Turn 1 is never rewritten. Turn this off only if a model starts repeating a step it already did.",
     "outputCapMustBeInteger": "Output cap must be an integer",
     "outputCapRangeError": "Output cap must be between 1 and 1000000",
     "logConfig": "Log Configuration",

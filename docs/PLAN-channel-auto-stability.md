@@ -178,6 +178,48 @@ anthropic 信封（`server.ts:145`）✅、`count_tokens` ✅、块骨架/工具
 `tests/proxy/failover.test.ts` 的「人工介入类的换家分支…」与
 `tests/api/response-contract.test.ts` 的 risk-control 那条）。
 
+## 第四批：VS Code agent 第 2 轮起「装死」（末条 tool 兜底）
+
+来源是另一工具给的实施指令（`Qoder-提示词-末条tool兜底修复.md`）。审查结论分三层：
+
+- **症状属实**，从网关自己的请求日志取证：本机 VS Code（客户端标签 `GitHubCopilotChat`）
+  打到 131 的 9 笔里 4 笔是故障形状，回包原文分别是
+  `I don't see a request in your message — what would you like me to do in ModelPort?`、
+  `I'm ready — what would you like me to work on in ModelPort?`、中文变体一条、
+  以及一次 `ask_user` 反问；四条全部落在 `conversationTurn ≥ 2`，第 1 轮 5 笔全部正常。
+  ⚠️ 我第一轮用正则扫 `responseBody` 得到「0 命中」是**错的**：流式正文是逐 token 到达的
+  （`"I"` `"'m"` `" ready"`），短语在原始 SSE 里从不连续；必须先把帧拼回正文再判。
+- **它给的落点不成立**：`worker.ts::complete()` 只有 `provider.type === 'account'` 才到得了
+  （`forwarder.ts` 注册表 → `forwardAccountChannel` → `accountChannelManager.complete/openStream`），
+  而该文档自己把 ovh（聚合条目）列为同现象。按其 §2.5 的规则就等于「存在绕过路径，须补挂」，
+  它没写补挂到哪。故本仓改挂在 `forwardChatCompletion` 的**共同出口**。
+- ** efficacy 我没独立复现**：以真实形状重放（含 75 个工具与 `ask_user`、多轮工具结果）打
+  同一模型 `Raccoon (商汤) / DeepSeek-V4.1-Flash-1017`，A（原样）4/4 继续调工具，
+  B（补 user）反而 4/4 只出文本；我的合成体只有 35KB，真请求 ≥200KB（日志把
+  `requestBody` 截在 200026 字节，所以尾部形状无法从日志判定）。也就是说这条兜底
+  的证据基础是「A/B 差值」而不是我这一轮的重复实验，装到 131 后必须用真实 VS Code
+  会话复验（见下）。
+
+### 落地形态
+
+- 纯函数 `src/main/proxy/trailingUserGuard.ts`（`TRAILING_USER_TEXT` 一行、无插值、无换行）。
+- 挂点三条顺序约束（源码门 + 端到端各钉一遍）：必须在重复度/存活观测**之后**（那两项要读
+  客户端原样字节）、在 `applyCompression` **之后**（不被压缩器改写）、在托管工具注入与
+  `beginAttempt` **之前**。
+- 开关 `config.trailingUserGuard`，**缺省即开**（判据写 `!== false`：老 `data.json` 没有这一格，
+  写成 `=== true` 会让全部老装机静默失去兜底）；`shared/types.ts` 与 `store/types.ts` 两处声明
+  + `proxyStore.ProxyConfig` 映射 + 高级设置面板复选框 + `en-US`/`zh-CN` 两条文案，
+  读写两头都有断言（「面板加开关必须写清哪段代码读它」）。
+- 端到端证据：`tests/routes/trailing-user-guard-e2e.test.ts` 3 条 —— 默认开时上游实收
+  末条是那句 user 且前三条一字未动；关掉后出站字节完全不变；末条非 tool 时零副作用。
+
+### 部署后必须复验的一件事
+
+在 131 上装带本批的构建，本机 VS Code 跑到第 2 轮工具结果，看两件事：
+1. 出站是否真的补了（`MODELPORT_CHANNEL_PACK_DUMP=1` 打开后看 dump 末条，或直接看回包）；
+2. 「装死」是否消失。若仍出现，说明触发条件在体量或历史内容里，不在尾部形状 ——
+   那时把该次真实请求体（未截断的）取回来做 A/B，而不是继续加提示词。
+
 ## 验收
 
 1. `npx tsc --noEmit -p tsconfig.json` 与 `-p tsconfig.node.json` 均 0 错；

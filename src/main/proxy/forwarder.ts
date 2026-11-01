@@ -96,6 +96,7 @@ import {
 export { isFailoverEligibleStatus }
 import { qualifyChannelModel } from '../providers/accountChannels/modelCatalog'
 import { requestDeadlines } from './requestBudget'
+import { injectTrailingUser, trailingUserGuardEnabled } from './trailingUserGuard'
 
 function shouldDeleteSession(): boolean {
   return sessionManager.shouldDeleteAfterChat()
@@ -331,6 +332,23 @@ export class RequestForwarder {
       )
       if (steering.changed) {
         request = { ...request, messages: steering.messages }
+      }
+    }
+
+    // 末条是工具结果时补一条极简 user，把「继续干活」这个意图钉回序列尾部
+    // （判据与为什么放在这里，见 `trailingUserGuard.ts` 模块头：真流量里第 2 轮起
+    // 出现「I don't see a request…」与 ask_user 反问，第 1 轮从不出现）。
+    //
+    // 位置有三条约束，都在这一格上：
+    // - 必须排在重复度/存活观测与压缩**之后** —— 那三项要看客户端原样发来的字节，
+    //   我们造的这一句不能混进指标，也不能被压缩器再改一遍；
+    // - 必须排在托管工具层注入**之前** —— 注入的是提示词，不该被当成真的一轮用户发言；
+    // - 必须在分派之前 —— 账号渠道、聚合条目与自建供应商三条线路只有这里共用。
+    if (trailingUserGuardEnabled(config.trailingUserGuard)) {
+      const guarded = injectTrailingUser(request.messages)
+      if (guarded.injected) {
+        request = { ...request, messages: guarded.messages as ChatCompletionRequest['messages'] }
+        console.log(`[TrailingUserGuard] 末条为 tool，已追加一条 user 兜底 (request ${request.requestId ?? '-'}, provider ${provider.id})`)
       }
     }
 

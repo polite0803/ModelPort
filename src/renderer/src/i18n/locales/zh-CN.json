@@ -434,6 +434,8 @@
     "retryCountHelp": "请求失败后的自动重试次数 (0-10 次)",
     "outputCapFallback": "输出上限兜底值",
     "outputCapFallbackHelp": "Anthropic 协议必须携带 max_tokens：客户端两种写法都没给、模型参数也没配时，用这个值补上。留空使用内置默认 4096。",
+    "trailingUserGuard": "末条工具结果兜底",
+    "trailingUserGuardHelp": "出站历史以工具结果收尾时，追加一条极简用户消息，把「继续干活」钉回序列尾部——否则部分上游模型会回「没看到你的请求」或反过来提问。第 1 轮不会被改写。只有在发现模型重复做已完成的那一步时才需要关闭。",
     "outputCapMustBeInteger": "输出上限必须是整数",
     "outputCapRangeError": "输出上限必须在 1-1000000 范围内",
     "logConfig": "日志配置",

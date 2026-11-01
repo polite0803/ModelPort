@@ -303,6 +303,12 @@ export interface AppConfig {
    * between them), so both copies must carry it.
    */
   defaultMaxOutputTokens?: number
+  /**
+   * 末条是工具结果时补一条极简 user，把「继续干活」的意图钉回序列尾部。
+   * 可选且**默认开**（只有显式 `false` 才关）—— 与 `src/shared/types.ts` 同一份声明，
+   * 两处都要写，缺一处 UI 就读不到。判据见 `proxy/trailingUserGuard.ts`。
+   */
+  trailingUserGuard?: boolean
   /** API Key list */
   apiKeys: ApiKey[]
   /** Whether to enable API Key authentication */

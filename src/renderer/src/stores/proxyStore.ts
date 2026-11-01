@@ -9,6 +9,8 @@ export interface ProxyConfig {
   retryCount: number
   /** Absent = 代理内置默认（anthropic wire 必填的 max_tokens 兜底） */
   defaultMaxOutputTokens?: number
+  /** Absent = 开（末条是工具结果时补一条极简 user，见 proxy/trailingUserGuard.ts） */
+  trailingUserGuard?: boolean
   enableCors: boolean
   corsOrigin: string
   maxConnections: number
@@ -181,6 +183,7 @@ export const useProxyStore = create<ProxyState>((set, get) => ({
             timeout: config.requestTimeout,
             retryCount: config.retryCount,
             defaultMaxOutputTokens: config.defaultMaxOutputTokens,
+            trailingUserGuard: config.trailingUserGuard,
           },
         })
       }
