@@ -13,6 +13,7 @@
  */
 
 import { storeManager } from '../store/store'
+import { resolvePoolRoute } from '../store/modelRoutes'
 import type { Account, Provider, UserModelMarks } from '../store/types'
 import type {
   AutoPoolStrategy,
@@ -336,11 +337,16 @@ class AutoRouter {
    */
   routePoolSizes(routes: readonly ModelRoute[]): Record<string, number> {
     const pool = this.advertisedPool()
+    const table = storeManager.getConfig().routes
     const sizes: Record<string, number> = {}
     for (const route of routes) {
       if (sizes[route.name] !== undefined) continue
+      // 池来源断掉的路由**不给数字**（不是给 0，也不是给它自己那份没人执行的策略）：
+      // 界面那一栏读的是「这条路由能跑多大池」，答不了就该留空。
+      const resolution = resolvePoolRoute(table, route)
+      if (!resolution.ok) continue
       const namesByProvider = new Map<string, Set<string>>()
-      for (const candidate of this.keptOfPool(pool, route)) {
+      for (const candidate of this.keptOfPool(pool, resolution.route)) {
         const names = namesByProvider.get(candidate.providerId) ?? new Set<string>()
         namesByProvider.set(candidate.providerId, names)
         names.add(candidate.displayName.trim().toLowerCase())
@@ -645,14 +651,18 @@ class AutoRouter {
     } as unknown as ChatCompletionRequest
 
     const { rankInputs, skipped } = this.collectCandidates(probe, Date.now())
+    // 池引用先解开再折：预览显示的必须是实际会用的那个池。断掉的引用按本路由自己的字段折
+    // —— 请求路径会在 chat/completions 点名报错，这里只是编辑器辅助，不重复那套判定。
+    const resolution = resolvePoolRoute(storeManager.getConfig().routes, route)
+    const pool = resolution.ok ? resolution.route : route
     // 名字钉定与选路、广告下界同一份规则：预览折的必须是实际会用的那个基底。
-    const pinned = applyModelNamePin(rankInputs, route.pinModels)
-    const strategyOutcome = applyPoolStrategiesWithTrace(pinned, route.poolStrategies)
+    const pinned = applyModelNamePin(rankInputs, pool.pinModels)
+    const strategyOutcome = applyPoolStrategiesWithTrace(pinned, pool.poolStrategies)
     const manual = applyManualModelSelection(
       strategyOutcome.kept,
       pinned,
-      route.includeModels,
-      route.excludeModels
+      pool.includeModels,
+      pool.excludeModels
     )
 
     const modelKeyOf = (candidate: PoolStrategyCandidate): string =>

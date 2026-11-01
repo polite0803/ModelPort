@@ -19,6 +19,8 @@
  *    「附件/思考没生效」当成正常结果读，本仓的既有裁定是「拿不到可以说，不许装成正常」。
  */
 
+import { ANTHROPIC_FAMILY_TIERS, type AnthropicFamilyTier } from './types.ts'
+
 type Payload = Record<string, unknown>
 
 function asRecord(value: unknown): Payload | null {
@@ -842,11 +844,25 @@ export function estimateAnthropicInputTokens(body: unknown): number {
   return estimateAnthropicInputTokensDetailed(body).tokens
 }
 
-/** 清单条目：`context_window` 只在网关真的知道时才带（与 OpenAI 形状同一口径）。 */
+/**
+ * 清单条目：`context_window` 只在网关真的知道时才带（与 OpenAI 形状同一口径）。
+ */
 export interface AnthropicListModelEntry {
   id: string
   created?: number
   context_window?: number
+}
+
+/**
+ * 档位判据的唯一实现处：值不在合法表里就不发这一格，而不是发一个客户端会整行丢弃的值。
+ * 大小写与首尾空白在这里归一。
+ */
+export function normalizeFamilyTier(value: unknown): AnthropicFamilyTier | undefined {
+  if (typeof value !== 'string') return undefined
+  const key = value.trim().toLowerCase()
+  return (ANTHROPIC_FAMILY_TIERS as readonly string[]).includes(key)
+    ? (key as AnthropicFamilyTier)
+    : undefined
 }
 
 /**
@@ -865,10 +881,17 @@ export interface AnthropicListModelEntry {
  *
  * `max_input_tokens` 只在目标模型真有窗口时才发（沿用 `context_window` 的既有裁定：
  * 省略而不是编 0）；客户端用它判断要不要给这条模型开 1M 变体。
+ *
+ * `routeTiers`（即 `anthropicInbound.routeTiers`）是上面那条判据的**第二条活路**：客户端
+ * 保留一行的条件是「`id` 是它认识的 Anthropic 名 **或** 带合法 `anthropic_family_tier`」，
+ * 所以给一条现有路由标档位，就能把它广告给 Desktop，而不必伪造 Anthropic 名字。映射键
+ * 继承其目标路由的档位（客户端下一轮发回来的正是那个键）。
  */
 export function modelsToAnthropicList(
   models: AnthropicListModelEntry[],
-  anthropicNames?: Record<string, string>
+  anthropicNames?: Record<string, string>,
+  routeTiers?: Record<string, string>,
+  routeDisplayNames?: Record<string, string>
 ): Payload {
   const byGatewayName = new Map<string, AnthropicListModelEntry>()
   for (const model of models) {
@@ -876,11 +899,31 @@ export function modelsToAnthropicList(
     if (key !== '' && !byGatewayName.has(key)) byGatewayName.set(key, model)
   }
 
+  const tierByKey = new Map<string, AnthropicFamilyTier>()
+  for (const [name, tier] of Object.entries(routeTiers ?? {})) {
+    const key = name.trim().toLowerCase()
+    const normalized = normalizeFamilyTier(tier)
+    if (key !== '' && normalized !== undefined) tierByKey.set(key, normalized)
+  }
+
+  // 显示名按小写键取：id 必须是能被解析的路由名，想让用户看见别的字只能改这一格。
+  const displayByKey = new Map<string, string>()
+  for (const [name, label] of Object.entries(routeDisplayNames ?? {})) {
+    const key = name.trim().toLowerCase()
+    const value = typeof label === 'string' ? label.trim() : ''
+    if (key !== '' && value !== '') displayByKey.set(key, value)
+  }
+
   const now = Math.floor(Date.now() / 1000)
   const data: Payload[] = []
   const added = new Set<string>()
 
-  const pushRow = (rawId: string, entry: AnthropicListModelEntry | undefined): void => {
+  const pushRow = (
+    rawId: string,
+    entry: AnthropicListModelEntry | undefined,
+    tier?: AnthropicFamilyTier,
+    displayName?: string,
+  ): void => {
     const name = rawId.trim()
     if (name === '') return
     const key = name.toLowerCase()
@@ -889,21 +932,32 @@ export function modelsToAnthropicList(
     data.push({
       type: 'model',
       id: name,
-      display_name: name,
+      display_name: displayName ?? name,
       created_at: new Date((entry?.created ?? now) * 1000).toISOString(),
       ...(entry?.context_window === undefined ? {} : { max_input_tokens: entry.context_window }),
+      ...(tier === undefined ? {} : { anthropic_family_tier: tier }),
     })
   }
 
   for (const [name, target] of Object.entries(anthropicNames ?? {})) {
-    const resolved = byGatewayName.get(String(target ?? '').trim().toLowerCase())
+    const targetKey = String(target ?? '').trim().toLowerCase()
+    const resolved = byGatewayName.get(targetKey)
     // 映射指向一个此刻不广告的名字时不发这一行：发出去就是让客户端选中一条必然失败的
     // 模型，与 `resolveAnthropicModel` 里「映射目标必须被网关认识」是同一条判据。
     if (resolved === undefined) continue
-    pushRow(name, resolved)
+    const rowKey = name.trim().toLowerCase()
+    pushRow(
+      name,
+      resolved,
+      tierByKey.get(targetKey) ?? tierByKey.get(rowKey),
+      displayByKey.get(rowKey) ?? displayByKey.get(targetKey),
+    )
   }
 
-  for (const model of models) pushRow(model.id, model)
+  for (const model of models) {
+    const key = model.id.trim().toLowerCase()
+    pushRow(model.id, model, tierByKey.get(key), displayByKey.get(key))
+  }
 
   return {
     data,

@@ -17,9 +17,39 @@ import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { useToast } from '@/hooks/use-toast'
 import { Plus, Trash2, Braces, Radar } from 'lucide-react'
 import type { AnthropicDiscoveryPlan, AnthropicInboundConfig } from '@/types/electron'
+import { ANTHROPIC_FAMILY_TIERS, type AnthropicFamilyTier } from '@shared/types'
+
+/** Radix 的 SelectItem 不许用空串当值，「不广告」这一档另起一个哨兵值。 */
+const TIER_NONE = '__none__'
+
+function tiersToRecord(entries: Record<string, string>): AnthropicInboundConfig['routeTiers'] {  const kept: Record<string, AnthropicFamilyTier> = {}
+  for (const [route, tier] of Object.entries(entries)) {
+    if ((ANTHROPIC_FAMILY_TIERS as readonly string[]).includes(tier)) {
+      kept[route] = tier as AnthropicFamilyTier
+    }
+  }
+  return Object.keys(kept).length === 0 ? undefined : kept
+}
+
+/** 空显示名不写键：留空就是「按路由名显示」，写空串进库会让客户端显示空白。 */
+function namesToRecord(entries: Record<string, string>): AnthropicInboundConfig['routeDisplayNames'] {
+  const kept: Record<string, string> = {}
+  for (const [route, label] of Object.entries(entries)) {
+    const value = label.trim()
+    if (route.trim() !== '' && value !== '') kept[route.trim()] = value
+  }
+  return Object.keys(kept).length === 0 ? undefined : kept
+}
 
 /** 编辑态把 `modelMap` 摊成行；落库时再折回记录（见 `rowsToMap`）。 */
 interface MappingRow {
@@ -53,6 +83,11 @@ export function AnthropicInboundSettings() {
   const [draft, setDraft] = useState<AnthropicInboundConfig | null>(null)
   const [rows, setRows] = useState<MappingRow[]>([])
   const [hasChanges, setHasChanges] = useState(false)
+  // 档位编辑态用裸字符串（含「不广告」哨兵值），落库前才折成合法档位。
+  const [tierDraft, setTierDraft] = useState<Record<string, string>>({})
+  // 客户端显示名：id 必须是能被解析的路由名，想让用户看见别的字只能改这一格。
+  const [nameDraft, setNameDraft] = useState<Record<string, string>>({})
+  const [routeNames, setRouteNames] = useState<string[]>([])
 
   useEffect(() => {
     void loadConfig()
@@ -61,16 +96,25 @@ export function AnthropicInboundSettings() {
   const loadConfig = async () => {
     try {
       const appConfig = await window.electronAPI.config.get()
+      setRouteNames(
+        Object.values(appConfig?.routes ?? {})
+          .filter(route => route.enabled)
+          .map(route => route.name),
+      )
       const inbound = appConfig?.anthropicInbound
       if (inbound === undefined) {
         setDraft({})
         setRows([])
+        setTierDraft({})
+        setNameDraft({})
         return
       }
       setDraft(inbound)
       setRows(
         Object.entries(inbound.modelMap ?? {}).map(([from, to]) => ({ from, to: String(to ?? '') })),
       )
+      setTierDraft({ ...(inbound.routeTiers ?? {}) })
+      setNameDraft({ ...(inbound.routeDisplayNames ?? {}) })
     } catch (error) {
       console.error('Failed to load anthropic inbound config:', error)
       setDraft(null)
@@ -84,6 +128,8 @@ export function AnthropicInboundSettings() {
       const next: AnthropicInboundConfig = {
         defaultModel: draft.defaultModel?.trim() === '' ? undefined : draft.defaultModel,
         modelMap: rowsToMap(rows),
+        routeTiers: tiersToRecord(tierDraft),
+        routeDisplayNames: namesToRecord(nameDraft),
         // 没动过就不写这一格（undefined = 走默认开）；只有用户真关过才落 `false`。
         documentPassThrough: draft.documentPassThrough,
       }
@@ -92,6 +138,8 @@ export function AnthropicInboundSettings() {
       setRows(
         Object.entries(next.modelMap ?? {}).map(([from, to]) => ({ from, to: String(to ?? '') })),
       )
+      setTierDraft({ ...(next.routeTiers ?? {}) })
+      setNameDraft({ ...(next.routeDisplayNames ?? {}) })
       setHasChanges(false)
       toast({ title: t('common.success'), description: t('anthropicInbound.configSaved') })
     } catch (error) {
@@ -276,6 +324,54 @@ export function AnthropicInboundSettings() {
               )}
 
               <p className="text-sm text-muted-foreground">{t('anthropicInbound.discoveryNote')}</p>
+            </div>
+
+            <div className="space-y-3 pt-4 border-t">
+              <div className="space-y-0.5">
+                <Label>{t('anthropicInbound.tierTitle')}</Label>
+                <p className="text-sm text-muted-foreground">{t('anthropicInbound.tierHint')}</p>
+              </div>
+
+              {routeNames.length === 0 ? (
+                <p className="text-sm text-muted-foreground">{t('anthropicInbound.tierNoRoutes')}</p>
+              ) : (
+                <div className="space-y-2">
+                  {routeNames.map(route => (
+                    <div key={route} className="flex items-center gap-2">
+                      <code className="flex-1 font-mono text-sm truncate">{route}</code>
+                      <Input
+                        className="flex-1"
+                        value={nameDraft[route] ?? ''}
+                        placeholder={route}
+                        aria-label={t('anthropicInbound.displayNameColumn')}
+                        onChange={event => {
+                          setNameDraft(previous => ({ ...previous, [route]: event.target.value }))
+                          setHasChanges(true)
+                        }}
+                      />
+                      <Select
+                        value={tierDraft[route] ?? TIER_NONE}
+                        onValueChange={value => {
+                          setTierDraft(previous => ({ ...previous, [route]: value }))
+                          setHasChanges(true)
+                        }}
+                      >
+                        <SelectTrigger className="w-[200px]" aria-label={t('anthropicInbound.tierColumn')}>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={TIER_NONE}>{t('anthropicInbound.tierNone')}</SelectItem>
+                          {ANTHROPIC_FAMILY_TIERS.map(tier => (
+                            <SelectItem key={tier} value={tier}>
+                              {t(`anthropicInbound.tier_${tier}`)}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="space-y-3 pt-4 border-t">

@@ -8,8 +8,9 @@ import type { Context } from 'koa'
 import { ModelsResponse, ModelInfo } from '../types'
 import { storeManager } from '../../store/store'
 import { autoRouter } from '../autoRouter'
-import { enabledModelRoutes, findModelRoute } from '../../store/modelRoutes'
+import { enabledModelRoutes, findModelRoute, resolvePoolRoute } from '../../store/modelRoutes'
 import { modelsToAnthropicList } from '../../../shared/anthropicWire'
+import type { ModelRoute } from '../../../shared/types'
 
 const router = new Router({ prefix: '/v1' })
 
@@ -50,11 +51,20 @@ router.get('/models', async (ctx: Context) => {
   // `[a-z0-9_-]{1,64}` 且键等于规范形，所以条目之间不可能只差大小写，这里不再去重。
   const enabledRoutes = enabledModelRoutes(config.routes)
   const now = Math.floor(Date.now() / 1000)
+  // 先解开池引用再广告，两件事都在这里：
+  // 1. 窗口下界必须来自**实际会服务的那个池**，引用别人的路由却报自己策略的窗口就是假数；
+  // 2. 池来源断掉（删了/停用/二级引用）的这条现在答不了话，不广告 —— 与「清单里能看见的，
+  //    请求里才点得到」同口径，点它会在 chat/completions 拿到点名的 404。
+  // 名字仍是本路由的名字（`resolvePoolRoute` 只借「怎么选」，不借「它是谁」）。
+  const advertisedRoutes = enabledRoutes
+    .map(route => resolvePoolRoute(config.routes, route))
+    .filter((outcome): outcome is { ok: true; route: ModelRoute } => outcome.ok)
+    .map(outcome => outcome.route)
   // 下界按**每条路由自己的池**算：一次采集、逐路由折叠（`advertisedContextFloors`）。
   // 用全局未筛池会让一条只钉了大窗模型的路由被别家小窗模型压到 64K，报出来的数
   // 跟这条路由毫无关系。
-  const routeFloors = autoRouter.advertisedContextFloors(enabledRoutes)
-  const models: ModelInfo[] = enabledRoutes.map(route =>
+  const routeFloors = autoRouter.advertisedContextFloors(advertisedRoutes)
+  const models: ModelInfo[] = advertisedRoutes.map(route =>
     routeEntry(route.name, now, routeFloors.get(route.name)),
   )
 
@@ -69,12 +79,21 @@ router.get('/models', async (ctx: Context) => {
   // 「0 usable models」。详见 `modelsToAnthropicList` 的判据来源。
   if (ctx.get('anthropic-version')) {
     const mappedNames = config.anthropicInbound?.modelMap ?? {}
-    const list = modelsToAnthropicList(models, mappedNames)
+    const list = modelsToAnthropicList(
+      models,
+      mappedNames,
+      config.anthropicInbound?.routeTiers,
+      config.anthropicInbound?.routeDisplayNames,
+    )
     ctx.body = list
     // 「广告了几条」必须可查：客户端那边还有一层自己的名字过滤，没有这条日志，
     // 「网关发了 20 条」与「用户在客户端看到 0 条」之间的分歧无法对账。
     storeManager.addLog('debug', `Anthropic model list: ${String((list.data as unknown[]).length)} rows`, {
-      data: { gatewayModels: models.length, declaredAnthropicNames: Object.keys(mappedNames).length },
+      data: {
+        gatewayModels: models.length,
+        declaredAnthropicNames: Object.keys(mappedNames).length,
+        tieredRoutes: Object.keys(config.anthropicInbound?.routeTiers ?? {}).length,
+      },
     })
     return
   }
@@ -96,9 +115,14 @@ router.get('/models', async (ctx: Context) => {
  */
 router.get('/models/:model', async (ctx: Context) => {
   const modelId = ctx.params.model
-  const route = findModelRoute(storeManager.getConfig().routes, modelId)
+  const routes = storeManager.getConfig().routes
+  const route = findModelRoute(routes, modelId)
+  // 与列表同一个判据：池来源断掉的路由不广告，单查也不答话（清单否认、单查承认就是两套名字域）。
+  const pool = route === undefined || !route.enabled
+    ? null
+    : resolvePoolRoute(routes, route)
 
-  if (route === undefined || !route.enabled) {
+  if (pool === null || !pool.ok) {
     ctx.status = 404
     ctx.body = {
       error: {
@@ -113,9 +137,9 @@ router.get('/models/:model', async (ctx: Context) => {
 
   ctx.set('Content-Type', 'application/json')
   ctx.body = routeEntry(
-    route.name,
+    pool.route.name,
     Math.floor(Date.now() / 1000),
-    autoRouter.advertisedContextFloor(route)
+    autoRouter.advertisedContextFloor(pool.route)
   )
 })
 

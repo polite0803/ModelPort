@@ -15,7 +15,7 @@ import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
 import { autoRouter } from '../autoRouter'
 import type { AutoCandidate, AutoRouteDecision } from '../autoRouter'
-import { resolveRouteRequest } from '../../store/modelRoutes'
+import { resolveRouteRequest, routePoolBreakMessage } from '../../store/modelRoutes'
 import type { AutoAttemptFailure, RequestLogEntry } from '../../../shared/types'
 import { buildStreamErrorFrame, mapUpstreamError, retryAfterHeader } from '../errorMapping'
 import { findUnsupportedParameter, unsupportedParameterError } from '../parameterPolicy'
@@ -343,7 +343,7 @@ router.post('/completions', async (ctx: Context) => {
   // commit（响应头一旦发出就补不上，见下面 Auto-Skipped 的同款教训）。
   // 名字是 `[a-z0-9_-]` 规范形，仍然过 toHeaderValue：持久化条目的 `name` 来自
   // 磁盘，任何读侧归一之外的手坏都不该把一个成功请求变成 500（ERR_INVALID_CHAR）。
-  if (routeOutcome.kind === 'routable' || routeOutcome.kind === 'disabled') {
+  if (routeOutcome.kind === 'routable' || routeOutcome.kind === 'disabled' || routeOutcome.kind === 'broken-reference') {
     ctx.set('X-ModelPort-Route-Name', toHeaderValue(routeOutcome.route.name))
   }
 
@@ -363,6 +363,27 @@ router.post('/completions', async (ctx: Context) => {
       },
     }
     const rejected = rejectionEntryFromContext(ctx, 404, 'route_disabled', disabledMessage)
+    rejected.client = client
+    storeManager.addRequestLog(rejected)
+    storeManager.recordRequestInStats(false, rejected.latency, rejected.model || undefined)
+    return
+  }
+
+  // 点名了一条在服路由，但它的池来源（`basedOnRoute`）没了/停了/二级引用：给 404 并点名
+  // 是哪一条引用断了。**不静默回落到全目录** —— 那条池是用户显式选的，回落等于把
+  // 「写着 A 其实跑着整个目录」变成默认行为。
+  if (routeOutcome.kind === 'broken-reference') {
+    const breakMessage = routePoolBreakMessage(routeOutcome.route, routeOutcome.reason)
+    ctx.status = 404
+    ctx.body = {
+      error: {
+        message: breakMessage,
+        type: 'invalid_request_error',
+        param: 'model',
+        code: 'route_reference_broken',
+      },
+    }
+    const rejected = rejectionEntryFromContext(ctx, 404, 'route_reference_broken', breakMessage)
     rejected.client = client
     storeManager.addRequestLog(rejected)
     storeManager.recordRequestInStats(false, rejected.latency, rejected.model || undefined)

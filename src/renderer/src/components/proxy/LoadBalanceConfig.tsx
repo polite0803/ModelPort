@@ -17,6 +17,7 @@ import {
   defaultRouteFieldValues,
   routeFieldValuesOf,
   type ModelRouteFieldValues,
+  type ModelRouteOption,
   type ModelRouteStrategyOption,
 } from './ModelRouteFields'
 import { Scale, RefreshCw, Info, Plus, Pencil, Trash2, AlertTriangle } from 'lucide-react'
@@ -164,6 +165,15 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
   const handleDraftPatch = (patch: Partial<ModelRouteFieldValues>) => {
     setRouteDraft((prev) => (prev ? { ...prev, ...patch } : prev))
   }
+
+  /**
+   * 可作为池来源的路由：排除正在编辑的这条自己，也排除**已经引用了别条**的那些 ——
+   * 池引用只允许一跳，写入侧会拒，选项里就不该出现一个必然失败的候选。
+   */
+  const poolRouteOptions = (excluding: string): ModelRouteOption[] =>
+    routes
+      .filter((route) => route.name !== excluding && route.basedOnRoute === undefined)
+      .map((route) => ({ value: route.name, label: route.name }))
 
   // ── 路由 CRUD ──────────────────────────────────────────────────
   // 三条写通道成功时都带回归一后的整表，所以这里不再 list()；失败时把
@@ -576,6 +586,7 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
                 values={newRouteValues}
                 onChange={handleNewRoutePatch}
                 strategyOptions={strategyOptions}
+                poolRouteOptions={poolRouteOptions(newRouteName.trim().toLowerCase())}
               />
 
               <div className="flex justify-end gap-2">
@@ -689,10 +700,19 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
               )}
 
               {route.pinModels.length > 0 && (
-                // 钉定是「客户端可以点名的名字只有路由」这条口径下，路由名敢说自己是
-                // `claude-opus-5` 的唯一依据：不钉，池就是全目录。
+                // 一个客户端入口名要敢说自己只跑某几个模型，靠的是这两种诚实形态之一：
+                // 钉名（池 = 这些模型），或引用一条用户真配过池的路由（见下面 basedOnRoute）。
+                // 两者都不是「池 = 全目录」。
                 <p className="text-xs text-muted-foreground">
                   {t('proxy.routePinSummary', { total: route.pinModels.length })}
+                </p>
+              )}
+
+              {route.basedOnRoute !== undefined && (
+                // 引用别人的池时，上面那些策略徽章都不参与选路 —— 不点名来源，列表就读成
+                // 「这条路由自己配了这些策略」，而它其实一条都不执行。
+                <p className="text-xs text-muted-foreground">
+                  {t('proxy.routeBasedOnSummary', { route: route.basedOnRoute })}
                 </p>
               )}
 
@@ -744,6 +764,7 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
                     values={routeDraft}
                     onChange={handleDraftPatch}
                     strategyOptions={strategyOptions}
+                    poolRouteOptions={poolRouteOptions(route.name)}
                   />
 
                   <div className="flex justify-end gap-2">

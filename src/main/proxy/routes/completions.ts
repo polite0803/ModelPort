@@ -15,7 +15,7 @@ import { autoRouter } from '../autoRouter'
 import type { AutoCandidate } from '../autoRouter'
 import type { AccountSelection, ForwardResult } from '../types'
 import { storeManager } from '../../store/store'
-import { resolveRouteRequest } from '../../store/modelRoutes'
+import { resolveRouteRequest, routePoolBreakMessage } from '../../store/modelRoutes'
 import { rejectionEntryFromContext } from '../rejectionLog'
 import { createTextCompletionChunkTransform, toTextCompletion } from '../utils/textCompletion'
 import { routeHeaderValue, toHeaderValue } from '../utils/headerValue'
@@ -129,7 +129,7 @@ router.post('/completions', async (ctx: Context) => {
 
   // 路由名透出（与 chat 路由同因）：必须在任何 return 之前、也在流式首块 commit
   // 之前写；值过 toHeaderValue。
-  if (routeOutcome.kind === 'routable' || routeOutcome.kind === 'disabled') {
+  if (routeOutcome.kind === 'routable' || routeOutcome.kind === 'disabled' || routeOutcome.kind === 'broken-reference') {
     ctx.set('X-ModelPort-Route-Name', toHeaderValue(routeOutcome.route.name))
   }
 
@@ -147,6 +147,25 @@ router.post('/completions', async (ctx: Context) => {
       },
     }
     const rejected = rejectionEntryFromContext(ctx, 404, 'route_disabled', disabledMessage)
+    rejected.client = client
+    storeManager.addRequestLog(rejected)
+    storeManager.recordRequestInStats(false, rejected.latency, rejected.model || undefined)
+    return
+  }
+
+  // 池来源断了：与 chat 路由同因同形状（404 + 点名哪条引用），不许静默回落全目录。
+  if (routeOutcome.kind === 'broken-reference') {
+    const breakMessage = routePoolBreakMessage(routeOutcome.route, routeOutcome.reason)
+    ctx.status = 404
+    ctx.body = {
+      error: {
+        message: breakMessage,
+        type: 'invalid_request_error',
+        param: 'model',
+        code: 'route_reference_broken',
+      },
+    }
+    const rejected = rejectionEntryFromContext(ctx, 404, 'route_reference_broken', breakMessage)
     rejected.client = client
     storeManager.addRequestLog(rejected)
     storeManager.recordRequestInStats(false, rejected.latency, rejected.model || undefined)

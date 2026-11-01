@@ -149,6 +149,8 @@ function normalizeRouteFields(name: string, entry: Record<string, unknown>, opti
     ...(entry.poolStrategies !== undefined ? { poolStrategies: entry.poolStrategies } : {}),
   } as Partial<AutoRoutingConfig>)
 
+  const basedOn = canonicalRouteName(entry.basedOnRoute)
+
   return {
     name,
     enabled: entry.enabled !== false,
@@ -162,6 +164,9 @@ function normalizeRouteFields(name: string, entry: Record<string, unknown>, opti
     includeModels: normalizeRouteModelRefs(entry.includeModels),
     excludeModels: normalizeRouteModelRefs(entry.excludeModels),
     pinModels: normalizeRouteModelRefs(entry.pinModels),
+    // 引用只认规范名，且**不许引用自己**：手坏的盘上留一个自引用就会让「取池」这一步
+    // 无限递归，写入侧本来拒绝，读侧再兜一层保证不 500。
+    ...(basedOn.length > 0 && basedOn !== name ? { basedOnRoute: basedOn } : {}),
   }
 }
 
@@ -383,12 +388,65 @@ export function enabledModelRoutes(routes: Record<string, ModelRoute> | undefine
     .sort((a, b) => a.name.localeCompare(b.name))
 }
 
+/** 池引用解不开的原因（三种都要能分别说清，不许合并成一句「路由不可用」）。 */
+export type RoutePoolBreakReason =
+  /** 被引用的路由不存在（删掉了，或手坏的盘） */
+  | 'missing'
+  /** 被引用的路由已停用 */
+  | 'disabled'
+  /** 被引用的路由自己也带引用 —— 写入侧禁止，读侧到此为止，不递归 */
+  | 'nested'
+
+export type RoutePoolResolution =
+  | { ok: true; route: ModelRoute }
+  | { ok: false; route: ModelRoute; reason: RoutePoolBreakReason }
+
+/**
+ * 解开一跳池引用：`basedOnRoute` 存在时，「怎么选模型」全部取自被引用的那条路由，
+ * 名字与启用位仍是本路由的 —— 响应头 `X-ModelPort-Route-Name`、sticky 键、请求日志里的
+ * 路由名都必须是用户点名的那一个，否则「客户端选了 A、日志说 B」。
+ *
+ * 只解一跳，且引用链在写入侧就被限制成一跳，所以这里不需要环检测。
+ */
+export function resolvePoolRoute(
+  routes: Record<string, ModelRoute> | undefined,
+  route: ModelRoute
+): RoutePoolResolution {
+  const target = route.basedOnRoute
+  if (target === undefined || target === '') return { ok: true, route }
+
+  const referenced = routes?.[target]
+  if (referenced === undefined) return { ok: false, route, reason: 'missing' }
+  if (!referenced.enabled) return { ok: false, route, reason: 'disabled' }
+  if (referenced.basedOnRoute !== undefined) return { ok: false, route, reason: 'nested' }
+
+  return { ok: true, route: { ...referenced, name: route.name, enabled: route.enabled } }
+}
+
+/**
+ * 池引用断掉时给客户端的那句话。两条入口共用一种说法，措辞只在这里定一次：
+ * 用户要知道的是「这条路由的池来自哪条、那条现在怎么了」，不是又一句「不可用」。
+ */
+export function routePoolBreakMessage(route: ModelRoute, reason: RoutePoolBreakReason): string {
+  const target = route.basedOnRoute ?? ''
+  switch (reason) {
+    case 'missing':
+      return `Route '${route.name}' takes its pool from '${target}', which no longer exists`
+    case 'disabled':
+      return `Route '${route.name}' takes its pool from '${target}', which is disabled`
+    case 'nested':
+      return `Route '${route.name}' takes its pool from '${target}', which takes its own pool from another route (only one hop is allowed)`
+  }
+}
+
 /** 一次请求对路由表的判定结果（chat / completions 两条入口共用）。 */
 export type RouteRequestOutcome =
   /** 命中且在服：按这条路由跑 */
   | { kind: 'routable'; route: ModelRoute }
   /** 命中但已停用：必须是可读的「路由已停用」，不能掉进具名模型路径 */
   | { kind: 'disabled'; route: ModelRoute }
+  /** 命中且在服，但它引用的那条池来源没了/停了/二级引用：点名原因，不许静默回落 */
+  | { kind: 'broken-reference'; route: ModelRoute; reason: RoutePoolBreakReason }
   /** 这不是一个（在服或已停用的）路由名：按普通模型名解析（映射、聚合链、具名账号） */
   | { kind: 'not-a-route' }
 
@@ -420,7 +478,11 @@ export function resolveRouteRequest(
 ): RouteRequestOutcome {
   const route = findModelRoute(routes, requestedModel)
   if (route !== undefined) {
-    return route.enabled ? { kind: 'routable', route } : { kind: 'disabled', route }
+    if (!route.enabled) return { kind: 'disabled', route }
+    const pool = resolvePoolRoute(routes, route)
+    return pool.ok
+      ? { kind: 'routable', route: pool.route }
+      : { kind: 'broken-reference', route, reason: pool.reason }
   }
 
   return { kind: 'not-a-route' }
@@ -589,6 +651,30 @@ export function validateRoutesForWrite(
       const refError = checkRouteModelRefs(field, record[field])
       if (refError !== undefined) {
         errors.push(`routes.${name}: ${refError.message}`)
+      }
+    }
+
+    // 池引用的三条硬规则在这里定一次：目标必须是已存在的规范名、不能自引用、只能一跳。
+    // 「只能一跳」是环检测的替代品 —— 链长上限 1 就不可能成环，读侧因此不必递归。
+    const basedRaw = record.basedOnRoute
+    if (typeof basedRaw === 'string' && basedRaw.trim() !== '') {
+      const based = canonicalRouteName(basedRaw)
+      if (based.length === 0 || based !== basedRaw.trim()) {
+        errors.push(`routes.${name}: 'basedOnRoute' must be an existing canonical route name`)
+      } else if (based === name) {
+        errors.push(`routes.${name}: 'basedOnRoute' cannot reference itself`)
+      } else if (!known.has(based) && entries[based] === undefined) {
+        errors.push(`routes.${name}: 'basedOnRoute' references the unknown route '${based}'`)
+      } else {
+        const targetIncoming = entries[based] as Record<string, unknown> | undefined
+        const targetBased = canonicalRouteName(
+          targetIncoming?.basedOnRoute ?? current?.[based]?.basedOnRoute,
+        )
+        if (targetBased.length > 0) {
+          errors.push(
+            `routes.${name}: pool references are one hop only; '${based}' already references '${targetBased}'`,
+          )
+        }
       }
     }
 

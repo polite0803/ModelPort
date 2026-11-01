@@ -304,8 +304,24 @@ export interface ModelRoute {
    *
    * This is what makes an Anthropic-facing route name honest: a route called
    * `claude-opus-5` must not be free to answer with any model in the catalogue.
+   *
+   * The other honest shape is `basedOnRoute`: an entry name that borrows a route the
+   * user actually configured is honest because the pool is that route's deliberate
+   * decision, not because it is pinned to one model.
    */
   pinModels: RouteModelRef[]
+  /**
+   * Pool reference: this route's **whole selection behaviour** comes from the
+   * referenced route (strategies, pin, manual include/exclude, scoring profile,
+   * attempt cap, stickiness). Only the name stays ours - `X-ModelPort-Route-Name`,
+   * the sticky key and the request log all still say which name the client asked for.
+   *
+   * Why a reference instead of a copy: a second client-facing name (an Anthropic
+   * tier, a per-app lane) must not carry its own copy of the pool config, or editing
+   * `auto` would leave that copy silently stale. Write-side validation allows one
+   * hop only, so a chain cannot form and cannot cycle.
+   */
+  basedOnRoute?: string
   /**
    * Models force-added to this route's pool **after** `poolStrategies` ran.
    *
@@ -580,11 +596,31 @@ export interface ApiKey {
  * 两个字段都可选：缺席时行为固定为「请求名能在网关解析就原样用，否则落 auto」，
  * 所以一份老配置不需要迁移也能工作。
  */
+/**
+ * Anthropic 家族档位。值域不是我们编的：Claude Desktop 4.4212 的清单解析里那张合法表
+ * 是 `["sonnet","opus","haiku","fable","mythos"]`（取自本机 `app.asar`），而它保留一行的
+ * 判据是「`id` 是它认识的 Anthropic 名 **或** 这一格是合法档位」。
+ */
+export const ANTHROPIC_FAMILY_TIERS = ['sonnet', 'opus', 'haiku', 'fable', 'mythos'] as const
+
+export type AnthropicFamilyTier = (typeof ANTHROPIC_FAMILY_TIERS)[number]
+
 export interface AnthropicInboundConfig {
   /** 请求名解析不出来时落到哪个网关模型/路由。缺省 `auto`。 */
   defaultModel?: string
   /** `客户端模型名/前缀 -> 网关模型名`。 */
   modelMap?: Record<string, string>
+  /**
+   * `路由名 -> 档位`：发清单时给这一行带 `anthropic_family_tier`，于是客户端按档位保留
+   * 它，网关里的名字不必长得像 Anthropic。键大小写不敏感；值不在合法档位表里时
+   * 这一格不发（判据只在 `modelsToAnthropicList` 一处实现）。
+   */
+  routeTiers?: Record<string, AnthropicFamilyTier>
+  /**
+   * `路由名 -> 客户端里显示的名字`。清单行的 `display_name` 默认等于 id 本身，
+   * 而 id 必须是能被解析的路由名，所以「想让用户看到别的字」只能改这一格。
+   */
+  routeDisplayNames?: Record<string, string>
   /**
    * `document` 附件块要不要翻成 chat 的 `file` 块真的发给上游。
    *

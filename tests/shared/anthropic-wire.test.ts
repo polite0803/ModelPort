@@ -532,6 +532,38 @@ test('申报过的 anthropic 面向名排在最前，窗口取目标模型的真
   assert.equal(legacy.data[0].id, 'auto')
 })
 
+test('档位是清单行的第二条活路：名字不被客户端认识时靠 tier 保留，非法值不发', () => {
+  const list = modelsToAnthropicList(
+    [{ id: 'stable', context_window: 200000 }, { id: 'daily' }, { id: 'Off' }],
+    { 'claude-sonnet-4-6': 'stable' },
+    { stable: 'opus', daily: 'not-a-tier', off: 'haiku' },
+  )
+  const rows = list.data as any[]
+  const byId = new Map(rows.map(row => [row.id as string, row]))
+
+  assert.equal(byId.get('stable').anthropic_family_tier, 'opus', '标了档位就要发出去')
+  assert.equal(byId.get('claude-sonnet-4-6').anthropic_family_tier, 'opus', '映射键继承其目标路由的档位')
+  assert.equal(byId.get('Off').anthropic_family_tier, 'haiku', '路由名按大小写不敏感匹配')
+  assert.ok(!('anthropic_family_tier' in byId.get('daily')), '非法档位宁可不发，也别发一个让客户端整行丢弃的值')
+
+  // 负控：不传第三、四个参数就是改动前的行为，既没有档位也没有自定义显示名。
+  const withoutTiers = modelsToAnthropicList([{ id: 'stable' }])
+  assert.ok(!(withoutTiers.data as any[]).some(row => 'anthropic_family_tier' in row))
+  assert.equal((withoutTiers.data as any[])[0].display_name, 'stable')
+
+  // 显示名：id 必须是能被解析的路由名，所以「让用户看见别的字」只能改 display_name。
+  const labelled = modelsToAnthropicList(
+    [{ id: 'stable' }, { id: 'daily' }],
+    { 'claude-sonnet-4-6': 'stable' },
+    { stable: 'opus' },
+    { STABLE: '强档（网关池）', daily: '   ' },
+  )
+  const labelledById = new Map((labelled.data as any[]).map(row => [row.id, row]))
+  assert.equal(labelledById.get('stable').display_name, '强档（网关池）', '大小写不敏感地取显示名')
+  assert.equal(labelledById.get('claude-sonnet-4-6').display_name, '强档（网关池）', '映射键沿用目标路由的显示名')
+  assert.equal(labelledById.get('daily').display_name, 'daily', '空白显示名等于没配，不发空串')
+})
+
 test('错误信封用 anthropic 认识的 type，状态码决定它', () => {
   assert.deepEqual(anthropicErrorBody('密钥不对', 'authentication_error'), {
     type: 'error',

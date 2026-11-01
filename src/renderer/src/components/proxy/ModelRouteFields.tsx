@@ -40,12 +40,25 @@ export interface ModelRouteFieldValues {
    * 客户端可点名的名字域现在只有路由，所以「这条路由真的只跑那几个模型」全靠这一格。
    */
   pinModels: RouteModelRef[]
+  /**
+   * 池引用：非空时这条路由的**全部选择行为**取自被引用的那条路由，上面这些字段
+   * 一概不参与（界面会把它们置灰并说明原因）。存在的理由与 `pinModels` 相反 ——
+   * 一个客户端入口名不该复制一份池配置，复制了就有两份真值。
+   */
+  basedOnRoute?: string
 }
 
+/** Radix 的 SelectItem 不许用空串；「自带池（不引用）」这一档另起哨兵值。 */
+export const NO_POOL_SOURCE = '__own_pool__'
+
 /** 策略下拉的选项由父组件传入：五个策略的字面量与标签表只允许存在于 `LoadBalanceConfig.tsx`。 */
-export interface ModelRouteStrategyOption {
-  value: LoadBalanceStrategy
+export interface ModelRouteOption {
+  value: string
   label: string
+}
+
+export interface ModelRouteStrategyOption extends ModelRouteOption {
+  value: LoadBalanceStrategy
 }
 
 interface ModelRouteFieldsProps {
@@ -57,6 +70,8 @@ interface ModelRouteFieldsProps {
   values: ModelRouteFieldValues
   onChange: (patch: Partial<ModelRouteFieldValues>) => void
   strategyOptions: ModelRouteStrategyOption[]
+  /** 可作为池来源的其他路由（父组件已排除正在编辑的那一条）。 */
+  poolRouteOptions?: ModelRouteOption[]
 }
 
 /**
@@ -76,6 +91,7 @@ export function defaultRouteFieldValues(strategy: LoadBalanceStrategy): ModelRou
     includeModels: [],
     excludeModels: [],
     pinModels: [],
+    basedOnRoute: undefined,
   }
 }
 
@@ -90,6 +106,7 @@ export function routeFieldValuesOf(route: ModelRoute): ModelRouteFieldValues {
     includeModels: route.includeModels.map((ref) => ({ ...ref })),
     excludeModels: route.excludeModels.map((ref) => ({ ...ref })),
     pinModels: route.pinModels.map((ref) => ({ ...ref })),
+    basedOnRoute: route.basedOnRoute,
   }
 }
 
@@ -125,14 +142,56 @@ const CATEGORY_ORDER: AutoPoolStrategyCategory[] = ['capability', 'cost', 'conte
  * 只负责「改草稿」，不碰 IPC：写盘时机、错误文案的显示都由父组件决定，
  * 于是新建与编辑两条路径能共享同一个 `error.message` 展示区。
  */
-export function ModelRouteFields({ idPrefix, values, onChange, strategyOptions }: ModelRouteFieldsProps) {
+export function ModelRouteFields({
+  idPrefix,
+  values,
+  onChange,
+  strategyOptions,
+  poolRouteOptions = [],
+}: ModelRouteFieldsProps) {
   const { t } = useTranslation()
+
+  const referenced = values.basedOnRoute ?? ''
+  const isReferenced = referenced !== ''
 
   const operatorLabel = (operator: AutoPoolStrategyOperator) =>
     operator === 'and' ? t('proxy.autoRoutingPoolOperator_and') : t('proxy.autoRoutingPoolOperator_or')
 
   return (
     <div className="space-y-4">
+      <div className="space-y-2">
+        <Label htmlFor={`route-based-on-${idPrefix}`}>{t('proxy.routeBasedOn')}</Label>
+        <Select
+          value={referenced === '' ? NO_POOL_SOURCE : referenced}
+          onValueChange={value =>
+            onChange({ basedOnRoute: value === NO_POOL_SOURCE ? undefined : value })
+          }
+        >
+          <SelectTrigger id={`route-based-on-${idPrefix}`}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={NO_POOL_SOURCE}>{t('proxy.routeBasedOnNone')}</SelectItem>
+            {poolRouteOptions.map(option => (
+              <SelectItem key={option.value} value={option.value}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">{t('proxy.routeBasedOnHelp')}</p>
+      </div>
+
+      {/* 引用了别人的池，下面这些字段就一概不参与选路（`store/modelRoutes.ts::resolvePoolRoute`
+          只取被引用那一条的池策略、钉名与手动增删）。留着可编辑又不起作用，比不给编辑更糟，
+          所以整组置灰并点名来源。 */}
+      {isReferenced && (
+        <p className="text-sm rounded-lg bg-muted/30 p-3 text-muted-foreground">
+          {t('proxy.routeBasedOnNotice', { route: referenced })}
+        </p>
+      )}
+
+      <div className={isReferenced ? 'space-y-4 opacity-50 pointer-events-none' : 'space-y-4'}>
       <div className="space-y-2">
         <Label htmlFor={`route-strategy-${idPrefix}`}>{t('proxy.routeStrategy')}</Label>
         <Select
@@ -296,6 +355,7 @@ export function ModelRouteFields({ idPrefix, values, onChange, strategyOptions }
 
       {/* 候选池预览 + 手动增删 + 逐模型标注：误筛/漏筛的修正入口 */}
       <RoutePoolEditor idPrefix={idPrefix} values={values} onChange={onChange} />
+      </div>
     </div>
   )
 }
