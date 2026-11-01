@@ -6,6 +6,8 @@
  * 必须能被真实单测钉住，不能只靠源码文本断言。
  */
 import type { PassThrough } from 'stream'
+import type { AutoAttemptFailure } from '../../shared/types'
+import { DEFAULT_FIRST_EVENT_TIMEOUT_MS } from './retryPolicy.ts'
 
 /**
  * 工具数量超限类 400 的识别。
@@ -87,6 +89,57 @@ export function isChannelModelUnavailableError(message: string | undefined): boo
 }
 
 /**
+ * 「这一家的凭据已经不能用，要人来处理」类失败的识别
+ * （2026-11-01 192.168.85.131 实测：27 笔失败属于这一类）。
+ *
+ * ## 为什么它必须与普通 502 分开
+ *
+ * 普通 5xx 走 15s 起的指数退避（`accountRuntime`），意图是「过一会儿再试同一类
+ * 故障」。但凭据类故障**不会自己好**：
+ * - `qoder: no usable credential; log in first`（登录态过期/被登出）；
+ * - `凭据未配置，请先登录`（渠道有占位账号但没有可用凭据）；
+ * - `opencode: 没有可用通道`（匿名槽按出口 IP 限，本机这一档已耗尽）。
+ *
+ * 短退避的实际后果是每一笔新请求都再撞一遍，而每一遍都要先付一次完整加密
+ * prefill + 排队等待 —— 实测这三条各自的等待是 214s / 244s / 245s，`auto` 更被
+ * 一笔拖到 **525s**。所以：换下一家照做（502 本来就 eligible），但冷却按
+ * 「需要人工介入」那一档给（`accountRuntime.recordCredentialFailure`），宿主层
+ * 也不再重试第二次。
+ *
+ * ⚠️ 识别口径必须**窄**：三条都是渠道包/适配器抛出的原文短语
+ * （`account-pool.ts` / `opencode-adapter.ts` / 各家 `*-adapter.ts` 的
+ * `MISSING_CREDENTIAL`），正常正文不会出现「no usable credential」「凭据未配置」
+ * 「没有可用通道」这类字样。
+ */
+export function isChannelCredentialFailure(message: string | undefined): boolean {
+  if (!message) return false
+  return /no usable credential/i.test(message)
+    || message.includes('凭据未配置')
+    || message.includes('没有可用通道')
+}
+
+/**
+ * 「这一家不接受强制 tool_choice」类 400 的识别（2026-11-01 实测 3 笔，`att=1`
+ * 直接整场失败）。
+ *
+ * `tool_choice: "required"`（或指名某个函数）撞上只支持 `auto`/`none` 的网关
+ * （Cline 背后的 Vercel AI Gateway、MiniMax 的 `MiniMax-M3.1-Flash`）会得到
+ * `only tool_choice auto and none are supported`。这与工具数超限同类：**换一个
+ * 候选就能成**，而请求在生成之前就被拒，账号健康、不烧积分 —— 所以按 capability
+ * 类换下一家，不记冷却、不计账号失败。
+ *
+ * 单模型路径**保持原样直接 400**：用户点名了这一家，换成别家等于替他改需求。
+ *
+ * ⚠️ 识别口径必须**窄**：要求文案同时出现 `tool_choice` 与「只支持 auto/none」
+ * 短语，正常正文不会同时带这两者。
+ */
+export function isForcedToolChoiceUnsupported(message: string | undefined): boolean {
+  if (!message) return false
+  return /tool_choice/i.test(message)
+    && /only\s+.{0,40}auto\s+and\s+none\s+are\s+supported/i.test(message)
+}
+
+/**
  * 429 / 5xx / 无状态码（网络错误、超时）才值得换目标；4xx 换目标没有意义。
  *
  * 例外是「渠道能力不匹配」类 400（工具数超限、历史缺 reasoning_content）与
@@ -127,6 +180,10 @@ export function isRecoverableChannelFailure(message: string | undefined): boolea
     || /quota/i.test(message)
     || /billing\s+daily\s+count\s+exceeded/i.test(message)
     || /所有账号均受限/.test(message)
+    // 凭据类同族：请求在生成之前就被拒，不烧积分，换下一家命中率真实存在。
+    // 它与其余几类的**唯一**区别是要人工处理，所以冷却档位另算
+    // （{@link isChannelCredentialFailure} 供 forwarder 判冷却与是否重试）。
+    || isChannelCredentialFailure(message)
 }
 
 /** 可恢复类失败在账号故障类上限之外额外放行的候选数（默认 3 + 3 = 6 家）。 */
@@ -134,6 +191,39 @@ export const AUTO_RECOVERABLE_EXTRA_ATTEMPTS = 3
 
 /** 换家的墙钟总预算（毫秒）：整条候选链耗掉这么多时间就不再继续换家。 */
 export const AUTO_WALL_CLOCK_BUDGET_MS = 90_000
+
+/** 上游文案进日志时的截断长度（一条日志里最多 8 次失败，各 200 字符封顶）。 */
+export const ATTEMPT_REASON_MAX_CHARS = 200
+
+/**
+ * 把一次「被跳过的候选」写成日志记录（分类判据与 forwarder 循环用的完全是
+ * 同一批谓词，所以日志里的 `kind` 就是当时换家逻辑实际走的分支）。
+ *
+ * 为什么要单独记：请求日志只有**最终赢家**，`attempts: 4` 说明试了四家，
+ * 但前三家各自答了什么无处可查 —— 一个天天全错的通道（目录不认模型、
+ * 凭据过期）与一个只是暂时排队的通道，在日志里长得一模一样。
+ */
+export function describeAttemptFailure(input: {
+  candidate: string
+  error?: string
+  status?: number
+}): AutoAttemptFailure {
+  const reason = (input.error ?? '').trim().slice(0, ATTEMPT_REASON_MAX_CHARS)
+  const kind: AutoAttemptFailure['kind'] = isToolOverflowError(input.error)
+    || isMissingReasoningHistoryError(input.error)
+    || isChannelModelUnavailableError(input.error)
+    || isForcedToolChoiceUnsupported(input.error)
+    ? 'capability'
+    : isFailoverEligibleStatus(input.status)
+      ? 'failover'
+      : 'fatal'
+  return {
+    candidate: input.candidate,
+    kind,
+    ...(input.status === undefined ? {} : { status: input.status }),
+    ...(reason.length > 0 ? { reason } : { reason: '上游未给出错误文本' }),
+  }
+}
 
 /**
  * 等流首事件的超时（毫秒）。
@@ -149,7 +239,10 @@ export const AUTO_WALL_CLOCK_BUDGET_MS = 90_000
  * 60s 的取值：正常渠道首帧零延迟（首帧即 role delta），而推理模型静默思考
  * 很少超过 30s —— 再长的沉默就该按假死对待了。
  */
-export const FIRST_EVENT_TIMEOUT_MS = 60_000
+// 取值本体在 `retryPolicy.DEFAULT_FIRST_EVENT_TIMEOUT_MS`（等待侧的唯一决策点）；
+// 实际等待另受 `planRequestDeadlines()` 的 `min(本值, 请求超时)` 收窄。
+export const FIRST_EVENT_TIMEOUT_MS = DEFAULT_FIRST_EVENT_TIMEOUT_MS
+
 
 /** 是否还该尝试下一个候选（纯函数，供单测钉住分级语义；forwarder 循环调用）。 */
 export function shouldTryNextAutoCandidate(input: {
@@ -173,6 +266,56 @@ export function shouldTryNextAutoCandidate(input: {
   if (input.attempts >= input.extendedCap) return false
   if (input.elapsedMs >= input.budgetMs) return false
   return true
+}
+
+/**
+ * 块间静默看门狗（流式**首块之后**的停摆检测）。
+ *
+ * ## 为什么单独成函数
+ *
+ * 判据本体要能被真实单测钉住：装它的 `channelPack/bridge.ts` import 了 electron，
+ * `node --test` 拉不动；而这条时间轴（每一帧续一次、静默到点才炸）恰恰是
+ * 「首块一到就记成功、之后停摆的流永远不返回」这类假死的唯一防线（2026-11-01
+ * 实测两笔 `auto` 流式请求各挂 120s 零字节）。
+ *
+ * 语义三条，逐条有断言：
+ * - **只在被 arm 之后计时**：首块到达前归 `firstStreamEvent` 管，两处都炸只会
+ *   让错误文案变模糊；
+ * - **每一帧续期**：量的是相邻两帧之间的静默，长回答永远不会被掐；
+ * - **到点只炸一次**，之后必须显式 `arm()` 才会重新计时（不会自己连发）。
+ */
+export interface IdleWatchdog {
+  /** 续期（也可用于首次装载） */
+  arm(): void
+  /** 撤掉计时器并禁止后续触发（结算/失败时调用） */
+  clear(): void
+}
+
+export function createIdleWatchdog(timeoutMs: number, onTimeout: () => void): IdleWatchdog {
+  let timer: NodeJS.Timeout | undefined
+  let cleared = false
+
+  const cancel = (): void => {
+    if (timer !== undefined) {
+      clearTimeout(timer)
+      timer = undefined
+    }
+  }
+
+  return {
+    arm(): void {
+      if (cleared || timeoutMs <= 0) return
+      cancel()
+      timer = setTimeout(() => {
+        timer = undefined
+        if (!cleared) onTimeout()
+      }, timeoutMs)
+    },
+    clear(): void {
+      cleared = true
+      cancel()
+    },
+  }
 }
 
 /** 一条流的首个事件：首块 / 首错 / 未产出任何数据就关闭 / 等待超时。 */

@@ -26,6 +26,13 @@ const RATE_LIMIT_MAX_MS = 10 * 60 * 1000
 const ERROR_BASE_MS = 15 * 1000
 const ERROR_MAX_MS = 2 * 60 * 1000
 
+/**
+ * 凭据类故障（要人重新登录/补 Key）的退避基数与上限：5 分钟起，最多 30 分钟。
+ * 取值理由见 {@link AccountRuntime.recordCredentialFailure}。
+ */
+const CREDENTIAL_BASE_MS = 5 * 60 * 1000
+const CREDENTIAL_MAX_MS = 30 * 60 * 1000
+
 interface AccountRuntimeState {
   inFlight: number
   attempts: number[]
@@ -77,6 +84,28 @@ export class AccountRuntime {
     const max = status === 429 ? RATE_LIMIT_MAX_MS : ERROR_MAX_MS
     const ttl = Math.min(max, base * 2 ** (state.consecutiveFailures - 1))
 
+    state.coolingUntil = now + ttl
+    return ttl
+  }
+
+  /**
+   * 记录一次**需要人工介入**的失败（凭据失效 / 未登录 / 匿名槽耗尽）。
+   *
+   * 与 {@link recordFailure} 的区别只在退避档位：普通 5xx 假设「过一会儿就好」，
+   * 15s 起步；凭据类故障不会自己好，短退避等于让每一笔新请求都再付一次完整的
+   * 加密 prefill 与排队等待（实测单家 214s–245s，`auto` 一笔被拖到 525s）。
+   * 所以按 5 分钟起、30 分钟封顶，连续失败仍逐次翻倍。
+   *
+   * 渠道池发生变化（重新登录、账号增删）后由 {@link recordSuccess} 一侧解除，用户
+   * 不必等冷却自然到期。
+   */
+  recordCredentialFailure(accountId: string, now: number = Date.now()): number {
+    const state = this.state(accountId)
+    state.consecutiveFailures += 1
+    const ttl = Math.min(
+      CREDENTIAL_MAX_MS,
+      CREDENTIAL_BASE_MS * 2 ** (state.consecutiveFailures - 1),
+    )
     state.coolingUntil = now + ttl
     return ttl
   }

@@ -735,6 +735,16 @@ class AutoRouter {
     accountRuntime.recordFailure(accountId, status)
   }
 
+  /**
+   * 凭据类故障的冷却（重新登录 / 补 Key / 匿名槽耗尽）。
+   *
+   * 账号渠道每家在宿主侧只有一个本机占位账号（`manager.ensureLocalAccount`），
+   * 所以「账号级冷却」在这一类里天然就是「渠道级冷却」，不需要另建一张表。
+   */
+  markCredentialCooldown(accountId: string): void {
+    accountRuntime.recordCredentialFailure(accountId)
+  }
+
   clearAccountCooldown(accountId: string): void {
     accountRuntime.recordSuccess(accountId)
   }

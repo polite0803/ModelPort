@@ -12,6 +12,7 @@ import { modelMapper } from '../modelMapper'
 import { autoRouter } from '../autoRouter'
 import { enabledModelRoutes, findModelRoute } from '../../store/modelRoutes'
 import { aliasMappingKeys, contextWindowOf, matchesCatalogueName } from '../../store/modelServing'
+import { modelsToAnthropicList } from '../../../shared/anthropicWire'
 
 const router = new Router({ prefix: '/v1' })
 
@@ -122,12 +123,21 @@ router.get('/models', async (ctx: Context) => {
     }
   }
 
+  ctx.set('Content-Type', 'application/json')
+  // 只会说 anthropic 的客户端（Claude Code / 官方 SDK）带着 `anthropic-version` 来列
+  // 模型，它们按 `{data:[{type:'model',display_name,created_at}],has_more}` 解析；
+  // 发 OpenAI 形状会让它们拿到一个「有 data 键但字段全缺」的空壳清单。判别只用
+  // 这一个请求头，不看 Accept —— 后者会被中间层改写。
+  if (ctx.get('anthropic-version')) {
+    ctx.body = modelsToAnthropicList(models)
+    return
+  }
+
   const response: ModelsResponse = {
     object: 'list',
     data: models,
   }
 
-  ctx.set('Content-Type', 'application/json')
   ctx.body = response
 })
 

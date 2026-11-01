@@ -13,9 +13,8 @@ import {
   ProxyContext,
   type ChatMessage as ContextChatMessage,
 } from './types'
-import { proxyStatusManager } from './status'
 import { storeManager } from '../store/store'
-import { DEFAULT_AUTO_ROUTING_CONFIG } from '../../shared/types'
+import { DEFAULT_AUTO_ROUTING_CONFIG, type AutoAttemptFailure } from '../../shared/types'
 import { wrapStreamWithPlan } from './toolCalling/streamPlanWrapper'
 import { AnthropicAdapter } from './adapters/anthropic'
 import { ToolCallingEngine } from './toolCalling/ToolCallingEngine'
@@ -33,6 +32,22 @@ export interface ChainCandidate {
 }
 
 /**
+ * 换家循环的产出：最终赢家 + **每一次被跳过候选的失败样貌**。
+ *
+ * `failures` 只含被跳过的家（成功那轮不进列表），全部失败时含最后一家 ——
+ * 那正是客户端拿到的错误。上限 {@link MAX_LOGGED_ATTEMPT_FAILURES} 条。
+ */
+export interface ForwardChainOutcome<T extends ChainCandidate> {
+  result: ForwardResult
+  candidate: T
+  attempts: number
+  failures: AutoAttemptFailure[]
+}
+
+/** 日志里最多留几次失败：候选链本身不超 6 家，留出余量只为防御异常循环。 */
+const MAX_LOGGED_ATTEMPT_FAILURES = 8
+
+/**
  * 换家循环的预算：随**本次决策**传入，不在循环里读全局配置。
  *
  * `baseCap` 是账号故障类（5xx/网络）的尝试上限。auto 路径由命中的那条路由给出，
@@ -43,7 +58,7 @@ export interface FailoverBudget {
   baseCap: number
 }
 import { accountRuntime } from './accountRuntime'
-import { planForwardRetries } from './retryPolicy'
+import { planAttemptDeadline, planForwardRetries } from './retryPolicy'
 import { stripUnsupportedForBuiltin } from './parameterPolicy'
 import { ensureAnthropicOutputCap, outputCapFallbackOf } from './utils/outputCap.ts'
 import { createContextManagementService, SummaryGenerator } from './services/contextManagementService'
@@ -66,10 +81,12 @@ import { recordConversationTurn, recordConversationTurnForRequest } from './comp
 // 再导出，chat 路由的既有 import 路径不变。
 import {
   AUTO_WALL_CLOCK_BUDGET_MS,
-  FIRST_EVENT_TIMEOUT_MS,
+  describeAttemptFailure,
   firstStreamEvent,
+  isChannelCredentialFailure,
   isChannelModelUnavailableError,
   isFailoverEligibleStatus,
+  isForcedToolChoiceUnsupported,
   isMissingReasoningHistoryError,
   isRecoverableChannelFailure,
   isToolOverflowError,
@@ -77,6 +94,8 @@ import {
   shouldTryNextAutoCandidate,
 } from './failover.ts'
 export { isFailoverEligibleStatus }
+import { qualifyChannelModel } from '../providers/accountChannels/modelCatalog'
+import { requestDeadlines } from './requestBudget'
 
 function shouldDeleteSession(): boolean {
   return sessionManager.shouldDeleteAfterChat()
@@ -117,8 +136,8 @@ export class RequestForwarder {
     {
       name: 'account-channel',
       matches: (provider: Provider) => provider.type === 'account',
-      forward: (request, _account, _provider, actualModel) =>
-        this.forwardAccountChannel(request, actualModel),
+      forward: (request, _account, provider, actualModel) =>
+        this.forwardAccountChannel(request, actualModel, provider.id),
     },
   ]
 
@@ -393,6 +412,13 @@ export class RequestForwarder {
         if (result.status && result.status < 500) {
           break
         }
+
+        // 凭据类 502 也不重试，理由与 429 那一段同构但更强：它不是「隔一会儿就
+        // 好」，而是「要人来处理」（重新登录 / 补 Key / 换出口 IP）。重试等于把同一
+        // 笔等待再付一遍 —— 宿主截止时间 60s 时，一次多余重试就是把 60s 变成 120s。
+        if (isChannelCredentialFailure(result.error)) {
+          break
+        }
       } catch (error) {
         lastError = error instanceof Error ? error.message : 'Unknown error'
       }
@@ -448,7 +474,7 @@ export class RequestForwarder {
     candidates: AutoCandidate[],
     context: ProxyContext,
     budget: FailoverBudget
-  ): Promise<{ result: ForwardResult; candidate: AutoCandidate; attempts: number } | null> {
+  ): Promise<ForwardChainOutcome<AutoCandidate> | null> {
     return this.forwardFirstReachable(request, candidates, context, budget)
   }
 
@@ -460,7 +486,7 @@ export class RequestForwarder {
     request: ChatCompletionRequest,
     candidates: ChainCandidate[],
     context: ProxyContext
-  ): Promise<{ result: ForwardResult; candidate: ChainCandidate; attempts: number } | null> {
+  ): Promise<ForwardChainOutcome<ChainCandidate> | null> {
     // 聚合裸名链与同供应商换 Key 都**没有路由上下文**：请求里那个模型名就是它自己，
     // 表里没有哪一条配置可查。这里用出厂默认，而不是 legacy `config.autoRouting`
     // 的 maxAttempts —— 迁移之后那个字段只是「`auto` 路由当年的值」，用户改任何
@@ -478,8 +504,11 @@ export class RequestForwarder {
     candidates: T[],
     context: ProxyContext,
     budget: FailoverBudget
-  ): Promise<{ result: ForwardResult; candidate: T; attempts: number } | null> {
+  ): Promise<ForwardChainOutcome<T> | null> {
     let last: { result: ForwardResult; candidate: T; attempts: number } | null = null
+    // 被跳过的候选各自的失败样貌（判据与换家分支同源，见 describeAttemptFailure）。
+    // 请求日志只记最终赢家，没有这个数组就分不清「这家天天错」和「这家偶发排队」。
+    const failures: AutoAttemptFailure[] = []
     let attempts = 0
     // 账号故障类（5xx/网络）失败计数：达到基础上限就停手 —— 积分账号每次失败
     // 都可能烧钱，5xx 通常意味着系统性问题，多试只是多烧（PLAN P0-1）。
@@ -490,6 +519,10 @@ export class RequestForwarder {
     // 账号故障类的尝试上限：由调用方随本次决策传入（auto 走命中的那条路由，
     // 无路由的裸名链走出厂默认），见 forwardAutoCompletion 的注释。
     const baseCap = budget.baseCap
+    // 循环的每个出口都带上失败清单（`failures` 是同一数组引用，退出时的内容
+    // 就是「被跳过的家」，成功那轮从不进入）。
+    const finish = (): ForwardChainOutcome<T> | null =>
+      last === null ? null : { ...last, failures: failures.slice(0, MAX_LOGGED_ATTEMPT_FAILURES) }
 
     for (const candidate of candidates) {
       // 分级尝试上限 + 墙钟预算（分级判据本体与测试在 failover.ts；候选列表
@@ -508,6 +541,11 @@ export class RequestForwarder {
       const attemptRequest: ChatCompletionRequest = {
         ...request,
         model: candidate.displayName,
+        attemptDeadlineMs: planAttemptDeadline({
+          completeMs: requestDeadlines().completeMs,
+          elapsedMs: Date.now() - budgetStart,
+          budgetMs: AUTO_WALL_CLOCK_BUDGET_MS,
+        }),
       }
       const attemptContext: ProxyContext = {
         ...context,
@@ -529,7 +567,7 @@ export class RequestForwarder {
       last = { result, candidate, attempts }
 
       if (result.success) {
-        return last
+        return finish()
       }
 
       // 「换一家就能成」类失败（工具数超限、历史缺 reasoning_content、渠道目录不认
@@ -538,9 +576,17 @@ export class RequestForwarder {
       const capabilityMismatch = isToolOverflowError(result.error)
         || isMissingReasoningHistoryError(result.error)
         || isChannelModelUnavailableError(result.error)
+        || isForcedToolChoiceUnsupported(result.error)
+      // 无论后面走哪个分支，这次尝试都已经发生且没有成功 —— 先记账（含 fatal：
+      // 它同时是客户端拿到的错误，日志里两处都能看到，宁重不漏）。
+      failures.push(describeAttemptFailure({
+        candidate: candidate.displayName,
+        error: result.error,
+        status: result.status,
+      }))
       if (!capabilityMismatch) {
         if (!this.isFailoverEligible(result.status)) {
-          return last
+          return finish()
         }
 
         // 分级：429 / 排队 / 额度类失败是「渠道暂时不可服务」，请求在生成之前
@@ -552,13 +598,17 @@ export class RequestForwarder {
 
         // 429 的冷却已由 forwardChatCompletion 记录，这里只补记 5xx / 网络错误
         if (result.status !== 429) {
-          autoRouter.markAccountCooldown(candidate.account.id, result.status)
+          if (isChannelCredentialFailure(result.error)) {
+            autoRouter.markCredentialCooldown(candidate.account.id)
+          } else {
+            autoRouter.markAccountCooldown(candidate.account.id, result.status)
+          }
         }
         loadBalancer.markAccountFailed(candidate.account.id)
       }
     }
 
-    return last
+    return finish()
   }
 
   /** 429 / 5xx / 无状态码（网络错误、超时）才值得换目标；4xx 换目标没有意义 */
@@ -576,21 +626,28 @@ export class RequestForwarder {
    */
   private async forwardAccountChannel(
     request: ChatCompletionRequest,
-    actualModel: string
+    actualModel: string,
+    providerId: string
   ): Promise<ForwardResult> {
     const startTime = Date.now()
     const requestId = request.requestId ?? `channel-${startTime}`
+    // Worker 只认 `<channel>/<model>`；旧写法目录里的裸 id 在这里补回前缀
+    // （判据本体与三种输入的取舍见 `qualifyChannelModel`）。
+    const channelModel = qualifyChannelModel(providerId, actualModel)
+    // 单次等待的截止：换家循环会按剩余墙钟预算给一个更紧的值，没有则用出厂计划。
+    const deadlineMs = request.attemptDeadlineMs ?? requestDeadlines().completeMs
     const {
       requestId: _internalRequestId,
       signal: _signal,
       originalModel: _originalModel,
+      attemptDeadlineMs: _internalDeadline,
       ...rest
     } = request
-    const openAi = { ...rest, model: actualModel } as Record<string, unknown>
+    const openAi = { ...rest, model: channelModel } as Record<string, unknown>
 
     try {
       if (request.stream !== true) {
-        const body = await accountChannelManager.complete({ requestId, model: actualModel, openAi })
+        const body = await accountChannelManager.complete({ requestId, model: channelModel, openAi }, deadlineMs)
         return {
           success: true,
           status: 200,
@@ -599,7 +656,7 @@ export class RequestForwarder {
           providerSessionId: requestId,
         }
       }
-      const upstream = await accountChannelManager.openStream({ requestId, model: actualModel, openAi })
+      const upstream = await accountChannelManager.openStream({ requestId, model: channelModel, openAi })
       // 客户端在「等首块」期间断开时中止上游：chat 路由把 request.signal 接在
       // res close 上，但那套联动要到结果返回后才建立，这个窗口里只有 signal 能
       // 看到。销毁源流既停掉渠道 Worker 的上游请求，也让下面的首事件等到关闭。
@@ -615,7 +672,8 @@ export class RequestForwarder {
       // （用户报障 2026-10-30：auto 命中 cline 的 Vercel 网关 tools ≤ 128）。
       // 这里等首个事件：有首块才算成功（首块原样补发），首错转成普通
       // ForwardResult 失败，交给既有的换家 / 错误映射逻辑。
-      const first = await firstStreamEvent(upstream)
+      const firstEventMs = Math.min(requestDeadlines().firstEventMs, deadlineMs)
+      const first = await firstStreamEvent(upstream, firstEventMs)
       if (first.kind === 'timeout') {
         // 等首事件超时：渠道假死（HTTP 200 但零字节，无首块也无首错 —— 实测
         // qoder 挂过 165s/285s/625s）。墙钟预算只在尝试之间检查，单次悬挂时
@@ -625,7 +683,7 @@ export class RequestForwarder {
         return {
           success: false,
           status: 504,
-          error: `渠道 ${Math.round(FIRST_EVENT_TIMEOUT_MS / 1000)}s 内未产出任何首块（疑似假死），已中止并换下一家`,
+          error: `渠道 ${Math.round(firstEventMs / 1000)}s 内未产出任何首块（疑似假死），已中止并换下一家`,
           latency: Date.now() - startTime,
         }
       }
@@ -743,7 +801,15 @@ export class RequestForwarder {
       const chatPath = provider.chatPath || '/chat/completions'
       const url = this.buildUrl(provider, chatPath)
       const headers = this.buildHeaders(provider, account)
-      const body = this.buildRequestBody({ ...request, messages: transformed.messages }, actualModel, account)
+      // `transformed.tools` 是引擎的裁决结果：走原生工具时它等于客户端带来的 tools，
+      // 走提示注入时它是 `undefined`。这里必须把它当**唯一的** tools 来源 ——
+      // 直接取 `request.tools` 会在提示已经注入之后再原生发一遍工具描述（与
+      // responses wire 当初修掉的是同一个双重提示缺陷）。
+      const body = this.buildRequestBody(
+        { ...request, messages: transformed.messages, tools: transformed.tools },
+        actualModel,
+        account,
+      )
 
       // buildRequestBody 只挑白名单字段；每模型参数里的其余键（top_k、seed、reasoning_effort…）
       // 在这里显式补进上游请求体。保留字段 model/messages/stream 不允许被覆盖。
@@ -769,7 +835,7 @@ export class RequestForwarder {
         url,
         headers,
         data: sanitizedBody,
-        timeout: proxyStatusManager.getConfig().timeout,
+        timeout: requestDeadlines().completeMs,
         responseType: request.stream ? 'stream' : 'json',
         validateStatus: () => true,
       }
@@ -862,7 +928,7 @@ export class RequestForwarder {
         url,
         headers,
         data: body,
-        timeout: proxyStatusManager.getConfig().timeout,
+        timeout: requestDeadlines().completeMs,
         responseType: request.stream ? 'stream' : 'json',
         validateStatus: () => true,
       })
@@ -1095,6 +1161,31 @@ export class RequestForwarder {
       body.user = request.user
     }
 
+    // 工具三件套只在**有工具**时成组发出（原生模式由 `transformed.tools` 决定）。
+    if (request.tools !== undefined && request.tools.length > 0) {
+      body.tools = request.tools
+      if (request.tool_choice !== undefined) body.tool_choice = request.tool_choice
+      if (request.parallel_tool_calls !== undefined) body.parallel_tool_calls = request.parallel_tool_calls
+    }
+
+    if (request.reasoning_effort !== undefined) {
+      body.reasoning_effort = request.reasoning_effort
+    }
+
+    // 这三格由 `ChatCompletionRequest` 的**未声明字段**承载（类型里没有，但客户端
+    // 确实会发，`parameterPolicy.STRIPPED_FOR_BUILTIN` 认得它们）。此前白名单不转，
+    // 后果各有不同：
+    // - `stream_options` 丢了 → 上游永远不发最后一个 usage 块 → 流式响应的 `usage`
+    //   对**所有**客户端都是 null，`/v1/messages` 那半边只好用估算值顶（见 A2）；
+    // - `response_format` 丢了 → JSON 模式静默变自由文本；
+    // - `seed` 丢了 → 可复现性承诺失效。
+    // 聚合条目的地盘很严时由条目自己的 `dropParams` 剥（`applyAggregateDropParams`
+    // 就在这之后跑），内建供应商仍由 `stripUnsupportedForBuiltin` 先删掉它们。
+    for (const key of ['response_format', 'stream_options', 'seed'] as const) {
+      const value = (request as unknown as Record<string, unknown>)[key]
+      if (value !== undefined) body[key] = value
+    }
+
     return body
   }
 
@@ -1171,7 +1262,7 @@ export class RequestForwarder {
         url,
         headers,
         data: body,
-        timeout: proxyStatusManager.getConfig().timeout,
+        timeout: requestDeadlines().completeMs,
         responseType: isStream ? 'stream' : 'json',
         validateStatus: () => true,
       }

@@ -67,6 +67,15 @@ export interface ChatCompletionRequest {
   requestId?: string
   /** Aborted when the client disconnects, so long upstream turns can stop early */
   signal?: AbortSignal
+  /**
+   * 这一次尝试在宿主侧的最长等待（毫秒），由换家循环按**剩余墙钟预算**收紧。
+   *
+   * 为什么必须是它而不是 `request.signal`：`signal` 表达的是「客户端走了」，
+   * 而墙钟预算要表达的是「这家不能再占了整条链的时间」。`AUTO_WALL_CLOCK_BUDGET_MS`
+   * 原先只在尝试**之间**检查，一笔永不返回的渠道请求（实测 525s）会让预算永远
+   * 等不到检查点 —— 预算要生效，必须传到单次等待里。未给 = 用出厂计划值。
+   */
+  attemptDeadlineMs?: number
   /** Original model name before mapping (used for feature detection like web search, thinking mode) */
   originalModel?: string
   messages: ChatMessage[]

@@ -24,6 +24,7 @@ import {
 import { autoRouter } from './autoRouter'
 import { buildRouteError, isModelApiPath } from './routeErrorPolicy'
 import { buildRejectionLogEntry, requestedModelOf } from './rejectionLog'
+import { anthropicErrorBody } from '../../shared/anthropicWire'
 
 const SLOW_REQUEST_THRESHOLD_MS = 1500
 
@@ -138,28 +139,37 @@ export class ProxyServer {
       const providedKey = extractProvidedKey(ctx)
       const outcome = evaluateApiKeyAuth({ apiKeys: config.apiKeys, providedKey })
 
+      // Anthropic 客户端只认 Anthropic 的错误信封。回 OpenAI 信封会让它把 401
+      // 当成"响应解析失败"，用户看到的是莫名其妙的 JSON 报错而不是"密钥不对"。
+      const isAnthropicInbound =
+        ctx.path === '/v1/messages' || ctx.path.startsWith('/v1/messages/')
+
       if (outcome === 'missing_key') {
         ctx.status = 401
-        ctx.body = {
-          error: {
-            message: 'API key is required',
-            type: 'invalid_request_error',
-            code: 'missing_api_key',
-          },
-        }
+        ctx.body = isAnthropicInbound
+          ? anthropicErrorBody('API key is required', 'authentication_error')
+          : {
+              error: {
+                message: 'API key is required',
+                type: 'invalid_request_error',
+                code: 'missing_api_key',
+              },
+            }
         recordRejectedRequest(ctx, 401, 'missing_api_key', 'API key is required')
         return
       }
 
       if (outcome === 'invalid_key') {
         ctx.status = 401
-        ctx.body = {
-          error: {
-            message: 'Invalid API key',
-            type: 'invalid_request_error',
-            code: 'invalid_api_key',
-          },
-        }
+        ctx.body = isAnthropicInbound
+          ? anthropicErrorBody('Invalid API key', 'authentication_error')
+          : {
+              error: {
+                message: 'Invalid API key',
+                type: 'invalid_request_error',
+                code: 'invalid_api_key',
+              },
+            }
         recordRejectedRequest(ctx, 401, 'invalid_api_key', 'Invalid API key')
         return
       }
@@ -219,12 +229,14 @@ export class ProxyServer {
       ctx.body = {
         name: 'ModelPort Proxy',
         version: '1.1.2',
-        description: 'OpenAI API compatible proxy service',
+        description: 'OpenAI + Anthropic API compatible proxy service',
         endpoints: [
           'POST /v1/chat/completions',
           'GET /v1/models',
           'GET /v1/models/:model',
           'POST /v1/completions',
+          'POST /v1/messages',
+          'POST /v1/messages/count_tokens',
         ],
       }
     })

@@ -7,7 +7,10 @@ export interface ApiKeyRecord {
 
 export const LOOPBACK_HOSTS = ['127.0.0.1', '::1', 'localhost'] as const
 
-const LOOPBACK_HEADERS = 'Content-Type, Authorization, X-Requested-With, X-API-Key, X-Management-Secret'
+// `Anthropic-Version` / `Anthropic-Beta` 只服务于 `/v1/messages` 的浏览器侧预检，
+// 对 OpenAI 客户端没有影响（多放行两个头不放宽任何鉴权）。
+const LOOPBACK_HEADERS =
+  'Content-Type, Authorization, X-Requested-With, X-API-Key, X-Management-Secret, Anthropic-Version, Anthropic-Beta'
 
 export function isLoopbackHost(host?: string): boolean {
   if (!host) return false

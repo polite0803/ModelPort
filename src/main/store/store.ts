@@ -53,6 +53,7 @@ import { sendRequestLog } from '../ipc/logBroadcast'
 import { RequestLogManager } from '../requestLogs/manager'
 import { normalizeRequestLogConfig } from '../requestLogs/types'
 import { setContentLoggingEnabled } from '../proxy/utils/debugContent'
+import { configureRequestDeadlines } from '../proxy/requestBudget'
 import {
   compareStoreSnapshot,
   legacyBackupCandidates,
@@ -503,6 +504,12 @@ class StoreManager {
       ...config,
     }
     const rawToolCallingConfig = rawConfig.toolCallingConfig ?? rawConfig.toolPromptConfig
+
+    // 等待时间镜像：`requestTimeout` 此前**没有任何读取者**，而真正生效的两处各有
+    // 自己的字面量（HTTP 转发的 120s、渠道非流式完成的 `0`＝永不超时）。放在这里而
+    // 不是只放 `updateConfig`，与 `normalizeRoutes` 同一个理由：renderer 的
+    // `saveAppConfig` 走通用 `STORE_SET` 整对象 raw 写，会绕过 `updateConfig`。
+    configureRequestDeadlines(rawConfig.requestTimeout)
 
     return {
       ...rawConfig,

@@ -19,6 +19,11 @@
  * 3. 换家按错误类分级（账号故障类 3 家封顶；排队/额度/限流类放宽到 6 家）；
  * 4. 换家有墙钟总预算（90s），预算耗尽返回最后失败；
  * 5. 前置剔除的候选透出为 X-ModelPort-Auto-Skipped。
+ *
+ * 换家取证（用户报障 2026-11-01，auto 连续两次答「末尾没有用户指令」）：
+ * 8. 每个被跳过的候选按错误类记进日志（`auto.failures`）—— 请求日志原先只有
+ *    最终赢家，`attempts: 4` 看不出前三家各自答了什么，于是「一家天天全错」
+ *    与「一家偶发排队」在日志里长得一模一样。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -26,12 +31,17 @@ import { readFileSync } from 'node:fs'
 import { PassThrough } from 'stream'
 
 import {
+  ATTEMPT_REASON_MAX_CHARS,
   AUTO_RECOVERABLE_EXTRA_ATTEMPTS,
   AUTO_WALL_CLOCK_BUDGET_MS,
+  createIdleWatchdog,
+  describeAttemptFailure,
   FIRST_EVENT_TIMEOUT_MS,
   firstStreamEvent,
+  isChannelCredentialFailure,
   isChannelModelUnavailableError,
   isFailoverEligibleStatus,
+  isForcedToolChoiceUnsupported,
   isMissingReasoningHistoryError,
   isRecoverableChannelFailure,
   isToolOverflowError,
@@ -299,7 +309,7 @@ test('forwarder 的换家判据必须接上：超限 400 参与换家，普通 4
 test('forwarder 的流式路径必须等首事件再定成败（建流失败要能进换家循环）', () => {
   assert.match(
     forwarderSource,
-    /const first = await firstStreamEvent\(upstream\)/,
+    /const first = await firstStreamEvent\(\s*upstream\b/,
     'account-channel streaming must await the first stream event before declaring success',
   )
 })
@@ -425,4 +435,228 @@ test('chat 路由必须把跳过清单写进 X-ModelPort-Auto-Skipped（源码�
     /ctx\.set\('X-ModelPort-Auto-Skipped', toHeaderValue\(autoDecision\.skipped\.join\(','\)\)\)/,
     'the skipped list must be surfaced as X-ModelPort-Auto-Skipped',
   )
+})
+
+/* ---------------- 换家取证：被跳过的候选各自答了什么 ---------------- */
+
+test('失败分类：能力不匹配类优先于状态码语义（400 也能换家）', () => {
+  // 三类「换一家就能成」的 400/404，kind 都是 capability —— 与 forwarder
+  // 循环里不计账号失败、不进冷却的那三个分支同一判据。
+  const toolOverflow = describeAttemptFailure({
+    candidate: 'cline/reflection/beam-free',
+    status: 400,
+    error: "Invalid value for 'tools': maximum number of items is 128.",
+  })
+  assert.equal(toolOverflow.kind, 'capability')
+  assert.equal(toolOverflow.status, 400)
+
+  assert.equal(describeAttemptFailure({
+    candidate: 'workbuddy/hy3',
+    status: 400,
+    error: "Missing required parameter: 'messages[6].reasoning_content'",
+  }).kind, 'capability')
+
+  assert.equal(describeAttemptFailure({
+    candidate: 'opencode/qwen3.8-max',
+    status: 404,
+    error: '模型不存在或已停用',
+  }).kind, 'capability')
+})
+
+test('失败分类：账号故障与暂时不可服务记 failover，普通 4xx 记 fatal', () => {
+  // 5xx / 429 / 无状态码（网络错误、超时）= 换家循环实际会继续试的那一类
+  assert.equal(describeAttemptFailure({ candidate: 'loomy/spark-x2.6', status: 502, error: 'Bad Gateway' }).kind, 'failover')
+  assert.equal(describeAttemptFailure({ candidate: 'qoder/qfmodel', status: 429, error: '模型排队中' }).kind, 'failover')
+  assert.equal(describeAttemptFailure({ candidate: 'raccoon/glm', error: 'socket hang up' }).kind, 'failover')
+  // 400（非能力类）当场把链打断 —— 日志要能看出「这一家之后没再试」的原因不是暂时故障
+  assert.equal(describeAttemptFailure({ candidate: 'buddy/hy3', status: 400, error: 'invalid api key' }).kind, 'fatal')
+})
+
+test('失败记录：无状态码时不写 status 键，空错误文本给可读兜底', () => {
+  // 「键直接不出现」而不是 undefined：日志消费方（仪表盘/JSON 导出）不能看到
+  // 一个把「上游没答」和「上游答了 200」混在一起的 null。
+  const networkOnly = describeAttemptFailure({ candidate: 'zcode/glm-5.2', error: 'fetch failed' })
+  assert.ok(!('status' in networkOnly), 'status 缺失时不得出现该键')
+  assert.equal(networkOnly.reason, 'fetch failed')
+
+  // 假死/零字节流只有状态码没有文案，兜底文案要说明白「上游没给错误文本」
+  assert.equal(describeAttemptFailure({ candidate: 'trae/deepseek-v4.1-flash', status: 504 }).reason, '上游未给出错误文本')
+  assert.equal(describeAttemptFailure({ candidate: 'trae/deepseek-v4.1-flash' }).reason, '上游未给出错误文本')
+})
+
+test('失败记录：文案去首尾空白并按上限截断（日志体积有界）', () => {
+  assert.equal(ATTEMPT_REASON_MAX_CHARS, 200, '单条原因钉在 200 字符')
+  const long = `  ${'排队中，'.repeat(100)}尾部不该出现  `
+  const record = describeAttemptFailure({ candidate: 'qoder/dfmodel', status: 429, error: long })
+  assert.equal(record.reason.length, ATTEMPT_REASON_MAX_CHARS)
+  assert.ok(!record.reason.includes('尾部不该出现'), '只留前 200 字符')
+  assert.ok(!record.reason.startsWith(' '), '首尾空白必须先去掉')
+})
+
+test('换家取证必须落到源码：循环记录每次失败，日志写出 failures（源码钉点）', () => {
+  // 循环里的记账点必须在 capability/fatal 分支之前 —— fatal 也要留痕，
+  // 否则「为什么链在这里断了」仍然无处可查。
+  assert.match(
+    forwarderSource,
+    /failures\.push\(describeAttemptFailure\(\{\s*\n\s*candidate: candidate\.displayName,\s*\n\s*error: result\.error,\s*\n\s*status: result\.status,\s*\n\s*\}\)\)\s*\n\s*if \(!capabilityMismatch\)/,
+    'every failed attempt must be described before the failover branch decides where to go next',
+  )
+  // 每个出口都要带上清单（成功那轮的返回值同样含此前被跳过的家）
+  assert.match(
+    forwarderSource,
+    /const finish = \(\): ForwardChainOutcome<T> \| null =>\s*\n\s*last === null \? null : \{ \.\.\.last, failures: failures\.slice\(0, MAX_LOGGED_ATTEMPT_FAILURES\) \}/,
+    'the chain loop must return the failure list from a single capped exit helper',
+  )
+  // 日志侧：非空才写键，第一家命中时不出现空数组
+  assert.match(
+    chatRouteSource,
+    /\.\.\.\(failures\.length > 0 \? \{ failures \} : \{\}\)/,
+    'the auto log record must carry failures only when a candidate was actually switched past',
+  )
+  assert.match(
+    chatRouteSource,
+    /autoFailures = outcome\.failures/,
+    'the chat route must adopt the forwarder per-attempt failure list',
+  )
+})
+
+/**
+ * 2026-11-01 新增的两类判据（192.168.85.131 实测：凭据类失败 27 笔、强制
+ * tool_choice 类 400 三笔且 `att=1` 直接整场失败）。
+ *
+ * 两条都要求**负样本**：判据一宽，就会把无关的 4xx 变成「可换家」，那是用
+ * 户点名的那一家被悄悄跳过。
+ */
+test('credential-class failures are recognised from the pack wording only', () => {
+  assert.equal(isChannelCredentialFailure('qoder: no usable credential; log in first'), true)
+  assert.equal(isChannelCredentialFailure('凭据未配置，请先登录'), true)
+  assert.equal(isChannelCredentialFailure('opencode: 没有可用通道'), true)
+
+  // 负样本：目录不认模型、强制 tool_choice、配额、普通正文都不能命中。
+  assert.equal(isChannelCredentialFailure('模型不存在或已停用'), false)
+  assert.equal(isChannelCredentialFailure('only tool_choice auto and none are supported'), false)
+  assert.equal(isChannelCredentialFailure('qoder: Billing daily count exceeded'), false)
+  assert.equal(isChannelCredentialFailure('The model `X` does not exist.'), false)
+  assert.equal(isChannelCredentialFailure(undefined), false)
+})
+
+test('forced tool_choice rejection is a capability gap, not an account fault', () => {
+  assert.equal(isForcedToolChoiceUnsupported('only tool_choice auto and none are supported'), true)
+  assert.equal(isForcedToolChoiceUnsupported("Error: only 'tool_choice' auto and none are supported"), true)
+
+  // 负样本：只出现 tool_choice、或只出现 auto/none 字样的普通文本都不算。
+  assert.equal(isForcedToolChoiceUnsupported('invalid value for tool_choice'), false)
+  assert.equal(isForcedToolChoiceUnsupported('the model supports auto and none modes'), false)
+  assert.equal(isForcedToolChoiceUnsupported(undefined), false)
+
+  // 归类：capability（换下一家、不记冷却、不计账号故障）。
+  const failure = describeAttemptFailure({
+    candidate: 'MiniMax Code / M3',
+    error: 'only tool_choice auto and none are supported',
+    status: 400,
+  })
+  assert.equal(failure.kind, 'capability')
+})
+
+test('credential failures stay a failover class so the chain keeps going', () => {
+  // 与 capability 类区分开：凭据死了是这一家真的不可用，要记冷却（冷却档位本身
+  // 由 accountRuntime.recordCredentialFailure 钉，见 tests/proxy/accountRuntime.test.ts）。
+  const failure = describeAttemptFailure({
+    candidate: 'Qoder / Qwen3.8-Flash',
+    error: 'qoder: no usable credential; log in first',
+    status: 502,
+  })
+  assert.equal(failure.kind, 'failover')
+  assert.equal(failure.status, 502)
+})
+
+/**
+ * 块间静默看门狗（2026-11-01 实测两笔 `auto` 流式请求各挂 120s 零字节：
+ * 首块一到就记成功，之后停摆的流原先没有任何时间上限）。
+ *
+ * 判据本体抽成 `createIdleWatchdog` 就是为了这四条能真跑，而不是读源码文本。
+ */
+test('idle watchdog fires once after the configured silence', async () => {
+  let fired = 0
+  const watchdog = createIdleWatchdog(20, () => { fired += 1 })
+  watchdog.arm()
+  await new Promise(resolve => setTimeout(resolve, 80))
+  assert.equal(fired, 1)
+  // 到点后不会自己连发（每笔请求只该被中止一次）。
+  assert.equal(fired, 1)
+})
+
+test('idle watchdog measures silence between frames, not the whole request', async () => {
+  let fired = 0
+  const watchdog = createIdleWatchdog(30, () => { fired += 1 })
+  // 每 10ms 续一次，共 60ms —— 超过 timeoutMs 的总时长，但没有任何一段静默到点。
+  for (let i = 0; i < 6; i++) {
+    watchdog.arm()
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  assert.equal(fired, 0, '持续有帧的流永远不该被停摆判死')
+  // 停止续期后才炸，且只炸一次。
+  await new Promise(resolve => setTimeout(resolve, 60))
+  assert.equal(fired, 1)
+})
+
+test('idle watchdog clear stops it for good', async () => {
+  let fired = 0
+  const watchdog = createIdleWatchdog(20, () => { fired += 1 })
+  watchdog.arm()
+  watchdog.clear()
+  watchdog.arm()
+  await new Promise(resolve => setTimeout(resolve, 60))
+  assert.equal(fired, 0, 'clear 之后 arm 必须无效，否则结算完还会回炸一次')
+})
+
+test('a non-positive timeout disables the watchdog instead of firing instantly', async () => {
+  let fired = 0
+  const watchdog = createIdleWatchdog(0, () => { fired += 1 })
+  watchdog.arm()
+  await new Promise(resolve => setTimeout(resolve, 30))
+  assert.equal(fired, 0)
+})
+
+/* ---------------- 2026-11-01 接线门：等待与判据必须真的被请求路径读到 ----------------
+ *
+ * forwarder / bridge 背着 electron 依赖，`node --test` 拉不动（本文件头注释同因），
+ * 所以这四条只能按源码文本判。规则与既有那几条一致：**验语义写法而非行号**，
+ * 并允许换行与参数形式变化；每条都配一条「不接线就红」的反向说明。
+ */
+const bridgeSource = readFileSync('src/main/channelPack/bridge.ts', 'utf-8')
+const storeSource = readFileSync('src/main/store/store.ts', 'utf-8')
+
+test('请求超时这一格必须被读进等待计划（否则设置又是装饰品）', () => {
+  assert.match(storeSource, /configureRequestDeadlines\(\s*(rawConfig|config)\.requestTimeout\s*\)/,
+    'store must feed config.requestTimeout into the deadline mirror on every config read')
+  assert.match(bridgeSource, /requestDeadlines\(\)\.completeMs/,
+    'the channel non-stream completion must be bounded by the plan, not by 0 (never-timeout)')
+  assert.match(bridgeSource, /DSH_QODER_QUEUE_TIMEOUT_MS\s*:/,
+    'the pack queue budget must be injected from the plan, otherwise it stays at its 30-minute default')
+})
+
+test('墙钟预算必须折算成单次截止（不然一笔悬挂就吃掉整条链）', () => {
+  assert.match(forwarderSource, /attemptDeadlineMs\s*:\s*planAttemptDeadline\(/,
+    'the failover loop must pass a per-attempt deadline derived from the remaining wall budget')
+  assert.match(forwarderSource, /request\.attemptDeadlineMs\s*\?\?\s*requestDeadlines\(\)\.completeMs/,
+    'the account-channel forward must honour that per-attempt deadline')
+})
+
+test('流式首块之后的停摆必须由看门狗兜住', () => {
+  assert.match(bridgeSource, /createIdleWatchdog\(\s*requestDeadlines\(\)\.idleMs\s*,/,
+    'the stream job must own an idle watchdog sized by the plan')
+  assert.match(bridgeSource, /job\?\.watchdog\)\s*job\.watchdog\.arm\(\)/,
+    'every sse frame must re-arm the watchdog (it measures silence between frames)')
+})
+
+test('凭据类与强制 tool_choice 类判据必须接进请求路径', () => {
+  // 凭据类：不重试（否则同一笔等待再付一遍）+ 按人工介入档冷却。
+  assert.match(forwarderSource, /if\s*\(\s*isChannelCredentialFailure\(result\.error\)\s*\)\s*\{?\s*\n?\s*break/,
+    'credential-class failures must not be retried by the host')
+  assert.match(forwarderSource, /autoRouter\.markCredentialCooldown\(/,
+    'credential-class failures must use the human-intervention cooldown tier')
+  // 强制 tool_choice：按 capability 类换下一家，而不是整场 400。
+  assert.match(forwarderSource, /\|\|\s*isForcedToolChoiceUnsupported\(result\.error\)/,
+    'forced tool_choice rejection must join the capability-mismatch set so the chain keeps trying')
 })

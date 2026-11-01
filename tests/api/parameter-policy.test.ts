@@ -88,7 +88,14 @@ test('request correlation id is returned and context trimming keeps tool fields'
 
 test('custom providers go through the same tool pipeline', () => {
   const forwarder = readFileSync(fileURLToPath(new URL('../../src/main/proxy/forwarder.ts', import.meta.url)), 'utf8')
-  assert.match(forwarder, /buildRequestBody\(\{ \.\.\.request, messages: transformed\.messages \}/)
+  // 语义而不是排版：默认分支的 messages 与 tools 都必须来自工具引擎的裁决结果
+  // （2026-11-01 修复：`transformed.tools` 此前被整个丢掉，`buildRequestBody` 的
+  // 白名单里也没有 `tools`，于是「关掉工具托管」等于把客户端的工具静默删掉）。
+  // 断言允许换行与加参，不再锁某一种写法。
+  assert.match(
+    forwarder,
+    /buildRequestBody\(\s*\{[\s\S]{0,400}?messages: transformed\.messages[\s\S]{0,200}?tools: transformed\.tools/,
+  )
   assert.match(forwarder, /stream: wrapStreamWithPlan\(response\.data, transformed\.plan\)/)
   assert.match(forwarder, /this\.applyToolCallsToResponse\(response\.data, transformed\)/)
 })

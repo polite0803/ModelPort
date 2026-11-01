@@ -22,6 +22,8 @@ import {
   markChannelRuntimeRunning,
   markChannelRuntimeStopped,
 } from '../providers/accountChannels/runtimeState'
+import { requestDeadlines } from '../proxy/requestBudget'
+import { createIdleWatchdog, type IdleWatchdog } from '../proxy/failover.ts'
 
 export class ChannelBridgeError extends Error {
   /** HTTP status to surface to the OpenAI client; undefined means 500. */
@@ -56,6 +58,14 @@ interface Job {
   reject: (error: Error) => void
   stream?: PassThrough
   timer?: NodeJS.Timeout
+  /**
+   * 流式**首块之后**的块间静默看门狗（只在见过第一帧 `sse` 后才开始计时）。
+   *
+   * 判据本体与单测在 `proxy/failover.ts::createIdleWatchdog`；放在 bridge 这一层是
+   * 因为只有这里能同时做到：知道每一帧的到达时刻、发 `cancel` 让 worker 中止上游、
+   * 以及 `destroy(error)` 让响应层按既有约定回一个流内错误帧（绝不静默断流）。
+   */
+  watchdog?: IdleWatchdog
 }
 
 const START_TIMEOUT_MS = 30_000
@@ -119,6 +129,11 @@ export class ChannelBridge {
         ...process.env,
         DSH_CHANNEL_PACK_STATE_DIR: this.options.dataDir,
         DSH_OPENAI_GATEWAY_ENABLED: '0',
+        // 渠道包自己的排队总预算（`qoder-adapter.ts::resolveQueueTimeoutMs` 的默认是
+        // **30 分钟**）。刻意取到宿主截止时间之前：渠道先答「模型排队中」比宿主造一个
+        // 504 更诚实，也少烧一次全量加密 prefill。改「请求超时」要**重启渠道运行时**
+        // 才影响这一格（env 在 spawn 时定型），宿主那一条则是每笔现读，永远兜得住。
+        DSH_QODER_QUEUE_TIMEOUT_MS: String(requestDeadlines().packQueueMs),
       },
     })
     this.worker = worker
@@ -172,6 +187,7 @@ export class ChannelBridge {
     for (const [id, job] of this.jobs) {
       this.jobs.delete(id)
       if (job.timer) clearTimeout(job.timer)
+      if (job.watchdog) job.watchdog.clear()
       if (job.stream) {
         job.stream.destroy(error)
         job.reject(error)
@@ -205,6 +221,7 @@ export class ChannelBridge {
       case 'sse': {
         const job = this.jobs.get(String(message.id))
         job?.stream?.write(String(message.text ?? ''))
+        if (job?.watchdog) job.watchdog.arm()
         return
       }
       case 'completion': {
@@ -259,7 +276,24 @@ export class ChannelBridge {
     if (!job) return undefined
     this.jobs.delete(id)
     if (job.timer) clearTimeout(job.timer)
+    if (job.watchdog) job.watchdog.clear()
     return job
+  }
+
+  /**
+   * 首块之后的停摆处置：中止 worker 里的这笔请求，并把错误交给响应层。
+   *
+   * `settle` 先把 job 摘掉，`stream.on('close')` 里那条「还在 jobs 里才发 cancel」
+   * 因此不会触发 —— 中止必须在这里显式发出，否则上游会继续跑完并白烧配额。
+   */
+  private failIdleStream(id: string, job: Job): void {
+    const idleMs = requestDeadlines().idleMs
+    this.settle(id)
+    this.worker?.postMessage({ type: 'cancel', id })
+    job.stream?.destroy(new ChannelBridgeError(
+      `渠道在 ${Math.round(idleMs / 1000)}s 内没有再产出任何数据（疑似停摆），已中止`,
+      504,
+    ))
   }
 
   private async handleCredential(message: Record<string, any>): Promise<void> {
@@ -311,8 +345,17 @@ export class ChannelBridge {
     return { ok: false, error: { code: 'invalid_response', message: '渠道返回了未知的响应' } }
   }
 
-  async complete(request: ChannelCompletionRequest): Promise<Record<string, unknown>> {
-    const value = await this.request('complete', { request }, 0)
+  async complete(request: ChannelCompletionRequest, timeoutMs?: number): Promise<Record<string, unknown>> {
+    // 截止时间来自「请求超时」这一格（`proxy/requestBudget`），不再是 `0`；
+    // 换家循环会传一个更紧的值（剩余墙钟预算），未传则用出厂计划。
+    // 写 `0` 的后果实测过：渠道包内部排队预算默认 30 分钟，宿主等 525s 才拿到
+    // 一句 `Billing daily count exceeded`，而墙钟预算只在换家尝试之间检查，
+    // 单次尝试永不返回时它永远等不到检查点（2026-11-01 192.168.85.131）。
+    const value = await this.request(
+      'complete',
+      { request },
+      timeoutMs !== undefined && timeoutMs > 0 ? timeoutMs : requestDeadlines().completeMs,
+    )
     if (value === null || typeof value !== 'object') {
       throw new ChannelBridgeError('渠道没有返回对话结果', 502)
     }
@@ -333,6 +376,9 @@ export class ChannelBridge {
       reject: (error) => undefined,
       stream,
     }
+    // 停摆看门狗此刻**不**计时：首块之前归 `firstStreamEvent` 管。第一帧 `sse`
+    // 到达才 `arm()`，之后每一帧续一次。
+    job.watchdog = createIdleWatchdog(requestDeadlines().idleMs, () => this.failIdleStream(id, job))
     this.jobs.set(id, job)
     void this.workerOrThrow()
       .then(worker => {
@@ -358,7 +404,10 @@ export class ChannelBridge {
         job.timer = setTimeout(() => {
           this.settle(id)
           this.worker?.postMessage({ type: 'cancel', id })
-          reject(new ChannelBridgeError('渠道请求超时', 504))
+          reject(new ChannelBridgeError(
+            `渠道 ${Math.round(timeoutMs / 1000)}s 内没有给出结果（排队中或上游过慢），已中止`,
+            504,
+          ))
         }, timeoutMs)
       }
       this.jobs.set(id, job)

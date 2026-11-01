@@ -34,6 +34,7 @@ import type {
 } from '../../../shared/channels'
 import type { ModelCapabilityHint } from '../../../shared/types'
 import { ACCOUNT_CHANNELS, getChannelDefinition } from './catalogue'
+import { accountRuntime } from '../../proxy/accountRuntime'
 import { attachContextWindows, capabilityHintOf, readModelList } from './modelCatalog'
 import { channelRuntimeState } from './runtimeState'
 import { resyncsAfterChannelRpc } from './rpcSync'
@@ -480,6 +481,17 @@ class AccountChannelManager {
   /** 账号池或模型目录可能变了：清缓存、重建 provider 记录、通知界面。 */
   private notifyChanged(): void {
     this.modelsCache = null
+    // 池子一变就解除凭据类冷却（`accountRuntime.recordCredentialFailure` 那条
+    // 5–30 分钟的档）。那条冷却的前提是「要人来处理」，而 `changed` / 登录 /
+    // `account.refresh` 正是人已经处理完的信号 —— 不解就变成「重新登录成功了，
+    // 卡还要再锁半小时」。清档走 `recordSuccess`，与 autoRouter 的
+    // `clearAccountCooldown` 同一实现；这里直接用它，是为了不把 autoRouter 拖进
+    // 管理器与请求路径的导入图。
+    for (const channel of ACCOUNT_CHANNELS) {
+      for (const account of AccountManager.getByProviderId(channel.id, false)) {
+        accountRuntime.recordSuccess(account.id)
+      }
+    }
     void this.syncProviders()
     this.onChanged?.()
   }
@@ -520,9 +532,9 @@ class AccountChannelManager {
     requestId: string
     model: string
     openAi: Record<string, unknown>
-  }): Promise<Record<string, unknown>> {
+  }, timeoutMs?: number): Promise<Record<string, unknown>> {
     const bridge = await this.bridgeOrThrow()
-    return bridge.complete({ ...request, stream: false })
+    return bridge.complete({ ...request, stream: false }, timeoutMs)
   }
 
   async openStream(request: {

@@ -27,6 +27,7 @@ import {
 import { collectOpenAiCompletion, toOpenAiSse } from 'virtual:channel-pack-stream'
 import { assertValidToolCalls, countToolCallShapes } from './toolCallValidation'
 import { ReasoningReplay, reasoningReplayEnabled } from './reasoningReplay'
+import { appendOutboundDump, resolveDumpTarget, summarizeOutbound } from './outboundDump'
 
 type Adapter = {
   prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<{ stream: (options: unknown) => AsyncIterable<unknown> }>
@@ -124,6 +125,13 @@ const logger = {
   warn: (message: unknown) => send({ type: 'log', level: 'warn', message: String(message) }),
   error: (message: unknown) => send({ type: 'log', level: 'error', message: String(message) }),
 }
+
+/**
+ * 出站请求体取证开关（默认关闭）。开法与取值见 `outboundDump.ts` 头注释：
+ * `MODELPORT_CHANNEL_PACK_DUMP=1` 写 `<dataDir>/channel-pack/outbound-dump.ndjson`，
+ * 给别的值就按那个路径写。只落摘要（role / 长度 / 末尾片段 / 工具坐标），不落正文。
+ */
+const outboundDumpPath = resolveDumpTarget(process.env.MODELPORT_CHANNEL_PACK_DUMP, dataDir)
 
 /**
  * 跨请求的思考回放缓存（按 `tool_call.id`、有界）。
@@ -286,6 +294,24 @@ async function complete(request: CompleteRequest, jobId: string, signal: AbortSi
   // 钉住一个固定值会把全部会话并成一个服务端会话，并在累计超限后无法升代自愈）。
   const options = await toGenerateOptions(body, signal, effort, maxTokens, { bridge: attachments })
 
+  // 取证开关打开时，把「交给适配器的两段形状」（宿主收到的 OpenAI messages 与
+  // 转换后的 harness messages）落一行摘要 —— 排查「尾巴消息到底有没有出站」
+  // 只能在这里取证，请求日志的截断把尾部证据结构性地切掉了。
+  if (outboundDumpPath !== null) {
+    appendOutboundDump(
+      outboundDumpPath,
+      summarizeOutbound({
+        ts: Date.now(),
+        requestId: request.requestId,
+        model: request.model,
+        stream: request.stream,
+        openAiMessages: Array.isArray(body.messages) ? body.messages as unknown[] : [],
+        harnessMessages: Array.isArray(options.messages) ? options.messages as unknown[] : [],
+      }),
+      message => logger.warn(message),
+    )
+  }
+
   const stream = ctx.llm.stream(markGatewayChannel(options))
   // 观测**我们下行发出的**思考（两种上游形态在这里已合并成 reasoning_content）。
   reasoningReplay.begin()
@@ -359,4 +385,8 @@ parentPort?.on('message', async (message: Record<string, any>) => {
 })
 
 apply(ctx)
+if (outboundDumpPath !== null) {
+  // 显式声明开关生效，避免「以为开了其实没开」——路径也打出来，直接照着取文件。
+  logger.info(`渠道包出站取证已开启：每次请求写一行摘要到 ${outboundDumpPath}`)
+}
 send({ type: 'ready', providers: [...adapters.keys()] })

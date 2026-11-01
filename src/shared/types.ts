@@ -549,6 +549,23 @@ export interface ApiKey {
   description?: string
 }
 
+/**
+ * Anthropic 入站（`/v1/messages`）的模型解析规则。
+ *
+ * anthropic 客户端只说 `claude-*`，网关没有这些模型，所以必须有一条落点规则：
+ * 先查 `modelMap`（精确键优先，其次按最长前缀匹配，`claude-*` 这种通配就写前缀），
+ * 再落 `defaultModel`（缺省 `auto` 路由）。
+ *
+ * 两个字段都可选：缺席时行为固定为「请求名能在网关解析就原样用，否则落 auto」，
+ * 所以一份老配置不需要迁移也能工作。
+ */
+export interface AnthropicInboundConfig {
+  /** 请求名解析不出来时落到哪个网关模型/路由。缺省 `auto`。 */
+  defaultModel?: string
+  /** `客户端模型名/前缀 -> 网关模型名`。 */
+  modelMap?: Record<string, string>
+}
+
 export interface AppConfig {
   proxyPort: number
   proxyHost: string
@@ -590,6 +607,11 @@ export interface AppConfig {
    * `undefined` for a hand-built object that never went through the store.
    */
   routes?: Record<string, ModelRoute>
+  /**
+   * Anthropic 入站（`/v1/messages`）的模型解析规则。缺席即默认行为
+   * （见 `AnthropicInboundConfig`），所以老配置无需迁移。
+   */
+  anthropicInbound?: AnthropicInboundConfig
   compression: CompressionConfig
   outputSteering: OutputSteeringConfig
   language: 'zh-CN' | 'en-US'
@@ -727,6 +749,29 @@ export interface SessionConfig {
   maxSessionsPerAccount: number
 }
 
+/**
+ * One candidate the route tried and switched past.
+ *
+ * `kind` is the same classification the failover loop itself branches on, so the
+ * log answers "was this home broken, or just wrong for this request" without
+ * reading upstream wording:
+ * - `capability` - the request died before generation (tools overflow, history
+ *   missing `reasoning_content`, this channel's catalogue does not serve the
+ *   model). The account is healthy: no cooldown, no failure count.
+ * - `failover` - 429 / 5xx / no status code; the next home may answer.
+ * - `fatal` - any other status; the chain stopped right here, so this row is also
+ *   what the client got.
+ */
+export interface AutoAttemptFailure {
+  /** Candidate display name, e.g. `workbuddy/hy3`. */
+  candidate: string
+  kind: 'capability' | 'failover' | 'fatal'
+  /** Absent when upstream never answered (network error, timeout). */
+  status?: number
+  /** Upstream wording, capped by `describeAttemptFailure`. */
+  reason: string
+}
+
 export interface RequestLogEntry {
   /** Log ID */
   id: string
@@ -811,6 +856,14 @@ export interface RequestLogEntry {
      * sub-field cannot break a persisted row, and an old row simply has none.
      */
     route?: string
+    /**
+     * Why each skipped candidate was skipped, in attempt order. The chain logs the
+     * winner only, so without this a candidate that fails every time (a dead
+     * channel, a catalogue that rejects the model) is invisible: `attempts: 4` says
+     * four homes were tried, nothing says what the first three answered.
+     * Absent when the first candidate succeeded.
+     */
+    failures?: AutoAttemptFailure[]
   }
 
   /**

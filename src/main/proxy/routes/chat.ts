@@ -16,7 +16,7 @@ import { modelMapper } from '../modelMapper'
 import { autoRouter } from '../autoRouter'
 import type { AutoCandidate, AutoRouteDecision } from '../autoRouter'
 import { resolveRouteRequest } from '../../store/modelRoutes'
-import type { RequestLogEntry } from '../../../shared/types'
+import type { AutoAttemptFailure, RequestLogEntry } from '../../../shared/types'
 import { buildStreamErrorFrame, mapUpstreamError, retryAfterHeader } from '../errorMapping'
 import { findUnsupportedParameter, unsupportedParameterError } from '../parameterPolicy'
 import { createToolViolationTap } from '../utils/toolViolationTap'
@@ -47,7 +47,8 @@ const router = new Router({ prefix: '/v1/chat' })
 /** 请求日志里的 auto 决策记录；非 auto 请求返回 undefined（字段直接不出现） */
 function autoLogRecord(
   decision: AutoRouteDecision | null,
-  attempts: number
+  attempts: number,
+  failures: AutoAttemptFailure[]
 ): RequestLogEntry['auto'] | undefined {
   if (!decision) return undefined
   return {
@@ -59,6 +60,8 @@ function autoLogRecord(
     attempts,
     candidates: decision.candidates.slice(0, 5).map(candidate => candidate.displayName),
     ...(decision.degraded.length > 0 ? { degraded: decision.degraded } : {}),
+    // 第一家就命中时数组为空 —— 空数组不写，日志里没成功的请求不会出现空字段。
+    ...(failures.length > 0 ? { failures } : {}),
   }
 }
 
@@ -487,6 +490,8 @@ router.post('/completions', async (ctx: Context) => {
   let actualModel = selection ? selection.actualModel : firstCandidate!.actualModel
   let chosenCandidate: AutoCandidate | null = null
   let autoAttempts = 0
+  // 换家循环里被跳过的候选（判据与循环分支同源）；第一家命中时为空。
+  let autoFailures: AutoAttemptFailure[] = []
 
   // auto 的候选可能分属内置与自定义供应商，只有所有候选都拒绝时才整体报错
   const unsupportedParam = autoDecision
@@ -541,6 +546,7 @@ router.post('/completions', async (ctx: Context) => {
 
       result = outcome.result
       autoAttempts = outcome.attempts
+      autoFailures = outcome.failures
       ctx.set('X-ModelPort-Auto-Attempts', String(outcome.attempts))
       chosenCandidate = outcome.candidate
       account = outcome.candidate.account
@@ -642,7 +648,7 @@ router.post('/completions', async (ctx: Context) => {
         loadBalancer.markAccountFailed(account.id)
       }
 
-      const mapped = mapUpstreamError(result.status)
+      const mapped = mapUpstreamError(result.status, result.error)
       ctx.status = mapped.status
       if (mapped.status === 429) {
         const retryAfter = retryAfterHeader(result.headers as Record<string, unknown> | undefined)
@@ -690,7 +696,7 @@ router.post('/completions', async (ctx: Context) => {
         requestBody: JSON.stringify(request),
         userInput,
         client,
-        auto: autoLogRecord(autoDecision, autoAttempts),
+        auto: autoLogRecord(autoDecision, autoAttempts, autoFailures),
         compression: compressionReport,
         duplication,
         conversationTurn,
@@ -761,7 +767,7 @@ router.post('/completions', async (ctx: Context) => {
         requestBody: JSON.stringify(request),
         userInput,
         client,
-        auto: autoLogRecord(autoDecision, autoAttempts),
+        auto: autoLogRecord(autoDecision, autoAttempts, autoFailures),
         compression: compressionReport,
         duplication,
         conversationTurn,
@@ -792,7 +798,7 @@ router.post('/completions', async (ctx: Context) => {
         requestBody: JSON.stringify(request),
         userInput,
         client,
-        auto: autoLogRecord(autoDecision, autoAttempts),
+        auto: autoLogRecord(autoDecision, autoAttempts, autoFailures),
         compression: compressionReport,
         duplication,
         conversationTurn,
@@ -1053,7 +1059,7 @@ router.post('/completions', async (ctx: Context) => {
       accountName: account.name,
       requestBody: JSON.stringify(request),
       userInput,
-      auto: autoLogRecord(autoDecision, autoAttempts),
+      auto: autoLogRecord(autoDecision, autoAttempts, autoFailures),
       webSearch: request.web_search,
       reasoningEffort: request.reasoning_effort,
       maxTokens: requestedMaxTokens,

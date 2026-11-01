@@ -159,3 +159,32 @@ export function capabilityHintOf(model: ChannelModelInfo): ModelCapabilityHint |
   if (model.contextWindow !== undefined) hint.contextTokens = model.contextWindow
   return Object.keys(hint).length > 0 ? hint : undefined
 }
+
+/**
+ * 把模型名补成渠道 Worker 要求的 `<channel>/<model>` 形状。
+ *
+ * ## 为什么需要它（2026-11-01 192.168.85.131 实测 8 笔 400）
+ *
+ * 目录里可能留着**旧写法**的行：展示名是 `opencode/big-pickle`，`actualModelId`
+ * 却是**裸** `big-pickle`（改名之前，展示名本身就是 `<channel>/<id>`，映射值只留
+ * 了 id）。`channelPack/worker.ts` 的请求前校验按**第一个 `/`** 切出渠道 id 与模型
+ * id，裸 id 直接 400 `模型 ID 无效：big-pickle` —— 于是一条明明还在
+ * `/v1/models` 里广告的名字，每次请求都在自己进程里被拒掉，而且 400 不参与换家，
+ * `auto` 撞上它就整场失败。
+ *
+ * 宿主手里**一直**有那条渠道的 id（provider 记录），只是转发时把它丢了。这里补回来。
+ *
+ * 规则（顺序即优先级）：
+ * - 已经带**本渠道**前缀 → 原样（多数请求走这一格，不做任何字符串手术）；
+ * - 裸名（无 `/`）→ 补 `<channelId>/`；
+ * - 带的是**别家**前缀（`other/x`）→ 原样返回：那是用户自己写的映射，改它等于
+ *   替他改意图；真要出错也该由那条映射的归属来解释，不在这里悄悄换掉目标。
+ */
+export function qualifyChannelModel(channelId: string, model: string): string {
+  const trimmed = model.trim()
+  if (trimmed.length === 0) return trimmed
+  const slash = trimmed.indexOf('/')
+  if (slash < 0) return `${channelId}/${trimmed}`
+  if (trimmed.slice(0, slash) === channelId) return trimmed
+  return trimmed
+}

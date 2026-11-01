@@ -156,6 +156,23 @@ export class StreamHandler {
     let toolCallIndex = 0
     let doneSent = false
 
+    // 部分上游（商汤系等推理模型）只回 reasoning_content，content 恒为空。
+    // 对只读 content 的客户端（VS Code 原生 Chat 等）这等于空响应，收尾时需要用 reasoning 回填。
+    let reasoningAccum = ''
+    let emittedContentText = ''
+    let sawToolCall = false
+
+    // 上游整段正文为空时，用累积的 reasoning 补一帧 content，避免客户端判为空响应
+    const buildReasoningFallback = (): string | null => {
+      if (emittedContentText.trim() || sawToolCall) return null
+      const text = reasoningAccum.trim()
+      if (!text) return null
+      const data = transformChunk({ content: text }, model, responseId, created, isFirstChunk)
+      if (!data) return null
+      isFirstChunk = false
+      return formatter.formatJSON(data)
+    }
+
     return new Transform({
       objectMode: true,
       transform(chunk: Buffer, encoding, callback) {
@@ -174,6 +191,10 @@ export class StreamHandler {
                 contentBuffer = ''
               }
               if (!doneSent) {
+                const fallbackFrame = buildReasoningFallback()
+                if (fallbackFrame) {
+                  this.push(fallbackFrame)
+                }
                 doneSent = true
                 this.push(formatter.formatDone())
               }
@@ -190,6 +211,15 @@ export class StreamHandler {
 
             const transformedData = transformChunk(parsedData, model, responseId, created, isFirstChunk)
             if (!transformedData) continue
+
+            const reasoningPiece =
+              parsedData?.choices?.[0]?.delta?.reasoning_content ?? parsedData?.reasoning_content
+            if (typeof reasoningPiece === 'string' && reasoningPiece) {
+              reasoningAccum += reasoningPiece
+            }
+            if (transformedData.choices[0].delta?.tool_calls) {
+              sawToolCall = true
+            }
 
             // Handle tool call buffering
             const deltaContent = transformedData.choices[0].delta?.content || ''
@@ -310,6 +340,10 @@ export class StreamHandler {
 
             // Only push if we are NOT currently buffering a potential tool call
             if (!isBufferingToolCall) {
+              const pushedDelta = transformedData.choices[0].delta || {}
+              if (typeof pushedDelta.content === 'string' && pushedDelta.content) {
+                emittedContentText += pushedDelta.content
+              }
               isFirstChunk = false
               this.push(formatter.formatJSON(transformedData))
             }
@@ -354,6 +388,10 @@ export class StreamHandler {
           }
         }
         if (!doneSent) {
+          const fallbackFrame = buildReasoningFallback()
+          if (fallbackFrame) {
+            this.push(fallbackFrame)
+          }
           doneSent = true
           this.push(formatter.formatDone())
         }
@@ -407,8 +445,21 @@ export class StreamHandler {
 
     const finishReason = data.choices?.[0]?.finish_reason || data.finish_reason || null
 
+    // 上游报了 usage 就必须原样带着走。规范里 `stream_options.include_usage` 的最后
+    // 一帧是 `choices: [] + usage`，原先下面那句「什么都没有就丢」把它连同
+    // finish_reason 帧上的 usage 一起吞掉，后果是**流式响应的 usage 永远是 null，
+    // 哪怕上游明明报了数** —— 本仓的契约是「上游没报才 null」，不是「报了也 null」。
+    // 不重塑结构（原样透传），`prompt_tokens_details` 这类上游自有字段才不会被抹掉。
+    const reportedUsage = data.usage !== null && typeof data.usage === 'object' ? data.usage : undefined
+
     // Allow null content when there are tool_calls or finish_reason
-    if (delta.content === undefined && !delta.reasoning_content && !delta.tool_calls && !finishReason) {
+    if (
+      delta.content === undefined
+      && !delta.reasoning_content
+      && !delta.tool_calls
+      && !finishReason
+      && reportedUsage === undefined
+    ) {
       return null
     }
 
@@ -422,6 +473,7 @@ export class StreamHandler {
         delta,
         finish_reason: finishReason,
       }],
+      ...(reportedUsage === undefined ? {} : { usage: reportedUsage }),
     }
   }
 
@@ -524,7 +576,11 @@ export class StreamHandler {
           message.reasoning_content = reasoningContent.trim()
         }
         // If we have tool calls, force content to null to avoid client confusion
-        message.content = finalToolCalls.length > 0 ? null : (cleanContent || null)
+        // 正文为空但上游给了 reasoning（推理模型常见），用 reasoning 兜底，避免客户端读到空
+        message.content =
+          finalToolCalls.length > 0
+            ? null
+            : cleanContent || reasoningContent.trim() || null
 
         if (finalToolCalls.length > 0) {
           // Remove index field and sort by original index
