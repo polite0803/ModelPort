@@ -108,6 +108,21 @@ router.post('/completions', async (ctx: Context) => {
   const config = storeManager.getConfig()
   const promptMessages = promptToMessages(request.prompt)
 
+  // `prompt: []` 过得了上面的 `undefined` 检查，却会投影成 `messages: []`。账号渠道
+  // 的网关按 OpenAI 规范拒空数组，报的是 `messages must be a non-empty array` —— 那
+  // 句里被拒的字段名是代理内部的，客户端只会以为自己什么都没发，而不是 prompt 为空。
+  if (promptMessages.length === 0) {
+    ctx.status = 400
+    ctx.body = {
+      error: {
+        message: 'prompt must be a non-empty string or string array',
+        type: 'invalid_request_error',
+        param: 'prompt',
+      },
+    }
+    return
+  }
+
   // 路由优先 + 可读错误：判定与 chat 路由共用 `resolveRouteRequest`（见该函数注释），
   // 两条入口不许对同一个名字给出两种答案。
   const routeOutcome = resolveRouteRequest(config.routes, request.model)
