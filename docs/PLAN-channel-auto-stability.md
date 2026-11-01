@@ -180,7 +180,8 @@ anthropic 信封（`server.ts:145`）✅、`count_tokens` ✅、块骨架/工具
 
 ## 第四批：VS Code agent 第 2 轮起「装死」（末条 tool 兜底）
 
-来源是另一工具给的实施指令（`Qoder-提示词-末条tool兜底修复.md`）。审查结论分三层：
+来源是另一工具给的实施指令（`Qoder-提示词-末条tool兜底修复.md`，随后被它自己发布的
+`对比证据与判定修正-给Qoder.md` 更正）。审查结论分三层：
 
 - **症状属实**，从网关自己的请求日志取证：本机 VS Code（客户端标签 `GitHubCopilotChat`）
   打到 131 的 9 笔里 4 笔是故障形状，回包原文分别是
@@ -192,33 +193,42 @@ anthropic 信封（`server.ts:145`）✅、`count_tokens` ✅、块骨架/工具
 - **它给的落点不成立**：`worker.ts::complete()` 只有 `provider.type === 'account'` 才到得了
   （`forwarder.ts` 注册表 → `forwardAccountChannel` → `accountChannelManager.complete/openStream`），
   而该文档自己把 ovh（聚合条目）列为同现象。按其 §2.5 的规则就等于「存在绕过路径，须补挂」，
-  它没写补挂到哪。故本仓改挂在 `forwardChatCompletion` 的**共同出口**。
-- ** efficacy 我没独立复现**：以真实形状重放（含 75 个工具与 `ask_user`、多轮工具结果）打
-  同一模型 `Raccoon (商汤) / DeepSeek-V4.1-Flash-1017`，A（原样）4/4 继续调工具，
-  B（补 user）反而 4/4 只出文本；我的合成体只有 35KB，真请求 ≥200KB（日志把
-  `requestBody` 截在 200026 字节，所以尾部形状无法从日志判定）。也就是说这条兜底
-  的证据基础是「A/B 差值」而不是我这一轮的重复实验，装到 131 后必须用真实 VS Code
-  会话复验（见下）。
+  它没写补挂到哪。故本仓挂在 `doForward` —— 三类供应商分派前的最后一个共用点。
+- **有效性已由真实请求体分两次确认**（`对比证据与判定修正-给Qoder.md` + 本仓重跑）：
+  我第一轮用自造请求体（23–35KB）重放 4/4 都能继续调工具，因此判过「复现不出来」——
+  那个结论的错因现已定位：**精简的 system 拿不到易感态**，与尾部形状无关。
+  对方随后用未截断的真实抓包体（`request_round2.json`，186KB，system 71,889 字符 / 75 tools /
+  末三条 `assistant, tool, tool`）做了 10 组消融，并在 2026-11-01 修正了判定：
+  **大 system 决定易感，末条 tool 决定发作，两者缺一不可**。我用自己的手在同一网关重跑
+  `--variant base --n 10`：**5/10 判空或 `ask_user` 反问**（3 次 ask_user + 2 次判空话术），
+  5/10 正常发起 `powershell` 调用 —— 达到对方 §六.1 的复现门槛（≥5/10）。
 
 ### 落地形态
 
-- 纯函数 `src/main/proxy/trailingUserGuard.ts`（`TRAILING_USER_TEXT` 一行、无插值、无换行）。
-- 挂点三条顺序约束（源码门 + 端到端各钉一遍）：必须在重复度/存活观测**之后**（那两项要读
-  客户端原样字节）、在 `applyCompression` **之后**（不被压缩器改写）、在托管工具注入与
-  `beginAttempt` **之前**。
+- 纯函数 `src/main/proxy/trailingUserGuard.ts`（`TRAILING_USER_TEXT` 一行、无插值、无换行，
+  文案与对方验证过的 `TAIL_USER` 逐字一致，所以那批 0/15 的数据可以直接当本修复的效果）。
+- 挂点是 `doForward` 内部（`cb49a5c`）。为什么不能更早：上下文裁剪/摘要跑在
+  `forwardChatCompletion` 的重试循环里，若兜底排在它前面，那句合成的 user 会被裁剪器当成
+  「最新的用户消息」而保住它、反而丢掉客户端真实那句；重复度/存活观测、内容压缩同样只该读
+  客户端原样字节。四个内部消费者 ⇒ 全部前置，兜底 ⇒ 紧挨三个分派出口
+  （渠道 `dedicatedForwarder.forward` / `forwardResponsesWire` / 默认 chat 装配）。
+  产的是一份局部 `guardedRequest`，不改写调用方传进来的 `request`。
 - 开关 `config.trailingUserGuard`，**缺省即开**（判据写 `!== false`：老 `data.json` 没有这一格，
   写成 `=== true` 会让全部老装机静默失去兜底）；`shared/types.ts` 与 `store/types.ts` 两处声明
   + `proxyStore.ProxyConfig` 映射 + 高级设置面板复选框 + `en-US`/`zh-CN` 两条文案，
   读写两头都有断言（「面板加开关必须写清哪段代码读它」）。
-- 端到端证据：`tests/routes/trailing-user-guard-e2e.test.ts` 3 条 —— 默认开时上游实收
-  末条是那句 user 且前三条一字未动；关掉后出站字节完全不变；末条非 tool 时零副作用。
+- 端到端证据：`tests/routes/trailing-user-guard-e2e.test.ts` 4 条 —— 默认开时上游实收
+  末条是那句 user 且前三条一字未动；关掉后出站字节完全不变；末条非 tool 时零副作用；
+  **请求日志的 `userInput` 仍是客户端原话**（这条是「这个不是最后请求作为用户输入」的直接断言）。
+  挂点顺序另有一条源码门（`tests/proxy/trailing-user-guard.test.ts`）：四个消费者必须早于
+  `doForward`，兜底必须早于三个分派调用，缺一即红。
 
 ### 部署后必须复验的一件事
 
-在 131 上装带本批的构建，本机 VS Code 跑到第 2 轮工具结果，看两件事：
-1. 出站是否真的补了（`MODELPORT_CHANNEL_PACK_DUMP=1` 打开后看 dump 末条，或直接看回包）；
-2. 「装死」是否消失。若仍出现，说明触发条件在体量或历史内容里，不在尾部形状 ——
-   那时把该次真实请求体（未截断的）取回来做 A/B，而不是继续加提示词。
+在 131 上装带本批的构建，同一 `request_round2.json` 再跑 `--variant base --n 10`（这次由
+服务端补，脚本不改）：判空/反问要 ≤1/10。真实 VS Code 会话侧的复验同一条：第 2 轮起不再
+出现 `I don't see …` 或 `ask_user` 反问。若仍出现，把该次未截断的真实请求体取回来做消融，
+而不是继续加长提示词。
 
 ## 验收
 

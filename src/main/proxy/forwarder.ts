@@ -795,9 +795,10 @@ export class RequestForwarder {
   ): Promise<ForwardResult> {
     const startTime = Date.now()
 
-    // 末条是工具结果时补一条极简 user，把「继续干活」的意图钉回序列尾部（判据见
-    // `trailingUserGuard.ts` 模块头：真流量第 2 轮起出现「I don't see a request…」
-    // 与 ask_user 反问，第 1 轮从不出现）。
+    // 末条是工具结果时补一条极简 user，把「继续干活」的意图钉回序列尾部。触发条件是
+    // 两条同时成立（实测数据见 `trailingUserGuard.ts` 模块头）：巨大的 system 决定易感，
+    // 末条 tool 决定发作——同请求末尾补一句 user 后 15 次 0 命中，system 削到 8K 后
+    // 末条 tool 也 0 命中。网关改不了客户端的 system，能动的是序列尾部。
     //
     // 位置是这条修复的全部难点，四条约束：
     // - **必须是最后一个共用点**：账号渠道、聚合条目与自建供应商三条线路只有
