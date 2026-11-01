@@ -68,6 +68,7 @@ import {
   AUTO_WALL_CLOCK_BUDGET_MS,
   FIRST_EVENT_TIMEOUT_MS,
   firstStreamEvent,
+  isChannelModelUnavailableError,
   isFailoverEligibleStatus,
   isMissingReasoningHistoryError,
   isRecoverableChannelFailure,
@@ -531,11 +532,12 @@ export class RequestForwarder {
         return last
       }
 
-      // 「渠道能力不匹配」类 400（工具数超限、历史缺 reasoning_content）是
-      // 「换一家就能成」而非账号故障：换下一家继续试，但**不记冷却也不计账号
-      // 失败** —— 账号本身是健康的，小工具请求/无思考历史的会话不该被连坐。
+      // 「换一家就能成」类失败（工具数超限、历史缺 reasoning_content、渠道目录不认
+      // 这个模型）：请求在生成之前就被拒，账号本身是健康的，既不该记冷却也不该
+      // 计账号失败 —— 小工具请求/无思考历史的会话/一次目录漂移不该连坐整个账号。
       const capabilityMismatch = isToolOverflowError(result.error)
         || isMissingReasoningHistoryError(result.error)
+        || isChannelModelUnavailableError(result.error)
       if (!capabilityMismatch) {
         if (!this.isFailoverEligible(result.status)) {
           return last

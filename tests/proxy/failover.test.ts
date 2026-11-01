@@ -11,6 +11,10 @@
  * 6. 历史 assistant 消息缺 reasoning_content 的 400 同判可换家 —— 推理模型的
  *    历史校验与客户端历史形状不匹配，重试同一家只会原样再撞。
  *
+ * 渠道目录漂移的 404（用户报障 2026-11-01，auto → opencode/qwen3.8-max）：
+ * 7. 「模型不存在或已停用」这类 404 同判可换家 —— 这一家的目录不认这个模型，
+ *    换一家就能成，且请求在自己的进程里就被拒，账号本身无过。
+ *
  * PLAN-auto-routing-freellmapi P0-1/P0-2 追加：
  * 3. 换家按错误类分级（账号故障类 3 家封顶；排队/额度/限流类放宽到 6 家）；
  * 4. 换家有墙钟总预算（90s），预算耗尽返回最后失败；
@@ -26,6 +30,7 @@ import {
   AUTO_WALL_CLOCK_BUDGET_MS,
   FIRST_EVENT_TIMEOUT_MS,
   firstStreamEvent,
+  isChannelModelUnavailableError,
   isFailoverEligibleStatus,
   isMissingReasoningHistoryError,
   isRecoverableChannelFailure,
@@ -82,6 +87,24 @@ test('缺 reasoning 历史识别：窄口径，无关 400 不得误判', () => {
   assert.equal(isMissingReasoningHistoryError("Invalid value for 'reasoning_content': must be a string"), false)
   // 普通业务错误不算
   assert.equal(isMissingReasoningHistoryError('model not found'), false)
+})
+
+test('渠道目录不认模型识别：命中渠道 worker 抛出的原文（2026-11-01 auto/opencode 报障）', () => {
+  // worker.ts 的 `complete()` 请求前校验：宿主从 `model.list`（不套身份档）拿到的
+  // 付费模型，只有匿名槽的渠道在请求时拒绝 —— 换下一家就能成。
+  assert.ok(isChannelModelUnavailableError('模型不存在或已停用'))
+  // 跨桥时文案可能被包在更长的一句里（渠道名/前缀），仍要认
+  assert.ok(isChannelModelUnavailableError('opencode: 模型不存在或已停用'))
+})
+
+test('渠道目录不认模型识别：窄口径，其它 404 与无关文案不得误判', () => {
+  assert.equal(isChannelModelUnavailableError(undefined), false)
+  assert.equal(isChannelModelUnavailableError(''), false)
+  // 上游自己的「模型不存在」：语义是客户端写了个不存在的名字，换家没有意义
+  assert.equal(isChannelModelUnavailableError('model not found'), false)
+  assert.equal(isChannelModelUnavailableError('The model `gpt-9` does not exist'), false)
+  // 额度/排队类走自己的分支
+  assert.equal(isChannelModelUnavailableError('insufficient_quota: You exceeded your current quota'), false)
 })
 
 test('firstStreamEvent：建流失败在首块之前到达时，以 error 浮现并带上状态码', () => {
@@ -253,12 +276,12 @@ test('worker 的 model.rateLimits rpc 必须剥 provider 前缀再查限流键',
 })
 
 test('forwarder 的换家判据必须接上：超限 400 参与换家，普通 400 仍然直接失败', () => {
-  // 钉调用点：forwardFirstReachable 在 4xx 判定之前先查「渠道能力不匹配」
-  // （工具数超限 + 历史缺 reasoning_content，两类都是换一家就能成的 400）
+  // 钉调用点：forwardFirstReachable 在 4xx 判定之前先查「换一家就能成」的三类
+  // （工具数超限 + 历史缺 reasoning_content + 渠道目录不认这个模型）
   assert.match(
     forwarderSource,
-    /const capabilityMismatch = isToolOverflowError\(result\.error\)\s*\n\s*\|\| isMissingReasoningHistoryError\(result\.error\)/,
-    'forwardFirstReachable must consult capability-mismatch 400s before rejecting failover',
+    /const capabilityMismatch = isToolOverflowError\(result\.error\)\s*\n\s*\|\| isMissingReasoningHistoryError\(result\.error\)\s*\n\s*\|\| isChannelModelUnavailableError\(result\.error\)/,
+    'forwardFirstReachable must consult the switch-to-next-candidate classes before rejecting failover',
   )
   // probe 错误帧映射：能力不匹配类 400 保持 400（换取「不计账号失败」的换家语义）
   assert.match(
@@ -268,6 +291,7 @@ test('forwarder 的换家判据必须接上：超限 400 参与换家，普通 4
   )
   // 钉不变量：普通 4xx（非超限）依旧不可换家 —— 这条语义不许被顺手改掉
   assert.equal(isFailoverEligibleStatus(400), false)
+  assert.equal(isFailoverEligibleStatus(404), false, '404 仍靠消息判据单独放行，纯状态码语义不许漂')
   assert.equal(isFailoverEligibleStatus(429), true)
   assert.equal(isFailoverEligibleStatus(502), true)
 })

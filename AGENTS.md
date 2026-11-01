@@ -769,6 +769,24 @@ answers 503 with `details.missing` (`vision` / `tools` / `context` for a request
 `pool_strategy` / `manual_filter` when the route's own configuration emptied the pool) instead of a
 bare "no model". The same decision record is stored on `RequestLogEntry.auto`.
 
+**A candidate that answers "this channel does not serve that model" is switched past, not fatal.**
+`isFailoverEligibleStatus` keeps its pure status-code meaning (429 / 5xx / no status), and three
+message-keyed classes are let through it in `forwardFirstReachable` **before** that check, each
+without cooldown and without an account-failure count, because the request dies before generation and
+the account is healthy: tool-count overflow, missing `reasoning_content` in history, and
+`isChannelModelUnavailableError` (the channel worker's own `模型不存在或已停用`,
+`src/main/channelPack/worker.ts::complete`). The third exists because the two catalogue views of the
+pack disagree by design: the host's `supportedModels` comes from `model.list` → `listAllModels()`
+(**no** identity gating), while the worker's request-time pre-check reads `listModels`, which for
+`opencode` is free-only when no `sk-` key was pasted - so an anonymous-only install advertises 6 paid
+models it can never serve, and `auto` ranks one of them first (big window + tools + reasoning). Before
+this, that 404 ended the whole chain (`attempts: 1`) and the client read "auto is unavailable" while
+four other candidates were never tried (measured 2026-11-01 08:06:40 / 08:11:00,
+`opencode/qwen3.8-max`). Matching is deliberately a single authored literal, so an upstream's own
+`model does not exist` 404 still fails immediately - pinned by
+`tests/routes/proxy-routes-catalog-404.test.ts`, which drives a real local upstream and asserts both
+the switch and the non-switch.
+
 **Route-level manual include/exclude is the correction for a wrong mark.** `ModelRoute.includeModels`
 / `excludeModels` (`RouteModelRef = {providerId, displayName}`) are applied by
 `applyManualModelSelection()` **after** `poolStrategies` and **before** the contract filter:

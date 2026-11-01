@@ -58,11 +58,40 @@ export function isMissingReasoningHistoryError(message: string | undefined): boo
 }
 
 /**
+ * 「渠道目录里没有这个模型」类 404 的识别（用户报障 2026-11-01，`auto` 命中
+ * `opencode/qwen3.8-max` 后整场 404）。
+ *
+ * ## 为什么这一类也必须「换下一家」
+ *
+ * 宿主侧的可路由名单来自渠道包的 `model.list`，而它优先取适配器的
+ * `listAllModels()` —— **不套身份档**（`opencode-adapter.ts`：只有匿名槽时
+ * `listModels` 只放免费模型，全量表里 6 条付费模型照样在 `model.list` 里）。
+ * 渠道 worker 的请求前校验读的却是**分档后**的 `listModels`
+ * （`src/main/channelPack/worker.ts`），于是宿主把「目录说有、请求时不认」的
+ * 模型广告成候选，`auto` 给它打了最高分（窗口大、tools/reasoning 齐全）。
+ *
+ * 后果原先是致命的而不是可绕的：404 不属于 `isFailoverEligibleStatus`，换家
+ * 循环在第一个候选就 `return last`，同池另外 4 家一次都没被试到，客户端把
+ * 「这一家供不了」读成「`auto` 不可用」。
+ *
+ * 判据与工具数超限同类：**这一家供不了这个模型，换一家就能成**，而账号本身
+ * 是健康的（请求在生成之前就被自己的进程拒掉，零上游调用、不烧积分）——
+ * 所以换下一家继续试，同时不记冷却、不计账号故障。
+ *
+ * ⚠️ 识别口径必须**窄**：这句文案是渠道 worker 自己抛出的原文
+ * （`模型不存在或已停用`），不是上游文本；按普通 404 的语义继续直接失败。
+ */
+export function isChannelModelUnavailableError(message: string | undefined): boolean {
+  if (!message) return false
+  return message.includes('模型不存在或已停用')
+}
+
+/**
  * 429 / 5xx / 无状态码（网络错误、超时）才值得换目标；4xx 换目标没有意义。
  *
- * 例外是「渠道能力不匹配」类 400（工具数超限、历史缺 reasoning_content）：那类
- * 400 由调用方在状态码判定**之前**单独放行（forwarder.ts 的
- * `forwardFirstReachable`），本函数保持纯状态码语义。
+ * 例外是「渠道能力不匹配」类 400（工具数超限、历史缺 reasoning_content）与
+ * 「渠道目录不认这个模型」类 404：那三类由调用方在状态码判定**之前**单独放行
+ * （forwarder.ts 的 `forwardFirstReachable`），本函数保持纯状态码语义。
  */
 export function isFailoverEligibleStatus(status?: number): boolean {
   if (status === undefined) return true
