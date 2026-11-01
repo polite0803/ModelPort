@@ -1277,7 +1277,8 @@
     "tierHint": "Claude Desktop keeps a row when its id is a model name it knows, or when the row carries a legal family tier. So tagging an existing route with a tier advertises it without inventing Anthropic names; the client sends that route name back and the request lands in that route's own pool. That covers discovery only: its model picker re-filters by name and a tier does not count there, so the rows it cannot select are listed below.",
     "tierNoRoutes": "No enabled routes: enable one on the Routes page first.",
     "tierColumn": "Tier",
-    "displayNameColumn": "Client display name (blank = route name)",
+    "routeColumn": "Route name (this is what the client filters on)",
+    "displayNameColumn": "Client display name (label only; blank = route name)",
     "tierNone": "Not advertised",
     "tier_sonnet": "sonnet (everyday efficiency)",
     "tier_opus": "opus (most capable)",
@@ -1289,9 +1290,9 @@
       "missing-anthropic-name": "the name holds none of claude, anthropic or a tier word (sonnet, opus, haiku, fable, mythos), so the client drops it from the menu as a non-Anthropic model",
       "other-vendor-name": "the name carries another vendor's word (glm, qwen, gpt, deepseek, codex and such), so the client drops it from the menu whether or not a tier is set"
     },
-    "pickerGapApply": "Add client names from the tiers",
+    "pickerGapAuto": "Saving appends these to the mapping table above: {{pairs}} (names are claude-<tier> with no version number, so nothing pretends to be a specific Anthropic release; edit or delete them there)",
     "pickerGapBlocked": "No free name could be generated for: {{names}} — rename those routes yourself",
-    "pickerGapFix": "The button above appends rows to the client-name mapping table (names are claude-<tier>, with no version number, so nothing pretends to be a specific Anthropic release); saving is still yours to press. Renaming the route to something Anthropic-shaped, such as claude-daily, works too. The display-name column cannot rescue this one — the client filters on id, not on the label.",
+    "pickerGapFix": "To use something else instead, rename the route to an Anthropic-shaped name (for example claude-daily). The display-name column cannot rescue this one — the client filters on id, not on the label.",
     "configSaved": "Anthropic inbound settings saved",
     "configSaveFailed": "Failed to save Anthropic inbound settings"
   },

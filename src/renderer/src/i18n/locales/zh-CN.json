@@ -1277,7 +1277,8 @@
     "tierHint": "Claude Desktop 保留清单里一行的条件是：名字是它认识的 Anthropic 模型名，或者这一行带合法档位。所以给一条现有路由标上档位就能把它广告出去，不必伪造 Anthropic 名字；客户端选中后发回来的就是这条路由名，直接落进它自己的池。这一格只管「发现」：客户端的模型下拉还会按名字再筛一次，档位在那一关不作数，所以下面会把选不中的名字点名出来。",
     "tierNoRoutes": "没有启用中的路由：先去路由页启用一条。",
     "tierColumn": "档位",
-    "displayNameColumn": "客户端显示名（留空用路由名）",
+    "routeColumn": "路由名（客户端筛的就是这个）",
+    "displayNameColumn": "客户端显示名（只改显示文字，留空用路由名）",
     "tierNone": "不广告",
     "tier_sonnet": "sonnet（日常高效）",
     "tier_opus": "opus（强能力）",
@@ -1289,9 +1290,9 @@
       "missing-anthropic-name": "路由名里没有 claude、anthropic 或档位词（sonnet、opus、haiku、fable、mythos），客户端按「不是 Anthropic 模型」把它从下拉里丢掉",
       "other-vendor-name": "路由名里有别家供应商的词（glm、qwen、gpt、deepseek、codex 这类），客户端无论有没有档位都会把它从下拉里丢掉"
     },
-    "pickerGapApply": "按档位补客户端名",
+    "pickerGapAuto": "保存时会自动往上面的映射表里补：{{pairs}}（名字取 claude-档位，不带版本号，不冒充某个具体的 Anthropic 发布版本；补完想改想删都在那张表里）",
     "pickerGapBlocked": "这几条补不出不冲突的名字：{{names}} —— 只能自己改路由名",
-    "pickerGapFix": "点上面那个按钮会按档位往「客户端名 → 网关路由」那张表里补行（名字取 claude-档位，不带版本号，不冒充某个具体的 Anthropic 发布版本），补完仍要点保存；也可以直接把路由改成 Anthropic 形状的名字（例如 claude-daily）。客户端显示名那一格救不了这一关——客户端筛的是 id，不是显示名。",
+    "pickerGapFix": "不想用自动补的名字就直接改路由名（例如 claude-daily）。客户端显示名那一格救不了这一关——客户端筛的是 id，不是显示名。",
     "configSaved": "Anthropic 入向配置已保存",
     "configSaveFailed": "保存 Anthropic 入向配置失败"
   },

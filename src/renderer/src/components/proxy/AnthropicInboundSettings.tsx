@@ -75,6 +75,21 @@ function duplicateNames(rows: MappingRow[]): string[] {
   return [...seen].filter(([, count]) => count > 1).map(([key]) => key)
 }
 
+/**
+ * 手填的映射与「按档位自动补的」折成同一份落库值。
+ *
+ * 不另设按钮：用户选了档位就意味着「我要客户端能选中这条池」，补名字是该要求的后半句，
+ * 不是第二次手工操作。两者不会撞名（`clientNamesForTieredRoutes` 已经避开所有已占用的键），
+ * 所以这里只做拼接，谁也不覆盖谁。
+ */
+function mergeClientNames(
+  manual: Record<string, string> | undefined,
+  generated: Array<{ from: string; to: string }>,
+): Record<string, string> | undefined {
+  if (generated.length === 0) return manual
+  return { ...(manual ?? {}), ...Object.fromEntries(generated.map(row => [row.from, row.to])) }
+}
+
 export function AnthropicInboundSettings() {
   const { t } = useTranslation()
   const { toast } = useToast()
@@ -126,9 +141,14 @@ export function AnthropicInboundSettings() {
     if (draft === null) return
     try {
       // 留空 = 不写键：把空串写进库会让后端把「用户要求落空名」当成一条真实映射。
+      const manualMap = rowsToMap(rows)
+      // 选了档位就意味着「要客户端能选中这条池」，而它的下拉只认 Anthropic 形状的名字，
+      // 所以补名字随这一趟保存一起做，不再多一次手工点击。用的就是面板上列出的那份计划
+      // （`clientNamePlan`），说的和写的不会是两套。补完落在上面那张映射表里，可改可删；
+      // 下一轮那条路由已可选中，缺口判据不再报它，所以重复保存不会越补越多。
       const next: AnthropicInboundConfig = {
         defaultModel: draft.defaultModel?.trim() === '' ? undefined : draft.defaultModel,
-        modelMap: rowsToMap(rows),
+        modelMap: mergeClientNames(manualMap, clientNamePlan.add),
         routeTiers: tiersToRecord(tierDraft),
         routeDisplayNames: namesToRecord(nameDraft),
         // 没动过就不写这一格（undefined = 走默认开）；只有用户真关过才落 `false`。
@@ -218,8 +238,8 @@ export function AnthropicInboundSettings() {
   }, [])
 
   // 档位只过客户端「发现」那一关，它的下拉还有一道独立的名称关（判据与出处都写在
-  // `shared/anthropicWire.ts`）。按编辑态算，选完档位就能看到「这条名字点不到」，
-  // 不必保存后再去客户端那边猜为什么只有默认模型。
+  // `shared/anthropicWire.ts`）。按编辑态算：选完档位就当场说明「这几条现在点不到」，
+  // 并列出保存时会自动补成什么名字 —— 补的动作在 `saveConfig` 里，不另设按钮。
   const pickerGaps = useMemo(
     () =>
       routesAbsentFromClaudePicker({
@@ -240,13 +260,6 @@ export function AnthropicInboundSettings() {
       }),
     [routeNames, tierDraft, rows],
   )
-
-  const applyClientNames = () => {
-    if (clientNamePlan.add.length === 0) return
-    // 只写进上面那张映射表的编辑态：用户先看得见补了哪几条，再决定保不保存。
-    setRows(previous => [...previous, ...clientNamePlan.add])
-    setHasChanges(true)
-  }
 
   // 「生成路由」那一节的成立条件：目录里有候选（要建/已可见/被跳过都算）或读它出过错。
   // 三堆全空 = 这份安装的目录里根本没有 Claude 形态的模型，那一节就只剩两个点了没反应的
@@ -383,6 +396,13 @@ export function AnthropicInboundSettings() {
                 <p className="text-sm text-muted-foreground">{t('anthropicInbound.tierNoRoutes')}</p>
               ) : (
                 <div className="space-y-2">
+                  {/* 三列必须有表头：中间那一格看着像「填模型名」，实际只改显示文字，
+                      客户端筛的是左边的路由名 —— 没有表头就会被填错（实测就被填错过一次）。 */}
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <span className="flex-1">{t('anthropicInbound.routeColumn')}</span>
+                    <span className="flex-1">{t('anthropicInbound.displayNameColumn')}</span>
+                    <span className="w-[200px]">{t('anthropicInbound.tierColumn')}</span>
+                  </div>
                   {routeNames.map(route => (
                     <div key={route} className="flex items-center gap-2">
                       <code className="flex-1 font-mono text-sm truncate">{route}</code>
@@ -435,9 +455,11 @@ export function AnthropicInboundSettings() {
                     </p>
                   ))}
                   {clientNamePlan.add.length > 0 && (
-                    <Button type="button" variant="outline" size="sm" onClick={applyClientNames}>
-                      {t('anthropicInbound.pickerGapApply')}
-                    </Button>
+                    <p className="text-sm text-muted-foreground">
+                      {t('anthropicInbound.pickerGapAuto', {
+                        pairs: clientNamePlan.add.map(entry => `${entry.from} → ${entry.to}`).join('、'),
+                      })}
+                    </p>
                   )}
                   {clientNamePlan.blocked.length > 0 && (
                     // 补不出不冲突的名字时不许静默少补：那几条只能由用户自己改名。

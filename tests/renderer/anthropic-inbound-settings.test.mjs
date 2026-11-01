@@ -247,26 +247,28 @@ test('说明文案里没有 markdown 粗体：这些串是纯文本渲染的', (
   }
 })
 
-test('「按档位补客户端名」这条按钮接得上：判据在 shared、按钮写映射表的编辑态', () => {
+test('补客户端名随保存自动做掉，不留按钮也不留手工步骤', () => {
   const source = panel()
   assert.match(source, /import \{ clientNamesForTieredRoutes[^}]*\} from '@shared\/anthropicWire'/)
-  assert.match(source, /clientNamesForTieredRoutes\(\{[\s\S]{0,200}routeTiers: tierDraft/)
-  // 补出来的是映射表的草稿行：用户先看得见补了哪几条，再决定保不保存（不直接落库）。
-  assert.match(source, /setRows\(previous => \[\.\.\.previous, \.\.\.clientNamePlan\.add\]\)/)
-  assert.match(source, /if \(clientNamePlan\.add\.length === 0\) return[\s\S]{0,200}setHasChanges\(true\)/)
-  assert.match(source, /t\('anthropicInbound\.pickerGapApply'\)/)
-  assert.match(source, /pickerGapBlocked/, '补不出不冲突的名字要单独一句，不许静默少补')
+  // 保存时把「按档位补出来的名字」折进同一份 modelMap：用户只点一次保存。
+  assert.match(source, /modelMap: mergeClientNames\(manualMap, clientNamePlan\.add\)/)
+  assert.match(source, /if \(generated\.length === 0\) return manual/)
+  // 面板上那句「会补成什么」与真正写库的那份是同一个 plan，说的和写的不会两套。
+  assert.match(source, /t\('anthropicInbound\.pickerGapAuto'/)
+  assert.match(source, /clientNamePlan\.add\.map\(entry => `\$\{entry\.from\} → \$\{entry\.to\}`\)\.join\('、'\)/)
+  // 按钮那一版被退回过（「自动化个鬼」）：这里不许再长出 applyClientNames。
+  assert.doesNotMatch(source, /applyClientNames/, '补名字不该是一次额外的手工点击')
   // 名字是 shared 算的：面板里再拼一份 `claude-${...}` 就会与判据分叉。
   assert.doesNotMatch(source, /`claude-\$\{/, '客户端名的构造只该有一处')
 
   for (const name of ['zh-CN', 'en-US']) {
     const tree = locale(name).anthropicInbound
-    assert.equal(typeof tree?.pickerGapApply, 'string', `${name} is missing pickerGapApply`)
+    assert.equal(tree.pickerGapApply, undefined, `${name} keeps a label for a retired button`)
+    assert.match(tree.pickerGapAuto, /\{\{pairs\}\}/, `${name} lost the {{pairs}} slot`)
+    assert.match(tree.pickerGapAuto, /claude/, `${name} pickerGapAuto must say what gets generated`)
     assert.match(tree.pickerGapBlocked, /\{\{names\}\}/, `${name} lost the {{names}} slot`)
-    assert.match(tree.pickerGapFix, /claude/, `${name} pickerGapFix must say what the button generates`)
   }
 })
-
 test('「生成路由」那一节只在目录里有候选时出现，且挂载即读预览', () => {
   const source = panel()
   // 挂载就调 plan（只读）：不读就不知道该不该出现，等于留给用户一个只会出 0 的按钮。
@@ -280,5 +282,25 @@ test('「生成路由」那一节只在目录里有候选时出现，且挂载�
   for (const name of ['zh-CN', 'en-US']) {
     assert.equal(locale(name).anthropicInbound.discoveryNothingFound, undefined,
       `${name} keeps a string nothing renders`)
+  }
+})
+
+test('档位那张表有表头，且三列宽度与数据行一一对应', () => {
+  const source = panel()
+  // 中间那格看着像「填模型名」，实际只改显示文字：没有表头就会被填错（实测被填错过）。
+  assert.match(source, /t\('anthropicInbound\.routeColumn'\)/)
+  assert.match(source, /t\('anthropicInbound\.displayNameColumn'\)[\s\S]{0,80}t\('anthropicInbound\.tierColumn'\)/)
+  // 表头三列的宽度类必须与下面数据行的 code / Input / SelectTrigger 一致，否则错位。
+  const header = source.match(/<div className="flex items-center gap-2 text-xs[\s\S]*?<\/div>/)[0]
+  assert.deepEqual(header.match(/flex-1/g)?.length, 2, '表头前两列要与数据行同为 flex-1')
+  assert.match(header, /w-\[200px\]/, '表头第三列要与档位下拉同宽')
+  assert.match(source, /<code className="flex-1 font-mono text-sm truncate">/)
+  assert.match(source, /<SelectTrigger className="w-\[200px\]"/)
+
+  for (const name of ['zh-CN', 'en-US']) {
+    const tree = locale(name).anthropicInbound
+    assert.equal(typeof tree.routeColumn, 'string', `${name} is missing routeColumn`)
+    // 显示名那一格的标签要自己说清「只是文字」，不靠用户猜。
+    assert.match(tree.displayNameColumn, /显示|label/i, `${name} displayNameColumn must say it is a label only`)
   }
 })
