@@ -606,6 +606,8 @@ export interface AppConfig {
   httpsCertPath?: string
   /** Custom PEM private key; required together with `httpsCertPath`. */
   httpsKeyPath?: string
+  /** Extra IPs/hostnames the managed certificate must include in its SAN. */
+  httpsSanHosts: string[]
   loadBalanceStrategy: LoadBalanceStrategy
   modelMappings: Record<string, ModelMapping>
   theme: Theme
@@ -1190,6 +1192,7 @@ export interface ConfigUpdateRequest {
   httpsPort?: number
   httpsCertPath?: string
   httpsKeyPath?: string
+  httpsSanHosts?: string[]
   loadBalanceStrategy?: LoadBalanceStrategy
   theme?: Theme
   autoStart?: boolean

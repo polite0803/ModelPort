@@ -8,9 +8,11 @@ export const IpcChannels = {
 
   // Extra TLS listener (Claude Desktop's gateway refuses plain HTTP). Status is
   // read-only; installing the generated certificate into the OS trust store is
-  // always a user click, never a silent startup action.
+  // always a user click, never a silent startup action. `uninstall-trust` is the
+  // inverse and is equally click-only - it removes the cert, not the file.
   TLS_STATUS: 'tls:status',
   TLS_INSTALL_TRUST: 'tls:install-trust',
+  TLS_UNINSTALL_TRUST: 'tls:uninstall-trust',
 
   CONFIG_GET: 'config:get',
   CONFIG_UPDATE: 'config:update',

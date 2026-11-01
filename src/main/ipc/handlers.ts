@@ -19,7 +19,14 @@ import { getBuiltinProviders, getBuiltinProvider } from '../providers/builtin'
 import { oauthManager } from '../oauth/manager'
 import { fetchProviderModels } from '../providers/modelCatalog'
 import { proxyServer } from '../proxy/server'
-import { getTlsStatus, installCertificateTrust, loadTlsMaterial } from '../proxy/tls'
+import {
+  getTlsStatus,
+  installCertificateTrust,
+  loadTlsMaterial,
+  tryReadTlsMaterial,
+  uninstallCertificateTrust,
+  type TlsMaterial,
+} from '../proxy/tls'
 import { autoRouter } from '../proxy/autoRouter'
 import type { RoutePreviewResult, RoutePreviewSample } from '../proxy/autoRouter'
 import { proxyStatusManager } from '../proxy/status'
@@ -234,11 +241,15 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     return getTlsStatus(storeManager.getConfig(), proxyServer.getHttpsRuntimeStatus())
   })
 
-  ipcMain.handle(IpcChannels.TLS_INSTALL_TRUST, async (): Promise<TlsTrustResult> => {
+  // 信任的安装与卸载都针对**盘上当前这张**证书：改过证书名单后磁盘上的证书已经重签，
+  // 运行时缓存那份是旧的，装/卸错对象会让界面显示「未信任」而用户不知道为什么。
+  const withTlsMaterial = async (
+    action: (material: TlsMaterial) => Promise<TlsTrustResult>,
+  ): Promise<TlsTrustResult> => {
     try {
       const config = storeManager.getConfig()
-      const material = proxyServer.getHttpsMaterial() ?? loadTlsMaterial(config)
-      return await installCertificateTrust(material)
+      const material = tryReadTlsMaterial(config) ?? proxyServer.getHttpsMaterial() ?? loadTlsMaterial(config)
+      return await action(material)
     } catch (error) {
       return {
         ok: false,
@@ -246,7 +257,11 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
         trusted: null,
       }
     }
-  })
+  }
+
+  ipcMain.handle(IpcChannels.TLS_INSTALL_TRUST, () => withTlsMaterial(installCertificateTrust))
+
+  ipcMain.handle(IpcChannels.TLS_UNINSTALL_TRUST, () => withTlsMaterial(uninstallCertificateTrust))
 
   ipcMain.handle(IpcChannels.CONFIG_GET, async () => {
     return storeManager.getConfig()
@@ -264,6 +279,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
       httpsPort: updates.httpsPort ?? current.httpsPort,
       httpsCertPath: updates.httpsCertPath ?? current.httpsCertPath,
       httpsKeyPath: updates.httpsKeyPath ?? current.httpsKeyPath,
+      httpsSanHosts: updates.httpsSanHosts ?? current.httpsSanHosts,
     })
     if (!validation.valid) {
       const message = validation.errors.join('; ')

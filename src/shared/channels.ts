@@ -38,6 +38,15 @@ export interface ChannelDefinition {
    * （`account.create` 对它没有分支），所以方法名必须由目录声明，界面只照着调。
    */
   credentialAdd?: { withKey: string; anonymous?: string }
+  /**
+   * 该渠道上游**是否有每日签到（领取积分）接口**。
+   *
+   * 必填，不是可选：可选字段会被新渠道按「不写 = 有」填进去，于是界面照常渲染
+   * 「领取积分」按钮，点下去拿到渠道包 `credits.claimAll` 的兜底文案
+   * `unsupported provider: <id>`（用户报障 2026-11-02，opencode）。
+   * 判据只有一条：**渠道包的 `credits.claimAll` 有没有这家自己的分支**。
+   */
+  dailyCheckin: boolean
   /** One-line description of what the account unlocks. */
   description: string
   /**
@@ -78,6 +87,8 @@ export interface ChannelView {
   vendor: string
   loginKind: ChannelLoginKind
   credentialAdd?: { withKey: string; anonymous?: string }
+  /** 来自 {@link ChannelDefinition.dailyCheckin} —— 界面按它决定渲染不渲染「领取积分」。 */
+  dailyCheckin: boolean
   description: string
   /** A provider record exists, so its models are routable. */
   configured: boolean

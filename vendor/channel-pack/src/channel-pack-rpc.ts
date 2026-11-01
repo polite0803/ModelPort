@@ -2706,6 +2706,34 @@ function registerChannelPackEndpoints(
             value: { results, summary: computeClaimSummary(outcomes) } satisfies RpcCreditsClaimAllResponse,
           }
         }
+        if (req.provider === OPENCODE.id) {
+          // OpenCode Zen **没有签到端点**，也没有余额端点（实测 `/zen/v1/` 下
+          // balance/credits/usage/billing/quota 等 15 个候选路径全 404，见
+          // `credits.balances` 分支的说明）。它的「额度」是**按出口 IP 的匿名车道
+          // 限流**，既不需要领取也没有可领的东西。
+          //
+          // 用户报障 2026-11-02：界面上点 OpenCode 的「领取积分」拿到的是本 case
+          // 末尾的泛化文案 `unsupported provider: opencode` —— 那句是给「provider
+          // 没注册」准备的，而这里是「产品无此能力」，故与 cline / raccoon 同型显式拒绝。
+          return {
+            ok: false,
+            error: {
+              code: 'bad-request',
+              message: 'OpenCode 不支持每日签到（其后端没有签到接口；免费车道按出口 IP 限流，额度无需领取）',
+            },
+          }
+        }
+        if (req.provider === GEMINI.id) {
+          // Gemini Code Assist 免费线是**配额窗口**制（5 小时 / 周两个窗口的剩余
+          // 比例，见 `gemini-credits.ts`），没有积分这个概念，也就没有签到。
+          return {
+            ok: false,
+            error: {
+              code: 'bad-request',
+              message: 'Gemini Code Assist 不支持每日签到（其免费线按配额窗口计量，后端没有签到接口）',
+            },
+          }
+        }
         return { ok: false, error: { code: 'bad-request', message: `unsupported provider: ${req.provider}` } }
       }
 

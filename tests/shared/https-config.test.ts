@@ -5,7 +5,13 @@ import {
   buildHttpsUrl,
   buildProxyUrl,
   formatHostForUrl,
+  isDnsName,
+  isIpv4,
+  isIpv6,
+  normalizeSanHostList,
+  requiredSanHosts,
   validateHttpsConfig,
+  validateSanHosts,
 } from '../../src/shared/httpsConfig.ts'
 
 test('HTTPS port must stay inside 1-65535 and be an integer', () => {
@@ -48,4 +54,30 @@ test('URL helpers keep IPv6 hosts bracketed', () => {
   assert.equal(buildHttpsUrl('::1', 8443), 'https://[::1]:8443')
   assert.equal(buildProxyUrl('localhost', 8080, false), 'http://localhost:8080')
   assert.equal(buildProxyUrl('::1', 8443, true), 'https://[::1]:8443')
+})
+
+test('SAN list parsing keeps IPs and hostnames and drops the rest', () => {
+  assert.deepEqual(normalizeSanHostList(['192.168.1.20, 10.0.0.5', 'bad name', '']), ['192.168.1.20', '10.0.0.5'])
+  assert.deepEqual(normalizeSanHostList('not an array'), [])
+  assert.deepEqual(normalizeSanHostList(['Example.COM']), ['example.com'])
+  assert.deepEqual(requiredSanHosts(['192.168.1.20']), ['localhost', '127.0.0.1', '::1', '192.168.1.20'])
+  assert.deepEqual(requiredSanHosts(['localhost', '::1']), ['localhost', '127.0.0.1', '::1'])
+})
+
+test('invalid SAN entries are named at the write boundary', () => {
+  assert.deepEqual(validateSanHosts(undefined), [])
+  assert.deepEqual(validateSanHosts(['10.0.0.1', 'host.example']), [])
+  assert.equal(validateSanHosts(['bad name']).length, 1)
+  assert.match(validateSanHosts(['http://10.0.0.1'])[0], /http:\/\/10\.0\.0\.1/)
+  assert.deepEqual(validateHttpsConfig({ httpsSanHosts: ['oops!]'] }), [
+    'HTTPS certificate name is neither an IP nor a hostname: oops!]',
+  ])
+  assert.ok(isIpv4('10.0.0.1'))
+  assert.ok(!isIpv4('10.0.0.256'))
+  assert.ok(!isIpv4('::1'))
+  assert.ok(isIpv6('fe80::1'))
+  assert.ok(!isIpv6('10.0.0.1'))
+  assert.ok(isDnsName('localhost'))
+  assert.ok(isDnsName('a.b.example'))
+  assert.ok(!isDnsName('-bad'))
 })

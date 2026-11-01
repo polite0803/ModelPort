@@ -6,7 +6,7 @@ import { join } from 'path'
 import { generate } from 'selfsigned'
 import type { TlsCertificateInfo, TlsStatus, TlsTrustResult } from '../../shared/types'
 import type { AppConfig } from '../store/types'
-import { buildHttpsUrl } from '../../shared/httpsConfig.ts'
+import { buildHttpsUrl, isIpv4, isIpv6, requiredSanHosts } from '../../shared/httpsConfig.ts'
 
 const MANAGED_DIR = join(homedir(), '.modelport', 'tls')
 const MANAGED_CERT = 'server.crt'
@@ -24,6 +24,13 @@ export interface TlsRuntimeStatus {
   host: string
   port: number
   error: string | null
+}
+
+/** The config slice that decides which certificate gets presented. */
+export interface TlsConfigInput {
+  httpsCertPath?: string
+  httpsKeyPath?: string
+  httpsSanHosts?: string[]
 }
 
 interface CommandResult {
@@ -85,21 +92,35 @@ function managedPaths(): { certPath: string; keyPath: string } {
   }
 }
 
-function managedCertificateUsable(certPem: string): boolean {
+function altNamesFor(hosts: string[]): Array<{ type: number; value?: string; ip?: string }> {
+  return hosts.map((host) =>
+    isIpv4(host) || isIpv6(host) ? { type: 7, ip: host } : { type: 2, value: host },
+  )
+}
+
+function certCoversHosts(x509: X509Certificate, hosts: string[]): boolean {
+  return hosts.every((host) =>
+    isIpv4(host) || isIpv6(host)
+      ? x509.checkIP(host) !== undefined
+      : x509.checkHost(host) !== undefined,
+  )
+}
+
+function managedCertificateUsable(certPem: string, requiredHosts: string[]): boolean {
   try {
     const x509 = new X509Certificate(certPem)
     if (Date.parse(x509.validTo) - Date.now() < RENEW_BEFORE_MS) return false
-    return x509.checkHost('localhost') !== undefined && x509.checkIP('127.0.0.1') !== undefined
+    return certCoversHosts(x509, requiredHosts)
   } catch {
     return false
   }
 }
 
-function generateManagedMaterial(): TlsMaterial {
+function generateManagedMaterial(hosts: string[]): TlsMaterial {
   const { certPath, keyPath } = managedPaths()
   mkdirSync(MANAGED_DIR, { recursive: true })
   const result = generate(
-    [{ name: 'commonName', value: 'ModelPort Local' }],
+    [{ name: 'commonName', value: 'ModelPort' }],
     {
       days: CERT_DAYS,
       keySize: 2048,
@@ -109,14 +130,7 @@ function generateManagedMaterial(): TlsMaterial {
         { name: 'basicConstraints', cA: true, pathLenConstraint: 0 },
         { name: 'keyUsage', digitalSignature: true, keyEncipherment: true, keyCertSign: true },
         { name: 'extKeyUsage', serverAuth: true },
-        {
-          name: 'subjectAltName',
-          altNames: [
-            { type: 2, value: 'localhost' },
-            { type: 7, ip: '127.0.0.1' },
-            { type: 7, ip: '::1' },
-          ],
-        },
+        { name: 'subjectAltName', altNames: altNamesFor(hosts) },
         { name: 'subjectKeyIdentifier' },
       ],
     },
@@ -131,25 +145,26 @@ function generateManagedMaterial(): TlsMaterial {
   return readPair(certPath, keyPath, 'managed')
 }
 
-function ensureManagedMaterial(): TlsMaterial {
+function ensureManagedMaterial(requiredHosts: string[]): TlsMaterial {
   const { certPath, keyPath } = managedPaths()
   if (existsSync(certPath) && existsSync(keyPath)) {
     try {
       const material = readPair(certPath, keyPath, 'managed')
-      if (managedCertificateUsable(material.cert)) return material
+      if (managedCertificateUsable(material.cert, requiredHosts)) return material
     } catch {
       // Unreadable or mismatched pair: fall through and regenerate.
     }
   }
-  return generateManagedMaterial()
+  return generateManagedMaterial(requiredHosts)
 }
 
 /**
  * Resolves the certificate the HTTPS listener should present. Custom PEM paths
- * win; otherwise the app-managed self-signed cert is generated on first use and
- * renewed shortly before it expires.
+ * win; otherwise the app-managed self-signed cert is generated on first use,
+ * renewed shortly before it expires, and regenerated when a name the client
+ * connects by is missing from its SAN.
  */
-export function loadTlsMaterial(config: Pick<AppConfig, 'httpsCertPath' | 'httpsKeyPath'>): TlsMaterial {
+export function loadTlsMaterial(config: TlsConfigInput): TlsMaterial {
   const hasCert = typeof config.httpsCertPath === 'string' && config.httpsCertPath.trim() !== ''
   const hasKey = typeof config.httpsKeyPath === 'string' && config.httpsKeyPath.trim() !== ''
   if (hasCert !== hasKey) {
@@ -158,11 +173,11 @@ export function loadTlsMaterial(config: Pick<AppConfig, 'httpsCertPath' | 'https
   if (hasCert && hasKey) {
     return readPair(config.httpsCertPath as string, config.httpsKeyPath as string, 'custom')
   }
-  return ensureManagedMaterial()
+  return ensureManagedMaterial(requiredSanHosts(config.httpsSanHosts))
 }
 
 /** Reads an existing certificate for display without generating a new one. */
-export function tryReadTlsMaterial(config: Pick<AppConfig, 'httpsCertPath' | 'httpsKeyPath'>): TlsMaterial | null {
+export function tryReadTlsMaterial(config: TlsConfigInput): TlsMaterial | null {
   try {
     const hasCert = typeof config.httpsCertPath === 'string' && config.httpsCertPath.trim() !== ''
     const hasKey = typeof config.httpsKeyPath === 'string' && config.httpsKeyPath.trim() !== ''
@@ -176,13 +191,22 @@ export function tryReadTlsMaterial(config: Pick<AppConfig, 'httpsCertPath' | 'ht
 }
 
 /**
+ * SHA-1 thumbprint, formatted the way Windows certificate stores report it.
+ * The trust probe and the removal both compare against this exact shape, so a
+ * stray separator or lowercase hex silently matches nothing.
+ */
+export function sha1Thumbprint(certPem: string): string {
+  return new X509Certificate(certPem).fingerprint.replace(/:/g, '').toUpperCase()
+}
+
+/**
  * Whether the certificate is trusted by the OS store. Chromium-based clients
  * (Claude Desktop) use that store on Windows and macOS, so this is the same
  * question the client will ask. null means the platform has no cheap probe.
  */
 export async function isCertificateTrusted(material: TlsMaterial): Promise<boolean | null> {
   if (process.platform === 'win32') {
-    const thumbprint = new X509Certificate(material.cert).fingerprint.replace(/:/g, '').toUpperCase()
+    const thumbprint = sha1Thumbprint(material.cert)
     const command = `(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { $_.Thumbprint -eq '${thumbprint}' } | Measure-Object).Count`
     const result = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command])
     if (!result.ok) return null
@@ -211,9 +235,7 @@ export async function installCertificateTrust(material: TlsMaterial): Promise<Tl
   }
 
   if (process.platform === 'darwin') {
-    const loginKeychain = join(homedir(), 'Library', 'Keychains', 'login.keychain-db')
-    const keychain = existsSync(loginKeychain) ? loginKeychain : 'login.keychain'
-    const result = await run('security', ['add-trusted-cert', '-r', 'trustRoot', '-k', keychain, material.certPath])
+    const result = await run('security', ['add-trusted-cert', '-r', 'trustRoot', '-k', loginKeychainPath(), material.certPath])
     if (!result.ok) {
       return { ok: false, message: result.output || 'security add-trusted-cert failed', trusted: false }
     }
@@ -227,6 +249,73 @@ export async function installCertificateTrust(material: TlsMaterial): Promise<Tl
   return {
     ok: false,
     message: `On Linux, trust the certificate manually, e.g. sudo trust anchor --store "${material.certPath}" (or copy it to /usr/local/share/ca-certificates/ and run update-ca-certificates).`,
+    trusted: null,
+  }
+}
+
+function loginKeychainPath(): string {
+  const db = join(homedir(), 'Library', 'Keychains', 'login.keychain-db')
+  return existsSync(db) ? db : 'login.keychain'
+}
+
+/**
+ * Takes the certificate out of the OS trust store again.
+ *
+ * ⚠️ Windows deliberately does **not** use `certutil -delstore`: measured on this
+ * machine, a serial that matches nothing still exits 0 and removes the *first*
+ * entry of the store. The PowerShell form below filters on the exact SHA-1 and
+ * deletes nothing when there is no match.
+ */
+export async function uninstallCertificateTrust(material: TlsMaterial): Promise<TlsTrustResult> {
+  if (process.platform === 'win32') {
+    const thumbprint = sha1Thumbprint(material.cert)
+    const command =
+      `$found = @(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { $_.Thumbprint -eq '${thumbprint}' }); ` +
+      "if ($found.Count -eq 0) { 'NOT-INSTALLED' } else { $found | Remove-Item; 'REMOVED=' + $found.Count }"
+    const result = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command])
+    const output = result.output.trim()
+
+    if (!result.ok) {
+      return { ok: false, message: output || 'Failed to remove the certificate', trusted: null }
+    }
+    if (output.includes('NOT-INSTALLED')) {
+      return {
+        ok: true,
+        message: 'This certificate is not in the current user Trusted Root store; nothing was removed.',
+        trusted: false,
+      }
+    }
+    return {
+      ok: true,
+      message: `Removed from the current user Trusted Root store (${output}).`,
+      trusted: await isCertificateTrusted(material),
+    }
+  }
+
+  if (process.platform === 'darwin') {
+    const result = await run('security', [
+      'delete-certificate',
+      '-Z',
+      sha1Thumbprint(material.cert),
+      loginKeychainPath(),
+    ])
+    if (!result.ok) {
+      return {
+        ok: false,
+        message: result.output || `security delete-certificate failed (a trust setting added with sudo has to be removed with sudo)`,
+        trusted: null,
+      }
+    }
+    return {
+      ok: true,
+      message: 'Removed from the login keychain trust settings.',
+      trusted: await isCertificateTrusted(material),
+    }
+  }
+
+  return {
+    ok: false,
+    message: `On Linux, remove the trust anchor manually, e.g. sudo trust anchor --remove "${material.certPath}" (or delete it from /usr/local/share/ca-certificates/ and run update-ca-certificates).`,
     trusted: null,
   }
 }

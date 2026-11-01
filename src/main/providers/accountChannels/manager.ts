@@ -153,6 +153,7 @@ class AccountChannelManager {
         vendor: channel.vendor,
         loginKind: channel.loginKind,
         credentialAdd: channel.credentialAdd,
+        dailyCheckin: channel.dailyCheckin,
         description: channel.description,
         configured: provider !== undefined && provider.type === 'account',
         enabled: provider?.enabled === true,

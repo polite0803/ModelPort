@@ -41,6 +41,7 @@ import {
   normalizeModelMappingsWithDefaults,
 } from './types'
 import { localDayKey, recentLocalDays } from '../../shared/localDay'
+import { normalizeSanHostList } from '../../shared/httpsConfig'
 import {
   accumulateDayBucket,
   normalizeDayBucket,
@@ -538,6 +539,7 @@ class StoreManager {
       ),
       toolCallingConfig: normalizeToolCallingConfig(rawToolCallingConfig),
       toolPromptConfig: undefined,
+      httpsSanHosts: normalizeSanHostList(rawConfig.httpsSanHosts),
       autoRouting: normalizeAutoRoutingConfig(rawConfig.autoRouting),
       routes: this.normalizeRoutes(config, rawConfig),
       compression: normalizeCompressionConfig(rawConfig.compression),

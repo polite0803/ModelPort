@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import {
@@ -85,6 +85,9 @@ test('渠道 tools 硬上限：cline 必须声明 maxTools=128（用户报障 20
 test('opencode 渠道：不跳浏览器，且没有签到接口', () => {
   // 这两条是它和其余 12 家的结构性差别，界面上的「登录」与「签到」入口都按它们决定。
   assert.equal(getChannelDefinition('opencode')?.loginKind, 'api-key')
+  // 用户报障 2026-11-02：这条以前只有标题说了「没有签到接口」，断言里却没有它 ——
+  // 于是界面照常渲染「领取积分」，点下去拿到渠道包的 `unsupported provider: opencode`。
+  assert.equal(getChannelDefinition('opencode')?.dailyCheckin, false)
 })
 
 test('宿主没有把任何在册渠道重新关掉', () => {
@@ -146,4 +149,100 @@ test('表单型对话框的文案在两种语言里齐备且键集一致', () =>
   // 标题必须带渠道名插值：没有它，用户看不出自己在给哪一家加账号。
   assert.ok(zh.title.includes('{{name}}'))
   assert.ok(en.title.includes('{{name}}'))
+})
+
+/**
+ * 「领取积分」这条能力的三方对齐（用户报障 2026-11-02）。
+ *
+ * 症状：OpenCode 卡片点「领取积分」→ 红色 toast `unsupported provider: opencode`。
+ * 根因是这条能力在三处各说各话，中间没人对齐：
+ * - 渠道包 `credits.claimAll`：只有写了分支的渠道会真去领，其余一律落到 case 末尾
+ *   的泛化兜底 —— 那句本来是给「provider 根本没注册」准备的，用它回答「这家产品
+ *   没有签到能力」，排查者会去找一个不存在的注册项；
+ * - 目录 `dailyCheckin`：界面据此决定渲染不渲染按钮；
+ * - 界面 `Channels.tsx`：原先对 13 家无条件渲染。
+ *
+ * 这里刻意**不写死**「哪几家能领」的名单，而是从渠道包源码现读分支：判据变了（渠道
+ * 包给某家补上领取、或把某家的领取撤掉）时，目录没跟着改就直接红。
+ */
+const PACK_SRC_DIR = join(process.cwd(), 'vendor', 'channel-pack', 'src')
+const RPC_FILE = join(PACK_SRC_DIR, 'channel-pack-rpc.ts')
+
+/** 渠道包的产品常量名 → provider id（`export const TRAE: TraeProduct = { … id: 'trae'`）。 */
+function productIdsByConstant(): Map<string, string> {
+  const map = new Map<string, string>()
+  for (const file of readdirSync(PACK_SRC_DIR)) {
+    if (!file.endsWith('.ts')) continue
+    const source = readFileSync(join(PACK_SRC_DIR, file), 'utf8')
+    for (const match of source.matchAll(/export const ([A-Z_]+):[^\n]*\{([\s\S]{0,600}?)\n {2}id: '([a-z]+)',/g)) {
+      map.set(match[1], match[3])
+    }
+  }
+  return map
+}
+
+/** `credits.claimAll` 那一段 case 的源码（到下一个 `case '` 之前）。 */
+function claimAllCase(): string {
+  const source = readFileSync(RPC_FILE, 'utf8')
+  const start = source.indexOf("case 'credits.claimAll'")
+  assert.notEqual(start, -1, '渠道包里找不到 credits.claimAll 分支')
+  const end = source.indexOf("\n      case '", start + 5)
+  assert.notEqual(end, -1, 'credits.claimAll 之后没有别的 case，切片口径失效')
+  return source.slice(start, end)
+}
+
+/** 该 case 里每个 provider 分支 → 它是「明确拒绝签到」(true) 还是「真去领取」(false)。 */
+function claimBranches(): Map<string, boolean> {
+  const block = claimAllCase()
+  const constants = productIdsByConstant()
+  const pattern = /if \((?:req\.provider === ([A-Z_]+)\.id|isQoderFamily\(req\.provider\))\)/g
+  const hits: Array<{ start: number; end: number; constant: string | undefined; family: boolean }> = []
+  for (const match of block.matchAll(pattern)) {
+    const at = match.index ?? 0
+    hits.push({
+      start: at,
+      end: at + match[0].length,
+      constant: match[1],
+      family: match[1] === undefined,
+    })
+  }
+  // 扫不到分支＝扫描式样失效，下面的断言会全红；先在这里说清是哪种。
+  assert.ok(hits.length > 0, 'credits.claimAll 里一个 provider 分支都没扫到')
+
+  const branches = new Map<string, boolean>()
+  hits.forEach((hit, index) => {
+    // 分支体 = 本条 `if` 之后到下一条 `if`（最后一条到 case 末尾）之间的源码。
+    const stop = index + 1 < hits.length ? hits[index + 1].start : block.length
+    const refused = block.slice(hit.end, stop).includes('不支持每日签到')
+    if (hit.family) {
+      // qoder 与 qodercn 共用一条 `isQoderFamily` 分支
+      branches.set('qoder', refused)
+      branches.set('qodercn', refused)
+      return
+    }
+    const id = constants.get(String(hit.constant))
+    assert.ok(id !== undefined, `分支用了扫不到 id 的产品常量 ${String(hit.constant)}`)
+    branches.set(id, refused)
+  })
+  return branches
+}
+
+test('目录的 dailyCheckin 与渠道包 credits.claimAll 的分支逐家对齐', () => {
+  const branches = claimBranches()
+  for (const channel of ACCOUNT_CHANNELS) {
+    const refused = branches.get(channel.id)
+    // ① 在册 13 家都要有自己的分支。没有分支＝走到 case 末尾的泛化兜底，
+    //    界面拿到的就是本次报障的那句 `unsupported provider: <id>`。
+    assert.ok(
+      refused !== undefined,
+      `${channel.id}: 渠道包 credits.claimAll 没有它的分支，会落到泛化文案 unsupported provider`,
+    )
+    // ② 目录说能领 ⇒ 渠道包必须真去领；目录说不能领 ⇒ 渠道包必须给可读拒绝。
+    assert.equal(
+      channel.dailyCheckin,
+      refused === false,
+      `${channel.id}: 目录 dailyCheckin=${String(channel.dailyCheckin)}，`
+        + `而渠道包分支${refused ? '明确拒绝签到' : '真的执行领取'}`,
+    )
+  }
 })

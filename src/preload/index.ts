@@ -81,6 +81,9 @@ const tlsAPI = {
 
   installTrust: (): Promise<TlsTrustResult> =>
     ipcRenderer.invoke(IpcChannels.TLS_INSTALL_TRUST),
+
+  uninstallTrust: (): Promise<TlsTrustResult> =>
+    ipcRenderer.invoke(IpcChannels.TLS_UNINSTALL_TRUST),
 }
 
 const storeAPI = {

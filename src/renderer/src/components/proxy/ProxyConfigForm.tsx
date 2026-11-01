@@ -10,7 +10,7 @@ import { useProxyStore } from '@/stores/proxyStore'
 import { useToast } from '@/hooks/use-toast'
 import { Server, AlertCircle, RefreshCw, ShieldCheck } from 'lucide-react'
 import type { TlsStatus } from '@shared/types'
-import { buildHttpsUrl } from '@shared/httpsConfig'
+import { buildHttpsUrl, normalizeSanHostList, validateSanHosts } from '@shared/httpsConfig'
 import {
   Dialog,
   DialogContent,
@@ -29,6 +29,7 @@ interface FormErrors {
   host?: string
   httpsPort?: string
   httpsCert?: string
+  httpsSan?: string
 }
 
 interface ProxyFormValues {
@@ -38,6 +39,7 @@ interface ProxyFormValues {
   httpsPort: number
   httpsCertPath: string
   httpsKeyPath: string
+  httpsSanHostsText: string
 }
 
 export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
@@ -52,6 +54,7 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
     httpsPort: proxyConfig.httpsPort.toString(),
     httpsCertPath: proxyConfig.httpsCertPath ?? '',
     httpsKeyPath: proxyConfig.httpsKeyPath ?? '',
+    httpsSanHostsText: (proxyConfig.httpsSanHosts ?? []).join(', '),
   })
 
   const [formData, setFormData] = useState({
@@ -61,6 +64,7 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
     httpsPort: proxyConfig.httpsPort.toString(),
     httpsCertPath: proxyConfig.httpsCertPath ?? '',
     httpsKeyPath: proxyConfig.httpsKeyPath ?? '',
+    httpsSanHostsText: (proxyConfig.httpsSanHosts ?? []).join(', '),
   })
 
   const [errors, setErrors] = useState<FormErrors>({})
@@ -87,6 +91,7 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
       httpsPort: proxyConfig.httpsPort.toString(),
       httpsCertPath: proxyConfig.httpsCertPath ?? '',
       httpsKeyPath: proxyConfig.httpsKeyPath ?? '',
+      httpsSanHostsText: (proxyConfig.httpsSanHosts ?? []).join(', '),
     }
     setFormData(newFormData)
     initialConfigRef.current = newFormData
@@ -180,20 +185,39 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
     onConfigChange?.()
   }
 
-  const handleInstallTrust = async () => {
+  const handleSanHostsChange = (value: string) => {
+    setFormData(prev => ({ ...prev, httpsSanHostsText: value }))
+    const error = validateSanHosts([value]).length > 0 ? t('proxy.httpsSanInvalid') : undefined
+    setErrors(prev => ({ ...prev, httpsSan: error }))
+    setHasChanges(true)
+    onConfigChange?.()
+  }
+
+  const runTlsTrustAction = async (kind: 'install' | 'uninstall') => {
     if (tlsBusy) return
     setTlsBusy(true)
     try {
-      const result = await window.electronAPI?.tls?.installTrust?.()
+      const result =
+        kind === 'install'
+          ? await window.electronAPI?.tls?.installTrust?.()
+          : await window.electronAPI?.tls?.uninstallTrust?.()
+      const ok = result?.ok ?? false
       toast({
-        title: result?.ok ? t('proxy.httpsTrustInstalled') : t('proxy.httpsTrustFailed'),
+        title:
+          kind === 'install'
+            ? ok
+              ? t('proxy.httpsTrustInstalled')
+              : t('proxy.httpsTrustFailed')
+            : ok
+              ? t('proxy.httpsTrustRemoved')
+              : t('proxy.httpsTrustRemoveFailed'),
         description: result?.message,
-        variant: result?.ok ? 'default' : 'destructive',
+        variant: ok ? 'default' : 'destructive',
       })
       await refreshTlsStatus()
     } catch (error) {
       toast({
-        title: t('proxy.httpsTrustFailed'),
+        title: kind === 'install' ? t('proxy.httpsTrustFailed') : t('proxy.httpsTrustRemoveFailed'),
         description: error instanceof Error ? error.message : undefined,
         variant: 'destructive',
       })
@@ -207,13 +231,18 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
     const hostError = validateHost(formData.host)
     const httpsPortError = formData.httpsEnabled ? validateHttpsPort(formData.httpsPort) : undefined
     const httpsCertError = formData.httpsEnabled ? validateCertPair() : undefined
+    const httpsSanError =
+      formData.httpsEnabled && validateSanHosts([formData.httpsSanHostsText]).length > 0
+        ? t('proxy.httpsSanInvalid')
+        : undefined
 
-    if (portError || hostError || httpsPortError || httpsCertError) {
+    if (portError || hostError || httpsPortError || httpsCertError || httpsSanError) {
       setErrors({
         port: portError,
         host: hostError,
         httpsPort: httpsPortError,
         httpsCert: httpsCertError,
+        httpsSan: httpsSanError,
       })
       toast({
         title: t('proxy.validationFailed'),
@@ -230,6 +259,7 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
       httpsPort: parseInt(formData.httpsPort, 10),
       httpsCertPath: formData.httpsCertPath.trim(),
       httpsKeyPath: formData.httpsKeyPath.trim(),
+      httpsSanHostsText: formData.httpsSanHostsText.trim(),
     }
     const listenerChanged =
       values.port !== proxyConfig.port ||
@@ -237,7 +267,8 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
       values.httpsEnabled !== proxyConfig.httpsEnabled ||
       values.httpsPort !== proxyConfig.httpsPort ||
       values.httpsCertPath !== (proxyConfig.httpsCertPath ?? '') ||
-      values.httpsKeyPath !== (proxyConfig.httpsKeyPath ?? '')
+      values.httpsKeyPath !== (proxyConfig.httpsKeyPath ?? '') ||
+      values.httpsSanHostsText !== (proxyConfig.httpsSanHosts ?? []).join(', ')
 
     if (listenerChanged && proxyStatus?.isRunning) {
       setShowRestartDialog(true)
@@ -255,8 +286,19 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
       httpsPort: proxyConfig.httpsPort,
       httpsCertPath: proxyConfig.httpsCertPath,
       httpsKeyPath: proxyConfig.httpsKeyPath,
+      httpsSanHosts: proxyConfig.httpsSanHosts,
     }
-    setProxyConfig(values)
+    // 界面是一栏逗号分隔的文本，落库是数组：这里折一次，读回来再显示成文本。
+    const sanHosts = normalizeSanHostList([values.httpsSanHostsText])
+    setProxyConfig({
+      port: values.port,
+      host: values.host,
+      httpsEnabled: values.httpsEnabled,
+      httpsPort: values.httpsPort,
+      httpsCertPath: values.httpsCertPath || undefined,
+      httpsKeyPath: values.httpsKeyPath || undefined,
+      httpsSanHosts: sanHosts,
+    })
 
     const success = await saveAppConfig({
       proxyPort: values.port,
@@ -265,6 +307,7 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
       httpsPort: values.httpsPort,
       httpsCertPath: values.httpsCertPath || undefined,
       httpsKeyPath: values.httpsKeyPath || undefined,
+      httpsSanHosts: sanHosts,
     })
 
     if (success) {
@@ -276,6 +319,7 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
         httpsPort: values.httpsPort.toString(),
         httpsCertPath: values.httpsCertPath,
         httpsKeyPath: values.httpsKeyPath,
+        httpsSanHostsText: sanHosts.join(', '),
       }
       toast({
         title: t('common.success'),
@@ -306,6 +350,7 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
         httpsPort: parseInt(formData.httpsPort, 10),
         httpsCertPath: formData.httpsCertPath.trim(),
         httpsKeyPath: formData.httpsKeyPath.trim(),
+        httpsSanHostsText: formData.httpsSanHostsText.trim(),
       }
 
       const saved = await performSave(values)
@@ -354,7 +399,13 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
     setHasChanges(false)
   }
 
-  const isValid = !errors.port && !errors.host && !errors.httpsPort && !errors.httpsCert
+  const isValid = !errors.port && !errors.host && !errors.httpsPort && !errors.httpsCert && !errors.httpsSan
+  const formSanHosts = normalizeSanHostList([formData.httpsSanHostsText])
+  // 绑 `0.0.0.0` 时那个地址本身连不上，界面要显示的是客户端真正会敲的那个 IP。
+  const httpsPreviewHost =
+    formData.host === '0.0.0.0' || formData.host === '::'
+      ? formSanHosts.find((host) => host !== 'localhost') ?? '127.0.0.1'
+      : formData.host
 
   return (
     <>
@@ -464,10 +515,30 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
                   <div className="space-y-2">
                     <Label>{t('proxy.httpsClientUrl')}</Label>
                     <code className="block rounded bg-[var(--bg-subtle)] px-2 py-1.5 text-xs">
-                      {buildHttpsUrl(formData.host, parseInt(formData.httpsPort, 10) || 8443)}
+                      {buildHttpsUrl(httpsPreviewHost, parseInt(formData.httpsPort, 10) || 8443)}
                     </code>
                     <p className="text-xs text-muted-foreground">{t('proxy.httpsClientUrlHelp')}</p>
                   </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="https-san-hosts" className="flex items-center gap-2">
+                    {t('proxy.httpsSanHosts')}
+                    {errors.httpsSan && (
+                      <span className="text-destructive text-caption flex items-center gap-1">
+                        <AlertCircle className="h-3 w-3" />
+                        {errors.httpsSan}
+                      </span>
+                    )}
+                  </Label>
+                  <Input
+                    id="https-san-hosts"
+                    placeholder="192.168.1.20, 10.0.0.5"
+                    value={formData.httpsSanHostsText}
+                    onChange={(e) => handleSanHostsChange(e.target.value)}
+                    className={errors.httpsSan ? 'border-destructive' : ''}
+                  />
+                  <p className="text-xs text-muted-foreground">{t('proxy.httpsSanHostsHelp')}</p>
                 </div>
 
                 <div className="space-y-2">
@@ -483,6 +554,9 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
                         {t('proxy.httpsCertValidTo')}: {tlsStatus.certificate.validTo}
                       </div>
                       <div>
+                        {t('proxy.httpsCertSan')}: <code>{tlsStatus.certificate.subjectAltName}</code>
+                      </div>
+                      <div>
                         {t('proxy.httpsCertTrust')}:{' '}
                         {tlsStatus.trusted === null
                           ? t('proxy.httpsCertTrustUnknown')
@@ -495,16 +569,28 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
                     <p className="text-xs text-muted-foreground">{t('proxy.httpsCertNotGenerated')}</p>
                   )}
                   {errors.httpsCert && <p className="text-xs text-destructive">{errors.httpsCert}</p>}
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={handleInstallTrust}
-                    disabled={tlsBusy || !tlsStatus?.certificate}
-                  >
-                    {tlsBusy ? t('proxy.httpsInstalling') : t('proxy.httpsInstallTrust')}
-                  </Button>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => runTlsTrustAction('install')}
+                      disabled={tlsBusy || !tlsStatus?.certificate}
+                    >
+                      {tlsBusy ? t('proxy.httpsInstalling') : t('proxy.httpsInstallTrust')}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => runTlsTrustAction('uninstall')}
+                      disabled={tlsBusy || !tlsStatus?.certificate}
+                    >
+                      {tlsBusy ? t('proxy.httpsUninstalling') : t('proxy.httpsUninstallTrust')}
+                    </Button>
+                  </div>
                   <p className="text-xs text-muted-foreground">{t('proxy.httpsInstallTrustHelp')}</p>
+                  <p className="text-xs text-muted-foreground">{t('proxy.httpsRemoteTrustHint')}</p>
                 </div>
 
                 <div className="grid gap-4 md:grid-cols-2">

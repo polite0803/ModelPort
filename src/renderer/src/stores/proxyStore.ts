@@ -9,6 +9,8 @@ export interface ProxyConfig {
   httpsPort: number
   httpsCertPath?: string
   httpsKeyPath?: string
+  /** Extra IPs/hostnames the managed certificate must carry. */
+  httpsSanHosts: string[]
   timeout: number
   retryCount: number
   /** Absent = 代理内置默认（anthropic wire 必填的 max_tokens 兜底） */
@@ -58,6 +60,7 @@ const DEFAULT_PROXY_CONFIG: ProxyConfig = {
   host: '127.0.0.1',
   httpsEnabled: false,
   httpsPort: 8443,
+  httpsSanHosts: [],
   timeout: 60000,
   retryCount: 3,
   maxConnections: 100,
@@ -184,6 +187,7 @@ export const useProxyStore = create<ProxyState>((set, get) => ({
             host: config.proxyHost || '127.0.0.1',
             httpsEnabled: config.httpsEnabled ?? false,
             httpsPort: config.httpsPort ?? 8443,
+            httpsSanHosts: config.httpsSanHosts ?? [],
             httpsCertPath: config.httpsCertPath,
             httpsKeyPath: config.httpsKeyPath,
             timeout: config.requestTimeout,

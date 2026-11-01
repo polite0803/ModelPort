@@ -790,15 +790,17 @@ export function Channels() {
                     <Plus className="mr-1 h-3.5 w-3.5" />
                     {t('channels.addAccount')}
                   </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={busy || !connected}
-                    onClick={() => void claimCredits(channel)}
-                  >
-                    <Ticket className="mr-1 h-3.5 w-3.5" />
-                    {t('channels.claim')}
-                  </Button>
+                  {channel.dailyCheckin && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={busy || !connected}
+                      onClick={() => void claimCredits(channel)}
+                    >
+                      <Ticket className="mr-1 h-3.5 w-3.5" />
+                      {t('channels.claim')}
+                    </Button>
+                  )}
                   {connected && (
                     <Button
                       variant="ghost"

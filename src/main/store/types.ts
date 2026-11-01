@@ -290,6 +290,12 @@ export interface AppConfig {
   httpsCertPath?: string
   /** Custom PEM private key; must be set together with `httpsCertPath`. */
   httpsKeyPath?: string
+  /**
+   * Extra IPs/hostnames the managed certificate must carry. A remote client
+   * connects by address, and TLS fails on a name mismatch no matter whether the
+   * certificate is trusted - so the address actually used has to be in the SAN.
+   */
+  httpsSanHosts: string[]
   /** Load balance strategy */
   loadBalanceStrategy: LoadBalanceStrategy
   /** Model mapping configuration */
@@ -843,6 +849,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   proxyHost: '127.0.0.1',
   httpsEnabled: false,
   httpsPort: 8443,
+  httpsSanHosts: [],
   loadBalanceStrategy: 'round-robin',
   modelMappings: {},
   theme: 'system',

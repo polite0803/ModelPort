@@ -136,6 +136,7 @@ interface ProxyAPI {
 interface TlsAPI {
   getStatus: () => Promise<TlsStatus>
   installTrust: () => Promise<TlsTrustResult>
+  uninstallTrust: () => Promise<TlsTrustResult>
 }
 
 interface StoreAPI {
