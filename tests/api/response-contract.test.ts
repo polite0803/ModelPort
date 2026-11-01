@@ -98,3 +98,37 @@ test('stop() force-closes lingering connections', () => {
   assert.match(source, /closeIdleConnections/)
   assert.match(source, /closeAllConnections/)
 })
+
+/**
+ * 上游风控拦截的 `code`（2026-11-01 真流量 9 笔）。判据的关键是**分类顺序**：
+ * 风控的状态码两边都见过（400 / 502，上游也有 403），若先按状态码分，
+ * 403 会被报成「调用方的 Key 不对」——而渠道包逐账号实测证明它按**账号**生效
+ * （同一请求体 7 个账号：2 通、4 拦、1 限流），与客户端凭据毫无关系。
+ */
+test('risk-control rejections get their own code and never masquerade as an auth failure', () => {
+  const illegal = 'workbuddy: 请求被拦截，请重新发送 request illegal'
+  assert.deepEqual(mapUpstreamError(400, illegal), {
+    status: 400,
+    type: 'invalid_request_error',
+    code: 'channel_risk_control',
+  })
+  assert.equal(mapUpstreamError(502, illegal).code, 'channel_risk_control')
+  assert.equal(mapUpstreamError(502, illegal).type, 'api_error')
+  // 同一条文案配 403 时必须**不**落到 authentication_error。
+  assert.deepEqual(mapUpstreamError(403, illegal), {
+    status: 403,
+    type: 'invalid_request_error',
+    code: 'channel_risk_control',
+  })
+
+  // 负样本：真认证失败（无风控文案）仍按 401 / authentication_error。
+  assert.deepEqual(mapUpstreamError(403, 'upstream rejected the token'), {
+    status: 401,
+    type: 'authentication_error',
+    code: 'upstream_unauthorized',
+  })
+  // 429 也不被文案劫持。
+  assert.equal(mapUpstreamError(429, 'Raccoon: 模型 sn-x 的可用账号均在限流中，将于 20:00 解禁').code, 'rate_limit_exceeded')
+  // 无文案时行为不变。
+  assert.equal(mapUpstreamError(400).code, null)
+})

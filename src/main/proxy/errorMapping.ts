@@ -1,4 +1,4 @@
-import { isChannelCredentialFailure } from './failover.ts'
+import { isChannelCredentialFailure, isChannelRiskControlFailure } from './failover.ts'
 
 export interface UpstreamErrorShape {
   status: number
@@ -7,6 +7,19 @@ export interface UpstreamErrorShape {
 }
 
 export function mapUpstreamError(status?: number, message?: string): UpstreamErrorShape {
+  // 上游风控拦截排在最前：它的状态码两边都见过（实测 400 与 502，上游也有 403），
+  // 若先按状态码分类，403 会被报成「调用方的 Key 不对」—— 而逐账号实测证明这是
+  // **账号级**拦截（同一请求体发往 7 个账号：2 通、4 拦、1 限流），与客户端的
+  // 凭据毫无关系。渠道包自己的「请调整内容」提示同样是错的方向，所以这里只在
+  // `code` 上给稳定信号，`type` 仍按状态码本身那一类。
+  if (status !== undefined && isChannelRiskControlFailure(message)) {
+    const bounded = status >= 400 && status < 600 ? status : 502
+    return {
+      status: bounded,
+      type: bounded < 500 ? 'invalid_request_error' : 'api_error',
+      code: 'channel_risk_control',
+    }
+  }
   if (status === 401 || status === 403) {
     return { status: 401, type: 'authentication_error', code: 'upstream_unauthorized' }
   }

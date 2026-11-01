@@ -180,10 +180,46 @@ export function isRecoverableChannelFailure(message: string | undefined): boolea
     || /quota/i.test(message)
     || /billing\s+daily\s+count\s+exceeded/i.test(message)
     || /所有账号均受限/.test(message)
-    // 凭据类同族：请求在生成之前就被拒，不烧积分，换下一家命中率真实存在。
-    // 它与其余几类的**唯一**区别是要人工处理，所以冷却档位另算
-    // （{@link isChannelCredentialFailure} 供 forwarder 判冷却与是否重试）。
+    // 渠道包在**发请求之前**就报「该模型全部启用账号都在限流中」（`index.ts` 的
+    // `QUOTA_EXCEEDED`，状态码落成 502）。它自己写着「无需重新登录」，所以这是
+    // 定时限流而不是人工介入：零上游调用、不烧积分，换下一家就能成。
+    // 按普通 502 计入账号故障上限的话，三家限流就把整条链判死，而池里其余候选
+    // 其实都活着（2026-11-01 远程日志：这一类在真流量里排第 2 多）。
+    || /均在限流中|频率超限/.test(message)
     || isChannelCredentialFailure(message)
+}
+
+/**
+ * 「这一家的账号被上游风控挡住，要人或时间去处理」类失败的识别。
+ *
+ * 腾讯系（CodeBuddy / WorkBuddy）的安全策略拦截：业务码 `11140`、
+ * `msg: "request illegal"`、`displayMsg` 的「安全审核」文案。渠道包 2026-09-27 的
+ * 逐账号实测已经推翻「这是内容问题」的初判 —— **同一份请求体**发往池里 7 个账号
+ * 得到 2×200 / 4×403 / 1×429，拦截按**账号**生效。所以：
+ * - 它不是「客户端请求写错」：换一个候选就能成 ⇒ `auto` 必须继续往下试，
+ *   而不是在第一个候选就 `return last`（2026-11-01 实测 3 笔 `auto` 因此整场 400）；
+ * - 它也不会自己好得快：渠道包内部就给它定了 30 分钟的账号冷却 ⇒ 宿主侧用
+ *   「人工介入」那一档，而不是 15s 起（`accountRuntime.recordCredentialFailure`）。
+ *
+ * 状态码两边都有（远程日志里 400 与 502 各 7 / 2 笔），所以判据只看文案。
+ */
+export function isChannelRiskControlFailure(message: string | undefined): boolean {
+  if (!message) return false
+  return /request illegal/i.test(message)
+    || message.includes('请求被拦截')
+    || /安全审核|safety review/i.test(message)
+}
+
+/**
+ * 「要人来处理或要时间恢复」的渠道级故障：凭据类与风控类的并集。
+ *
+ * 两者共同点决定了宿主该做的三件事一致：重试无意义（同一家同一笔等待再付一遍）、
+ * 换下一家能成、冷却按人工介入档给。区别只在给客户端的 `code`
+ * （`channel_relogin_required` / `channel_risk_control`），所以那个仍在
+ * `errorMapping.ts` 里分开判。
+ */
+export function isChannelHumanRequiredFailure(message: string | undefined): boolean {
+  return isChannelCredentialFailure(message) || isChannelRiskControlFailure(message)
 }
 
 /** 可恢复类失败在账号故障类上限之外额外放行的候选数（默认 3 + 3 = 6 家）。 */
@@ -214,7 +250,11 @@ export function describeAttemptFailure(input: {
     || isChannelModelUnavailableError(input.error)
     || isForcedToolChoiceUnsupported(input.error)
     ? 'capability'
-    : isFailoverEligibleStatus(input.status)
+    : isChannelHumanRequiredFailure(input.error)
+      // 风控类落的是 400，按纯状态码会被记成 `fatal`，而换家循环实际是**继续往下试**
+      // （见 forwarder 的人工介入分支）—— 日志里的 kind 必须与当时走的分支一致。
+      ? 'failover'
+      : isFailoverEligibleStatus(input.status)
       ? 'failover'
       : 'fatal'
   return {

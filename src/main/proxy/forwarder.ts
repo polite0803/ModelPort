@@ -83,7 +83,7 @@ import {
   AUTO_WALL_CLOCK_BUDGET_MS,
   describeAttemptFailure,
   firstStreamEvent,
-  isChannelCredentialFailure,
+  isChannelHumanRequiredFailure,
   isChannelModelUnavailableError,
   isFailoverEligibleStatus,
   isForcedToolChoiceUnsupported,
@@ -416,7 +416,7 @@ export class RequestForwarder {
         // 凭据类 502 也不重试，理由与 429 那一段同构但更强：它不是「隔一会儿就
         // 好」，而是「要人来处理」（重新登录 / 补 Key / 换出口 IP）。重试等于把同一
         // 笔等待再付一遍 —— 宿主截止时间 60s 时，一次多余重试就是把 60s 变成 120s。
-        if (isChannelCredentialFailure(result.error)) {
+        if (isChannelHumanRequiredFailure(result.error)) {
           break
         }
       } catch (error) {
@@ -584,6 +584,19 @@ export class RequestForwarder {
         error: result.error,
         status: result.status,
       }))
+      if (isChannelHumanRequiredFailure(result.error)) {
+        // 「这一家当前供不了，且要人或时间恢复」：凭据失效（`no usable credential`
+        // /`凭据未配置`/`没有可用通道`）与上游风控（`request illegal`）。
+        // 两类都不能让整条链停手 —— 风控落的是 400，不在 failover 的状态码里，
+        // 原先第一个候选就 `return last`（2026-11-01 实测 3 笔 `auto` 整场失败）；
+        // 也不占账号故障上限（换一家就能成）；但必须按人工介入档冷却：真流量里
+        // 这一类 9+5 笔，没有长冷却时每一笔新请求都再付一遍完整加密 prefill
+        // 与排队等待（同一家单次实测 214s–245s）。
+        autoRouter.markCredentialCooldown(candidate.account.id)
+        loadBalancer.markAccountFailed(candidate.account.id)
+        continue
+      }
+
       if (!capabilityMismatch) {
         if (!this.isFailoverEligible(result.status)) {
           return finish()
@@ -598,11 +611,7 @@ export class RequestForwarder {
 
         // 429 的冷却已由 forwardChatCompletion 记录，这里只补记 5xx / 网络错误
         if (result.status !== 429) {
-          if (isChannelCredentialFailure(result.error)) {
-            autoRouter.markCredentialCooldown(candidate.account.id)
-          } else {
-            autoRouter.markAccountCooldown(candidate.account.id, result.status)
-          }
+          autoRouter.markAccountCooldown(candidate.account.id, result.status)
         }
         loadBalancer.markAccountFailed(candidate.account.id)
       }

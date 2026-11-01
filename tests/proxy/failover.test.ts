@@ -39,6 +39,8 @@ import {
   FIRST_EVENT_TIMEOUT_MS,
   firstStreamEvent,
   isChannelCredentialFailure,
+  isChannelHumanRequiredFailure,
+  isChannelRiskControlFailure,
   isChannelModelUnavailableError,
   isFailoverEligibleStatus,
   isForcedToolChoiceUnsupported,
@@ -498,7 +500,7 @@ test('换家取证必须落到源码：循环记录每次失败，日志写出 f
   // 否则「为什么链在这里断了」仍然无处可查。
   assert.match(
     forwarderSource,
-    /failures\.push\(describeAttemptFailure\(\{\s*\n\s*candidate: candidate\.displayName,\s*\n\s*error: result\.error,\s*\n\s*status: result\.status,\s*\n\s*\}\)\)\s*\n\s*if \(!capabilityMismatch\)/,
+    /failures\.push\(describeAttemptFailure\(\{\s*\n\s*candidate: candidate\.displayName,\s*\n\s*error: result\.error,\s*\n\s*status: result\.status,\s*\n\s*\}\)\)[\s\S]{0,1600}?if \(!capabilityMismatch\)/,
     'every failed attempt must be described before the failover branch decides where to go next',
   )
   // 每个出口都要带上清单（成功那轮的返回值同样含此前被跳过的家）
@@ -652,11 +654,50 @@ test('流式首块之后的停摆必须由看门狗兜住', () => {
 
 test('凭据类与强制 tool_choice 类判据必须接进请求路径', () => {
   // 凭据类：不重试（否则同一笔等待再付一遍）+ 按人工介入档冷却。
-  assert.match(forwarderSource, /if\s*\(\s*isChannelCredentialFailure\(result\.error\)\s*\)\s*\{?\s*\n?\s*break/,
-    'credential-class failures must not be retried by the host')
+  assert.match(forwarderSource, /if\s*\(\s*isChannelHumanRequiredFailure\(result\.error\)\s*\)\s*\{?\s*\n?\s*break/,
+    'credential- and risk-control-class failures must not be retried by the host')
   assert.match(forwarderSource, /autoRouter\.markCredentialCooldown\(/,
     'credential-class failures must use the human-intervention cooldown tier')
   // 强制 tool_choice：按 capability 类换下一家，而不是整场 400。
   assert.match(forwarderSource, /\|\|\s*isForcedToolChoiceUnsupported\(result\.error\)/,
     'forced tool_choice rejection must join the capability-mismatch set so the chain keeps trying')
+})
+
+/**
+ * 2026-11-01 部署后从真流量日志里补的两类（各 15 / 9 笔，探针矩阵看不见）：
+ * - 「可用账号均在限流中」：渠道包在发请求**之前**就报，且原文明确写「无需重新登录」
+ *   —— 是定时限流，不该占账号故障上限，也不该进人工介入冷却档；
+ * - 「request illegal / 请求被拦截」：上游风控，渠道包逐账号实测是**账号级**
+ *   （同一请求体 7 个账号 2 通 4 拦），落 400 时原先会把整条 `auto` 链打死。
+ */
+test('定时限流算可恢复类，但不算人工介入类', () => {
+  const limited = 'Raccoon (商汤)：模型 sn-deepseek-v4-1-flash-1017 的可用账号均在限流中，'
+    + '最近一个将于 2026/11/1 20:00:00 解禁。可改用其它 provider / 模型，或等待解禁后再试（无需重新登录）。'
+  assert.equal(isRecoverableChannelFailure(limited), true)
+  assert.equal(isChannelCredentialFailure(limited), false)
+  assert.equal(isChannelRiskControlFailure(limited), false)
+  assert.equal(isChannelHumanRequiredFailure(limited), false)
+  assert.equal(isRecoverableChannelFailure('raccoon: 您的模型请求频率超限，请稍后重试'), true)
+})
+
+test('风控拦截属人工介入类，凭据类不算风控', () => {
+  assert.equal(isChannelRiskControlFailure('workbuddy: 请求被拦截，请重新发送 request illegal'), true)
+  assert.equal(isChannelHumanRequiredFailure('workbuddy: 请求被拦截，请重新发送 request illegal'), true)
+  assert.equal(isChannelRiskControlFailure('qoder: no usable credential; log in first'), false)
+  assert.equal(isChannelHumanRequiredFailure('qoder: no usable credential; log in first'), true)
+  // 负样本：普通正文、限流、目录不认模型都不命中。
+  assert.equal(isChannelRiskControlFailure('模型不存在或已停用'), false)
+  assert.equal(isChannelRiskControlFailure('The safety of your request was reviewed.'), false)
+})
+
+test('风控类 400 在日志里记成 failover，而不是 fatal', () => {
+  // 判据与换家分支必须同源：`kind` 说 fatal 而循环其实往下试了下一家，
+  // 日志就会把「这一家被风控」和「客户端请求写错」写成同一件事。
+  const failure = describeAttemptFailure({
+    candidate: 'WorkBuddy (腾讯) / Hy3',
+    error: 'workbuddy: 请求被拦截，请重新发送 request illegal',
+    status: 400,
+  })
+  assert.equal(failure.kind, 'failover')
+  assert.equal(failure.status, 400)
 })
