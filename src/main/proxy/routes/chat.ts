@@ -21,6 +21,7 @@ import { buildStreamErrorFrame, mapUpstreamError, retryAfterHeader } from '../er
 import { findUnsupportedParameter, unsupportedParameterError } from '../parameterPolicy'
 import { createToolViolationTap } from '../utils/toolViolationTap'
 import { normalizeMessageRoles } from '../utils/messageRoles'
+import { normalizeToolCallArguments } from '../utils/toolArguments'
 import { normalizeOutputCap } from '../utils/outputCap'
 import { toHeaderValue, routeHeaderValue } from '../utils/headerValue'
 import { readStreamOutcome } from '../utils/streamOutcome'
@@ -268,7 +269,16 @@ router.post('/completions', async (ctx: Context) => {
     return
   }
 
-  request = normalizeOutputCap({ ...request, messages: normalizeMessageRoles(request.messages) })
+  // 历史里的 tool_calls.arguments 必须是合法 JSON，否则严格上游会让整段对话
+  // 从这一轮起每轮 400（判据与降级口径见 toolArguments.ts）。
+  const argNormalized = normalizeToolCallArguments(normalizeMessageRoles(request.messages))
+  if (argNormalized.repaired > 0) {
+    console.log(
+      `[Chat] 历史 tool_calls.arguments 修复 ${argNormalized.repaired} 个调用`
+      + (argNormalized.discarded > 0 ? `，其中 ${argNormalized.discarded} 个无法修复已降级为空参数` : ''),
+    )
+  }
+  request = normalizeOutputCap({ ...request, messages: argNormalized.messages })
 
   // 客户端请求的输出上限；入口已把 max_completion_tokens 折进 max_tokens，这里只读一个字段。
   const requestedMaxTokens = typeof request.max_tokens === 'number' ? request.max_tokens : undefined
