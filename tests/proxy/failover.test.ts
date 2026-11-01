@@ -54,6 +54,8 @@ import {
 const forwarderSource = readFileSync('src/main/proxy/forwarder.ts', 'utf-8')
 const autoRouterSource = readFileSync('src/main/proxy/autoRouter.ts', 'utf-8')
 const chatRouteSource = readFileSync('src/main/proxy/routes/chat.ts', 'utf-8')
+const completionsRouteSource = readFileSync('src/main/proxy/routes/completions.ts', 'utf-8')
+const channelsManagerSource = readFileSync('src/main/providers/accountChannels/manager.ts', 'utf-8')
 
 test('工具数超限识别：命中用户报障的上游原文', () => {
   // 用户报障原文（cline / Vercel AI Gateway 400 的 error.message 片段）
@@ -661,6 +663,49 @@ test('凭据类与强制 tool_choice 类判据必须接进请求路径', () => {
   // 强制 tool_choice：按 capability 类换下一家，而不是整场 400。
   assert.match(forwarderSource, /\|\|\s*isForcedToolChoiceUnsupported\(result\.error\)/,
     'forced tool_choice rejection must join the capability-mismatch set so the chain keeps trying')
+})
+
+test('限流退避的键必须带到模型粒度（接线门）', () => {
+  // 账号渠道在宿主侧只有一个占位账号，整条线路共用它。哪一处调用漏了模型参数，
+  // 那一处就退回「同渠道别的模型成功一次 → 把正在限流的模型放出去重付一遍 prefill」。
+  // 语义判据本身在 tests/proxy/accountRuntime.test.ts，这里只管接线。
+  assert.match(
+    forwarderSource,
+    /recordFailure\(\s*account\.id\s*,\s*429\s*,\s*Date\.now\(\)\s*,\s*actualModel\s*\)/,
+    'the 429 record must be keyed by the model actually sent upstream',
+  )
+  assert.match(
+    forwarderSource,
+    /recordSuccess\(\s*account\.id\s*,\s*actualModel\s*\)/,
+    'a success must clear only this model rate-limit tier',
+  )
+  assert.match(
+    autoRouterSource,
+    /accountRuntime\.snapshot\(\s*account\.id\s*,\s*now\s*,\s*model\.actualModelId\s*\)/,
+    'candidate scoring must ask about (account, model), not just the account',
+  )
+  assert.match(
+    chatRouteSource,
+    /clearAccountCooldown\(\s*account\.id\s*,\s*actualModel\s*\)/,
+    'the chat route success path must pass the model',
+  )
+  assert.match(
+    completionsRouteSource,
+    /clearAccountCooldown\(\s*account\.id\s*,\s*actualModel\s*\)/,
+    'the completions route success path must pass the model',
+  )
+  // 反向：池子变化/重新登录是整账号语义，这里必须**不带**模型，否则换了凭据
+  // 还要等旧限流窗自然到期。
+  assert.match(
+    channelsManagerSource,
+    /recordSuccess\(\s*account\.id\s*\)/,
+    'a channel-pool change must clear every rate-limit tier of that account',
+  )
+  assert.doesNotMatch(
+    channelsManagerSource,
+    /recordSuccess\(\s*account\.id\s*,/,
+    'the pool-change call must not be narrowed to one model',
+  )
 })
 
 /**

@@ -487,6 +487,8 @@ class AccountChannelManager {
     // 卡还要再锁半小时」。清档走 `recordSuccess`，与 autoRouter 的
     // `clearAccountCooldown` 同一实现；这里直接用它，是为了不把 autoRouter 拖进
     // 管理器与请求路径的导入图。
+    // 这里**故意不带 model**：不带模型 = 连该账号所有 (账号, 模型) 限流档一起清，
+    // 因为换凭据/换池子等于上游的限流窗口重新开过。
     for (const channel of ACCOUNT_CHANNELS) {
       for (const account of AccountManager.getByProviderId(channel.id, false)) {
         accountRuntime.recordSuccess(account.id)

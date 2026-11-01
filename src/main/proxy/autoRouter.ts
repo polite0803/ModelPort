@@ -396,7 +396,9 @@ class AutoRouter {
             }
           }
 
-          const runtime = accountRuntime.snapshot(account.id, now)
+          // 带上这个候选的真实模型名：429 限流档按 (账号, 模型) 记，只查账号会漏掉
+          // 「账号健康、但这个模型正在限流里」的那一档
+          const runtime = accountRuntime.snapshot(account.id, now, model.actualModelId)
           const key = candidateKey(provider.id, account.id, model.displayName)
           const hints = capabilityHintsFor(provider, model.displayName, model.actualModelId, marks)
           // 配额余量（PLAN P1-3）：只对聚合目录候选计算 —— 账号渠道的帽在渠道
@@ -725,14 +727,22 @@ class AutoRouter {
     }
   }
 
-  /** 该账号当前是否处于冷却期 */
-  isAccountCooling(accountId: string): boolean {
-    return accountRuntime.isCooling(accountId)
+  /**
+   * 该账号当前是否处于冷却期。
+   *
+   * `model` 给了就连同该模型的限流档一起问 —— 排序与选路关心的是「这个账号跑这个
+   * 模型能不能派」，账号整体健康不代表这个模型不在限流窗里。
+   */
+  isAccountCooling(accountId: string, model?: string): boolean {
+    return accountRuntime.isCooling(accountId, Date.now(), model)
   }
 
-  /** 标记账号冷却：429 按分钟级指数退避，其余错误按秒级退避 */
-  markAccountCooldown(accountId: string, status?: number): void {
-    accountRuntime.recordFailure(accountId, status)
+  /**
+   * 标记账号冷却：429 给了 `model` 就按 (账号, 模型) 档做分钟级指数退避，
+   * 其余错误按账号级秒级退避。
+   */
+  markAccountCooldown(accountId: string, status?: number, model?: string): void {
+    accountRuntime.recordFailure(accountId, status, Date.now(), model)
   }
 
   /**
@@ -745,8 +755,12 @@ class AutoRouter {
     accountRuntime.recordCredentialFailure(accountId)
   }
 
-  clearAccountCooldown(accountId: string): void {
-    accountRuntime.recordSuccess(accountId)
+  /**
+   * 成功后解除冷却。带 `model` 只清这个模型的限流档；不带则清该账号全部档
+   * （渠道池变化 / 重新登录 / 重启走这条，见 `accountChannels/manager.ts`）。
+   */
+  clearAccountCooldown(accountId: string, model?: string): void {
+    accountRuntime.recordSuccess(accountId, model)
   }
 
   /** 代理服务重启时清空，避免跨进程生命周期残留 */

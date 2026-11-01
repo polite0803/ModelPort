@@ -726,7 +726,9 @@ router.post('/completions', async (ctx: Context) => {
     }
 
     loadBalancer.clearAccountFailure(account.id)
-    autoRouter.clearAccountCooldown(account.id)
+    // 带 actualModel：只清这一档的限流退避。整账号清零会让同渠道别的模型的成功
+    // 顺手把正在限流的那个模型放出去，每一轮再付一次完整 prefill。
+    autoRouter.clearAccountCooldown(account.id, actualModel)
     learnQuotaCaps(provider, result.headers)
 
     if (autoDecision && chosenCandidate) {

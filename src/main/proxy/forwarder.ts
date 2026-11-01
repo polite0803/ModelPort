@@ -399,7 +399,8 @@ export class RequestForwarder {
         const result = await this.doForward(modifiedRequest, account, provider, actualModel, context)
 
         if (result.success) {
-          accountRuntime.recordSuccess(account.id)
+          // 带 actualModel：成功只清这个模型自己的限流档，不牵连同渠道别的模型
+          accountRuntime.recordSuccess(account.id, actualModel)
           accountRuntime.endAttempt(account.id)
           return result
         }
@@ -427,9 +428,11 @@ export class RequestForwarder {
 
     accountRuntime.endAttempt(account.id)
 
-    // 429 说明账号已被上游限流，记录指数退避冷却，供后续 auto 路由避开
+    // 429 说明这个账号跑**这个模型**被上游限流了，按 (账号, 模型) 记指数退避，供后续
+    // auto 路由避开；上游的限流窗本来就是按模型计的，整账号清零会让同渠道别的模型
+    // 一次成功就把这里的退避抹掉（见 accountRuntime.ts 头部）
     if (lastStatus === 429) {
-      accountRuntime.recordFailure(account.id, 429)
+      accountRuntime.recordFailure(account.id, 429, Date.now(), actualModel)
     }
 
     return {
@@ -610,9 +613,10 @@ export class RequestForwarder {
           accountFailures += 1
         }
 
-        // 429 的冷却已由 forwardChatCompletion 记录，这里只补记 5xx / 网络错误
+        // 429 的冷却已由 forwardChatCompletion 记进 (账号, 模型) 档，这里只补记
+        // 5xx / 网络错误那类账号级故障
         if (result.status !== 429) {
-          autoRouter.markAccountCooldown(candidate.account.id, result.status)
+          autoRouter.markAccountCooldown(candidate.account.id, result.status, candidate.actualModel)
         }
         loadBalancer.markAccountFailed(candidate.account.id)
       }

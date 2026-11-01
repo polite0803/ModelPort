@@ -311,7 +311,8 @@ router.post('/completions', async (ctx: Context) => {
     proxyStatusManager.recordRequestSuccess(latency)
 
     if (autoDecision) {
-      autoRouter.clearAccountCooldown(account.id)
+      // 只清这一档的限流退避，理由同 chat 路由：整账号清零会牵连同渠道别的模型
+      autoRouter.clearAccountCooldown(account.id, actualModel)
       if (chosenCandidate) {
         autoRouter.rememberRoute(autoDecision.conversationKey, chosenCandidate, autoDecision.route)
       }
