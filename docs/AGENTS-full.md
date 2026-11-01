@@ -272,8 +272,8 @@ declares `dropParams` (`response_format`, `enable_thinking`, `tool_choice=auto`,
   - `response.failed` / `error` becomes a `{"error": ...}` frame, never assistant text;
   - `refusal` and `function_call` output items never leak into `message.content`.
 
-  There is **no inbound `/v1/responses` route**: a client speaking Responses to this proxy would
-  need the reverse codec, and no known client asks for it yet.
+  There is **no inbound `/v1/responses` route** in this bullet's scope: the bullet above is about
+  *outbound* wires. The client-facing endpoint is a separate surface - see *Inbound Protocols*.
 - Auth header: `Authorization: Bearer` by default, `x-api-key` for the anthropic wire, `api-key`
   for `azure_openai`; `forwarder.buildHeaders()` reads `provider.authHeader`/`authPrefix`.
 - A baseUrl containing `{placeholders}` is never expanded: the user has to override it. `test`
@@ -282,6 +282,53 @@ declares `dropParams` (`response_format`, `enable_thinking`, `tool_choice=auto`,
   uses the `openai-free-list` reader, so only `isFree: true` models are exposed.
 - Parametpolicy passes every parameter through for any `type !== 'builtin'` provider, so aggregate
   requests are never silently stripped.
+
+### Inbound Protocols
+
+The internal canonical shape is OpenAI chat. Two client-facing endpoints speak a different protocol
+and reach it the same way: translate the request, then loop it back over local HTTP to
+`/v1/chat/completions`. Routing, failover, account pools, quota metering, context compression,
+request logs and tool-violation detection therefore stay one implementation - re-implementing them
+per protocol is how two behaviors appear and later fork (the reason stated in `routes/messages.ts`).
+
+- `POST /v1/messages`, plus `POST /v1/messages/count_tokens` (local estimate, never forwarded).
+  Codec: `src/shared/anthropicWire.ts`. Because a refusal has to be readable by an anthropic client,
+  the auth middleware chooses the error envelope by path (`server.ts`). Claude Code only ever sends
+  `claude-*` names, so this entry resolves the model through `anthropicInbound.modelMap` /
+  `defaultModel` (four ordered sources in `resolveAnthropicModel`) and publishes what actually ran in
+  `X-ModelPort-Anthropic-Resolved`, because echoing the client's own name is necessary but not
+  honest on its own.
+- `POST /v1/responses`. Codec: `src/shared/responsesInbound.ts` (`responsesToChatRequest`,
+  `chatResponseToResponseBody`, `createResponsesStreamTranslator`). No model-name fallback here: a
+  Codex-family client lets the user set the name, so an unknown name keeps chat's
+  `503 no_available_account` instead of silently running a substitute model. Parameters that require
+  the gateway to remember an earlier turn - `previous_response_id`, `conversation`,
+  `background: true`, `input[].item_reference` - are refused `400 unsupported_parameter` naming the
+  parameter, and the refusal is written to the request log (a refusal that reaches no provider is
+  otherwise invisible on the dashboard). `store: true` is accepted but answered with
+  `X-ModelPort-Responses-Store: not-retained`. A Responses stream ends in exactly one
+  `response.completed` / `response.incomplete` / `response.failed` and never carries `[DONE]`;
+  `usage` stays `null` until upstream reports it, so unlike the anthropic stream there is no
+  required-but-unavailable token cell to estimate and no `X-ModelPort-Usage-Estimated` header.
+
+The protocol-neutral half of the loopback (target host, credential forwarding, the caller's
+`User-Agent`, SSE headers, upstream error text, inner `X-Request-Id` adoption, `X-ModelPort-*`
+passthrough) lives in `proxy/utils/inboundLoopback.ts` - shared by both entries precisely because a
+second copy drifts. Forwarding `User-Agent` is not cosmetic: the request log's `client` and the
+`X-ModelPort-Client` response header are classified from the UA alone
+(`shared/clientProfile.ts`), so an entry that drops it reports every caller as the proxy's own
+fetch client (`node`), which is exactly the lead an operator needs when a harness misbehaves. The UA
+goes through `toHeaderValue` like every other dynamic header value.
+
+One parameter is carried in both directions under the same name: `prompt_cache_key`. Inbound
+translates it onto the chat request, `buildRequestBody` passes it to the upstream (it is in the
+undeclared-field list next to `response_format` / `stream_options` / `seed`), and the outbound
+responses wire folds it back in - dropping it is silent, and all the operator sees is a slower
+upstream.
+Tests split by layer: `tests/shared/anthropic-wire.test.ts` and
+`tests/shared/responses-inbound.test.ts` for the codecs, `tests/routes/anthropic-inbound.test.ts`
+and `tests/routes/responses-inbound.test.ts` for the entries end to end (real `ProxyServer` looping
+back into real `routes/chat.ts`, with a `node:http` stand-in upstream).
 
 ### Load Balance Strategies
 
@@ -720,6 +767,27 @@ state, cooling) and `src/main/proxy/autoRouting.ts` (all pure decision logic, un
 Its candidate pool is exactly `getEffectiveModels(provider)`, i.e. the models the user kept served -
 auto never widens that.
 
+**Preset routes are seeded once, the same way `auto` was migrated.** Since R2 (`/v1/models`
+advertises enabled route names only), both a client that can only send one fixed model name and a
+user picking a chat tier need a route of their own, so `store/modelRoutes.ts::PRESET_ROUTE_SEEDS`
+lists them (today: `codex` for the Responses client, plus the three `/v1/chat` tiers `daily` /
+`stable` / `performance`) and `store.ts::seedPresetRoutes` creates the missing ones at the end of
+`initialize()`. Two rules keep that honest. First, the gate is the on-disk
+`config.seededPresetRoutes` marker - never "is the table empty", which would resurrect a route the
+user deleted; creation goes through `createRoute`, so the seed obeys the same charset / duplicate /
+`conflicts_model` checks as the UI, and a name already held by a served model is skipped *and still
+recorded as handled* so it is not retried on every start. Second, only a tier seed may carry a pool
+filter, because the tier *is* its filter: `daily` = `free-only` (prefer `cheap`), `stable` =
+`channel-only` (prefer `balanced`, i.e. account-channel quota rather than aggregate spend),
+`performance` = `strong-tier` (prefer `strong`). The protocol seed intentionally carries none: the
+capability predicates are strict (`tools-capable` drops every un-annotated candidate) and an
+out-of-the-box filter there would advertise a name that can only answer 503. An empty tier pool is
+not hidden either - the route is still advertised and answers `503 no_available_model` with
+`details.missing = ['pool_strategy']`, which is the same state the route card warns about. Tool
+capability needs no seed-level gate anyway: it is enforced per request (channel
+`capabilities.tools === false`, `maxTools`). `auto` itself is left untouched by the seed, so existing
+configs keep their behavior.
+
 **Capability is tri-state and unknown is a real answer.** `ModelCapability` (vision/tools/reasoning)
 is `yes | no | unknown`; `contextTokens` is `undefined` when unknown and never defaulted to a number.
 `resolveCapabilityDetail()` in `proxy/autoRouting.ts` merges six ordered layers, per field: manual
@@ -923,12 +991,25 @@ that path.
   `500 {"type":"internal_error"}`. ASCII-only values pass through unchanged; anything else is
   percent-encoded per UTF-8 byte (so `decodeURIComponent` restores it, and CR/LF can never
   inject a header).
-- `/v1/models` (both the list and the single-model route) carries `context_window` **only when the
-  upstream declared one** - the key is omitted otherwise, never `0` and never a guessed default,
-  because clients time their own compaction off this number and an over-stated ceiling turns into a
-  hard upstream rejection. It is resolved by `store/modelServing.ts::contextWindowOf` from
-  `Provider.modelCapabilities`, so it covers exactly what the syncs could prove (builtin sync,
-  account-channel sync via the pack's `/v1/models` view). User aliases carry nothing. Route
+- `/v1/models` advertises **routes and nothing else**: one entry per enabled name in
+  `AppConfig.routes`, `owned_by: auto-router`, in the order `store/modelRoutes.ts::enabledModelRoutes`
+  sorts. `GET /v1/models/:model` uses that same name domain - a single model or a user alias gets
+  `404 model_not_found`, because answering a name on the retrieve endpoint that the list refuses to
+  advertise is how a gateway ends up with two contradictory catalogs. Whether a model is enabled
+  therefore no longer decides what a client can *list*; it decides whether that model sits in any
+  route's candidate pool (`store/modelServing.ts::applyServed` -> `userModelOverrides.excludedModels`,
+  read back as the served slice by `store.ts::getEffectiveModels`) and whether a request naming it
+  directly is accepted (`loadbalancer.ts::providerSupportsModel` through `isModelRoutable`, and
+  `routes/messages.ts::gatewayKnowsModel` on the anthropic entry). A disabled user **alias** is stored
+  on the mapping row itself (`ModelMapping.disabled`, declared twice: `shared/types.ts` and
+  `main/store/types.ts`), because an alias belongs to no provider catalogue and `excludedModels`
+  cannot record it; the gate is `store/modelServing.ts::isMappingActive`, and every read path must go
+  through it - the one that forgets serves a name the user turned off. The per-provider and per-alias
+  entry loops plus `contextWindowOf` and `aliasMappingKeys` were retired with this change, since no
+  other consumer survived them.
+- `context_window` on both endpoints is present **only when it can be proved**, never `0` and never a
+  guessed default, because clients time their own compaction off this number and an over-stated
+  ceiling turns into a hard upstream rejection. Route
   entries (`auto` plus every enabled `AppConfig.routes` name) carry the **smallest window among the
   candidates that route can actually serve** - `autoRouter::advertisedContextFloor(route)` (and
   `advertisedContextFloors(routes)` for the list, one pool walk for all routes) feeding the pure

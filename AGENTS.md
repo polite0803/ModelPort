@@ -61,7 +61,7 @@ src/
 │   ├── index.ts     # entry (pins userData - see Data Storage)
 │   ├── ipc/         # main <-> renderer handlers
 │   ├── proxy/       # Koa proxy: server, forwarder, loadbalancer, modelMapper,
-│   │                #   adapters/, routes/ (chat, completions, models, management/),
+│   │                #   adapters/, routes/ (chat, completions, models, messages, responses, management/),
 │   │                #   toolCalling/, quota/, services/, sessionManager.ts
 │   ├── oauth/       # manager, inAppLogin, adapters/
 │   ├── channelPack/ # vendored pack host: worker.ts + compat shims + bridge.ts
@@ -87,6 +87,12 @@ constant-time compare). With no key the server binds loopback only and `start()`
 host. No `?api\_key=` support.
 * **`usage` is `null`, never fabricated**, when the upstream reported nothing. Same for
 `context\_window` on `/v1/models`: omit the key rather than emit `0` or a guess.
+* **`/v1/models` advertises routes only** - the list and `GET /v1/models/:model` share that one name
+domain. A model's enabled state decides whether it joins any route's candidate pool and whether a
+request naming it directly is accepted; it never decides what a client can list. A stopped user
+alias is `ModelMapping.disabled` (declared in both `shared/types.ts` and `main/store/types.ts`, read
+through `modelServing.ts::isMappingActive` at every use site), not `excludedModels` - an alias
+belongs to no provider catalogue.
 * **Every stream carries exactly one `\[DONE]`**; a post-stream failure is a `data: {"error": …}` frame,
 never assistant text. Errors keep OpenAI shapes (401/403 `authentication\_error`, 429
 `rate\_limit\_error`, 5xx `api\_error`).

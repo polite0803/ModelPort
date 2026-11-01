@@ -2,6 +2,7 @@ import { BrowserWindow } from 'electron'
 import { autoUpdater, UpdateInfo } from 'electron-updater'
 import { EventEmitter } from 'events'
 import { IpcChannels } from '../ipc/channels'
+import { storeManager } from '../store/store'
 
 export interface DownloadProgress {
   percent: number
@@ -198,6 +199,13 @@ export class UpdaterManager extends EventEmitter {
     }
 
     console.log('[Updater] Quitting and installing update...')
+    // 日志是 2 秒合并落盘的，安装会直接结束进程：不先 flush 就丢掉这段时间里的记录，
+    // 而用户正好是在「升级出问题」时最需要看到它们的时候。
+    try {
+      storeManager.flushPendingWrites()
+    } catch (error) {
+      console.error('[Updater] Failed to flush logs before install:', error)
+    }
     autoUpdater.quitAndInstall(false, true)
   }
 

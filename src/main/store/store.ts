@@ -71,7 +71,10 @@ import {
   checkRouteName,
   findModelRoute,
   isRouteStrategyValue,
+  LEGACY_AUTO_ROUTE_NAME,
   normalizeModelRoutes,
+  pendingPresetRouteSeeds,
+  presetRouteFields,
   routesFromLegacyAutoRouting,
 } from './modelRoutes'
 import type { ModelCapabilityHint, ModelRoute } from '../../shared/types'
@@ -173,6 +176,9 @@ class StoreManager {
       await this.initializeDefaultProviders()
       this.isInitialized = true
       this.initializationError = null
+      // 播种必须在 `isInitialized` 之后：它复用 `createRoute` 与 `updateConfig`，
+      // 两者第一行都是 `ensureInitialized()`。
+      this.seedPresetRoutes()
     } catch (error) {
       console.error('[Store] Failed to initialize storage:', error)
       this.initializationError = error instanceof Error ? error : new Error(String(error))
@@ -748,6 +754,19 @@ class StoreManager {
   }
 
   /**
+   * 加密降级只往应用日志里报一次。`encryptData` 是逐字段调用的，每条都写会把日志刷满，
+   * 反而看不见真正的异常；而只 `console.warn` 的问题是打包后的 GUI 里没人看 stdout，
+   * 用户与运维都不知道凭据正以明文落盘。
+   */
+  private plaintextStorageWarned = false
+
+  private warnPlaintextStorage(reason: string): void {
+    if (this.plaintextStorageWarned) return
+    this.plaintextStorageWarned = true
+    this.addLog('error', '凭据将以明文保存：系统密钥库不可用', { data: { reason } })
+  }
+
+  /**
    * Encrypt Sensitive Data
    * @param data Data to encrypt
    * @returns Encrypted string
@@ -755,6 +774,7 @@ class StoreManager {
   encryptData(data: string): string {
     if (!safeStorage.isEncryptionAvailable()) {
       console.warn('[Store] System keychain unavailable - credentials will be stored unencrypted')
+      this.warnPlaintextStorage('keystore-unavailable')
       return data
     }
     try {
@@ -762,11 +782,13 @@ class StoreManager {
       // Some keychains report available but fail to round-trip (headless Linux without libsecret)
       if (safeStorage.decryptString(encrypted) !== data) {
         console.error('[Store] Encryption round-trip failed - credentials will be stored unencrypted')
+        this.warnPlaintextStorage('roundtrip-failed')
         return data
       }
       return encrypted.toString('base64')
     } catch (error) {
       console.error('Failed to encrypt data:', error)
+      this.warnPlaintextStorage('encrypt-threw')
     }
     return data
   }
@@ -1003,36 +1025,22 @@ class StoreManager {
       return null
     }
     
-    console.log('[Store] Update account:', {
-      id,
-      updatesCredentials: updates.credentials,
-      oldCredentials: accounts[index].credentials,
-      oldCredentialsDecrypted: this.decryptCredentials(accounts[index].credentials),
-    })
-    
     const updatedAccount: Account = {
       ...accounts[index],
       ...updates,
       updatedAt: Date.now(),
     }
-    
+
     if (updates.credentials) {
       updatedAccount.credentials = this.encryptCredentials(updates.credentials)
-      console.log('[Store] Encrypted credentials:', updatedAccount.credentials)
-      console.log('[Store] Old credentials:', accounts[index].credentials)
-      console.log('[Store] Credentials match:', JSON.stringify(updatedAccount.credentials) === JSON.stringify(accounts[index].credentials))
+      // 只记元数据（动了哪个账号、哪些凭据字段）。这里原本连着四条输出：明文旧凭据、
+      // 解密后的旧凭据、加密后的新值、以及两者是否相同 —— 以控制台方式启动、带
+      // `--enable-logging`、或任何接走 stdout 的采集，都等于把全部上游凭据抄进日志。
+      console.log('[Store] Update account:', { id, changedCredentialFields: Object.keys(updates.credentials) })
     }
-    
+
     accounts[index] = updatedAccount
     this.store!.set('accounts', accounts)
-    
-    // Verify save was successful
-    const savedAccounts = this.store!.get('accounts') as Account[]
-    const savedAccount = savedAccounts.find(a => a.id === id)
-    console.log('[Store] Verify after save:', {
-      id,
-      savedCredentials: savedAccount?.credentials,
-    })
     
     return {
       ...updatedAccount,
@@ -1307,6 +1315,61 @@ class StoreManager {
   }
 
   /**
+   * 一次性播种「协议路由」（`auto` 那条迁移的同一套建法，只是面向另一套入站协议）。
+   *
+   * 判据是记档键里有没有这个名字，**不是**路由表是否为空：删掉以后每次读取都重新造
+   * 出来，等于用出厂值推翻「这个名字不再被路由」。与 `routes` 键同一理由。
+   *
+   * 复用 `createRoute` 而不是自己写表：名字字符集、与模型名/别名的冲突、字段校验、
+   * 归一与广播都在那一条路径上，这里再实现一遍迟早和它分叉。被冲突挡下时**照样记档** ——
+   * 那说明名字已被别的东西占住，每次重启再试一次只会把日志刷满。
+   *
+   * 失败不带上启动：播种是可用性增益，不是存储能否读出来的前提；但也不许静默，
+   * 单独记一条 error 让界面与 ndjson 都看得见。
+   */
+  private seedPresetRoutes(): void {
+    try {
+      const config = this.getConfig()
+      const pending = pendingPresetRouteSeeds(config.seededPresetRoutes)
+      if (pending.length === 0) return
+
+      const handled: string[] = []
+      for (const seed of pending) {
+        const result = this.createRoute({
+          name: seed.name,
+          ...presetRouteFields(
+            // 模板是 `auto` 那一条，不是播种名自己 —— 播种时那个名字还不在表里。
+            config.routes?.[LEGACY_AUTO_ROUTE_NAME],
+            config.autoRouting,
+            config.loadBalanceStrategy,
+            seed,
+          ),
+        })
+        handled.push(seed.name)
+        this.addLog(
+          result.ok ? 'info' : 'warn',
+          result.ok
+            ? `Preset route seeded: ${seed.name} (${seed.kind}: ${seed.label})`
+            : `Preset route skipped: ${seed.name} (${result.error.code})`,
+          {
+            data: {
+              name: seed.name,
+              label: seed.label,
+              ...(result.ok ? {} : { error: result.error }),
+            },
+          },
+        )
+      }
+
+      this.updateConfig({
+        seededPresetRoutes: [...(config.seededPresetRoutes ?? []), ...handled],
+      })
+    } catch (error) {
+      this.addLog('error', `Preset route seeding failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /**
    * 新建路由（R2）。名字与池策略在写入前严格校验，其余字段按既有兜底归一。
    * 返回 `{ok:false, error}` 而不是抛异常：错误要原样进 IPC 给 UI 显示。
    */
@@ -1454,6 +1517,8 @@ class StoreManager {
     if (includeError !== undefined) return includeError
     const excludeError = checkRouteModelRefs('excludeModels', input.excludeModels)
     if (excludeError !== undefined) return excludeError
+    const pinError = checkRouteModelRefs('pinModels', input.pinModels)
+    if (pinError !== undefined) return pinError
     return undefined
   }
 
@@ -2243,8 +2308,10 @@ class StoreManager {
 
   /**
    * Get Effective Models for a Provider
-   * The served slice of the catalogue: what `/v1/models` advertises and what the
-   * load balancer routes, so advertising and routing cannot disagree.
+   * The served slice of the catalogue: the pool every route filters from, and the
+   * gate a request naming one model directly has to pass. `/v1/models` no longer
+   * reads it - that endpoint advertises routes only - so this stays the single
+   * authority for *routing*, not for advertising.
    */
   getEffectiveModels(providerId: string): EffectiveModel[] {
     return this.getModelCatalogue(providerId)
@@ -2428,8 +2495,23 @@ class StoreManager {
   /**
    * Clear All Data
    */
+  /**
+   * 不可逆写入前的一份密文快照。损坏恢复那条路本来就备份（`recoverFromCorruptedData`），
+   * 而「恢复出厂」这种销毁型动作反而什么都不留 —— 备份失败就不清，宁可拒绝也不做
+   * 「没有回路的销毁」。
+   */
+  private backupDataFile(reason: string): string {
+    const dataPath = join(this.getStoragePath(), 'data.json')
+    if (!existsSync(dataPath)) return ''
+    const target = `${dataPath}.pre-${reason}.${Date.now()}.bak`
+    copyFileSync(dataPath, target)
+    return target
+  }
+
   clearAll(): void {
     this.ensureInitialized()
+    const backupPath = this.backupDataFile('reset')
+    console.log('[Store] clearAll: backup taken at', backupPath || '(no data.json to back up)')
     this.appLogManager?.clearLogs()
     this.appLogManager?.flushSync()
     this.store!.clear()

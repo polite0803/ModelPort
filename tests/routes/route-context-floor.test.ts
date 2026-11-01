@@ -195,3 +195,40 @@ test('瞬时状态不动广告值：账号当日额度打满后下界仍是原�
 
   sm.updateAccount('small-acct', { dailyLimit: 0, todayUsed: 0 })
 })
+
+// ---------------------------------------------------- 候选数（路由页的那个读数）
+
+test('候选数按（供应商, 模型）去重，与广告下界共用同一次折叠', () => {
+  // 同一个供应商再开一个账号：池里的**模型**数不许因为账号翻倍
+  sm.addAccount({ ...accountFixture('big'), id: 'big-acct-2', name: 'big account 2' } as never)
+
+  const sizes = autoRouter.routePoolSizes(sm.listModelRoutes())
+  assert.equal(sizes['auto'], 4, 'big/mid/small/noann 四个模型；wild 的通配符不是上游模型，不进池')
+  assert.equal(sizes['wide'], 1, '只钉了一家大窗')
+  assert.equal(sizes['pair'], 2)
+  assert.equal(sizes['longonly'], 2, 'long-context 留下 big(1M) 与 mid(128K)')
+  assert.equal(sizes['onlyunknown'], 1)
+  assert.equal(sizes['emptied'], 0, '被策略剔光的池读数是 0 —— 这是可信读数，不是「读不到」')
+
+  // 停掉一个模型 = 从每一条路由的池里掉出去（配置层的唯一真值源仍是 served 切片）
+  sm.setModelsServed('mid', ['Mid-128K'], false)
+  const afterStop = autoRouter.routePoolSizes(sm.listModelRoutes())
+  assert.equal(afterStop['auto'], 3)
+  assert.equal(afterStop['pair'], 1)
+  assert.equal(afterStop['wide'], 1, '这条路由本来就没含 mid')
+  assert.equal(afterStop['longonly'], 1)
+  sm.setModelsServed('mid', ['Mid-128K'], true)
+
+  // 手动加入不复活停用的模型，所以停用态下 include 也不改变读数
+  sm.setModelsServed('small', ['Small-8K'], false)
+  const withInclude = sm.updateRoute('wide', {
+    includeModels: [{ providerId: 'small', displayName: 'Small-8K' }],
+  })
+  assert.equal(withInclude.ok, true, JSON.stringify(withInclude.error))
+  assert.equal(autoRouter.routePoolSizes(sm.listModelRoutes())['wide'], 1,
+    'include 只从在服的候选里取回，停用的模型不会被它救回来')
+  sm.updateRoute('wide', { includeModels: [] })
+  sm.setModelsServed('small', ['Small-8K'], true)
+
+  sm.deleteAccount('big-acct-2')
+})

@@ -3,6 +3,8 @@ import type { Provider, AuthType } from '../../shared/types'
 import type { CredentialField } from '../store/types'
 import { getBuiltinProvider } from './builtin/index.ts'
 import { validateApiEndpoint } from './endpointPolicy.ts'
+import { redactSecretHeaders, stripRedactedHeaders } from '../../shared/providerExportPolicy'
+import { isForbiddenProviderHeader } from '../../shared/providerHeaders'
 import { syncBuiltinProvider } from '../store/providerSync.ts'
 
 export interface CustomProviderData {
@@ -77,6 +79,16 @@ export class CustomProviderManager {
       
       if (key.includes(':') || key.includes('\n')) {
         errors.push(`Header name "${key}" contains invalid characters`)
+      }
+
+      // 与转发侧同一份口径：`Host` / `Content-Length` / `Transfer-Encoding` 这类头会顶掉
+      // axios 自己算出来的值，保存时就拒绝，而不是等到请求走私成功再在 `buildHeaders` 里滤。
+      if (isForbiddenProviderHeader(key)) {
+        errors.push(`Header "${key}" is reserved by the proxy and cannot be overridden`)
+      }
+
+      if (typeof value !== 'string') {
+        errors.push(`Header "${key}" must carry a string value`)
       }
     }
     
@@ -295,7 +307,7 @@ export class CustomProviderManager {
       name: provider.name,
       authType: provider.authType,
       apiEndpoint: provider.apiEndpoint,
-      headers: provider.headers,
+      headers: redactSecretHeaders(provider.headers),
       description: provider.description,
       icon: provider.icon,
       supportedModels: provider.supportedModels,
@@ -312,7 +324,11 @@ export class CustomProviderManager {
     } catch {
       throw new Error('Invalid JSON format')
     }
-    
+
+    // 占位串不代表某把真实的 Key，接进来只会让每个请求带着它去撞 401。丢掉，让用户在
+    // 账号凭据里重新填。
+    data = { ...data, headers: stripRedactedHeaders(data.headers) }
+
     return this.create(data)
   }
 

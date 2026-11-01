@@ -199,6 +199,9 @@ export function ModelMappingConfig({ onConfigChange }: ModelMappingConfigProps) 
       actualModel: formData.actualModel.trim(),
       preferredProviderId: formData.preferredProviderId === AUTO_SELECT_VALUE ? undefined : formData.preferredProviderId || undefined,
       preferredAccountId: formData.preferredAccountId === AUTO_SELECT_VALUE ? undefined : formData.preferredAccountId || undefined,
+      // 编辑其它字段不许顺手把停用位清掉；新建时省略这个键（即启用）。
+      // 这个位只有模型页那一个开关会写，这一页负责的是「别丢」。
+      disabled: editingMapping?.disabled,
     }
 
     if (editingMapping) {
@@ -463,6 +466,13 @@ export function ModelMappingConfig({ onConfigChange }: ModelMappingConfigProps) 
                             <Sparkles className="h-4 w-4 text-warning" />
                           )}
                           <code className="text-sm">{mapping.requestModel}</code>
+                          {mapping.disabled === true && (
+                            // 停用位在模型页的开关上，这一页只报状态：两处对不上就是
+                            // 「看着能改其实改不到」。
+                            <Badge variant="outline" className="text-xs text-muted-foreground">
+                              {t('models.stopped')}
+                            </Badge>
+                          )}
                         </div>
                       </TableCell>
                       <TableCell>

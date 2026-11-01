@@ -20,6 +20,13 @@ export const IpcChannels = {
   // 候选池预览：按路由配置跑一遍采集/策略/手动增删，返回逐模型状态与筛除原因。
   // 只读，不写任何状态（不扣冷却、不请求上游）。
   ROUTES_PREVIEW: 'routes:preview',
+  // 逐路由的候选模型数（一次采集折全表，比逐条 preview 便宜一个量级）。只读。
+  ROUTES_POOL_SIZES: 'routes:pool-sizes',
+
+  // Anthropic 客户端（Claude Desktop / Claude Code）的可发现名：一条只读预览、一条落库。
+  // 分两条是因为客户端那一侧的白名单会筛名字，用户必须先看一眼「会新增哪几条」再写。
+  ANTHROPIC_DISCOVERY_PLAN: 'anthropic:discovery-plan',
+  ANTHROPIC_DISCOVERY_APPLY: 'anthropic:discovery-apply',
 
   STORE_GET: 'store:get',
   STORE_SET: 'store:set',

@@ -135,7 +135,10 @@ export default defineConfig({
       }
     },
     server: {
-      host: '0.0.0.0',
+      // 默认只绑回环。开发态的 CSP 放开 `script-src 'unsafe-inline'`，而 dev 模式下渲染进程
+      // 挂着完整 `electronAPI`：绑 0.0.0.0 等于让同网段任意主机把这套界面加载起来。
+      // 确实需要局域网调试（手机、另一台机器）时显式指定：MODELPORT_DEV_HOST=0.0.0.0。
+      host: process.env.MODELPORT_DEV_HOST || '127.0.0.1',
       port: 5173
     }
   }

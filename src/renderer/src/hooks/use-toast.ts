@@ -9,7 +9,10 @@ import type {
 } from "@/components/ui/toast"
 
 const TOAST_LIMIT = 1
-const TOAST_REMOVE_DELAY = 1000000
+// 消失后的 toast 从状态里摘掉的延迟。原来这里是 1_000_000ms（≈11.6 天），等于「每次弹出的
+// 提示都在 Map 里挂一个十余天不着陆的定时器」——长时间挂着应用的会话里它只增不减。
+// 5s 足够走完退出动画，也把这层驻留收回来了。
+const TOAST_REMOVE_DELAY = 5000
 
 type ToasterToast = ToastProps & {
   id: string

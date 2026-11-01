@@ -1,7 +1,13 @@
 import { ipcMain, app, BrowserWindow, shell } from 'electron'
 import axios from 'axios'
 import { IpcChannels } from './channels'
+import { installTrustedSenderGuard } from './trustedSender'
 import { storeManager } from '../store/store'
+import { applyAnthropicRoutes, planAnthropicRoutes } from '../store/anthropicRoutes'
+import type {
+  AnthropicDiscoveryResult,
+  AnthropicRouteApplyResult,
+} from '../../shared/anthropicDiscovery'
 import { ProviderManager } from '../store/providers'
 import { AccountManager } from '../store/accounts'
 import { ProviderChecker } from '../providers/checker'
@@ -24,7 +30,7 @@ import { runToolCallingSmoke } from '../proxy/toolCalling/diagnostics'
 import { UpdaterManager } from '../updater'
 import { setTitleBarTheme } from '../window/manager'
 import type { Provider, Account, ProxyStatus, ProviderCheckResult, OAuthResult, AuthType, CredentialField, LogLevel, LogEntry, ProviderVendor, ModelRoute, ModelCapabilityHint } from '../../shared/types'
-import type { RouteListResult, RouteMutationResult, RouteRemovalResult } from '../../shared/modelRouteName'
+import type { RouteListResult, RouteMutationResult, RouteRemovalResult, RoutePoolSizesResult } from '../../shared/modelRouteName'
 import type { SessionConfig, SessionRecord, ManagementApiConfig, AppConfig } from '../store/types'
 import type { ProviderType } from '../oauth/types'
 import type { ModelsFetchFailure } from '../store/types'
@@ -77,6 +83,8 @@ function routeStorageError(error: unknown): { code: 'storage_unavailable'; messa
 }
 
 export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Promise<void> {
+  // 先装来源校验，再登记任何 handler：所有通道都在它的保护下注册。
+  installTrustedSenderGuard()
   let storageReady = true
   try {
     await storeManager.initialize()
@@ -228,6 +236,9 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     const newConfig = storeManager.updateConfig(updates)
 
     broadcastConfigChanged(newConfig)
+    // 配置一落地就重新核对监听安全：`checkStartupSecurity` 原本只在 `start()` 跑一次，
+    // 「先带 Key 绑 0.0.0.0 启动、再把 Key 清空」会让服务继续以无鉴权状态对外监听。
+    proxyServer.revalidateSecurity()
 
     return true
   })
@@ -306,6 +317,49 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     },
   )
 
+  /**
+   * 逐路由的候选模型数。路由列表页在**没进编辑态**时也要回答「这条路由的池有多大」，
+   * 而 `routes:preview` 一次只折一条、还把逐行明细全带回来；这里一次采集折全表，只回
+   * 数字。停用的路由也算 —— 它的池照样是那份配置折出来的，界面要说的是配置而不是「能不能用」。
+   */
+  ipcMain.handle(
+    IpcChannels.ROUTES_POOL_SIZES,
+    async (): Promise<RoutePoolSizesResult> => {
+      try {
+        return { ok: true, sizes: autoRouter.routePoolSizes(storeManager.listModelRoutes()) }
+      } catch (error) {
+        return { ok: false, error: routeStorageError(error) }
+      }
+    },
+  )
+
+  /** 只读预览：会新增哪几条 Anthropic 可发现别名、哪些名字被什么挡住了。 */
+  ipcMain.handle(
+    IpcChannels.ANTHROPIC_DISCOVERY_PLAN,
+    async (): Promise<AnthropicDiscoveryResult> => {
+      try {
+        return planAnthropicRoutes()
+      } catch (error) {
+        return { ok: false, error: routeStorageError(error) }
+      }
+    },
+  )
+
+  ipcMain.handle(
+    IpcChannels.ANTHROPIC_DISCOVERY_APPLY,
+    async (): Promise<AnthropicRouteApplyResult> => {
+      try {
+        const result = applyAnthropicRoutes()
+        if (!result.ok) return result
+        // 别名写进的是 `config.modelMappings`，模型映射面板与代理都在读它。
+        if (result.created.length > 0) broadcastConfigChanged(storeManager.getConfig())
+        return result
+      } catch (error) {
+        return { ok: false, error: routeStorageError(error) }
+      }
+    },
+  )
+
   ipcMain.handle(IpcChannels.STORE_GET, async (_, key: string): Promise<unknown> => {
     if (key === 'logs') {
       return storeManager.getLogs()
@@ -337,10 +391,17 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
           win.webContents.send(IpcChannels.CONFIG_CHANGED, normalized)
         }
       })
+      proxyServer.revalidateSecurity()
       return
     }
-    const store = storeManager.getStore()
-    store?.set(key as 'providers' | 'accounts' | 'config' | 'logs', value as never)
+    // 通用写通道到上面两个键为止。以前这里还有一条 `store.set(key, value)` 的裸写：
+    // `accounts` / `providers` 走它会把渲染层传来的整串对象直接落盘，绕过
+    // `encryptCredentials` 的逐字段加密；而读回来时 `decryptData` 对解不开的值回退返回
+    // 原文，于是「功能照常、盘上是明文」，谁都看不出加密被绕过了。
+    // 渲染层现在没有任何合法调用方（配置走 `config:update`，厂商/账号/路由走各自专用
+    // 通道），所以未登记的键一律拒绝并留痕。
+    console.error(`[IPC] Rejected raw store:set for unregistered key: ${key}`)
+    throw new Error(`store:set does not accept the key "${key}"`)
   })
 
   ipcMain.handle(IpcChannels.STORE_DELETE, async (_, key: string): Promise<void> => {
@@ -348,8 +409,10 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
       storeManager.clearLogs()
       return
     }
-    const store = storeManager.getStore()
-    store?.delete(key as 'providers' | 'accounts' | 'config' | 'logs')
+    // 与 `store:set` 同一条白名单：删除 `accounts` / `providers` / `config` 属于专用通道
+    // 的职责（它们要顺带清运行时状态与广播），通用键删会留下不一致的中间态。
+    console.error(`[IPC] Rejected raw store:delete for unregistered key: ${key}`)
+    throw new Error(`store:delete does not accept the key "${key}"`)
   })
 
   ipcMain.handle(IpcChannels.STORE_CLEAR_ALL, async (): Promise<void> => {
@@ -854,11 +917,20 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     console.error('[ChannelPack] 渠道运行时启动失败：', error)
   })
 
-  ipcMain.handle(IpcChannels.ACCOUNTS_GET_ALL, async (_, includeCredentials?: boolean): Promise<Account[]> => {
-    return AccountManager.getAll(includeCredentials)
+  ipcMain.handle(IpcChannels.ACCOUNTS_GET_ALL, async (): Promise<Account[]> => {
+    // 渲染层拿不到解密后的凭据：转发时用的密钥只在主进程内部解密取用
+    // （`proxy/forwarder.ts` 的 `buildHeaders`），界面要显示只能显示掩码。
+    // 这条通道原先带 `includeCredentials` 参数，任何能叫 IPC 的脚本一句
+    // `accounts:get-all(true)` 就把全部上游 Key / refreshToken / cookie 端走。
+    return AccountManager.getAll(false)
   })
 
   ipcMain.handle(IpcChannels.ACCOUNTS_GET_BY_ID, async (_, id: string, includeCredentials?: boolean): Promise<Account | null> => {
+    // 这一条仍然把明文凭据交给渲染进程，因为账号编辑框要预填已存的 Key
+    // （`pages/Providers.tsx:681,707` 两处都传 true）。彻底闭掉它要先改编辑框语义
+    // （显示掩码 + 「留空表示不修改」），那是界面改动 + 实机核对，不能在这批里盲改。
+    // 已经收紧的是：`accounts:get-all` 不再返回凭据，且渲染层没有了通用 `invoke`，
+    // 主进程每个通道都要过 `senderFrame` 来源校验。
     return storeManager.getAccountById(id, includeCredentials) || null
   })
 
@@ -1107,7 +1179,20 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
   })
 
   ipcMain.handle(IpcChannels.APP_OPEN_EXTERNAL, async (_, url: string): Promise<void> => {
-    console.log('[APP_OPEN_EXTERNAL] Opening URL:', url)
+    // `shell.openExternal` 把 URL 交给系统默认处理器：`file://` 会开本地文件、`smb://`
+    // 会把 NetBIOS 凭据往外送、`ms-msdt:` / `search-ms:` 有已知的协议处理器滥用。
+    // 界面里的外链只有 http(s)，所以其它协议一律拒绝并留痕。
+    let protocol: string
+    try {
+      protocol = new URL(url).protocol
+    } catch {
+      console.warn(`[IPC] Rejected malformed openExternal URL: ${url}`)
+      throw new Error('Invalid URL')
+    }
+    if (protocol !== 'http:' && protocol !== 'https:') {
+      console.warn(`[IPC] Rejected openExternal for protocol ${protocol}`)
+      throw new Error(`Refused to open a ${protocol} URL`)
+    }
     try {
       await shell.openExternal(url)
       console.log('[APP_OPEN_EXTERNAL] Successfully opened')

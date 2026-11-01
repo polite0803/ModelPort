@@ -63,9 +63,12 @@ if (process.platform === 'darwin' && process.arch === 'arm64') {
   app.commandLine.appendSwitch('disable-gpu-sandbox')
 }
 
-// Automatically add --no-sandbox flag when running as root user
+// Running as root is reported, not fixed: this build does not append --no-sandbox
+// on anyone's behalf, because doing so would trade the renderer sandbox for the
+// convenience of a root container. Launch with `--no-sandbox` explicitly when that
+// trade is actually intended.
 if (process.getuid && process.getuid() === 0) {
-  console.log('Detected running as root user, sandbox settings have been automatically handled')
+  console.warn('Running as root: the sandbox stays enabled, pass --no-sandbox explicitly if you mean to drop it')
 }
 
 const gotTheLock = app.requestSingleInstanceLock()

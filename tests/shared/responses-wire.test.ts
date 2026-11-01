@@ -12,7 +12,7 @@ import {
  * 翻回 OpenAI chat 形状。
  *
  * 这套翻译只在**出向**用（供应商只支持 /responses 时）。入向（客户端打
- * /v1/responses）不在这里，也不在本轮范围。
+ * /v1/responses）在 `responsesInbound.ts`，方向相反、编解码各一套。
  *
  * 三条纪律：
  * 1. `usage` 上游没报就是 `null`，绝不编数字（项目既有契约）；
@@ -43,13 +43,22 @@ test('messages become a Responses `input` array, system becomes `instructions`',
 })
 
 test('streaming flips `stream` on, and sampling parameters are carried through', () => {
-  const body = chatToResponsesRequest({ model: 'gpt-5', messages: MESSAGES, stream: true, temperature: 0.3, max_tokens: 64 })
+  const body = chatToResponsesRequest({
+    model: 'gpt-5',
+    messages: MESSAGES,
+    stream: true,
+    temperature: 0.3,
+    max_tokens: 64,
+    prompt_cache_key: 'sess-42',
+  })
 
   assert.equal(body.stream, true)
   assert.equal(body.temperature, 0.3)
   // chat 的 max_tokens 在 responses 里叫 max_output_tokens
   assert.equal(body.max_output_tokens, 64)
   assert.equal(body.max_tokens, undefined, 'the chat name must not leak into the responses body')
+  // 缓存亲和键两边同名：不搬就等于替客户端放弃它自己的 prompt caching。
+  assert.equal(body.prompt_cache_key, 'sess-42')
 })
 
 test('tools are translated, and tool_choice only when chat named one', () => {

@@ -97,6 +97,7 @@ export { isFailoverEligibleStatus }
 import { qualifyChannelModel } from '../providers/accountChannels/modelCatalog'
 import { requestDeadlines } from './requestBudget'
 import { injectTrailingUser, trailingUserGuardEnabled } from './trailingUserGuard'
+import { isForbiddenProviderHeader } from '../../shared/providerHeaders'
 
 function shouldDeleteSession(): boolean {
   return sessionManager.shouldDeleteAfterChat()
@@ -880,6 +881,10 @@ export class RequestForwarder {
         timeout: requestDeadlines().completeMs,
         responseType: request.stream ? 'stream' : 'json',
         validateStatus: () => true,
+        // 客户端断开要中止上游：流式路径另有 `res close` → `upstream.destroy()` 的联动，
+        // 非流式以前没有任何 signal，用户在 IDE 里按下取消后上游照常推理完并计费
+        // （最长到 completeMs），还会继续走重试。
+        signal: request.signal,
       }
 
       const response: AxiosResponse = await this.axiosInstance.request(axiosConfig)
@@ -973,6 +978,7 @@ export class RequestForwarder {
         timeout: requestDeadlines().completeMs,
         responseType: request.stream ? 'stream' : 'json',
         validateStatus: () => true,
+        signal: request.signal,
       })
       const latency = Date.now() - startTime
 
@@ -1115,7 +1121,10 @@ export class RequestForwarder {
       path = '/' + path
     }
 
-    if (baseUrl.includes('/v1') && path.startsWith('/v1')) {
+    // 只有 baseUrl 自己就以 `/v1` 这一段结尾时，才把 path 的同名前缀去掉。
+    // 原来的 `baseUrl.includes('/v1')` 会被 `https://host/notreally/v1x`、
+    // `https://host/v1/gateway` 这类地址误判，把路径截错一截。
+    if (/\/v1$/.test(baseUrl) && path.startsWith('/v1')) {
       path = path.slice(3)
     }
 
@@ -1126,9 +1135,12 @@ export class RequestForwarder {
    * Build Request Headers
    */
   private buildHeaders(provider: Provider, account: Account): Record<string, string> {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      ...provider.headers,
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    // 逐条滤而不是整串展开：`...provider.headers` 让配置里的 `Host` / `Content-Length`
+    // 直接顶掉 axios 自己算出来的值，而配置可以来自导入文件或渠道包。
+    for (const [name, value] of Object.entries(provider.headers ?? {})) {
+      if (isForbiddenProviderHeader(name)) continue
+      headers[name] = value
     }
 
     const credentials = account.credentials
@@ -1221,9 +1233,11 @@ export class RequestForwarder {
     //   对**所有**客户端都是 null，`/v1/messages` 那半边只好用估算值顶（见 A2）；
     // - `response_format` 丢了 → JSON 模式静默变自由文本；
     // - `seed` 丢了 → 可复现性承诺失效。
+    // - `prompt_cache_key` 丢了 → 客户端自己的 prompt caching 命中率归零（它看不出来
+    //   为什么变慢，只会以为上游慢了）。
     // 聚合条目的地盘很严时由条目自己的 `dropParams` 剥（`applyAggregateDropParams`
     // 就在这之后跑），内建供应商仍由 `stripUnsupportedForBuiltin` 先删掉它们。
-    for (const key of ['response_format', 'stream_options', 'seed'] as const) {
+    for (const key of ['response_format', 'stream_options', 'seed', 'prompt_cache_key'] as const) {
       const value = (request as unknown as Record<string, unknown>)[key]
       if (value !== undefined) body[key] = value
     }

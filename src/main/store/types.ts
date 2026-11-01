@@ -19,6 +19,7 @@ import type {
   ModelCapabilityHint,
   CompressionConfig,
   OutputSteeringConfig,
+  AnthropicInboundConfig,
 } from '../../shared/types.ts'
 import type { ChannelLoginKind } from '../../shared/channels.ts'
 import {
@@ -262,6 +263,12 @@ export interface ModelMapping {
   preferredProviderId?: string
   /** Preferred account ID */
   preferredAccountId?: string
+  /**
+   * true = 这条别名已停用：不再参与任何名字解析（具名请求、anthropic 入站、
+   * 通配匹配都看不见它）。缺席即启用，所以老配置零迁移。
+   * 停用位落在映射表自身而不是 `excludedModels`，因为别名行不属于任何目录。
+   */
+  disabled?: boolean
 }
 
 /**
@@ -343,10 +350,23 @@ export interface AppConfig {
    * filled - see `normalizeConfig()` in `store.ts` for the migration itself.
    */
   routes?: Record<string, ModelRoute>
+  /**
+   * 已被「协议路由」播种处理过的名字记档（一次性判据，见
+   * `shared/types.ts::AppConfig.seededPresetRoutes`）。`DEFAULT_CONFIG` 不预置这个键。
+   */
+  seededPresetRoutes?: string[]
   /** Live-zone context compression (shipped default: on — see DEFAULT_COMPRESSION_CONFIG) */
   compression: CompressionConfig
   /** Output-side verbosity steering (off by default) */
   outputSteering: OutputSteeringConfig
+  /**
+   * `/v1/messages` 入向的模型解析与清单申报规则。缺席即默认行为
+   * （请求名能解析就原样用，否则落 `auto`）。
+   *
+   * 与 `src/shared/types.ts` 同一份声明、两处都要写 —— 少这一处，主进程侧
+   * `storeManager.updateConfig({ anthropicInbound })` 直接编译不过（UI 写路径就是它）。
+   */
+  anthropicInbound?: AnthropicInboundConfig
   /**
    * 免验证（keyless）聚合条目的自动开通黑名单：用户显式删除过的条目 id 记在这里，
    * 启动期自动开通不再复活它们。

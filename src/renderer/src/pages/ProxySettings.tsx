@@ -11,6 +11,7 @@ import {
 import { ContextManagement } from '@/components/proxy/ContextManagement'
 import { CompressionSettings } from '@/components/proxy/CompressionSettings'
 import { OutputSteeringSettings } from '@/components/proxy/OutputSteeringSettings'
+import { AnthropicInboundSettings } from '@/components/proxy/AnthropicInboundSettings'
 import ApiKeys from '@/pages/ApiKeys'
 import { useProxyStore } from '@/stores/proxyStore'
 import { Settings, Scale, Settings2, Key } from 'lucide-react'
@@ -75,6 +76,7 @@ export function ProxySettings() {
             <ContextManagement />
             <CompressionSettings />
             <OutputSteeringSettings />
+            <AnthropicInboundSettings />
           </div>
         </TabsContent>
       </Tabs>

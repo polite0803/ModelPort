@@ -43,12 +43,23 @@ export function ProxyStatus({ onStatusChange }: ProxyStatusProps) {
     fetchProxyStatistics()
 
     const statusInterval = setInterval(() => {
+      // 窗口不可见（收进托盘、切走）时不打扰主进程：这份状态没人看，而托盘与主界面各自
+      // 挂载就是两份同频轮询。回到前台立刻补一次，不留下「看着像停了」的空窗。
+      if (document.visibilityState !== 'visible') return
       fetchProxyStatus()
       fetchProxyStatistics()
     }, 5000)
 
+    const refreshWhenVisible = (): void => {
+      if (document.visibilityState !== 'visible') return
+      fetchProxyStatus()
+      fetchProxyStatistics()
+    }
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+
     return () => {
       clearInterval(statusInterval)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
     }
   }, [fetchProxyStatus, fetchProxyStatistics])
 

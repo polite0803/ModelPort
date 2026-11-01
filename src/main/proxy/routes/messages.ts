@@ -18,7 +18,16 @@ import { PassThrough } from 'node:stream'
 import { randomUUID } from 'node:crypto'
 import { storeManager } from '../../store/store'
 import { toHeaderValue } from '../utils/headerValue'
+import {
+  adoptInnerRequestId,
+  copyModelPortHeaders,
+  loopbackHostOf,
+  loopbackRequestHeaders,
+  setSseHeaders,
+  upstreamErrorMessage,
+} from '../utils/inboundLoopback'
 import { findModelRoute, enabledModelRoutes } from '../../store/modelRoutes'
+import { isMappingActive } from '../../store/modelServing'
 import {
   anthropicErrorBody,
   anthropicErrorTypeOf,
@@ -26,23 +35,13 @@ import {
   chatResponseToAnthropicMessage,
   createAnthropicStreamTranslator,
   estimateAnthropicInputTokens,
+  estimateAnthropicInputTokensDetailed,
 } from '../../../shared/anthropicWire'
 import type { AppConfig } from '../../../shared/types'
 
 type Payload = Record<string, any>
 
 const router = new Router({ prefix: '/v1' })
-
-/**
- * 本机回环地址。网关可能被配置成监听 `0.0.0.0`（对外提供服务），此时
- * 回环必须显式走 `127.0.0.1`，不能拿 `0.0.0.0` 当目标地址（那不是可连接的地址）。
- */
-function loopbackHostOf(config: AppConfig): string {
-  const host = (config.proxyHost || '127.0.0.1').trim()
-  if (host === '' || host === '0.0.0.0' || host === '*') return '127.0.0.1'
-  if (host === '::' || host === '[::]') return '[::1]'
-  return host.includes(':') ? `[${host}]` : host
-}
 
 /**
  * 网关是否认识这个名字。
@@ -58,8 +57,10 @@ function gatewayKnowsModel(name: string, config: AppConfig): boolean {
 
   if (findModelRoute(config.routes, trimmed) !== undefined) return true
 
-  for (const key of Object.keys(config.modelMappings ?? {})) {
-    if (key.trim().toLowerCase() === lower) return true
+  for (const [key, mapping] of Object.entries(config.modelMappings ?? {})) {
+    // 停用的别名不认 —— 与 modelMapper / loadbalancer 同一个判据，否则 anthropic
+    // 入口会「认识」一个 chat 入口根本跑不了的名字。
+    if (isMappingActive(mapping) && key.trim().toLowerCase() === lower) return true
   }
 
   for (const provider of storeManager.getProviders()) {
@@ -147,41 +148,10 @@ export function resolveAnthropicModel(requested: string, config: AppConfig): Res
   )
 }
 
-/** 客户端带的凭据原样转给回环请求：鉴权由 chat 路径上的中间件统一判定。 */
-function forwardAuthHeaders(ctx: Context): Record<string, string> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-  const authorization = ctx.get('Authorization')
-  if (authorization) headers.Authorization = authorization
-  const apiKey = ctx.get('x-api-key')
-  if (apiKey) headers['x-api-key'] = apiKey
-  return headers
-}
-
-function setSseHeaders(ctx: Context): void {
-  ctx.set('Content-Type', 'text/event-stream')
-  ctx.set('Cache-Control', 'no-cache')
-  ctx.set('Connection', 'keep-alive')
-  ctx.set('X-Accel-Buffering', 'no')
-}
-
 function failWith(ctx: Context, status: number, message: string): void {
   ctx.status = status
   ctx.set('Content-Type', 'application/json')
   ctx.body = anthropicErrorBody(message, anthropicErrorTypeOf(status))
-}
-
-/** 从上游错误响应里抠出人话；非 JSON（网关自己的纯文本错误）就原样用。 */
-async function upstreamErrorMessage(response: Response): Promise<string> {
-  const text = await response.text().catch(() => '')
-  if (text.trim() === '') return `Upstream responded with ${response.status}`
-  try {
-    const parsed = JSON.parse(text) as Payload
-    const message = parsed?.error?.message ?? parsed?.message
-    if (typeof message === 'string' && message.trim() !== '') return message
-  } catch {
-    // 非 JSON：当成文本
-  }
-  return text.slice(0, 2000)
 }
 
 router.post('/messages', async (ctx: Context) => {
@@ -218,7 +188,27 @@ router.post('/messages', async (ctx: Context) => {
     })
   }
 
-  const chatRequest = anthropicToChatRequest(body, { model: resolved.model, stream: wantsStream })
+  const { request: chatRequest, dropped } = anthropicToChatRequest(body, {
+    model: resolved.model,
+    stream: wantsStream,
+    // 显式 `false` 才关：默认把附件真的送出去，让「上游不吃 file 块」以报错的形式
+    // 暴露，而不是以「模型答非所问」的形式。
+    documentsAsFileParts: config.anthropicInbound?.documentPassThrough !== false,
+  })
+
+  if (dropped.length > 0) {
+    // 客户端发来了本网关翻不出去的东西（`document` 附件块、`thinking`、`top_k`…）。
+    // 请求照发 —— 拒掉整个请求对客户端更糟 —— 但这一格缺席必须留痕：日志一条 + 响应头
+    // 一条，与 `X-ModelPort-Usage-Estimated` 同一套做法。少了这两条，用户附件传不上去时
+    // 看到的就是一次「模型答非所问」，而现场什么都查不到。
+    const summary = dropped.join(',')
+    ctx.set('X-ModelPort-Anthropic-Dropped', toHeaderValue(summary))
+    storeManager.addLog('warn', `Anthropic inbound not translated: ${summary}`, {
+      requestId,
+      data: { requestedModel, resolvedModel: resolved.model, dropped },
+    })
+  }
+
   const endpoint = `http://${loopbackHostOf(config)}:${config.proxyPort}/v1/chat/completions`
 
   // 客户端断开就掐掉回环请求：否则 sentry 已经在跑的转发会继续占着账号和上游配额。
@@ -231,7 +221,11 @@ router.post('/messages', async (ctx: Context) => {
   try {
     response = await fetch(endpoint, {
       method: 'POST',
-      headers: forwardAuthHeaders(ctx),
+      headers: loopbackRequestHeaders({
+        authorization: ctx.get('Authorization'),
+        xApiKey: ctx.get('x-api-key'),
+        userAgent: ctx.get('User-Agent'),
+      }),
       body: JSON.stringify(chatRequest),
       signal: abort.signal,
     })
@@ -242,8 +236,11 @@ router.post('/messages', async (ctx: Context) => {
   }
 
   // 回环那笔 chat 请求才是日志行的归属（`chatcmpl-*`），拿到就把头换成它。
-  const innerRequestId = response.headers.get('x-request-id')
-  if (innerRequestId) ctx.set('X-Request-Id', innerRequestId)
+  adoptInnerRequestId(ctx, response)
+  // chat 那条链算好的诊断头（路由名、被剔除的渠道、降级说明、压缩读数、client）在这里
+  // 透出去。不透的话，走 anthropic 的客户端只看得见回答、看不见依据，而
+  // `/v1/responses` 那半边已经透 —— 同一份机制不该差这一格。
+  copyModelPortHeaders(ctx, response)
 
   if (!response.ok) {
     const message = await upstreamErrorMessage(response)
@@ -332,8 +329,14 @@ router.post('/messages', async (ctx: Context) => {
  */
 router.post('/messages/count_tokens', async (ctx: Context) => {
   const body = (ctx.request.body ?? {}) as Payload
+  const estimate = estimateAnthropicInputTokensDetailed(body)
   ctx.set('Content-Type', 'application/json')
-  ctx.body = { input_tokens: estimateAnthropicInputTokens(body) }
+  // `uncounted_blocks` 是本网关加的一格（Anthropic 的响应只有 `input_tokens`）：
+  // 附件里数不出页数的 PDF 与读不到宽高的图片不计入，所以这个数是**声明过的下界**。
+  // 不声明的话，客户端会把它当准数安排字节，到上游才被硬拒 —— 那正是最贵的一种沉默。
+  ctx.body = estimate.uncounted.length === 0
+    ? { input_tokens: estimate.tokens }
+    : { input_tokens: estimate.tokens, uncounted_blocks: estimate.uncounted }
 })
 
 export default router

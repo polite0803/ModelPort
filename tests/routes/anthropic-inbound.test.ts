@@ -14,10 +14,20 @@
  * 4. `toolCallingConfig` 关掉托管时，客户端的原生 tools 必须真的出站
  *    （此前 `buildRequestBody` 的白名单里根本没有 `tools` 这一格，那个开关
  *    等于「把工具静默丢掉」）；
- * 5. 带 `anthropic-version` 来列模型时返回 anthropic 形状。
+ * 5. 带 `anthropic-version` 来列模型时返回 anthropic 形状；
+ * 6. 未翻译的入向块（`document` 附件、`thinking`）在响应头与 warn 日志里各留一条，且
+ *    「丢」确实发生在翻译层（上游报文里查不到那个词）；
+ * 7. anthropic 形状的清单把申报过的 claude 面向名排在最前、窗口取映射目标的池下界、
+ *    映射目标不认识就不广告 —— 客户端逐行筛名的判据取自本机那份 Claude Desktop 4.4212
+ *    安装里的 `/v1/models` 解析代码（纯网关内部名会被筛成「0 usable models」），不是照
+ *    教程或想象写的；
+ * 8. 「生成可发现的 Anthropic 路由」这条链端到端成立：路由名出现在清单里、请求按
+ *    `as-requested` 直接命中、上游收到的是 Anthropic 的写法 —— 靠的是路由的
+ *    `pinModels` 钉池；同时钉空的路由（现存所有路由）行为逐字不变。
  *
- * 不在本层证明：真 Claude Code 客户端、账号渠道（那条路径不经回环，工具与 usage
- * 由渠道包自己处理）。
+ * 不在本层证明：真 Claude Desktop 客户端的完整会话（本机那份安装只读了它的请求构造与
+ * 清单解析代码，端点与鉴权头是实证；多轮工具循环与文件工作流还没实机跑过）、账号渠道
+ * （那条路径不经回环，工具与 usage 由渠道包自己处理）。
  */
 import { test, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
@@ -320,11 +330,237 @@ test('带 anthropic-version 列模型返回 anthropic 形状；不带时保持 O
   assert.equal(openai.json.data[0].type, undefined)
 })
 
-test('count_tokens 用本机估算答复，且不报 0', async () => {
+/**
+ * 成功那笔的请求日志行是在响应送达之后才落进内存表的（拒绝行才是同步写的），
+ * 所以按「发完就读」的顺序查会偶发查不到。这里给它有限的重试次数，判据不变。
+ */
+const findLogRow = async (predicate: (entry: Payload) => boolean, tries = 40): Promise<Payload | undefined> => {
+  for (let attempt = 0; attempt < tries; attempt++) {
+    const hit = sm.getRequestLogs().find(predicate)
+    if (hit !== undefined) return hit as Payload
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  return undefined
+}
+
+test('走回环的 anthropic 入口：日志里的 client 归的是客户端，不是网关自己', async () => {
+  const response = await proxy.request('POST', '/v1/messages', {
+    body: messagesBody('auto'),
+    headers: { 'User-Agent': 'claude-cli/1.0.3 (external, cli)' },
+  })
+
+  assert.equal(response.status, 200)
+
+  // `claude-cli` 不在识别表里，所以它是 `other` + UA 里的原始产品名。关键是这个名字只
+  // 能来自被透进回环的 UA：不透的话这一格是回环那笔自己的 UA（实测 'node'），
+  // 「这是谁发来的」这条排障线索在入站协议入口就断了。
+  const row = await findLogRow((entry) => entry.client?.label === 'claude-cli')
+  assert.ok(row, '日志里找不到归给 claude-cli 的那一行')
+  assert.equal(row.client.id, 'other')
+  assert.equal(row.client.version, '1.0.3')
+})
+
+test('走回环的 anthropic 入口把 chat 算好的诊断头透到外层（与 /v1/responses 同一格）', async () => {
+  const buffered = await proxy.request('POST', '/v1/messages', {
+    body: messagesBody('auto'),
+    headers: { 'User-Agent': 'claude-cli/1.0.3 (external, cli)' },
+  })
+  assert.equal(buffered.status, 200)
+  assert.equal(buffered.headers['x-modelport-route-name'], 'auto')
+  assert.equal(buffered.headers['x-modelport-client'], 'other/1.0.3')
+
+  // 流式那一格也要有：诊断头必须在首字节之前写好，发出去就补不上。
+  const streamed = await proxy.request('POST', '/v1/messages', { body: messagesBody('auto', { stream: true }) })
+  assert.equal(streamed.status, 200)
+  assert.equal(streamed.headers['x-modelport-route-name'], 'auto')
+  assert.match(streamed.text, /event: message_start/)
+})
+
+/* ------------------------------------------------------------------ 可发现名端到端 */
+
+/**
+ * 可发现的 Anthropic 路由：列得到 + 发得出 + 上游收到 Anthropic 的写法。
+ *
+ * 这条判据原本是 todo（清单名字域已收成「只有路由」，而路由钉不住池）。现在路由有了
+ * `pinModels`（`shared/types.ts::ModelRoute.pinModels`，折叠在 `autoRouting.ts::applyModelNamePin`），
+ * 一条叫 `claude-opus-5` 的路由可以诚实地只服务真正服务它的那几家，于是三件事一起钉：
+ * 名字出现在 `/v1/models` 的 anthropic 形状里、请求按 `as-requested` 直接命中（不落兜底）、
+ * 上游收到的模型名是 Anthropic 的写法而不是网关展示名。
+ */
+test('生成的可发现路由：列得到、发得出、上游收到的就是那个 Anthropic id', async () => {
+  // 第二家：目录名带条目前缀（客户端那一筛过不去），上游 id 才是 Anthropic 的写法。
+  sm.addProvider({
+    id: 'llm7',
+    name: 'LLM7 Test Entry',
+    type: 'custom',
+    authType: 'token',
+    apiEndpoint: `http://127.0.0.1:${UPSTREAM_PORT}/v1`,
+    chatPath: '/chat/completions',
+    headers: {},
+    enabled: true,
+    createdAt: 1,
+    updatedAt: 2,
+    supportedModels: ['llm7/claude-opus-5'],
+    modelMappings: { 'llm7/claude-opus-5': 'claude-opus-5' },
+  } as never)
+  sm.addAccount({
+    id: 'llm7-acct',
+    providerId: 'llm7',
+    name: 'llm7 account',
+    credentials: { token: 'test-token' },
+    status: 'active',
+    createdAt: 1,
+    updatedAt: 2,
+  } as never)
+
+  const { applyAnthropicRoutes } = await loadModule('main/store/anthropicRoutes.ts')
+  const applied = applyAnthropicRoutes()
+  if (!applied.ok) assert.fail(`建路由不该失败：${applied.error.message}`)
+  assert.deepEqual(applied.created.map(route => route.name), ['claude-opus-5'])
+  assert.deepEqual(applied.failed, [])
+
+  // 1. 列得到：路由名进 `/v1/models` 的 anthropic 形状（客户端那一筛只认 claude/anthropic 前缀）。
+  const list = await proxy.request('GET', '/v1/models', { headers: { 'anthropic-version': '2023-06-01' } })
+  const rows = (list.json.data as Array<Record<string, any>>).filter(row => row.id === 'claude-opus-5')
+  assert.equal(rows.length, 1, `清单里应当恰好一条：${JSON.stringify(list.json.data)}`)
+  // 窗口是**池下界**，不是上游声明的上限：未标注的候选按 `UNANNOTATED_CONTEXT_FLOOR`
+  // （64000）参与，与 OpenAI 形状里同一个 `context_window` 同源。空池才省略键 ——
+  // 纯函数层那条判据（未知窗口 ⇒ 省略 `max_input_tokens`）已经钉住那一格。
+  assert.equal(rows[0].max_input_tokens, 64000)
+
+  // 2. 发得出：客户端原样发回这个名字，它被**直接解析**成这条路由。
+  const response = await proxy.request('POST', '/v1/messages', { body: messagesBody('claude-opus-5') })
+  assert.equal(response.status, 200)
+  assert.equal(response.headers['x-modelport-anthropic-resolved'], undefined,
+    '这个名字应当被 as-requested 直接命中，而不是靠兜底')
+
+  // 3. 上游收到的是 Anthropic 的写法（池被 pinModels 收在这家，展示名再由目录映射换成上游 id）。
+  assert.equal(seenBodies[0].model, 'claude-opus-5')
+  assert.equal(response.json.model, 'claude-opus-5')
+})
+
+test('未钉定的路由照旧是全目录池：pinModels 为空时行为逐字不变', async () => {
+  // 这条是回归护栏：新字段对现存路由必须是 no-op，否则「不钉 = 全目录」的原义会被改坏。
+  const routes = sm.getConfig().routes ?? {}
+  const auto = routes.auto
+  assert.ok(auto !== undefined, '默认迁移应给出 auto 路由')
+  assert.deepEqual(auto.pinModels, [], '读侧同形')
+
+  const response = await proxy.request('POST', '/v1/messages', { body: messagesBody('auto') })
+  assert.equal(response.status, 200)
+  assert.ok(['antp-upstream', 'claude-opus-5'].includes(seenBodies[0].model),
+    `auto 仍应从整张目录里挑：${JSON.stringify(seenBodies[0])}`)
+})
+
+test('count_tokens 用本机估算答复，不报 0，并把数不出价的格子明说', async () => {
   const response = await proxy.request('POST', '/v1/messages/count_tokens', {
     body: { model: 'auto', system: 'a'.repeat(400), messages: [{ role: 'user', content: 'hi' }] },
   })
   assert.equal(response.status, 200)
   assert.equal(typeof response.json.input_tokens, 'number')
   assert.ok(response.json.input_tokens > 0)
+  assert.equal(response.json.uncounted_blocks, undefined, '全都计得进去时不发这一格')
+
+  // 图片按 (w×h)/750 定价，base64 里读不到宽高 ⇒ 不计入。不声明的话客户端会把这个
+  // 下界当准数安排字节，到上游才被硬拒 —— 那是最贵的一种沉默。
+  const withImage = await proxy.request('POST', '/v1/messages/count_tokens', {
+    body: {
+      model: 'auto',
+      messages: [{ role: 'user', content: [
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
+      ] }],
+    },
+  })
+  assert.equal(withImage.status, 200)
+  assert.deepEqual(withImage.json.uncounted_blocks, ['image'])
+})
+
+/* --------------------------------------------- 入向缺席的可辨认性（Claude Desktop） */
+
+test('附件默认真的发出去；显式关掉才回到「丢掉但响应头与 warn 日志各留一条」', async () => {
+  const pdf = Buffer.from('%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n').toString('base64')
+  const attachmentBody = () => ({
+    model: 'auto',
+    max_tokens: 64,
+    thinking: { type: 'enabled', budget_tokens: 1024 },
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: '读这份 PDF' },
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdf } },
+      ],
+    }],
+  })
+
+  // 附件在契约层算视觉需求（`file` 在 `autoRouting.ts` 的 `VISION_PART_TYPES` 里），所以
+  // 转发之后只有标了 vision 的候选接得住。先给夹具的一家补上标注 —— 不补就会 503，
+  // 而那个 503 是「转发而非丢弃」的真实选路后果，不是测试写坏了。
+  sm.updateProvider('antp', { modelCapabilities: { 'Test-Model': { vision: 'yes' } } } as never)
+
+  // 默认开：附件进上游报文，缺席清单里不该出现 document（`thinking` 仍然没搬运，照旧要报）。
+  const forwarded = await proxy.request('POST', '/v1/messages', { body: attachmentBody() })
+  assert.equal(forwarded.status, 200)
+  const forwardedHeader = forwarded.headers['x-modelport-anthropic-dropped'] ?? ''
+  assert.ok(!forwardedHeader.includes('document'), `附件已转发，缺席清单里不该有它：${forwardedHeader}`)
+  assert.match(forwardedHeader, /body:thinking/)
+  const withFile = JSON.stringify(seenBodies[0])
+  assert.ok(withFile.includes('"type":"file"'), `上游报文里应当带 file 块：${withFile}`)
+  assert.match(withFile, /读这份 PDF/, '文本那半照旧要到上游')
+
+  // 显式 `false`：回到旧行为 —— 请求照发，但这一格缺席必须在响应头与日志里看得见。
+  sm.updateConfig({ anthropicInbound: { documentPassThrough: false } })
+  try {
+    const warnBefore = sm.getLogs({ level: 'warn' }).length
+    const dropped = await proxy.request('POST', '/v1/messages', { body: attachmentBody() })
+    assert.equal(dropped.status, 200, '拒掉整个请求对客户端更糟')
+    assert.match(dropped.headers['x-modelport-anthropic-dropped'] ?? '', /document/)
+    // `beforeEach` 只在建用例前清一次，本用例内有两次请求 ⇒ 要看**最后一笔**。
+    const lastOutbound = JSON.stringify(seenBodies[seenBodies.length - 1])
+    assert.ok(!lastOutbound.includes('"type":"file"'), `关掉后不该把 file 块塞给上游：${lastOutbound}`)
+
+    const warns = sm.getLogs({ level: 'warn' })
+    assert.ok(warns.length > warnBefore, '缺席必须进日志，不能只活在响应头里')
+    assert.match(warns.map((entry) => entry.message).join('\n'), /Anthropic inbound not translated/)
+  } finally {
+    sm.updateConfig({ anthropicInbound: undefined })
+    sm.updateProvider('antp', { modelCapabilities: {} } as never)
+  }
+})
+
+test('列模型时申报过的 claude 名排在最前、带目标路由的广告下界，且不认识的目标不广告', async () => {
+  // R2 之后清单只有路由，所以 `anthropicInbound.modelMap` 的**目标今后必须是路由名**：
+  // 指向一个单模型时那一行不再发出（模型名已不在名字域里），Claude 就挑不到它。
+  // 窗口走真实管线：这一条证明的是 `context_window` → `max_input_tokens` 的通路，
+  // 纯函数层那条测的是映射本身，两边不重复。
+  sm.updateProvider('antp', { modelCapabilities: { 'Test-Model': { contextTokens: 128000 } } } as never)
+  sm.updateConfig({
+    anthropicInbound: { modelMap: { 'claude-sonnet-4-6': 'auto', 'claude-ghost': 'not-here' } },
+  })
+  try {
+    // 对照值现取：同一条路由在 OpenAI 形状里广告的下界，anthropic 那一行必须带同一个数
+    const plain = await proxy.request('GET', '/v1/models')
+    const autoEntry = (plain.json as { data: Array<Record<string, unknown>> }).data
+      .find(row => row.id === 'auto')
+    const floor = autoEntry?.context_window
+
+    const response = await proxy.request('GET', '/v1/models', {
+      headers: { 'anthropic-version': '2023-06-01' },
+    })
+    assert.equal(response.status, 200)
+    const rows = response.json.data as Array<Record<string, any>>
+    const ids = rows.map((row) => row.id)
+
+    assert.equal(ids[0], 'claude-sonnet-4-6', '客户端认识的面向名必须在表最前，否则 Desktop 逐行筛完什么都不剩')
+    assert.equal(rows[0].display_name, 'claude-sonnet-4-6')
+    if (floor === undefined) {
+      assert.equal('max_input_tokens' in rows[0], false, '路由池没窗口时两边一起省略，不兜底成默认值')
+    } else {
+      assert.equal(rows[0].max_input_tokens, floor, '窗口取映射目标那条路由广告的下界')
+    }
+    assert.ok(!ids.includes('claude-ghost'), '映射目标网关不认识就不发这一行，别让客户端选中一条必死的')
+    assert.ok(!ids.includes('Test-Model'), '单模型不再进清单：这一张表的名字域只有路由')
+  } finally {
+    sm.updateProvider('antp', { modelCapabilities: {} } as never)
+    sm.updateConfig({ anthropicInbound: undefined })
+  }
 })

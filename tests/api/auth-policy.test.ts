@@ -60,14 +60,13 @@ test('non-loopback listen without keys is refused at startup', () => {
   assert.equal(checkStartupSecurity({ apiKeys: keys, host: '0.0.0.0' }).ok, true)
 })
 
-test('CORS wildcard only for loopback without keys', () => {
-  assert.equal(resolveCorsOrigin({ origin: 'https://evil.example', requiresKey: false, host: '127.0.0.1' }), '*')
-  assert.equal(resolveCorsOrigin({ origin: 'https://evil.example', requiresKey: true, host: '127.0.0.1' }), null)
-  assert.equal(resolveCorsOrigin({ origin: 'https://evil.example', requiresKey: false, host: '0.0.0.0' }), null)
-  assert.equal(
-    resolveCorsOrigin({ origin: 'http://localhost:5173', requiresKey: true, host: '127.0.0.1' }),
-    'http://localhost:5173'
-  )
+test('CORS echoes loopback origins only — the wildcard-without-keys branch is gone', () => {
+  // 出厂默认没有 Key，旧行为此时回 `*`：任意网页都能读走响应，把用户机器当免费网关。
+  // 现在只剩「回环来源原样回显」这一条，本机 Web 客户端照旧可用。
+  assert.equal(resolveCorsOrigin({ origin: 'https://evil.example' }), null)
+  assert.equal(resolveCorsOrigin({}), null)
+  assert.equal(resolveCorsOrigin({ origin: 'http://localhost:5173' }), 'http://localhost:5173')
+  assert.equal(resolveCorsOrigin({ origin: 'http://127.0.0.1:3000' }), 'http://127.0.0.1:3000')
   assert.equal(isLoopbackOrigin('http://[::1]:8080'), true)
   assert.equal(isLoopbackOrigin('not-a-url'), false)
 })

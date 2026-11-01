@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { isDayRetained, oldestTimestamp, recentLocalDays } from '../../shared/localDay.ts'
@@ -240,7 +240,10 @@ export class AppLogManager {
     }
 
     const content = this.logs.map((entry) => JSON.stringify(entry)).join('\n')
-    writeFileSync(this.logFile, content, 'utf-8')
+    // 与请求日志同一口径：改名替换是原子的，崩溃不会留下半行被截断的日志。
+    const tempFile = `${this.logFile}.tmp`
+    writeFileSync(tempFile, content, 'utf-8')
+    renameSync(tempFile, this.logFile)
     this.dirty = false
   }
 }

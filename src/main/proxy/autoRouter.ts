@@ -34,6 +34,7 @@ import {
   advertisedContextFloorOf,
   applyContractFilter,
   applyManualModelSelection,
+  applyModelNamePin,
   applyPoolStrategiesWithTrace,
   capabilityOfCandidate,
   contractNeeds,
@@ -298,21 +299,57 @@ class AutoRouter {
     return this.collectCandidates(probe, Date.now(), { ignoreTransientAvailability: true }).rankInputs
   }
 
-  /** 一条路由在给定池上的下界；不传 `route` 时回退 legacy 全局池策略（与 `select` 同口径） */
-  private floorOfPool(pool: readonly PoolStrategyCandidate[], route?: ModelRoute): number | undefined {
+  /**
+   * 一条路由在给定池上折叠出的候选：池策略之后、手动增删之后。不传 `route` 时回退
+   * legacy 全局池策略（与 `select` 同口径）。广告下界与候选数都从这里折，两处不许
+   * 各写一遍折叠（写两遍就会有一遍忘了 `excludeModels`）。
+   */
+  private keptOfPool(pool: readonly PoolStrategyCandidate[], route?: ModelRoute): PoolStrategyCandidate[] {
+    // 名字钉定先收基底：广告下界与选路折的是同一个基底，两处不许分叉。
+    const base = applyModelNamePin(pool, route?.pinModels)
     const strategies: readonly AutoPoolStrategy[] = route?.poolStrategies
       ?? storeManager.getConfig().autoRouting?.poolStrategies
       ?? []
-    const afterStrategies = applyPoolStrategiesWithTrace(pool, strategies).kept
-    const { kept } = applyManualModelSelection(
+    const afterStrategies = applyPoolStrategiesWithTrace(base, strategies).kept
+    return applyManualModelSelection(
       afterStrategies,
-      pool,
+      base,
       route?.includeModels ?? [],
       route?.excludeModels ?? []
-    )
+    ).kept
+  }
+
+  /** 一条路由在给定池上的窗口下界 */
+  private floorOfPool(pool: readonly PoolStrategyCandidate[], route?: ModelRoute): number | undefined {
     return advertisedContextFloorOf(
-      kept.map(candidate => capabilityOfCandidate(candidate).contextTokens)
+      this.keptOfPool(pool, route).map(candidate => capabilityOfCandidate(candidate).contextTokens)
     )
+  }
+
+  /**
+   * 每条路由当前池里有几个**模型**（按供应商分组后再数名字，不是账号数）。
+   *
+   * 与广告下界共用同一次采集与同一条折叠，差别是这里不扣瞬时可用性：它回答的是
+   * 「这份配置把池定成多大」，而这一刻有几家能派是请求期才知道的事。`0` 是可信
+   * 读数（池确实被策略或手动移除筛光，后续请求必 503）；「算不出来」不走这里，
+   * 由 IPC 层报 `{ok:false}`，界面保持「没有数」而不是渲染成一个假的 0。
+   */
+  routePoolSizes(routes: readonly ModelRoute[]): Record<string, number> {
+    const pool = this.advertisedPool()
+    const sizes: Record<string, number> = {}
+    for (const route of routes) {
+      if (sizes[route.name] !== undefined) continue
+      const namesByProvider = new Map<string, Set<string>>()
+      for (const candidate of this.keptOfPool(pool, route)) {
+        const names = namesByProvider.get(candidate.providerId) ?? new Set<string>()
+        namesByProvider.set(candidate.providerId, names)
+        names.add(candidate.displayName.trim().toLowerCase())
+      }
+      let total = 0
+      for (const names of namesByProvider.values()) total += names.size
+      sizes[route.name] = total
+    }
+    return sizes
   }
 
   /**
@@ -490,14 +527,17 @@ class AutoRouter {
     // 候选池与未配置策略时完全一致。过滤后为空则走下方契约/排序兜底（空池
     // 时 explainMissing 自然返回空，不误报缺能力）。
     const poolStrategies = route?.poolStrategies ?? autoConfig?.poolStrategies ?? []
-    const strategyOutcome = applyPoolStrategiesWithTrace(rankInputs, poolStrategies)
+    // 名字钉定：基底先收到被点名的模型，`includeModels` 也只能在这个基底里取回 ——
+    // 否则一条钉死的路由会被一次手动增删绕开。
+    const pinnedRankInputs = applyModelNamePin(rankInputs, route?.pinModels)
+    const strategyOutcome = applyPoolStrategiesWithTrace(pinnedRankInputs, poolStrategies)
 
     // 手动增删：策略之后、契约过滤之前。exclude 赢过 include，include 只能从
     // 策略前就有资格的候选里取回模型 —— 不会复活停用的模型，也不会绕过下面
     // 的契约过滤与排序阶段的硬过滤。
     const manual = applyManualModelSelection(
       strategyOutcome.kept,
-      rankInputs,
+      pinnedRankInputs,
       route?.includeModels ?? [],
       route?.excludeModels ?? []
     )
@@ -605,10 +645,12 @@ class AutoRouter {
     } as unknown as ChatCompletionRequest
 
     const { rankInputs, skipped } = this.collectCandidates(probe, Date.now())
-    const strategyOutcome = applyPoolStrategiesWithTrace(rankInputs, route.poolStrategies)
+    // 名字钉定与选路、广告下界同一份规则：预览折的必须是实际会用的那个基底。
+    const pinned = applyModelNamePin(rankInputs, route.pinModels)
+    const strategyOutcome = applyPoolStrategiesWithTrace(pinned, route.poolStrategies)
     const manual = applyManualModelSelection(
       strategyOutcome.kept,
-      rankInputs,
+      pinned,
       route.includeModels,
       route.excludeModels
     )
@@ -618,6 +660,7 @@ class AutoRouter {
     const keptKeys = new Set(manual.kept.map(modelKeyOf))
     const includedKeys = new Set(manual.included.map(modelKeyOf))
     const excludedKeys = new Set(manual.excluded.map(modelKeyOf))
+    const pinnedKeys = new Set(pinned.map(modelKeyOf))
 
     const index = new Map<string, RoutePreviewModel>()
     const models: RoutePreviewModel[] = []
@@ -633,7 +676,11 @@ class AutoRouter {
       const failure = hardFilterFailure(profile, capability)
       let status: RoutePreviewStatus
       let filteredBy: AutoPoolStrategyId | undefined
-      if (excludedKeys.has(key)) {
+      if (!pinnedKeys.has(key)) {
+        // 钉了名字又不在名单里：这条与「被池策略筛掉」是两种缺席，分开说才不会让人
+        // 去动池策略找原因。
+        status = 'not-pinned'
+      } else if (excludedKeys.has(key)) {
         status = 'excluded'
       } else if (failure !== undefined) {
         status = 'unavailable'

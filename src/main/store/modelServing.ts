@@ -4,7 +4,7 @@ import type { CatalogueModel, ProviderModelOverrides } from './types.ts'
  * The single merge of a provider's model catalogue: shipped names, hand-added
  * models and the last online sync, each row carrying whether it is served now.
  * `getEffectiveModels()` is this filtered to the served rows, so the proxy, the
- * model list and the provider card can never disagree about what is exposed.
+ * route pool and the provider card can never disagree about what may be routed.
  */
 export function buildModelCatalogue(
   supportedModels: string[],
@@ -64,8 +64,18 @@ export interface RoutableInput {
   servedNames: string[]
   /** 该家是否有目录。没有目录才是通配供应商 */
   hasCatalogue: boolean
-  /** 全局映射表里这个名字的记录 */
-  mapping?: { actualModel: string; preferredProviderId?: string }
+  /** 全局映射表里这个名字的记录；已停用的别名按「没有记录」参与判断 */
+  mapping?: { actualModel: string; preferredProviderId?: string; disabled?: boolean }
+}
+
+/**
+ * 这条映射记录当前是否生效。停用一条别名是**名字域**里的操作，所以四个消费点
+ * （`modelMapper` 的五条读路径、`loadbalancer` 的两处、`messages.gatewayKnowsModel`）
+ * 都要认这同一个判据 —— 少认一处，那条别名就还能被点名。这里只做判定而不做整表
+ * 过滤：`mapModel` 每次请求会按候选供应商调若干回，复制一张几百行的表不值得。
+ */
+export function isMappingActive<T extends { disabled?: boolean }>(mapping: T | undefined): mapping is T {
+  return mapping !== undefined && mapping.disabled !== true
 }
 
 /**
@@ -74,60 +84,19 @@ export interface RoutableInput {
  * 用它翻案会把刚停用的模型救回来照样发给上游。
  */
 export function isModelRoutable({ model, servedNames, hasCatalogue, mapping }: RoutableInput): boolean {
+  const active = isMappingActive(mapping) ? mapping : undefined
   if (!hasCatalogue) return true
   if (servedNames.some(name => matchesCatalogueName(model, name))) return true
-  if (!mapping) return false
-  if (mapping.preferredProviderId) return false
-  return servedNames.some(name => matchesCatalogueName(mapping.actualModel, name))
-}
-
-/**
- * The keys of the global mapping table that no provider catalogue claims - the
- * user's own aliases. The aggregate and channel syncs write one mapping per
- * model, so advertising every key would re-expose exactly the models the user
- * just stopped.
- */
-export function aliasMappingKeys(
-  mappings: Record<string, unknown>,
-  catalogueNames: Set<string>
-): string[] {
-  return Object.keys(mappings || {}).filter(name => !catalogueNames.has(name))
-}
-
-/**
- * 查某个对外的模型名能声明多大的上下文窗口。
- *
- * 数据源是 `Provider.modelCapabilities`（内建同步与账号通道同步各自写入），所以
- * 「有没有」就等于「上游有没有说」：没有就说没有，返回 `undefined` 让调用方**省略
- * 这个键**。绝不能在这里放一个兜底数字 —— 虚报上界会让客户端把超长上下文直接发
- * 出去、被服务端拒（`trae-adapter.ts::contextWindowFor` 的注释记着同一个坑）。
- *
- * 匹配口径与路由一致：先按精确名，再按目录里的通配名（结尾 `*`）。
- *
- * ⚠️ 多个通配模式同时命中时取**最小**的那个窗口：宁可少报（客户端提前压缩，仍
- * 能用）也不可多报（请求被上游拒，用户看到的是硬失败）。
- */
-export function contextWindowOf(
-  capabilities: Record<string, { contextTokens?: number } | undefined> | undefined,
-  name: string,
-): number | undefined {
-  if (capabilities === undefined || name.length === 0) return undefined
-  const exact = capabilities[name]?.contextTokens
-  if (typeof exact === 'number' && exact > 0) return exact
-
-  const matched: number[] = []
-  for (const [pattern, hint] of Object.entries(capabilities)) {
-    if (hint === undefined || !matchesCatalogueName(name, pattern)) continue
-    const value = hint.contextTokens
-    if (typeof value === 'number' && value > 0) matched.push(value)
-  }
-  return matched.length > 0 ? Math.min(...matched) : undefined
+  if (!active) return false
+  if (active.preferredProviderId) return false
+  return servedNames.some(name => matchesCatalogueName(active.actualModel, name))
 }
 
 /**
  * Stop or start `names` and return the new `excludedModels` without touching the
- * caller's array. Stopping is what keeps a model out of `/v1/models` and out of
- * the load balancer, so the same ledger drives advertising and routing.
+ * caller's array. Stopping takes a model out of every route's candidate pool and
+ * out of the named-model request path, so the same ledger drives routing.
+ * It no longer drives advertising: `/v1/models` advertises routes only.
  */
 export function applyServed(excludedModels: string[], names: string[], served: boolean): string[] {
   if (served) {

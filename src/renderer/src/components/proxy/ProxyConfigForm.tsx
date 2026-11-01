@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { useProxyStore } from '@/stores/proxyStore'
@@ -25,28 +24,23 @@ interface ProxyConfigFormProps {
 interface FormErrors {
   port?: string
   host?: string
-  corsOrigin?: string
 }
 
 export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
   const { t } = useTranslation()
-  const { proxyConfig, proxyStatus, setProxyConfig, saveAppConfig, startProxy, stopProxy, isLoading } = useProxyStore()
+  const { proxyConfig, proxyStatus, setProxyConfig, saveAppConfig, startProxy, stopProxy, fetchProxyStatus, isLoading } = useProxyStore()
   const { toast } = useToast()
-  
+
   const initialConfigRef = useRef({
     port: proxyConfig.port.toString(),
     host: proxyConfig.host,
-    enableCors: proxyConfig.enableCors,
-    corsOrigin: proxyConfig.corsOrigin,
   })
-  
+
   const [formData, setFormData] = useState({
     port: proxyConfig.port.toString(),
     host: proxyConfig.host,
-    enableCors: proxyConfig.enableCors,
-    corsOrigin: proxyConfig.corsOrigin,
   })
-  
+
   const [errors, setErrors] = useState<FormErrors>({})
   const [hasChanges, setHasChanges] = useState(false)
   const [showRestartDialog, setShowRestartDialog] = useState(false)
@@ -56,8 +50,6 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
     const newFormData = {
       port: proxyConfig.port.toString(),
       host: proxyConfig.host,
-      enableCors: proxyConfig.enableCors,
-      corsOrigin: proxyConfig.corsOrigin,
     }
     setFormData(newFormData)
     initialConfigRef.current = newFormData
@@ -85,21 +77,10 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
     return undefined
   }
 
-  const validateCorsOrigin = (value: string): string | undefined => {
-    if (!formData.enableCors) return undefined
-    if (!value.trim()) return t('proxy.corsOriginEmpty')
-    if (value !== '*') {
-      const origins = value.split(',').map(o => o.trim())
-      for (const origin of origins) {
-        try {
-          new URL(origin)
-        } catch {
-          return `${t('proxy.invalidUrl')}: ${origin}`
-        }
-      }
-    }
-    return undefined
-  }
+  // 跨域策略不由这里配置：`AppConfig` 里没有 CORS 字段，服务端的判定（`proxy/authPolicy.ts`
+  // 的 `resolveCorsOrigin`）只回显回环来源，公网 Origin 拿不到 `Access-Control-Allow-Origin`。
+  // 以前这两个控件写进的是渲染层 store，用户关掉后本次会话看起来收紧了，重启回到默认，
+  // 服务端行为从未变过 —— 一个不起作用的开关比没有开关更糟，所以撤下。
 
   const handlePortChange = (value: string) => {
     setFormData(prev => ({ ...prev, port: value }))
@@ -117,36 +98,14 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
     onConfigChange?.()
   }
 
-  const handleCorsToggle = (enabled: boolean) => {
-    setFormData(prev => ({ ...prev, enableCors: enabled }))
-    if (enabled) {
-      const error = validateCorsOrigin(formData.corsOrigin)
-      setErrors(prev => ({ ...prev, corsOrigin: error }))
-    } else {
-      setErrors(prev => ({ ...prev, corsOrigin: undefined }))
-    }
-    setHasChanges(true)
-    onConfigChange?.()
-  }
-
-  const handleCorsOriginChange = (value: string) => {
-    setFormData(prev => ({ ...prev, corsOrigin: value }))
-    const error = validateCorsOrigin(value)
-    setErrors(prev => ({ ...prev, corsOrigin: error }))
-    setHasChanges(true)
-    onConfigChange?.()
-  }
-
   const handleSave = async () => {
     const portError = validatePort(formData.port)
     const hostError = validateHost(formData.host)
-    const corsError = validateCorsOrigin(formData.corsOrigin)
-    
-    if (portError || hostError || corsError) {
+
+    if (portError || hostError) {
       setErrors({
         port: portError,
         host: hostError,
-        corsOrigin: corsError,
       })
       toast({
         title: t('proxy.validationFailed'),
@@ -169,40 +128,31 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
     await performSave(newPort, newHost)
   }
 
-  const performSave = async (newPort: number, newHost: string) => {
-    const newConfig = {
-      port: newPort,
-      host: newHost,
-      enableCors: formData.enableCors,
-      corsOrigin: formData.corsOrigin,
-    }
+  const performSave = async (newPort: number, newHost: string): Promise<boolean> => {
+    const previous = { port: proxyConfig.port, host: proxyConfig.host }
+    setProxyConfig({ port: newPort, host: newHost })
 
-    setProxyConfig(newConfig)
-    
-    const success = await saveAppConfig({
-      proxyPort: newConfig.port,
-      proxyHost: newConfig.host,
-    })
+    const success = await saveAppConfig({ proxyPort: newPort, proxyHost: newHost })
 
     if (success) {
       setHasChanges(false)
-      initialConfigRef.current = {
-        port: newPort.toString(),
-        host: newHost,
-        enableCors: formData.enableCors,
-        corsOrigin: formData.corsOrigin,
-      }
+      initialConfigRef.current = { port: newPort.toString(), host: newHost }
       toast({
         title: t('common.success'),
         description: t('proxy.proxyConfigUpdated'),
       })
-    } else {
-      toast({
-        title: t('common.error'),
-        description: t('proxy.configSaveFailed'),
-        variant: 'destructive',
-      })
+      return true
     }
+
+    // 保存失败就退回界面原值：留着新值，界面显示的就是一个盘上并不存在的端口，
+    // 用户会拿着它去连客户端。
+    setProxyConfig(previous)
+    toast({
+      title: t('common.error'),
+      description: t('proxy.configSaveFailed'),
+      variant: 'destructive',
+    })
+    return false
   }
 
   const handleRestartAndSave = async () => {
@@ -210,15 +160,15 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
     try {
       const newPort = parseInt(formData.port, 10)
       const newHost = formData.host
-      
-      await performSave(newPort, newHost)
-      
+
+      const saved = await performSave(newPort, newHost)
+      if (!saved) return
+
       await stopProxy()
-      
-      await new Promise(resolve => setTimeout(resolve, 500))
-      
+      await waitForProxyToStop()
+
       const success = await startProxy(newPort)
-      
+
       if (success) {
         toast({
           title: t('common.success'),
@@ -237,13 +187,26 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
     }
   }
 
+  /**
+   * 等端口真正释放，而不是固定等 500ms。慢机器、防火墙弹窗、上游连接未收尾时，
+   * 500ms 到点就 start 会撞「端口仍被占用」，界面于是停在「已停止」而配置已是新的。
+   */
+  const waitForProxyToStop = async (timeoutMs = 3000): Promise<void> => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      await fetchProxyStatus()
+      if (!useProxyStore.getState().proxyStatus?.isRunning) return
+    }
+  }
+
   const handleReset = () => {
     setFormData(initialConfigRef.current)
     setErrors({})
     setHasChanges(false)
   }
 
-  const isValid = !errors.port && !errors.host && !errors.corsOrigin
+  const isValid = !errors.port && !errors.host
 
   return (
     <>
@@ -308,46 +271,6 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
                 {t('proxy.bindAddressHelp')}
               </p>
             </div>
-          </div>
-
-          <div className="space-y-4 pt-4 border-t">
-            <div className="flex items-center justify-between">
-              <div className="space-y-0.5">
-                <Label htmlFor="cors-toggle">{t('proxy.enableCors')}</Label>
-                <p className="text-sm text-muted-foreground">
-                  {t('proxy.enableCorsHelp')}
-                </p>
-              </div>
-              <Switch
-                id="cors-toggle"
-                checked={formData.enableCors}
-                onCheckedChange={handleCorsToggle}
-              />
-            </div>
-
-            {formData.enableCors && (
-              <div className="space-y-2">
-                <Label htmlFor="cors-origin" className="flex items-center gap-2">
-                  {t('proxy.corsOrigin')}
-                  {errors.corsOrigin && (
-                    <span className="text-destructive text-xs flex items-center gap-1">
-                      <AlertCircle className="h-3 w-3" />
-                      {errors.corsOrigin}
-                    </span>
-                  )}
-                </Label>
-                <Input
-                  id="cors-origin"
-                  placeholder="* or https://example.com,https://another.com"
-                  value={formData.corsOrigin}
-                  onChange={(e) => handleCorsOriginChange(e.target.value)}
-                  className={errors.corsOrigin ? 'border-destructive' : ''}
-                />
-                <p className="text-xs text-muted-foreground">
-                  {t('proxy.corsOriginHelp')}
-                </p>
-              </div>
-            )}
           </div>
 
           <div className="flex justify-end space-x-2 pt-4">

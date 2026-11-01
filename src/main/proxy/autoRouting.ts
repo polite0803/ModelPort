@@ -309,6 +309,31 @@ export function applyPoolStrategiesWithTrace(
  * - 找不到的 include（模型已停用/供应商已关闭）通过 `unresolved` 报出去，让调用
  *   方能解释「为什么加了却没生效」，而不是静默忽略。
  */
+/**
+ * 名字钉定（`ModelRoute.pinModels`）：把候选**基底**收到被点名的那几个模型上。
+ *
+ * 空数组 = 不钉，基底就是传进来的全部候选 —— 与 `poolStrategies: []` 的「不过滤」同一语义，
+ * 缺省行为逐字不变，所以这条规则对现存的所有路由都是 no-op。
+ *
+ * 匹配口径与手工增删完全一致（`(providerId, displayName)`、两侧 trim、大小写不敏感），
+ * 因为「同一条引用在 include 里认、在 pin 里不认」会让人觉得配置被静默忽略。
+ *
+ * 顺序是固定的：pin 收基底 → 池策略在里面筛 → `excludeModels` 再剔、`includeModels`
+ * **只能从钉定的基底里**取回（取不回池外的模型，否则 pin 会被绕开）。
+ */
+export function applyModelNamePin<T extends RankCandidate>(
+  candidates: readonly T[],
+  pinModels: readonly RouteModelRef[] = []
+): T[] {
+  if (pinModels.length === 0) return [...candidates]
+
+  const keyOf = (providerId: string, displayName: string): string =>
+    `${providerId.trim().toLowerCase()}\u0000${displayName.trim().toLowerCase()}`
+  const wanted = new Set(pinModels.map(ref => keyOf(ref.providerId, ref.displayName)))
+
+  return candidates.filter(candidate => wanted.has(keyOf(candidate.providerId, candidate.displayName)))
+}
+
 export function applyManualModelSelection<T extends RankCandidate>(
   pool: readonly T[],
   allCandidates: readonly T[],

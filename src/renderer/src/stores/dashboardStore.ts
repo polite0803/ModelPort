@@ -207,7 +207,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
 
     try {
       const proxyStatusPromise = window.electronAPI?.proxy?.getStatus?.() ?? Promise.resolve(null)
-      const statisticsPromise = window.electronAPI?.invoke?.('proxy:getStatistics') ?? Promise.resolve(null)
+      const statisticsPromise = window.electronAPI?.proxy?.getStatistics?.() ?? Promise.resolve(null)
       const persistentStatsPromise = window.electronAPI?.statistics?.get?.() ?? Promise.resolve(null)
       const providersPromise = window.electronAPI?.providers?.getAll?.() ?? Promise.resolve([])
       const accountsPromise = window.electronAPI?.accounts?.getAll?.() ?? Promise.resolve([])

@@ -20,9 +20,10 @@ export type AggregateCategory = 'apikey' | 'free-tier' | 'local'
  *   `shared/responsesWire.ts`: the app still speaks chat internally, and this wire
  *   exists for endpoints that only expose the Responses API.
  *
- * `openai-responses` is outbound only. There is no inbound `/v1/responses` route:
- * translating a client's Responses request into chat is a separate piece of work
- * with no known client asking for it yet.
+ * `openai-responses` names the **outbound** half only. The inbound client entry
+ * (`POST /v1/responses`, translated by `shared/responsesInbound.ts` into the chat
+ * shape) is a different surface: a wire is a provider's protocol, not a client
+ * endpoint, and the two never call each other.
  */
 export type AggregateWire = 'openai-chat' | 'anthropic-messages' | 'openai-responses'
 

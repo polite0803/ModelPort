@@ -63,7 +63,19 @@ export async function bootstrapStore(options = {}) {
   stub.stubState.userDataDir = storagePath
 
   if (options.initialData !== undefined) {
-    writeFileSync(join(storagePath, 'data.json'), JSON.stringify(options.initialData, null, 2), 'utf8')
+    const initial = { ...options.initialData }
+    if (options.seedPresetRoutes !== true && initial.config && typeof initial.config === 'object') {
+      // 默认**不参与播种**：`store.seedPresetRoutes` 会在 init 末尾往表里加预设路由
+      // （协议名 + 三档），而这批夹具的断言基线是「表里/清单里只有我写进去的那几条」。
+      // 这里写的是那个记档键本身（`pendingPresetRouteSeeds` 的唯一判据），不是另造
+      // 一个开关 —— 要证播种路径的用例传 `seedPresetRoutes: true` 就回到真实行为。
+      const { PRESET_ROUTE_SEEDS } = await import(srcUrl('main/store/modelRoutes.ts'))
+      initial.config = {
+        ...initial.config,
+        seededPresetRoutes: PRESET_ROUTE_SEEDS.map(seed => seed.name),
+      }
+    }
+    writeFileSync(join(storagePath, 'data.json'), JSON.stringify(initial, null, 2), 'utf8')
   }
 
   const { storeManager } = await import(srcUrl('main/store/store.ts'))

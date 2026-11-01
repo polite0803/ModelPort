@@ -66,9 +66,9 @@ interface ModelInfo {
   accountId?: string
   accountName?: string
   status: 'available' | 'unavailable' | 'stopped'
-  /** false = 已停用：不对外广告也不参与路由，但仍在列表里以便重新启用 */
+  /** false = 已停用：不进任何路由的候选池，也不能被点名，但仍在列表里以便重新启用 */
   served: boolean
-  /** 只有目录行带来源；模型映射别名行由「模型映射」页签管理，这一页不给它开关 */
+  /** 目录行的来源；undefined 且没有 `alias` 的行（不该存在）不渲染开关 */
   source?: 'builtin' | 'custom' | 'fetched'
   /** 来自渠道包目录的模态声明；没有声明时为 unknown */
   modality: Modality
@@ -76,6 +76,11 @@ interface ModelInfo {
   free?: boolean
   /** 上游生效倍率；缺失表示渠道没报，不能当成 0 */
   weight?: number
+  /**
+   * 模型映射别名的键。有这一格才说明这行是别名：它的启用位落在映射表自身的
+   * `disabled` 上（别名不归任何供应商目录管，`excludedModels` 记不到它）。
+   */
+  alias?: string
 }
 
 interface ModelRowProps {
@@ -183,7 +188,7 @@ const ModelRow = memo(({ model, isSelected, onSelect, t, credits, onToggleServed
       </TableCell>
       <TableCell>
         <div className="flex items-center gap-2">
-          {model.source !== undefined && (
+          {(model.source !== undefined || model.alias !== undefined) && (
             <Switch
               checked={model.served}
               onCheckedChange={(checked) => onToggleServed(model, checked)}
@@ -218,7 +223,7 @@ ModelRow.displayName = 'ModelRow'
 export function ModelList() {
   const { t } = useTranslation()
   const { providers, accounts, modelsLastUpdated, setProviders, setAccounts, setModelsLastUpdated } = useProvidersStore()
-  const { modelMappings } = useProxyStore()
+  const { modelMappings, setModelMappings } = useProxyStore()
   const { toast } = useToast()
   
   const [searchQuery, setSearchQuery] = useState('')
@@ -450,8 +455,11 @@ export function ModelList() {
           accountName: mapping.preferredAccountId 
             ? (accounts.find(a => a.id === mapping.preferredAccountId)?.name)
             : undefined,
-          status: owner ? (activeProviderMap.get(owner.id) ? 'available' : 'unavailable') : 'available',
-          served: true,
+          status: mapping.disabled === true
+            ? 'stopped'
+            : (owner ? (activeProviderMap.get(owner.id) ? 'available' : 'unavailable') : 'available'),
+          served: mapping.disabled !== true,
+          alias: mapping.requestModel,
           modality: 'unknown',
         })
       }
@@ -543,16 +551,24 @@ export function ModelList() {
     setSelectAll(newSelected.size === filteredModels.length)
   }, [selectedModels, filteredModels.length])
 
-  /** 停用即从 `/v1/models` 与负载均衡里消失；别名行不归这一页管，跳过 */
+  /**
+   * 停用 = 不进任何路由的候选池，也不能被点名。两本账各写各的：目录行落
+   * `excludedModels`（供应商维度），别名行落映射表自身的 `disabled`（全局键）。
+   */
   const changeServed = useCallback(async (rows: ModelInfo[], served: boolean): Promise<boolean> => {
     const namesByProvider = new Map<string, string[]>()
+    const aliasNames: string[] = []
     for (const row of rows) {
+      if (row.alias !== undefined) {
+        aliasNames.push(row.alias)
+        continue
+      }
       if (row.source === undefined) continue
       const names = namesByProvider.get(row.providerId) || []
       names.push(row.name)
       namesByProvider.set(row.providerId, names)
     }
-    if (namesByProvider.size === 0) return true
+    if (namesByProvider.size === 0 && aliasNames.length === 0) return true
 
     setServing(true)
     try {
@@ -570,12 +586,36 @@ export function ModelList() {
         nextCatalogue[providerId] = result.catalogue
       }
       setCatalogueMap(nextCatalogue)
+
+      if (aliasNames.length > 0) {
+        // 现读整表只改这几行：映射表同时被渠道/聚合同步与管理 API 写，拿这一页的
+        // 旧副本整表回写会把别人刚加的名字抹掉。
+        const current = await window.electronAPI.config.get()
+        const record = { ...current.modelMappings }
+        for (const name of aliasNames) {
+          const existing = record[name]
+          if (existing === undefined) continue
+          // 启用 = 省略这个键（缺席即在用，与从未停用同形）；停用 = 写 true。
+          record[name] = { ...existing, disabled: served ? undefined : true }
+        }
+        const updated = await window.electronAPI.config.update({ modelMappings: record })
+        if (!updated) {
+          toast({
+            title: t('common.error'),
+            description: t('models.serveChangeFailed'),
+            variant: 'destructive',
+          })
+          return false
+        }
+        setModelMappings(Object.values(record))
+      }
+
       setModelsLastUpdated(Date.now())
       return true
     } finally {
       setServing(false)
     }
-  }, [catalogueMap, setModelsLastUpdated, t, toast])
+  }, [catalogueMap, setModelMappings, setModelsLastUpdated, t, toast])
 
   const handleToggleServed = useCallback((model: ModelInfo, served: boolean) => {
     changeServed([model], served)
@@ -587,7 +627,7 @@ export function ModelList() {
     const started = await changeServed(modelList.filter(m => selected.has(m.id)), true)
     if (!started) return
     const stopped = await changeServed(
-      modelList.filter(m => m.source !== undefined && !selected.has(m.id)),
+      modelList.filter(m => (m.source !== undefined || m.alias !== undefined) && !selected.has(m.id)),
       false
     )
     if (!stopped) return

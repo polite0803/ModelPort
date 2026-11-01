@@ -17,7 +17,6 @@ import {
   corsAllowHeaders,
   evaluateApiKeyAuth,
   extractApiKey,
-  requiresApiKey,
   resolveCorsOrigin,
   safeKeyEquals,
 } from './authPolicy'
@@ -28,6 +27,13 @@ import { anthropicErrorBody } from '../../shared/anthropicWire'
 
 const SLOW_REQUEST_THRESHOLD_MS = 1500
 
+/**
+ * 同时在途请求的上限。`status.ts` 里那个 `maxConnections: 100` 从来没被任何代码读过，
+ * 一个没人消费的字段比不写更糟，所以这里把它变成真实行为。
+ */
+const MAX_IN_FLIGHT_REQUESTS = 100
+let inFlightRequests = 0
+
 function extractProvidedKey(ctx: Context): string | null {
   return extractApiKey({
     authorization: ctx.get('Authorization'),
@@ -35,15 +41,52 @@ function extractProvidedKey(ctx: Context): string | null {
   })
 }
 
+/**
+ * Key 用量先在内存里累加，再按固定间隔合并落盘。
+ *
+ * 原来每一个通过鉴权的请求都把整份 `apiKeys` 读回来、改一条、再整份写回（`updateConfig`
+ * 顺带做一遍全量归一）——磁盘写与序列化跟着请求数线性走，流式并发时主进程会抖。语义不变：
+ * 计数只在鉴权成功后累加，只是落盘被合并了。
+ */
+const KEY_USAGE_FLUSH_INTERVAL_MS = 30_000
+
+const pendingKeyUsage = new Map<string, { lastUsedAt: number; count: number }>()
+let keyUsageFlushTimer: NodeJS.Timeout | null = null
+
 function recordKeyUsage(providedKey: string): void {
   const config = storeManager.getConfig()
   const matched = (config.apiKeys || []).find((entry) => safeKeyEquals(entry.key, providedKey))
   if (!matched) return
-  const updatedKeys = config.apiKeys.map((entry) =>
-    entry.id === matched.id
-      ? { ...entry, lastUsedAt: Date.now(), usageCount: entry.usageCount + 1 }
-      : entry
-  )
+  const previous = pendingKeyUsage.get(matched.id)
+  pendingKeyUsage.set(matched.id, {
+    lastUsedAt: Date.now(),
+    count: (previous?.count ?? 0) + 1,
+  })
+  if (keyUsageFlushTimer === null) {
+    keyUsageFlushTimer = setTimeout(flushKeyUsage, KEY_USAGE_FLUSH_INTERVAL_MS)
+    keyUsageFlushTimer.unref?.()
+  }
+}
+
+/**
+ * 把攒下的用量写回配置。停服与运行时安全复核前都要调它，否则最后一次 flush 前的计数会丢。
+ */
+export function flushKeyUsage(): void {
+  if (keyUsageFlushTimer !== null) {
+    clearTimeout(keyUsageFlushTimer)
+    keyUsageFlushTimer = null
+  }
+  if (pendingKeyUsage.size === 0) return
+
+  const settled = new Map(pendingKeyUsage)
+  pendingKeyUsage.clear()
+
+  const config = storeManager.getConfig()
+  const updatedKeys = (config.apiKeys || []).map((entry) => {
+    const usage = settled.get(entry.id)
+    if (!usage) return entry
+    return { ...entry, lastUsedAt: usage.lastUsedAt, usageCount: entry.usageCount + usage.count }
+  })
   storeManager.updateConfig({ apiKeys: updatedKeys })
 }
 
@@ -98,12 +141,10 @@ export class ProxyServer {
   private setupMiddleware(): void {
     this.app.use(async (ctx, next) => {
       ctx.state.startedAt = Date.now()
-      const config = storeManager.getConfig()
-      const allowedOrigin = resolveCorsOrigin({
-        origin: ctx.get('Origin') || undefined,
-        requiresKey: requiresApiKey(config.apiKeys),
-        host: this.host,
-      })
+      // 跨域可读只按 Origin 判（`authPolicy.resolveCorsOrigin`：只回显回环来源）。
+      // 这里以前还要读整份配置算 `requiresKey`，因为有一条「无 Key 就回 `*`」的分支；
+      // 那条分支撤了，配置读取跟着去掉 —— 不留下没人消费的输入。
+      const allowedOrigin = resolveCorsOrigin({ origin: ctx.get('Origin') || undefined })
       if (allowedOrigin) {
         ctx.set('Access-Control-Allow-Origin', allowedOrigin)
         ctx.set('Vary', 'Origin')
@@ -123,7 +164,10 @@ export class ProxyServer {
     // API Key validation middleware - runs before body parsing so unauthenticated payloads are never read
     this.app.use(async (ctx, next) => {
       // Skip paths that don't require authentication
-      const publicPaths = ['/', '/health', '/stats']
+      // `/stats` 不再免鉴权：它把 modelUsage / providerUsage / accountUsage 整份端出来，
+      // 等于「这台机器接了哪些厂商、几个账号、谁用得多」的清单。界面走的是 IPC，
+      // 不受这一条影响。
+      const publicPaths = ['/', '/health']
       if (publicPaths.includes(ctx.path)) {
         await next()
         return
@@ -181,6 +225,32 @@ export class ProxyServer {
       await next()
     })
 
+    // 并发闸。这条服务原本对同时在途的请求数没有上限：本机任意进程（或在无 Key 时
+    // 跨域读得到的网页）可以一次打进来几百条，把内存、连接和上游配额一起耗尽 ——
+    // bodyparser 的 50MB 是单条上限，不是总量。计数在自己的 finally 里配对，故意不复用
+    // `activeConnections`：那个在异常路径上只增不减，拿它当闸会变成「越用越拒绝」。
+    this.app.use(async (ctx, next) => {
+      if (inFlightRequests >= MAX_IN_FLIGHT_REQUESTS) {
+        ctx.status = 429
+        ctx.set('Retry-After', '2')
+        ctx.body = {
+          error: {
+            message: 'Too many concurrent requests to this local proxy',
+            type: 'rate_limit_error',
+            code: 'concurrency_limit',
+          },
+        }
+        recordRejectedRequest(ctx, 429, 'concurrency_limit', 'Too many concurrent requests to this local proxy')
+        return
+      }
+      inFlightRequests++
+      try {
+        await next()
+      } finally {
+        inFlightRequests--
+      }
+    })
+
     this.app.use(bodyParser({
       jsonLimit: '50mb',
       formLimit: '50mb',
@@ -229,12 +299,13 @@ export class ProxyServer {
       ctx.body = {
         name: 'ModelPort Proxy',
         version: '1.1.2',
-        description: 'OpenAI + Anthropic API compatible proxy service',
+        description: 'OpenAI (chat / completions / responses) + Anthropic API compatible proxy service',
         endpoints: [
           'POST /v1/chat/completions',
           'GET /v1/models',
           'GET /v1/models/:model',
           'POST /v1/completions',
+          'POST /v1/responses',
           'POST /v1/messages',
           'POST /v1/messages/count_tokens',
         ],
@@ -401,7 +472,28 @@ export class ProxyServer {
   /**
    * Stop server
    */
+  /**
+   * 配置变更后重新核对监听安全。
+   *
+   * 启动检查只跑一次的话，「带 Key 绑 `0.0.0.0` 启动 → 再把 Key 全清空」会让服务继续以
+   * 无鉴权状态对外监听。这里每次配置落盘后被调一次：判定不过就停服。选停服而不是悄悄换
+   * 回 `127.0.0.1`，是因为那要求重开 socket 并改端口号，客户端看到的「突然连不上」比
+   * 状态栏里明明白白的「已停止」更难解释。
+   */
+  revalidateSecurity(): { ok: boolean; reason?: string } {
+    flushKeyUsage()
+    const config = storeManager.getConfig()
+    const security = checkStartupSecurity({ apiKeys: config.apiKeys, host: this.host })
+    if (!security.ok) {
+      storeManager.addLog('error', `Proxy stopped: listening on ${this.host} without any API key is not allowed`)
+      void this.stop()
+    }
+    return security
+  }
+
   async stop(): Promise<boolean> {
+    // 停服前把攒着的 Key 用量落盘，否则最后一个 flush 间隔内的计数会丢。
+    flushKeyUsage()
     if (!this.server) {
       return false
     }

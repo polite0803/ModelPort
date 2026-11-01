@@ -17,6 +17,7 @@ export type ClientId =
   | 'qoder'
   | 'dsh'
   | 'opencode'
+  | 'codex'
   | 'cline'
   | 'cursor'
   | 'continue'
@@ -49,6 +50,9 @@ const CLIENT_RULES: readonly ClientRule[] = [
   { id: 'qoder', label: 'Qoder', pattern: /\bqoder\b|qoder[-_/]/i },
   { id: 'dsh', label: 'DSH', pattern: /\bdsh\b|dsh[-_/]|deepseek[-_]ai\/dsh/i },
   { id: 'opencode', label: 'OpenCode', pattern: /opencode/i },
+  // Codex 的 UA 尾巴是 `codex_cli_rs/<版本> (<平台>; …)`；`_` 在正则里算单词字符，
+  // 所以光靠 `\bcodex\b` 命中不了它，得再给一条 `codex[-_/]`。
+  { id: 'codex', label: 'Codex', pattern: /\bcodex\b|codex[-_/]/i },
   { id: 'cline', label: 'Cline', pattern: /\bcline\b/i },
   { id: 'cursor', label: 'Cursor', pattern: /\bcursor\b/i },
   { id: 'continue', label: 'Continue', pattern: /\bcontinue\b/i },

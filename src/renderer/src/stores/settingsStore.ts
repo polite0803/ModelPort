@@ -2,18 +2,31 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type { AppConfig } from '@/types/electron'
 import i18n from '@/i18n'
+import {
+  LEGACY_SETTINGS_STORAGE_KEY,
+  SETTINGS_STORAGE_KEY,
+  containsPersistedSecrets,
+  pickPersistedPreferences,
+  sanitizePersistedSettings,
+} from '@shared/persistedSettings'
 
-// 数据迁移（Chat2API → ModelPort）：localStorage key 随品牌改名。渲染层加载时
-// 把旧 key 的值搬到新 key（新 key 已存在则跳过），随后删除旧 key。幂等且无副作用。
-const SETTINGS_STORAGE_KEY = 'modelport-settings'
-const LEGACY_SETTINGS_STORAGE_KEY = 'chat2api-settings'
+// 数据迁移（Chat2API → ModelPort）：localStorage key 随品牌改名。旧品牌的这份里可能带着
+// 明文凭据，所以搬运前先按偏好白名单收敛一遍 —— 迁移不是清洗的豁免通道。
 try {
-  if (localStorage.getItem(SETTINGS_STORAGE_KEY) === null) {
+  const current = localStorage.getItem(SETTINGS_STORAGE_KEY)
+  if (current === null) {
     const legacy = localStorage.getItem(LEGACY_SETTINGS_STORAGE_KEY)
     if (legacy !== null) {
-      localStorage.setItem(SETTINGS_STORAGE_KEY, legacy)
+      const cleaned = sanitizePersistedSettings(legacy)
+      if (cleaned !== null) localStorage.setItem(SETTINGS_STORAGE_KEY, cleaned)
       localStorage.removeItem(LEGACY_SETTINGS_STORAGE_KEY)
     }
+  } else if (containsPersistedSecrets(current)) {
+    // 升级清洗：历史版本把整个 `config`（含上游 API Key 与管理密钥）写进了浏览器存储。
+    // 不主动抹掉，这一份会一直留在 leveldb 里，即使新的写入路径已经不再包含它。
+    const cleaned = sanitizePersistedSettings(current)
+    if (cleaned !== null) localStorage.setItem(SETTINGS_STORAGE_KEY, cleaned)
+    console.warn('[Settings] Removed non-preference keys (including credentials) from persisted settings')
   }
 } catch (error) {
   console.warn('[Migration] settings localStorage migration failed:', error)
@@ -160,6 +173,10 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: SETTINGS_STORAGE_KEY,
+      // 只持久化界面偏好：`config` 是主进程运行期配置的镜像，`fetchConfig()` 随时能重新
+      // 取回。把它写进浏览器存储等于把上游 Key 与管理密钥交给 leveldb、备份盘和「导出配置」，
+      // 而主进程那份是整文件加密的，这一份没有任何保护层。白名单见 shared/persistedSettings。
+      partialize: (state) => pickPersistedPreferences(state),
       onRehydrateStorage: () => (state) => {
         if (state?.language) {
           i18n.changeLanguage(state.language)

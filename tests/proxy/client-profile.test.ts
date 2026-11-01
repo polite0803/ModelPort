@@ -30,6 +30,23 @@ test('dsh 按词边界识别，不误伤 dashboard', () => {
   assert.equal(dashboard.label, 'dashboard')
 })
 
+test('Codex 按 UA 归类，含 Rust CLI 的下划线形态', () => {
+  const identity = identifyClientByUserAgent('codex_cli_rs/0.49.0 (Windows 11; x86_64; zh-CN)')
+  assert.equal(identity.id, 'codex')
+  assert.equal(identity.label, 'Codex')
+  assert.equal(identity.version, '0.49.0')
+  // `_` 在正则里算单词字符，所以这条靠的是 `codex[-_/]` 而不是词边界那一支。
+  assert.equal(clientHeaderValue(identity), 'codex/0.49.0')
+
+  assert.equal(identifyClientByUserAgent('Codex/1.2.0').id, 'codex')
+  assert.equal(identifyClientByUserAgent('codex-cli/0.50.0').id, 'codex')
+
+  // 负控：`codec` 不该被当成 Codex（否则日志把别的客户端归成它）。
+  const codec = identifyClientByUserAgent('codec-av/1.0')
+  assert.equal(codec.id, 'other')
+  assert.equal(codec.label, 'codec-av')
+})
+
 test('OpenAI SDK 与 curl 可区分', () => {
   assert.equal(identifyClientByUserAgent('OpenAI/NodeJS/4.52.0').id, 'openai-node')
   assert.equal(identifyClientByUserAgent('OpenAI/Python 1.40.0').id, 'openai-python')

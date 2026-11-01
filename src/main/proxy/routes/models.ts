@@ -6,30 +6,12 @@
 import Router from '@koa/router'
 import type { Context } from 'koa'
 import { ModelsResponse, ModelInfo } from '../types'
-import { loadBalancer } from '../loadbalancer'
 import { storeManager } from '../../store/store'
-import { modelMapper } from '../modelMapper'
 import { autoRouter } from '../autoRouter'
 import { enabledModelRoutes, findModelRoute } from '../../store/modelRoutes'
-import { aliasMappingKeys, contextWindowOf, matchesCatalogueName } from '../../store/modelServing'
 import { modelsToAnthropicList } from '../../../shared/anthropicWire'
 
 const router = new Router({ prefix: '/v1' })
-
-/**
- * 所有供应商目录里的名字（含已停用的）。这些由供应商自己按「是否在服务」广告；
- * 聚合与账号通道每次同步都会按模型往全局映射表里写一条，所以映射表只能用来
- * 补用户自己建的别名，否则刚停用的模型会从这里回到客户端清单。
- */
-function providerCatalogueNames(): Set<string> {
-  const names = new Set<string>()
-  for (const provider of storeManager.getProviders()) {
-    for (const model of storeManager.getModelCatalogue(provider.id)) {
-      names.add(model.displayName)
-    }
-  }
-  return names
-}
 
 /**
  * 合成条目：路由不是模型，没有上游目录可查，所以带的是**那条路由自己的候选池**里
@@ -55,81 +37,45 @@ function routeEntry(name: string, createdAtSeconds: number, contextFloor?: numbe
 /**
  * Get all available models
  *
- * 去重按**大小写不敏感**：路由名在解析时是大小写不敏感的（`Fast` 与 `fast` 是同
- * 一条），广告里出现两条只差大小写的同名条目会让客户端按 id 建 Map 时互相覆盖，
- * 而按 id 精确匹配的调用方根本分不出该发哪一条。顺序：路由 **优先于** 同名模型
- * （请求解析就是这个优先级，广告必须与之一致，否则 `/v1/models` 会否认自己能服务
- * 一个请求已经能用的名字）。
+ * 对外面**只有路由**：每条已启用的路由一项，停用的不广告，删掉的连条目都没有。
+ * 单个模型与用户自建别名不再进这张清单 —— 启用位从此只管一件事：这个名字进不进
+ * 路由的候选池（`excludedModels` 与 `ModelMapping.disabled` 是两本账，别名不归目录管）。
+ * 名字域因此只有一个：清单里能看见的，请求里才点得到；单查 `/v1/models/:model`
+ * 与这里同口径。
  */
 router.get('/models', async (ctx: Context) => {
-  const providers = storeManager.getProviders().filter(p => p.enabled)
-  const models: ModelInfo[] = []
-  const addedNames = new Set<string>()
-  const now = Math.floor(Date.now() / 1000)
-
-  // 虚拟模型：每条**已启用**的路由一项，由 autoRouter 按那条路由的配置在全部
-  // 可用供应商/模型中挑目标。停用的不广告；`auto` 被删了就不再出现（迁移判据
-  // 见 store.ts::normalizeRoutes —— 键存在即永不重放迁移）。
-  // 排序由 enabledModelRoutes 显式给出，不依赖 Record 的迭代顺序（纯数字名如
-  // `2026` 会被 JS 整数键提升而插到最前）。
   const config = storeManager.getConfig()
+  // 排序由 `enabledModelRoutes` 显式给出，不依赖 Record 的迭代顺序（纯数字名如
+  // `2026` 会被 JS 整数键提升而插到最前）。路由名落盘前已归一成
+  // `[a-z0-9_-]{1,64}` 且键等于规范形，所以条目之间不可能只差大小写，这里不再去重。
   const enabledRoutes = enabledModelRoutes(config.routes)
+  const now = Math.floor(Date.now() / 1000)
   // 下界按**每条路由自己的池**算：一次采集、逐路由折叠（`advertisedContextFloors`）。
   // 用全局未筛池会让一条只钉了大窗模型的路由被别家小窗模型压到 64K，报出来的数
   // 跟这条路由毫无关系。
   const routeFloors = autoRouter.advertisedContextFloors(enabledRoutes)
-  for (const route of enabledRoutes) {
-    if (addedNames.has(route.name)) continue
-    addedNames.add(route.name)
-    models.push(routeEntry(route.name, now, routeFloors.get(route.name)))
-  }
-
-  for (const provider of providers) {
-    const accounts = storeManager.getAccountsByProviderId(provider.id)
-      .filter(account => account.status === 'active')
-
-    if (accounts.length === 0) {
-      continue
-    }
-
-    const effectiveModels = storeManager.getEffectiveModels(provider.id)
-    for (const model of effectiveModels) {
-      const canonical = model.displayName.trim().toLowerCase()
-      if (!addedNames.has(canonical)) {
-        addedNames.add(canonical)
-        // 只有上游报过窗口才发这个键；用户自建/聚合未标注的都保持省略。
-        const window = contextWindowOf(provider.modelCapabilities, model.displayName)
-        models.push({
-          id: model.displayName,
-          object: 'model',
-          created: Math.floor(provider.createdAt / 1000),
-          owned_by: provider.name,
-          ...(window === undefined ? {} : { context_window: window }),
-        })
-      }
-    }
-  }
-
-  for (const requestModel of aliasMappingKeys(config.modelMappings, providerCatalogueNames())) {
-    const canonical = requestModel.trim().toLowerCase()
-    if (!addedNames.has(canonical)) {
-      addedNames.add(canonical)
-      models.push({
-        id: requestModel,
-        object: 'model',
-        created: now,
-        owned_by: 'model-mapping',
-      })
-    }
-  }
+  const models: ModelInfo[] = enabledRoutes.map(route =>
+    routeEntry(route.name, now, routeFloors.get(route.name)),
+  )
 
   ctx.set('Content-Type', 'application/json')
-  // 只会说 anthropic 的客户端（Claude Code / 官方 SDK）带着 `anthropic-version` 来列
-  // 模型，它们按 `{data:[{type:'model',display_name,created_at}],has_more}` 解析；
-  // 发 OpenAI 形状会让它们拿到一个「有 data 键但字段全缺」的空壳清单。判别只用
+  // 只会说 anthropic 的客户端（Claude Code / Claude Desktop / 官方 SDK）带着
+  // `anthropic-version` 来列模型，它们按 `{data:[{type:'model',display_name,created_at}],has_more}`
+  // 解析；发 OpenAI 形状会让它们拿到一个「有 data 键但字段全缺」的空壳清单。判别只用
   // 这一个请求头，不看 Accept —— 后者会被中间层改写。
+  //
+  // 这一支还要把 `anthropicInbound.modelMap` 的键放在最前面：Desktop 会按自己的 Anthropic
+  // 名字表逐行筛，纯网关内部名（`auto`、`glm-5`）会被它整批丢掉，日志里就只剩
+  // 「0 usable models」。详见 `modelsToAnthropicList` 的判据来源。
   if (ctx.get('anthropic-version')) {
-    ctx.body = modelsToAnthropicList(models)
+    const mappedNames = config.anthropicInbound?.modelMap ?? {}
+    const list = modelsToAnthropicList(models, mappedNames)
+    ctx.body = list
+    // 「广告了几条」必须可查：客户端那边还有一层自己的名字过滤，没有这条日志，
+    // 「网关发了 20 条」与「用户在客户端看到 0 条」之间的分歧无法对账。
+    storeManager.addLog('debug', `Anthropic model list: ${String((list.data as unknown[]).length)} rows`, {
+      data: { gatewayModels: models.length, declaredAnthropicNames: Object.keys(mappedNames).length },
+    })
     return
   }
 
@@ -144,89 +90,33 @@ router.get('/models', async (ctx: Context) => {
 /**
  * Get specified model info
  *
- * 顺序与 `/v1/models`、与请求解析都一致：路由优先。legacy 的 `auto` 单模型分支
- * 已被「路由」这一条通用路径吃掉（迁移保证表里默认就有 `auto`），所以这里不再
- * 留第二份「auto 是否在服务」的真值。
+ * 与列表同一个名字域：只有路由查得到。单模型名与用户别名一律 404 —— 它们不再
+ * 是「客户端可以点名的名字」，单查若还答话就等于清单否认、单查承认。
+ * 停用的路由不许冒充在服，被删的路由表里根本没有，两者同样是 404。
  */
 router.get('/models/:model', async (ctx: Context) => {
   const modelId = ctx.params.model
-  const config = storeManager.getConfig()
+  const route = findModelRoute(storeManager.getConfig().routes, modelId)
 
-  const route = findModelRoute(config.routes, modelId)
-  if (route !== undefined) {
-    // 停用的路由不广告，单查也不许冒充在服；被删的路由压根不会走到这里（表里没有），
-    // 会自然落到下面的模型/别名查找，最后 404 —— 那正是「这个名字不再被路由」。
-    if (!route.enabled) {
-      ctx.status = 404
-      ctx.body = {
-        error: {
-          message: `Model '${modelId}' not found`,
-          type: 'invalid_request_error',
-          param: 'model',
-          code: 'model_not_found',
-        },
-      }
-      return
-    }
-
-    ctx.set('Content-Type', 'application/json')
-    ctx.body = routeEntry(
-      route.name,
-      Math.floor(Date.now() / 1000),
-      autoRouter.advertisedContextFloor(route)
-    )
-    return
-  }
-
-  const mappings = config.modelMappings || {}
-  if (mappings[modelId] && !providerCatalogueNames().has(modelId)) {
-    ctx.set('Content-Type', 'application/json')
+  if (route === undefined || !route.enabled) {
+    ctx.status = 404
     ctx.body = {
-      id: modelId,
-      object: 'model',
-      created: Math.floor(Date.now() / 1000),
-      owned_by: 'model-mapping',
+      error: {
+        message: `Model '${modelId}' not found`,
+        type: 'invalid_request_error',
+        param: 'model',
+        code: 'model_not_found',
+      },
     }
     return
   }
 
-  const providers = storeManager.getProviders().filter(p => p.enabled)
-
-  for (const provider of providers) {
-    const accounts = storeManager.getAccountsByProviderId(provider.id)
-      .filter(account => account.status === 'active')
-
-    if (accounts.length === 0) {
-      continue
-    }
-
-    const effectiveModels = storeManager.getEffectiveModels(provider.id)
-    // 用 find 而不是 some：命中那个**目录名**才是能力表的键，通配别名请求也要能查到窗口。
-    const matched = effectiveModels.find(model => matchesCatalogueName(modelId, model.displayName))
-
-    if (matched !== undefined) {
-      const window = contextWindowOf(provider.modelCapabilities, matched.displayName)
-      ctx.set('Content-Type', 'application/json')
-      ctx.body = {
-        id: modelId,
-        object: 'model',
-        created: Math.floor(provider.createdAt / 1000),
-        owned_by: provider.name,
-        ...(window === undefined ? {} : { context_window: window }),
-      }
-      return
-    }
-  }
-
-  ctx.status = 404
-  ctx.body = {
-    error: {
-      message: `Model '${modelId}' not found`,
-      type: 'invalid_request_error',
-      param: 'model',
-      code: 'model_not_found',
-    },
-  }
+  ctx.set('Content-Type', 'application/json')
+  ctx.body = routeEntry(
+    route.name,
+    Math.floor(Date.now() / 1000),
+    autoRouter.advertisedContextFloor(route)
+  )
 })
 
 export default router

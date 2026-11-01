@@ -11,8 +11,6 @@ export interface ProxyConfig {
   defaultMaxOutputTokens?: number
   /** Absent = 开（末条是工具结果时补一条极简 user，见 proxy/trailingUserGuard.ts） */
   trailingUserGuard?: boolean
-  enableCors: boolean
-  corsOrigin: string
   maxConnections: number
 }
 
@@ -56,8 +54,6 @@ const DEFAULT_PROXY_CONFIG: ProxyConfig = {
   host: '127.0.0.1',
   timeout: 60000,
   retryCount: 3,
-  enableCors: true,
-  corsOrigin: '*',
   maxConnections: 100,
 }
 
@@ -195,36 +191,17 @@ export const useProxyStore = create<ProxyState>((set, get) => ({
   },
 
   saveAppConfig: async (config) => {
-    if (!window.electronAPI?.store?.set) return false
+    if (!window.electronAPI?.config?.update) return false
     try {
       set({ isLoading: true, error: null })
-      const currentConfig = get().appConfig
-      
-      // Deep merge for nested objects like toolCallingConfig and sessionConfig
-      let newConfig = { ...currentConfig, ...config } as AppConfig
-      
-      // Handle toolCallingConfig deep merge
-      if (config.toolCallingConfig && currentConfig?.toolCallingConfig) {
-        newConfig.toolCallingConfig = {
-          ...currentConfig.toolCallingConfig,
-          ...config.toolCallingConfig,
-          advanced: {
-            ...currentConfig.toolCallingConfig.advanced,
-            ...config.toolCallingConfig.advanced,
-          },
-        }
-      }
-      
-      // Handle sessionConfig deep merge
-      if (config.sessionConfig && currentConfig?.sessionConfig) {
-        newConfig.sessionConfig = {
-          ...currentConfig.sessionConfig,
-          ...config.sessionConfig,
-        }
-      }
-      
-      await window.electronAPI.store.set('config', newConfig)
-      set({ appConfig: newConfig })
+      // 按字段提交：主进程的 `storeManager.updateConfig` 是唯一的合并与归一权威（它对
+      // toolCallingConfig / sessionConfig / requestLogConfig / autoRouting 做深合并）。
+      // 之前这条路是「取渲染层缓存的整份镜像 → 整对象覆盖 → 经通用 `store:set` raw 写盘」，
+      // 它绕过归一，还会把主进程运行期更新的字段顶回这份镜像的旧值。
+      await window.electronAPI.config.update(config)
+      set((state) => ({
+        appConfig: state.appConfig ? { ...state.appConfig, ...config } : state.appConfig,
+      }))
       return true
     } catch (error) {
       set({ error: (error as Error).message })

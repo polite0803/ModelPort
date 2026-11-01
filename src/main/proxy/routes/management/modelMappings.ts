@@ -89,6 +89,7 @@ router.post('/model-mappings', managementAuthMiddleware, async (ctx: Context) =>
       actualModel: request.actualModel,
       preferredProviderId: request.preferredProviderId,
       preferredAccountId: request.preferredAccountId,
+      disabled: request.disabled,
     }
 
     ConfigManager.setModelMapping(mapping)
@@ -124,6 +125,9 @@ router.put('/model-mappings/:model', managementAuthMiddleware, async (ctx: Conte
       actualModel: request.actualModel ?? existingMapping.actualModel,
       preferredProviderId: request.preferredProviderId ?? existingMapping.preferredProviderId,
       preferredAccountId: request.preferredAccountId ?? existingMapping.preferredAccountId,
+      // 省略 `disabled` 是沿用，不是清掉停用 —— 写成 `?? false` 会让一次只改目标
+      // 模型的 PUT 悄悄把停用的别名重新启用。
+      disabled: request.disabled ?? existingMapping.disabled,
     }
 
     ConfigManager.setModelMapping(updatedMapping)

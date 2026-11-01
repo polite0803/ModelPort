@@ -8,6 +8,7 @@ import {
   MenuItemConstructorOptions,
 } from 'electron'
 import path from 'path'
+import { isTrustedSender } from '../ipc/trustedSender'
 import { TrayWindow } from './TrayWindow'
 import { ConfigManager } from '../store/config'
 
@@ -124,11 +125,16 @@ export class TrayManager {
   }
 
   private setupIpcHandlers(): void {
-    ipcMain.on('tray:open-dashboard', () => {
+    // 这四个是 `ipcMain.on`（fire-and-forget），不在 `installTrustedSenderGuard()` 包住的
+    // `handle` 路径上，所以逐个自己判来源 —— `tray:quit-app` 能让整个应用退出，
+    // 任何被注入的脚本都应该叫不动它。托盘窗口与主窗口加载同一份文档，照常通过。
+    ipcMain.on('tray:open-dashboard', (event) => {
+      if (!isTrustedSender(event)) return
       this.openDashboard()
     })
 
-    ipcMain.on('tray:resize', (_event, height: number) => {
+    ipcMain.on('tray:resize', (event, height: number) => {
+      if (!isTrustedSender(event)) return
       this.trayWindow?.setHeight(height)
       if (this.trayWindow?.isVisible()) {
         const bounds = this.tray?.getBounds()
@@ -138,13 +144,15 @@ export class TrayManager {
       }
     })
 
-    ipcMain.on('tray:set-height', (_event, height: number) => {
+    ipcMain.on('tray:set-height', (event, height: number) => {
+      if (!isTrustedSender(event)) return
       this.trayWindow?.setHeight(height)
     })
 
-    ipcMain.on('tray:quit-app', () => {
+    ipcMain.on('tray:quit-app', (event) => {
+      if (!isTrustedSender(event)) return
       this.destroy()
-      ;(app as any).isQuitting = true
+      app.isQuitting = true
       app.quit()
     })
   }

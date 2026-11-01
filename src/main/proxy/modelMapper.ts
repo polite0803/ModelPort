@@ -5,6 +5,7 @@
 
 import { storeManager } from '../store/store'
 import { ModelMapping, Provider } from '../store/types'
+import { isMappingActive } from '../store/modelServing'
 
 /**
  * Model mapper
@@ -20,7 +21,7 @@ export class ModelMapper {
     const mappings = config.modelMappings
 
     const directMapping = mappings[requestedModel]
-    if (directMapping) {
+    if (isMappingActive(directMapping)) {
       if (!provider || !directMapping.preferredProviderId || directMapping.preferredProviderId === provider.id) {
         return directMapping.actualModel
       }
@@ -45,6 +46,9 @@ export class ModelMapper {
     const normalizedRequested = requestedModel.toLowerCase()
 
     for (const [pattern, mapping] of Object.entries(mappings)) {
+      // 停用的别名一律不认识，通配条目也不例外 —— 否则停用一条 `gpt-*`
+      // 之后它仍然能盖住同名请求。
+      if (!isMappingActive(mapping)) continue
       if (pattern.includes('*')) {
         const normalizedPattern = pattern.toLowerCase()
 
@@ -90,7 +94,7 @@ export class ModelMapper {
     const config = storeManager.getConfig()
     const mapping = config.modelMappings[requestedModel]
 
-    if (mapping) {
+    if (isMappingActive(mapping)) {
       if (!providerId || !mapping.preferredProviderId || mapping.preferredProviderId === providerId) {
         return mapping.actualModel
       }
@@ -106,7 +110,7 @@ export class ModelMapper {
     const config = storeManager.getConfig()
     const mapping = config.modelMappings[requestedModel]
 
-    return mapping?.preferredProviderId
+    return isMappingActive(mapping) ? mapping.preferredProviderId : undefined
   }
 
   /**
@@ -116,7 +120,7 @@ export class ModelMapper {
     const config = storeManager.getConfig()
     const mapping = config.modelMappings[requestedModel]
 
-    return mapping?.preferredAccountId
+    return isMappingActive(mapping) ? mapping.preferredAccountId : undefined
   }
 
   /**

@@ -35,6 +35,11 @@ export interface ModelRouteFieldValues {
   includeModels: RouteModelRef[]
   /** 策略之后手动移除的模型；优先于 include。 */
   excludeModels: RouteModelRef[]
+  /**
+   * 名字钉定：非空时这条路由的池只可能是这些模型。空 = 不钉（池 = 全部候选）。
+   * 客户端可点名的名字域现在只有路由，所以「这条路由真的只跑那几个模型」全靠这一格。
+   */
+  pinModels: RouteModelRef[]
 }
 
 /** 策略下拉的选项由父组件传入：五个策略的字面量与标签表只允许存在于 `LoadBalanceConfig.tsx`。 */
@@ -70,6 +75,7 @@ export function defaultRouteFieldValues(strategy: LoadBalanceStrategy): ModelRou
     poolStrategies: DEFAULT_AUTO_ROUTING_CONFIG.poolStrategies.map((strategyItem) => ({ ...strategyItem })),
     includeModels: [],
     excludeModels: [],
+    pinModels: [],
   }
 }
 
@@ -83,6 +89,7 @@ export function routeFieldValuesOf(route: ModelRoute): ModelRouteFieldValues {
     poolStrategies: route.poolStrategies.map((strategyItem) => ({ ...strategyItem })),
     includeModels: route.includeModels.map((ref) => ({ ...ref })),
     excludeModels: route.excludeModels.map((ref) => ({ ...ref })),
+    pinModels: route.pinModels.map((ref) => ({ ...ref })),
   }
 }
 

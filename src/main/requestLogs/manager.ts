@@ -1,4 +1,5 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 
 import { currentLocalDay } from '../../shared/localDay.ts'
@@ -222,13 +223,17 @@ export class RequestLogManager {
     }
 
     const content = this.requestLogs.map((entry) => JSON.stringify(entry)).join('\n')
-    writeFileSync(this.logFile, content, 'utf-8')
+    // 先写临时文件再改名替换：直接覆盖时若进程在写入中途退出，ndjson 末行会留下半条，
+    // 下次加载按行 parse 失败就整条丢弃 —— 那次会话的请求日志静默消失。
+    const tempFile = `${this.logFile}.tmp`
+    writeFileSync(tempFile, content, 'utf-8')
+    renameSync(tempFile, this.logFile)
     this.dirty = false
   }
 }
 
 function generateId(): string {
-  return `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`
+  return randomUUID()
 }
 
 function stripId(entry: RequestLogEntry): Omit<RequestLogEntry, 'id'> {

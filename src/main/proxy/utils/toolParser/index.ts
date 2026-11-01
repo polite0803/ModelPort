@@ -1,5 +1,5 @@
-import { ToolCall } from '../../types'
-import { ToolCallFormat } from '../../constants/signatures'
+import type { ToolCall } from '../../types.ts'
+import type { ToolCallFormat } from '../../constants/signatures.ts'
 import { debugContent } from '../debugContent.ts'
 
 /**

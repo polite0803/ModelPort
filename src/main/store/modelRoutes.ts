@@ -12,7 +12,14 @@
  * - 写入侧（`checkRouteName` / `validateRoutesForWrite`）返回**可读错误**，
  *   IPC 与管理 API 共用同一套错误码。
  */
-import type { AutoRoutingConfig, LoadBalanceStrategy, ModelRoute, RouteModelRef } from '../../shared/types.ts'
+import type {
+  AutoPoolStrategy,
+  AutoPreference,
+  AutoRoutingConfig,
+  LoadBalanceStrategy,
+  ModelRoute,
+  RouteModelRef,
+} from '../../shared/types.ts'
 import { isAutoPoolStrategyId } from '../../shared/types.ts'
 import { normalizeAutoRoutingConfig } from './autoRoutingConfig.ts'
 import type { ModelRouteError } from '../../shared/modelRouteName.ts'
@@ -96,13 +103,17 @@ export function normalizeRouteModelRefs(input: unknown): RouteModelRef[] {
 }
 
 /**
- * 写入侧的手工增删校验：只校验**结构**，不校验模型是否还存在。
+ * 写入侧的模型引用校验（`pinModels` / `includeModels` / `excludeModels` 同一口径）：
+ * 只校验**结构**，不校验模型是否还存在。
  *
  * 不按目录拒绝的理由：一条路由可能引用了用户刚刚停用的模型，若按目录拒绝，
  * 之后任何一次无关的编辑都会因为这条陈旧引用而永久 400。真正取不回的引用
  * 由候选池预览列为 `unresolved`，用户在那里删掉即可。
  */
-export function checkRouteModelRefs(field: 'includeModels' | 'excludeModels', input: unknown): ModelRouteError | undefined {
+export function checkRouteModelRefs(
+  field: 'pinModels' | 'includeModels' | 'excludeModels',
+  input: unknown
+): ModelRouteError | undefined {
   if (input === undefined) return undefined
   if (!Array.isArray(input)) {
     return { code: 'invalid_input', message: `Route field '${field}' must be an array` }
@@ -150,6 +161,7 @@ function normalizeRouteFields(name: string, entry: Record<string, unknown>, opti
     // 「没配手动增删」与「配了空列表」。
     includeModels: normalizeRouteModelRefs(entry.includeModels),
     excludeModels: normalizeRouteModelRefs(entry.excludeModels),
+    pinModels: normalizeRouteModelRefs(entry.pinModels),
   }
 }
 
@@ -220,6 +232,105 @@ export function routesFromLegacyAutoRouting(
       },
       options
     ),
+  }
+}
+
+/**
+ * 「预设路由」的一次性播种表：两类来源，同一套建法与判据。
+ *
+ * 1. **协议路由**（`kind: 'protocol'`）：R2 之后 `/v1/models` 只广告**启用中的路由名**，
+ *    只会说某套入站协议的客户端（Codex 的 Responses）需要有一个属于自己的名字。
+ * 2. **档位路由**（`kind: 'tier'`）：`/v1/chat` 的调用方按「日常 / 稳定 / 性能」选一条。
+ *    档位的定义就是它的 `poolStrategies` + `prefer`：日常＝免费档模型，稳定＝账号渠道
+ *    （消耗渠道配额，不花聚合的钱），性能＝强档模型。
+ *
+ * 判据与 `auto` 那条迁移同一形状：看原始存储对象里的记档键**有没有记过这个名字**，
+ * 不看路由表是否为空 —— 用户删掉以后不许每次读取都重新造出来。
+ */
+export interface PresetRouteSeed {
+  /** 规范名（`[a-z0-9_-]{1,64}`）；既是记档用的键，也是客户端填的 `model`。 */
+  name: string
+  /** 两类来源只影响文档与日志口径，不参与任何判定。 */
+  kind: 'protocol' | 'tier'
+  /** 只为日志与界面可读：不参与任何判定。 */
+  label: string
+  /**
+   * 覆盖 `auto` 的池策略。
+   *
+   * 协议路由**不设**（沿用 auto 的池）：能力档是严格判据（未标注即淘汰，见
+   * `autoRouting.ts::STRATEGY_PREDICATES`），拿它当出厂值会让一个还没同步过能力的
+   * 安装立刻广告一条必 503 的死名字。
+   *
+   * 档位路由**必须设**：档位的定义就是它的筛选。空池在这里是用户看得见的既有状态
+   * （`/v1/models` 照旧广告 + 路由卡片的空池警示），不是被出厂值掩盖的缺席。
+   */
+  poolStrategies?: AutoPoolStrategy[]
+  /** 覆盖 `auto` 的优化目标；只有档位路由需要。 */
+  prefer?: AutoPreference
+}
+
+export const PRESET_ROUTE_SEEDS: readonly PresetRouteSeed[] = [
+  { name: 'codex', kind: 'protocol', label: 'Codex（Responses 入站）' },
+  {
+    name: 'daily',
+    kind: 'tier',
+    label: '日常（免费档模型）',
+    poolStrategies: [{ id: 'free-only', operator: 'and' }],
+    prefer: 'cheap',
+  },
+  {
+    name: 'stable',
+    kind: 'tier',
+    label: '稳定（账号渠道额度）',
+    poolStrategies: [{ id: 'channel-only', operator: 'and' }],
+    prefer: 'balanced',
+  },
+  {
+    name: 'performance',
+    kind: 'tier',
+    label: '性能（强档模型）',
+    poolStrategies: [{ id: 'strong-tier', operator: 'and' }],
+    prefer: 'strong',
+  },
+]
+
+/**
+ * 播种判据：记档键里**没记过**的名字才要处理。
+ *
+ * 判据不看路由表是否为空（删光以后每次读取都重新造出来，等于出厂值推翻「这个名字
+ * 不再被路由」），也不看 `routes` 键存不存在（那是 `auto` 那条迁移的判据，两回事）。
+ * `recorded` 是磁盘原值，可能是 undefined、非数组、或混着手写的怪值，所以这里只做
+ * 「是不是字符串数组 + 包不包含」，不修脏数据（那是 `normalizeConfig` 的活）。
+ */
+export function pendingPresetRouteSeeds(recorded: unknown): PresetRouteSeed[] {
+  const done = Array.isArray(recorded)
+    ? recorded.filter((entry): entry is string => typeof entry === 'string')
+    : []
+  return PRESET_ROUTE_SEEDS.filter(seed => !done.includes(seed.name))
+}
+
+/**
+ * 播种出来的那条路由长什么样：**除名字与档位自己的覆盖项以外，全部沿用 `auto`**。
+ *
+ * `enabled` 沿用 `auto`：用户关掉过 auto 就不该在升级后被悄悄打开（与那条迁移同一裁定）。
+ */
+export function presetRouteFields(
+  auto: ModelRoute | undefined,
+  legacy: AutoRoutingConfig,
+  fallbackStrategy: LoadBalanceStrategy,
+  seed: PresetRouteSeed
+): Partial<ModelRoute> {
+  return {
+    enabled: auto?.enabled ?? legacy.enabled,
+    strategy: auto?.strategy ?? fallbackStrategy,
+    prefer: seed.prefer ?? auto?.prefer ?? legacy.prefer,
+    maxAttempts: auto?.maxAttempts ?? legacy.maxAttempts,
+    stickyMinutes: auto?.stickyMinutes ?? legacy.stickyMinutes,
+    poolStrategies: seed.poolStrategies ?? auto?.poolStrategies ?? legacy.poolStrategies,
+    // 不钉名：钉谁只能来自用户目录里真实存在的 (providerId, displayName)。
+    pinModels: [],
+    includeModels: [],
+    excludeModels: [],
   }
 }
 
@@ -474,7 +585,7 @@ export function validateRoutesForWrite(
         }
       }
     }
-    for (const field of ['includeModels', 'excludeModels'] as const) {
+    for (const field of ['pinModels', 'includeModels', 'excludeModels'] as const) {
       const refError = checkRouteModelRefs(field, record[field])
       if (refError !== undefined) {
         errors.push(`routes.${name}: ${refError.message}`)

@@ -4,9 +4,9 @@
  */
 
 import { PassThrough, Transform } from 'stream'
-import { SSEEvent, ChatCompletionResponse, ChatCompletionChoice, ToolCall } from './types'
-import { parseToolCalls } from './utils/toolParser/index'
-import { readUsageFromBody, toWireUsage, type TokenUsage } from './quota/usage'
+import type { SSEEvent, ChatCompletionResponse, ChatCompletionChoice, ToolCall } from './types.ts'
+import { parseToolCalls } from './utils/toolParser/index.ts'
+import { readUsageFromBody, toWireUsage, type TokenUsage } from './quota/usage.ts'
 
 /**
  * SSE Parser
@@ -124,14 +124,20 @@ export class SSEFormatter {
 }
 
 /**
+ * `reasoningAccum` 的累积上限（字符）。它唯一的用途是「content 全程为空时回填一帧」，
+ * 不是正文通道，所以留够头即可，不必按模型上下文长度无界留着。
+ */
+const REASONING_ACCUM_LIMIT = 16_384
+
+/**
  * Stream Response Handler
  */
 export class StreamHandler {
-  private parser: SSEParser
+  // `SSEFormatter` 只拼字符串、没有跨调用的状态，可以共享；`SSEParser` 带着跨 chunk 的
+  // 半行残留，一个实例服务两条并发流就会把 A 的残帧接到 B 上，所以解析器一律按流新建。
   private formatter: SSEFormatter
 
   constructor() {
-    this.parser = new SSEParser()
     this.formatter = new SSEFormatter()
   }
 
@@ -146,7 +152,7 @@ export class StreamHandler {
   ): Transform {
     let isFirstChunk = true
     const created = Math.floor(Date.now() / 1000)
-    const parser = this.parser
+    const parser = new SSEParser()
     const formatter = this.formatter
     const transformChunk = this.transformChunk.bind(this)
 
@@ -214,8 +220,8 @@ export class StreamHandler {
 
             const reasoningPiece =
               parsedData?.choices?.[0]?.delta?.reasoning_content ?? parsedData?.reasoning_content
-            if (typeof reasoningPiece === 'string' && reasoningPiece) {
-              reasoningAccum += reasoningPiece
+            if (typeof reasoningPiece === 'string' && reasoningPiece && reasoningAccum.length < REASONING_ACCUM_LIMIT) {
+              reasoningAccum += reasoningPiece.slice(0, REASONING_ACCUM_LIMIT - reasoningAccum.length)
             }
             if (transformedData.choices[0].delta?.tool_calls) {
               sawToolCall = true
@@ -492,9 +498,10 @@ export class StreamHandler {
       let usage: TokenUsage | null = null
       const toolCalls: ToolCall[] = []
       const created = Math.floor(Date.now() / 1000)
+      const parser = new SSEParser()
 
       stream.on('data', (chunk: Buffer) => {
-        const events = this.parser.parse(chunk.toString())
+        const events = parser.parse(chunk.toString())
 
         for (const event of events) {
           if (event.data === '[DONE]') continue

@@ -119,8 +119,8 @@ after(async () => {
 
 test('A/请求级：迁移出来的 `auto` 在第一次 HTTP 请求里就被广告成一条路由条目', async () => {
   const list = await models()
-  assert.deepEqual(list.data.map(entry => entry.id), ['auto', 'Test-A', 'Test-B'],
-    '路由条目排在供应商目录之前（与请求解析的优先级一致）')
+  assert.deepEqual(list.data.map(entry => entry.id), ['auto'],
+    '清单只剩启用中的路由：两家供应商各有一个在服模型，都不再进清单')
 
   const auto = list.data[0]
   assert.equal(auto.object, 'model')
@@ -144,7 +144,7 @@ test('A/请求级：createRoute 之后同一个代理实例（未重启）的下
   assert.equal(created.route.strategy, 'round-robin', '未指定 strategy 时回落到当时的 loadBalanceStrategy')
 
   const ids = await modelIds()
-  assert.deepEqual(ids, ['auto', 'fast', 'Test-A', 'Test-B'])
+  assert.deepEqual(ids, ['auto', 'fast'])
 
   const single = await proxy.request('GET', '/v1/models/fast')
   assert.equal(single.status, 200)
@@ -219,7 +219,7 @@ test('D/请求级：停用路由后两条入口都给 404 `route_disabled`（并
   const updated = sm.updateRoute('fast', { enabled: false })
   assert.equal(updated.ok, true, JSON.stringify(updated.error))
 
-  assert.deepEqual(await modelIds(), ['auto', 'Test-A', 'Test-B'], '停用的路由不广告')
+  assert.deepEqual(await modelIds(), ['auto'], '停用的路由不广告，单模型从来就不在清单里')
 
   const single = await proxy.request('GET', '/v1/models/fast')
   assert.equal(single.status, 404)
@@ -258,7 +258,7 @@ test('A/请求级：删除路由后同一个请求体从「被路由」变成具
   const removed = sm.deleteRoute('fast')
   assert.equal(removed.ok, true, JSON.stringify(removed.error))
 
-  assert.deepEqual(await modelIds(), ['auto', 'Test-A', 'Test-B'])
+  assert.deepEqual(await modelIds(), ['auto'])
 
   const response = await postChat('fast')
   assert.equal(response.status, 503)
@@ -282,7 +282,7 @@ test('G/请求级：删掉 `auto` 后 `/v1/models` 不再出现它，`model:"aut
     '存储里仍是「routes 键存在且为空」，否则读取侧会再迁移一次把 auto 复活')
   assert.deepEqual(stored.routes, {})
 
-  assert.deepEqual(await modelIds(), ['Test-A', 'Test-B'])
+  assert.deepEqual(await modelIds(), [], '没有启用中的路由时清单就是空的 —— 单模型不再回填')
 
   const single = await proxy.request('GET', '/v1/models/auto')
   assert.equal(single.status, 404)
@@ -311,7 +311,7 @@ test('G/请求级：`auto` 这个名字没有被特殊保留，重建后仍是�
   assert.equal(response.json.error.message, "No available model for route 'auto'")
 
   assert.equal(sm.deleteRoute('auto').ok, true)
-  assert.deepEqual(await modelIds(), ['Test-A', 'Test-B'], '删光后回到零条路由，且不会被复活')
+  assert.deepEqual(await modelIds(), [], '删光后回到零条路由，且不会被复活')
 })
 
 // ------------------------------ 路由名优先于同名模型（拍板语义的请求级证据）
@@ -340,8 +340,8 @@ test('同名优先：路由表里的名字抢在具名模型解析之前（真�
   assert.deepEqual(Object.keys(planted.routes), ['test-a'])
 
   const list = await models()
-  assert.deepEqual(list.data.map(entry => entry.id), ['test-a', 'Test-B'],
-    '广告里同名只留一条（大小写不敏感去重），且留的是路由那条')
+  assert.deepEqual(list.data.map(entry => entry.id), ['test-a'],
+    '清单里只有路由那一条；与它同名的模型不进清单，所以也不存在「同名留哪条」的取舍')
 
   const routed = await postChat('Test-A')
   assert.equal(routed.status, 503)
@@ -387,5 +387,66 @@ test('A/请求级：路由表的三次状态（有/停用/无）在连续请求�
   assert.equal(gone.headers['x-modelport-route-name'], undefined)
 
   assert.deepEqual(sm.getModelRoutes(), {})
-  assert.deepEqual(await modelIds(), ['Test-A', 'Test-B'])
+  assert.deepEqual(await modelIds(), [])
+})
+
+// ---------------------- R1/R2：不广告 ≠ 不能点名（拍板裁定的请求级证据）
+
+test('R1/R2：清单里没有的模型名，启用时仍能点名直连；停用后同一个名字立刻不可用', async () => {
+  assert.equal((await modelIds()).includes('Test-B'), false, '单模型不再进清单')
+
+  const forwarded = await postChat('Test-B')
+  assert.equal(forwarded.status, 500, '清单不认它，但它是启用中的模型，具名解析照旧转发')
+  assert.equal(forwarded.json.error.type, 'api_error')
+
+  const single = await proxy.request('GET', '/v1/models/Test-B')
+  assert.equal(single.status, 404, '单查与列表同一个名字域，不许清单否认、单查承认')
+
+  sm.setModelsServed('rp2', ['Test-B'], false)
+  const stopped = await postChat('Test-B')
+  assert.equal(stopped.status, 503, '停用即不可点名 —— 这是「必须启用才接」的那一半')
+  assert.equal(stopped.json.error.code, 'no_available_account')
+
+  sm.setModelsServed('rp2', ['Test-B'], true)
+  const again = await postChat('Test-B')
+  assert.equal(again.status, 500, '重新启用后同一个名字又能跑，无需重启代理')
+})
+
+// ------------------------- R3：别名行的启用位（落映射表自身，四通路同一判据）
+
+test('R3：别名停用后再也点不进，重新启用即恢复；停用位落在映射表自身的 disabled 上', async () => {
+  const withAlias = sm.updateConfig({
+    modelMappings: {
+      ...sm.getConfig().modelMappings,
+      'my-alias': { requestModel: 'my-alias', actualModel: 'Test-A' },
+    },
+  })
+
+  const named = await postChat('my-alias')
+  assert.equal(named.status, 500, '别名指向一个在服的模型时点名它照旧转发（上游拒接才是 500）')
+
+  sm.updateConfig({
+    modelMappings: {
+      ...withAlias.modelMappings,
+      'my-alias': { ...withAlias.modelMappings['my-alias'], disabled: true },
+    },
+  })
+  assert.equal(sm.getConfig().modelMappings['my-alias'].disabled, true,
+    '写入侧走的是同一条归一路径，停用位没被抹平')
+
+  const stopped = await postChat('my-alias')
+  assert.equal(stopped.status, 503, '停用后这个名字不再被任何解析路径认识')
+  assert.equal(stopped.json.error.code, 'no_available_account')
+
+  assert.equal((await modelIds()).includes('my-alias'), false, '别名从来就不在清单里（R2）')
+  const retrieve = await proxy.request('GET', '/v1/models/my-alias')
+  assert.equal(retrieve.status, 404, '单查也不认它')
+
+  // 同名目录行不受牵连：停用的是别名，不是 `Test-A` 那一家
+  const modelStillRoutable = await postChat('Test-A')
+  assert.equal(modelStillRoutable.status, 500, '两本账各记各的，停别名不停模型')
+
+  const rest = { ...sm.getConfig().modelMappings }
+  delete rest['my-alias']
+  sm.updateConfig({ modelMappings: rest })
 })

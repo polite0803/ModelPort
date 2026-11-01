@@ -1,8 +1,8 @@
 /**
  * 出向 responses 翻译层：本应用说 chat，供应商只会 responses 时用它往返。
  *
- * 只覆盖**出向**（本应用 → 供应商）。入向（客户端打 `/v1/responses`）不在本轮，
- * 它需要另一套事件编解码，且没有已知客户端在用。
+ * 只覆盖**出向**（本应用 → 供应商）。入向（客户端打 `/v1/responses`）在
+ * `responsesInbound.ts`，方向相反、编解码各一套，两边不共用函数。
  *
  * 四条纪律：
  *
@@ -27,6 +27,8 @@ const SAME_NAME_PARAMS = [
   'frequency_penalty',
   'stop',
   'user',
+  // 上游的缓存亲和键，两边同名；不搬就等于替客户端放弃 prompt caching。
+  'prompt_cache_key',
 ] as const
 
 function asRecord(value: unknown): Payload | null {
@@ -63,6 +65,7 @@ export interface ResponsesChatInput {
   frequency_penalty?: number
   stop?: unknown
   user?: string
+  prompt_cache_key?: string
 }
 
 /**

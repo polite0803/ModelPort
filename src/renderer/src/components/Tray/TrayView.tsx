@@ -81,7 +81,7 @@ export function TrayView() {
   }, [providers, accounts, selectedProvider])
 
   useEffect(() => {
-    window.electronAPI?.send?.('tray:set-height', 460)
+    window.electronAPI?.tray?.setHeight?.(460)
   }, [])
 
   const loadData = async () => {
@@ -156,7 +156,7 @@ export function TrayView() {
   }
 
   const openDashboard = () => {
-    window.electronAPI?.send?.('tray:open-dashboard')
+    window.electronAPI?.tray?.openDashboard?.()
   }
 
   const quitApp = () => {

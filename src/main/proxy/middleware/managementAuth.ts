@@ -6,6 +6,7 @@
 import type { Context, Next } from 'koa'
 import { randomUUID } from 'crypto'
 import { storeManager } from '../../store/store'
+import { safeKeyEquals } from '../authPolicy'
 
 /**
  * Management API Error Response Interface
@@ -110,7 +111,9 @@ export async function managementAuthMiddleware(ctx: Context, next: Next): Promis
     return
   }
 
-  if (providedToken !== managementConfig.managementApiSecret) {
+  // 常量时间比较，与 `/v1/*` 的 API Key 校验同一条入口（`authPolicy.safeKeyEquals`）：
+  // 明文 `!==` 会按首个不匹配字节提前返回，管理密钥被人工设成短口令时这点信息就够用。
+  if (!safeKeyEquals(providedToken, managementConfig.managementApiSecret)) {
     ctx.status = 401
     ctx.body = createUnauthorizedResponse(
       'Invalid management API secret',

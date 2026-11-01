@@ -84,6 +84,14 @@ export type RouteRemovalResult =
   | { ok: false; error: RouteIpcError }
 
 /**
+ * 每条路由当前的候选模型数（键是路由名）。`0` 是真的没候选；读不到时走 `ok:false`，
+ * 界面不许把「取不到」渲染成 0 —— 那会把一次存储故障说成「用户把池筛空了」。
+ */
+export type RoutePoolSizesResult =
+  | { ok: true; sizes: Record<string, number> }
+  | { ok: false; error: RouteIpcError }
+
+/**
  * 规范化：非字符串一律得到 `''`（调用方据此判非法），字符串按 trim + 小写。
  * 这里**不**做字符集校验，只做形态收敛：读取侧要能拿它比较键与字段。
  */

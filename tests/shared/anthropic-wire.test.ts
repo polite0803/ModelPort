@@ -22,6 +22,7 @@ import {
   chatResponseToAnthropicMessage,
   createAnthropicStreamTranslator,
   estimateAnthropicInputTokens,
+  estimateAnthropicInputTokensDetailed,
   modelsToAnthropicList,
   stopReasonOf,
 } from '../../src/shared/anthropicWire.ts'
@@ -51,13 +52,13 @@ function chatSse(...payloads: string[]): string {
 /* ------------------------------------------------------------------ 请求方向 */
 
 test('system 的两种形态都落到第一条 system 消息', () => {
-  const asText = anthropicToChatRequest(
+  const { request: asText } = anthropicToChatRequest(
     { model: 'claude-x', system: 'be brief', messages: [{ role: 'user', content: 'hi' }] },
     { model: 'auto', stream: false },
   )
   assert.deepEqual(asText.messages, [{ role: 'system', content: 'be brief' }, { role: 'user', content: 'hi' }])
 
-  const asBlocks = anthropicToChatRequest(
+  const { request: asBlocks } = anthropicToChatRequest(
     {
       model: 'claude-x',
       system: [{ type: 'text', text: 'A', cache_control: { type: 'ephemeral' } }, { type: 'text', text: 'B' }],
@@ -71,7 +72,7 @@ test('system 的两种形态都落到第一条 system 消息', () => {
 })
 
 test('assistant 的 tool_use 历史翻成 tool_calls，参数序列化成字符串', () => {
-  const request = anthropicToChatRequest(
+  const { request } = anthropicToChatRequest(
     {
       model: 'claude-x',
       messages: [
@@ -105,7 +106,7 @@ test('assistant 的 tool_use 历史翻成 tool_calls，参数序列化成字符�
 })
 
 test('纯工具调用的 assistant 轮 content 是 null 而不是空串', () => {
-  const request = anthropicToChatRequest(
+  const { request } = anthropicToChatRequest(
     {
       model: 'claude-x',
       messages: [{
@@ -119,7 +120,7 @@ test('纯工具调用的 assistant 轮 content 是 null 而不是空串', () => 
 })
 
 test('图片块的 base64 与 url 两种 source 都能变成 image_url，且该轮保持数组形态', () => {
-  const request = anthropicToChatRequest(
+  const { request } = anthropicToChatRequest(
     {
       model: 'claude-x',
       messages: [{
@@ -140,7 +141,7 @@ test('图片块的 base64 与 url 两种 source 都能变成 image_url，且该�
 })
 
 test('缺 media_type 的 base64 图片按 png 走，缺 data 的图片整块丢掉而不是发出坏 URL', () => {
-  const request = anthropicToChatRequest(
+  const { request } = anthropicToChatRequest(
     {
       model: 'claude-x',
       messages: [{
@@ -159,7 +160,7 @@ test('缺 media_type 的 base64 图片按 png 走，缺 data 的图片整块丢�
 })
 
 test('tools 与 tool_choice 的形态一一对应，input_schema 缺失补空对象', () => {
-  const request = anthropicToChatRequest(
+  const { request } = anthropicToChatRequest(
     {
       model: 'claude-x',
       messages: [{ role: 'user', content: 'go' }],
@@ -177,18 +178,19 @@ test('tools 与 tool_choice 的形态一一对应，input_schema 缺失补空对
   assert.deepEqual(request.tools[1].function.parameters, { type: 'object', properties: {} })
   assert.deepEqual(request.tool_choice, { type: 'function', function: { name: 'a' } })
 
-  const anyChoice = anthropicToChatRequest(
+  const { request: anyChoice } = anthropicToChatRequest(
     { model: 'x', messages: [], tool_choice: { type: 'any' } },
     { model: 'auto', stream: false },
   )
   assert.equal(anyChoice.tool_choice, 'required')
   for (const [type, expected] of [['auto', 'auto'], ['none', 'none']] as const) {
-    assert.equal(anthropicToChatRequest({ model: 'x', messages: [], tool_choice: { type } }, { model: 'a', stream: false }).tool_choice, expected)
+    const { request } = anthropicToChatRequest({ model: 'x', messages: [], tool_choice: { type } }, { model: 'a', stream: false })
+    assert.equal(request.tool_choice, expected)
   }
 })
 
 test('采样参数、stop_sequences 与 metadata.user_id 直通到对应字段', () => {
-  const request = anthropicToChatRequest(
+  const { request } = anthropicToChatRequest(
     {
       model: 'claude-x',
       messages: [{ role: 'user', content: 'go' }],
@@ -210,22 +212,22 @@ test('采样参数、stop_sequences 与 metadata.user_id 直通到对应字段',
 })
 
 test('流式必须主动要 usage，否则客户端的上下文余量永远算错', () => {
-  const streaming = anthropicToChatRequest(
+  const { request: streaming } = anthropicToChatRequest(
     { model: 'claude-x', messages: [{ role: 'user', content: 'go' }] },
     { model: 'auto', stream: true },
   )
   assert.equal(streaming.stream, true)
   assert.deepEqual(streaming.stream_options, { include_usage: true })
 
-  const plain = anthropicToChatRequest(
+  const { request: plain } = anthropicToChatRequest(
     { model: 'claude-x', messages: [{ role: 'user', content: 'go' }] },
     { model: 'auto', stream: false },
   )
   assert.equal(plain.stream_options, undefined, '非流式不该带 stream_options')
 })
 
-test('不认识的块（thinking / document）丢掉而不猜成文本', () => {
-  const request = anthropicToChatRequest(
+test('不认识的块（thinking / document）丢掉而不猜成文本，但必须留下清单', () => {
+  const { request, dropped } = anthropicToChatRequest(
     {
       model: 'claude-x',
       messages: [{
@@ -240,6 +242,77 @@ test('不认识的块（thinking / document）丢掉而不猜成文本', () => {
     { model: 'auto', stream: false },
   )
   assert.equal(request.messages[0].content, '答案')
+  // 「丢掉」与「丢掉并且看得见」是两件事：客户端附件没生效时，这条清单是唯一线索。
+  assert.deepEqual(dropped, ['thinking', 'document'])
+})
+
+test('请求体里没搬运的键逐个报名，搬运了的键一个都不报', () => {
+  const { dropped } = anthropicToChatRequest(
+    {
+      model: 'claude-x',
+      messages: [{ role: 'user', content: 'go' }],
+      max_tokens: 64,
+      thinking: { type: 'enabled', budget_tokens: 1024 },
+      top_k: 40,
+      service_tier: 'max',
+      mcp_servers: [{ type: 'url', name: 's', url: 'https://x' }],
+      container: { type: 'code_execution_20250825' },
+      metadata: { user_id: 'u-1' },
+    },
+    { model: 'auto', stream: false },
+  )
+  assert.deepEqual(dropped, ['body:thinking', 'body:top_k', 'body:service_tier', 'body:mcp_servers', 'body:container'])
+})
+
+test('一条全认识的请求 dropped 是空数组（证明上面几条不是恒真）', () => {
+  const { dropped } = anthropicToChatRequest(
+    {
+      model: 'claude-x',
+      system: 'be brief',
+      messages: [{ role: 'user', content: 'go' }],
+      max_tokens: 64,
+      temperature: 0.3,
+      top_p: 0.9,
+      stop_sequences: ['END'],
+      stream: true,
+      tools: [{ name: 'a', input_schema: { type: 'object' } }],
+      tool_choice: { type: 'auto' },
+      metadata: { user_id: 'u-1' },
+    },
+    { model: 'auto', stream: true },
+  )
+  assert.deepEqual(dropped, [])
+})
+
+test('assistant 轮混进的工具结果、以及发不出去的坏图片，都逐条计数', () => {
+  const { request, dropped } = anthropicToChatRequest(
+    {
+      model: 'claude-x',
+      messages: [{
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'ok' },
+          { type: 'tool_result', tool_use_id: 't', content: '不该出现在 assistant 轮' },
+          { type: 'tool_use', id: 't', name: 'f', input: {} },
+        ],
+      }, {
+        role: 'user',
+        content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: '' } }],
+      }],
+    },
+    { model: 'auto', stream: false },
+  )
+  assert.equal(request.messages.length, 1, '坏图片那一轮什么都不发，而不是发一条空消息')
+  assert.deepEqual(dropped, ['tool_result', 'image'])
+})
+
+test('认不出的 tool_choice 形态报名，而不是静默当成没要求', () => {
+  const { request, dropped } = anthropicToChatRequest(
+    { model: 'x', messages: [], tool_choice: { type: 'future_forced' } },
+    { model: 'auto', stream: false },
+  )
+  assert.equal(request.tool_choice, undefined)
+  assert.deepEqual(dropped, ['body:tool_choice'])
 })
 
 /* ------------------------------------------------------------------ 响应方向 */
@@ -424,6 +497,41 @@ test('网关模型清单按 anthropic 形状导出，空清单也用 null 游标
   assert.equal(empty.last_id, null)
 })
 
+test('申报过的 anthropic 面向名排在最前，窗口取目标模型的真值、未知就省略键', () => {
+  const list = modelsToAnthropicList(
+    [
+      { id: 'auto', created: 1700000000 },
+      { id: 'zai/glm-5', created: 1700000100, context_window: 200000 },
+      { id: 'no-window' },
+    ],
+    { 'claude-sonnet-4-6': 'zai/glm-5', 'claude-ghost': 'not-a-model' },
+  )
+  const rows = list.data as any[]
+
+  // 客户端会按自己的 Anthropic 名字表逐行筛（本机装的 Desktop 4.4212 就是这么写的），
+  // 所以面向客户端的名字必须出现在清单里，否则整张表会被筛成「0 usable models」。
+  assert.equal(rows[0].id, 'claude-sonnet-4-6')
+  assert.equal(rows[0].display_name, 'claude-sonnet-4-6')
+  assert.equal(rows[0].max_input_tokens, 200000, '窗口取自映射目标，不是客户端名')
+  assert.equal(rows[0].created_at, new Date(1700000100 * 1000).toISOString())
+
+  assert.ok(!rows.some((row) => row.id === 'claude-ghost'), '映射目标网关不认识 ⇒ 这一行不发，别让它可选')
+  assert.equal(rows[1].id, 'auto')
+  assert.equal(rows[1].max_input_tokens, undefined, '未知窗口省略键，不编 0')
+  assert.equal(list.first_id, 'claude-sonnet-4-6')
+  assert.equal(list.last_id, rows[rows.length - 1].id)
+
+  const dedup = modelsToAnthropicList([{ id: 'Auto' }], { auto: 'Auto' })
+  assert.equal(dedup.data.length, 1, '面向名与网关名只差大小写时不发两条同名的')
+
+  // 负控（同一函数、少传一个参数即改动前的行为）：不申报面向名时表里一个 claude 名都没有。
+  // 这正是 Desktop 把整张表筛空的场景，不是「改动前后的行数差」那种恒真对照。
+  const legacy = modelsToAnthropicList([{ id: 'auto' }, { id: 'zai/glm-5', context_window: 200000 }])
+  assert.ok(!legacy.data.some((row: any) => String(row.id).startsWith('claude-')),
+    '少传映射参数就不该凭空造出 claude 面向名')
+  assert.equal(legacy.data[0].id, 'auto')
+})
+
 test('错误信封用 anthropic 认识的 type，状态码决定它', () => {
   assert.deepEqual(anthropicErrorBody('密钥不对', 'authentication_error'), {
     type: 'error',
@@ -456,4 +564,103 @@ test('count_tokens 的粗估把 system、正文与工具 schema 都算进去', (
 
   // 空请求至少报 1，不给客户端「零成本」的假信号。
   assert.equal(estimateAnthropicInputTokens({}), 1)
+})
+/* ------------------------------------------------ 附件（document）与输入估算 */
+
+const PDF_TWO_PAGES = Buffer.from(
+  '%PDF-1.4\n' +
+  '1 0 obj << /Type /Page /Parent 2 0 R >> endobj\n' +
+  '2 0 obj << /Type /Pages /Kids [1 0 R 3 0 R] /Count 2 >> endobj\n' +
+  '3 0 obj << /Type/Page /Contents 4 0 R >> endobj\n',
+).toString('base64')
+
+// 页树在压缩的对象流里时数不出 `/Type /Page` —— 那种必须登记为未计入，而不是报 1 页。
+const PDF_NO_PAGE_OBJECTS = Buffer.from('%PDF-1.4\n/ObjStm compressed page tree\n').toString('base64')
+
+const documentBody = (blocks: any[]) => ({
+  model: 'claude-x',
+  messages: [{ role: 'user', content: blocks }],
+})
+
+test('document 块默认翻成 file 块真的发出，那一轮保持数组形态', () => {
+  const { request, dropped } = anthropicToChatRequest(
+    documentBody([
+      { type: 'text', text: '读这份' },
+      { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: PDF_TWO_PAGES }, title: 'spec.pdf' },
+    ]),
+    { model: 'auto', stream: false },
+  )
+
+  assert.deepEqual(dropped, [])
+  const content = request.messages[0].content
+  assert.ok(Array.isArray(content), '带附件的那一轮不能折回纯字符串')
+  assert.deepEqual(content[1], {
+    type: 'file',
+    file: { filename: 'spec.pdf', file_data: `data:application/pdf;base64,${PDF_TWO_PAGES}` },
+  })
+})
+
+test('开关显式关掉才回到「丢掉但报名」，两种状态在 dropped 上分得开', () => {
+  const { request, dropped } = anthropicToChatRequest(
+    documentBody([
+      { type: 'text', text: '读这份' },
+      { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: PDF_TWO_PAGES } },
+    ]),
+    { model: 'auto', stream: false, documentsAsFileParts: false },
+  )
+
+  assert.deepEqual(dropped, ['document'])
+  assert.equal(request.messages[0].content, '读这份', '关掉后那一轮退回纯文本')
+})
+
+test('没给标题时后缀由 media_type 反推；text/plain 走同一条路', () => {
+  const pdf = anthropicToChatRequest(
+    documentBody([{ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: PDF_TWO_PAGES } }]),
+    { model: 'auto', stream: false },
+  )
+  assert.match(pdf.request.messages[0].content[0].file.filename, /^document-\d+\.pdf$/, '上游普遍靠后缀判类型')
+
+  const txt = Buffer.from('hello world').toString('base64')
+  const note = anthropicToChatRequest(
+    documentBody([{ type: 'document', source: { type: 'base64', media_type: 'text/plain', data: txt } }]),
+    { model: 'auto', stream: false },
+  )
+  assert.equal(note.request.messages[0].content[0].file.file_data, `data:text/plain;base64,${txt}`)
+  assert.match(note.request.messages[0].content[0].file.filename, /\.txt$/)
+})
+
+test('缺 source 或缺 data 的 document 不许变成空壳块', () => {
+  const { request, dropped } = anthropicToChatRequest(
+    documentBody([
+      { type: 'document' },
+      { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: '' } },
+    ]),
+    { model: 'auto', stream: false },
+  )
+
+  assert.deepEqual(dropped, ['document', 'document'])
+  assert.equal(request.messages.length, 0, '两个都翻不出去时一条消息都不发，而不是发一条空的')
+})
+
+test('count_tokens 把数得出页数的 PDF 按每页 1590 计入，数不出的登记为下界', () => {
+  const twoPages = estimateAnthropicInputTokensDetailed({
+    system: 'x'.repeat(400),
+    messages: [{ role: 'user', content: [
+      { type: 'text', text: 'abcdefgh' },
+      { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: PDF_TWO_PAGES } },
+    ] }],
+  })
+  assert.deepEqual(twoPages.uncounted, [])
+  // 408 字符 /4 = 102，加两页 PDF。字符与整块分开累加，混在一起就会重算或漏算。
+  assert.equal(twoPages.tokens, 102 + 2 * 1590)
+
+  const unreadable = estimateAnthropicInputTokensDetailed(
+    documentBody([{ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: PDF_NO_PAGE_OBJECTS } }]),
+  )
+  assert.deepEqual(unreadable.uncounted, ['document'], '数不出页数就不拍一个数充数')
+
+  const withImage = estimateAnthropicInputTokensDetailed(
+    documentBody([{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } }]),
+  )
+  assert.deepEqual(withImage.uncounted, ['image'], '读不到宽高就不按 (w×h)/750 拍数')
 })

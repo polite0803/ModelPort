@@ -85,12 +85,16 @@ export function checkStartupSecurity(input: { apiKeys?: ApiKeyRecord[]; host: st
   return { ok: false, reason: 'api_key_required_for_non_loopback_listen' }
 }
 
-export function resolveCorsOrigin(input: {
-  origin?: string
-  requiresKey: boolean
-  host: string
-}): string | null {
-  if (!input.requiresKey && isLoopbackHost(input.host)) return '*'
+/**
+ * 跨域可读的判定。
+ *
+ * 曾经有一条「没配 Key 就回 `*`」的分支：出厂默认就是没有 Key，于是用户浏览器里打开的
+ * 任何网页都能 `fetch` 这台机器上的代理并**读走完整响应** —— 把用户的机器当免费 LLM 网关，
+ * 顺带烧掉他的上游配额。现在只回显回环来源：本机起的 Web 客户端（`http://localhost:xxxx`、
+ * `http://127.0.0.1:xxxx`）照常工作，公网页面拿不到 `Access-Control-Allow-Origin`，
+ * 浏览器侧就读不到响应。
+ */
+export function resolveCorsOrigin(input: { origin?: string }): string | null {
   if (input.origin && isLoopbackOrigin(input.origin)) return input.origin
   return null
 }

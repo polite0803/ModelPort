@@ -8,6 +8,9 @@
   },
   "homepage": "https://github.com/polite0803/ModelPort",
   "license": "GPL-3.0",
+  "engines": {
+    "node": ">=22.6.0"
+  },
   "scripts": {
     "dev": "bash scripts/dev.sh",
     "dev:win": "chcp 65001 && npm run build:channel-pack && electron-vite dev",

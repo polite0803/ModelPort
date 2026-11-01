@@ -14,7 +14,9 @@
  * 3. **失败不是正文。** 上游 `{"error": …}` 帧必须翻成 anthropic 的 `error` 事件，
  *    绝不能变成 assistant 文本（客户端会把报错当回答读）。
  * 4. **只搬运能一一对应的字段。** 不同名的（`tool_choice` 三种形态、`stop_sequences`）
- *    显式映射；不认识的（`thinking`、`container`、`mcp_servers`）直接丢，不猜。
+ *    显式映射；不认识的（`thinking`、`container`、`mcp_servers`）不猜语义，但**必须
+ *    进 `dropped` 清单**（见 `AnthropicToChatResult`）—— 静默丢掉会让客户端把
+ *    「附件/思考没生效」当成正常结果读，本仓的既有裁定是「拿不到可以说，不许装成正常」。
  */
 
 type Payload = Record<string, unknown>
@@ -109,7 +111,84 @@ export interface AnthropicToChatOptions {
   /** 已解析过的网关模型名（不是客户端发来的 anthropic 模型名）。 */
   model: string
   stream: boolean
+  /**
+   * `document` 块要不要翻成 chat 的 `file` 块发出去。缺省即 `true`
+   * （只有显式 `false` 才关，与 `trailingUserGuard` 同一形态）。
+   *
+   * 开着时附件真的进上游报文；上游如果不吃 `file` 块会**硬报错** —— 那比「客户端以为
+   * 模型读了这份 PDF、实际拿到的是空白」诚实。关掉它就回到旧行为：丢掉但记进 `dropped`。
+   */
+  documentsAsFileParts?: boolean
 }
+
+/**
+ * `document` 块 → chat 的 `file` 块（`{type:'file', file:{filename, file_data}}`，
+ * 这是 OpenAI 侧 PDF 输入的写法，`file_data` 收 data URL 或裸 base64 两种形态的供应商都见过，
+ * 这里统一发 data URL）。
+ *
+ * 两种 source 都要认：`base64`（带 `media_type`）与 `text`（Anthropic 允许纯文本文件，
+ * `media_type` 常为 `text/plain`）。翻不出去的一律返回 `null`，由调用方进 `dropped` ——
+ * 不许在这里造一个空壳块发上去。
+ */
+function documentPartOf(block: Payload, index: number): Payload | null {
+  const source = asRecord(block.source)
+  if (!source) return null
+  const mediaType = stringOf(source.media_type) || 'application/pdf'
+  const data = stringOf(source.data)
+  if (data === '') return null
+
+  // 文件名很多上游拿来做类型判断（OpenAI 要求 `.pdf` 结尾才当 PDF 读），
+  // 所以后缀必须由 media_type 反推，不能统一叫 document。
+  const title = stringOf(block.title) || stringOf(block.name)
+  const extension = EXTENSION_OF_MEDIA_TYPE[mediaType] ?? '.bin'
+  const filename = title === '' ? `document-${index + 1}${extension}` : title
+
+  return {
+    type: 'file',
+    file: { filename, file_data: `data:${mediaType};base64,${data}` },
+  }
+}
+
+const EXTENSION_OF_MEDIA_TYPE: Readonly<Record<string, string>> = {
+  'application/pdf': '.pdf',
+  'text/plain': '.txt',
+  'text/markdown': '.md',
+  'text/csv': '.csv',
+  'application/json': '.json',
+}
+
+/**
+ * 一次入向翻译的产物。
+ *
+ * `dropped` 是「客户端确实发来了、但本网关没有翻出去」的清单：内容块的 `type` 原样
+ * 记录（没有 `type` 的记 `unknown`），请求体里没搬运的键记成 `body:<键名>`。
+ *
+ * 为什么必须由翻译层自己报（而不是另写一个扫描函数）：判「这块翻没翻」的代码只该有
+ * 一份，两份会在下一个块类型上分叉，届时日志说「没丢」而正文真的丢了 —— 那正是这条
+ * 清单要消灭的东西。
+ */
+export interface AnthropicToChatResult {
+  request: Payload
+  dropped: string[]
+}
+
+/**
+ * 请求体里被翻译层读取的键。其余键（`thinking`、`top_k`、`service_tier`、
+ * `mcp_servers`、`container` 这些）一律进 `dropped`，不猜语义、也不静默吞掉。
+ */
+const TRANSLATED_BODY_KEYS: ReadonlySet<string> = new Set([
+  'model',
+  'messages',
+  'system',
+  'max_tokens',
+  'temperature',
+  'top_p',
+  'stop_sequences',
+  'stream',
+  'tools',
+  'tool_choice',
+  'metadata',
+])
 
 /**
  * anthropic `/v1/messages` 请求体 → chat `/v1/chat/completions` 请求体。
@@ -119,9 +198,14 @@ export interface AnthropicToChatOptions {
  * 顺序必须保持：`tool` 消息紧跟产生它的 assistant `tool_calls`，否则上游会
  * 把它当成「没有对应调用的工具结果」而拒绝。
  */
-export function anthropicToChatRequest(body: unknown, options: AnthropicToChatOptions): Payload {
+export function anthropicToChatRequest(body: unknown, options: AnthropicToChatOptions): AnthropicToChatResult {
   const source = asRecord(body) ?? {}
   const messages: Payload[] = []
+  const dropped: string[] = []
+
+  for (const key of Object.keys(source)) {
+    if (!TRANSLATED_BODY_KEYS.has(key)) dropped.push(`body:${key}`)
+  }
 
   const systemText = systemTextOf(source.system)
   if (systemText.trim() !== '') {
@@ -145,6 +229,7 @@ export function anthropicToChatRequest(body: unknown, options: AnthropicToChatOp
     const toolCalls: Payload[] = []
     const toolResults: Payload[] = []
     let hasImage = false
+    let hasFile = false
 
     for (const rawBlock of content) {
       const block = asRecord(rawBlock)
@@ -161,6 +246,22 @@ export function anthropicToChatRequest(body: unknown, options: AnthropicToChatOp
         if (part) {
           parts.push(part)
           hasImage = true
+        } else {
+          // 翻不出去的图片（缺 data 或缺 url）也是「客户端发了、模型收不到」，同样要报。
+          dropped.push('image')
+        }
+        continue
+      }
+      if (type === 'document') {
+        const part = options.documentsAsFileParts === false
+          ? null
+          : documentPartOf(block, parts.length)
+        if (part) {
+          parts.push(part)
+          hasFile = true
+        } else {
+          // 关掉开关、或这份附件根本翻不出去（没有 source/data）：照旧是缺席，但要看得见。
+          dropped.push('document')
         }
         continue
       }
@@ -184,10 +285,19 @@ export function anthropicToChatRequest(body: unknown, options: AnthropicToChatOp
         })
         continue
       }
-      // `thinking` / `redacted_thinking` / `document` / 未知块：不猜，丢掉。
+      // `thinking` / `redacted_thinking` / `document` / 未知块：不猜语义，但必须留痕。
+      dropped.push(stringOf(block.type) || 'unknown')
     }
 
     if (role === 'assistant') {
+      // assistant 轮只搬文本与 tool_calls：混进来的图片与工具结果到不了上游，逐条报数。
+      for (const part of parts) {
+        if (part.type === 'image_url') dropped.push('image')
+        // assistant 轮的历史里不会出现待发附件；真出现了就是客户端把块放错了位置，
+        // 这一格到不了上游，报出来而不是塞进那条消息。
+        if (part.type === 'file') dropped.push('document')
+      }
+      toolResults.forEach(() => dropped.push('tool_result'))
       const text = parts.map((part) => stringOf(part.text)).join('')
       const assistant: Payload = {
         role: 'assistant',
@@ -205,7 +315,7 @@ export function anthropicToChatRequest(body: unknown, options: AnthropicToChatOp
       const text = parts.map((part) => stringOf(part.text)).join('')
       messages.push({
         role: 'user',
-        content: hasImage || parts.length > 1 ? parts : text,
+        content: hasImage || hasFile || parts.length > 1 ? parts : text,
       })
     }
   }
@@ -236,13 +346,19 @@ export function anthropicToChatRequest(body: unknown, options: AnthropicToChatOp
   const tools = toolsOf(source.tools)
   if (tools.length > 0) request.tools = tools
   const toolChoice = toolChoiceOf(source.tool_choice)
-  if (toolChoice !== undefined) request.tool_choice = toolChoice
+  if (toolChoice !== undefined) {
+    request.tool_choice = toolChoice
+  } else if (source.tool_choice !== undefined) {
+    // 客户端点名了一种我们不认识的强制方式（例如 `{"type":"none"}` 之外的新形态）：
+    // 静默当「没要求」会让它以为工具被禁了，所以这里也进清单。
+    dropped.push('body:tool_choice')
+  }
 
   const metadata = asRecord(source.metadata)
   const userId = metadata ? stringOf(metadata.user_id) : ''
   if (userId !== '') request.user = userId
 
-  return request
+  return { request, dropped }
 }
 
 /** chat 的 `finish_reason` → anthropic 的 `stop_reason`。 */
@@ -624,10 +740,68 @@ export function anthropicErrorTypeOf(status: number): 'invalid_request_error' | 
  * 粗估输入 token。`/v1/messages/count_tokens` 只被客户端用于「发不发得出去」的
  * 预判，不需要精确；按字符数 /4 估（中英文混排的常见近似），工具 schema 也计入
  * —— 那部分在 agent 客户端里往往比对话本身还大。
+ *
+ * `document` 块按 Anthropic 公布的 **每页 1590 token** 计入，页数从 PDF 自身的页对象里
+ * 数出来。数不出来（页树在压缩的对象流里、或不是 PDF）就**不计入并登记进 `uncounted`** ——
+ * 宁可得出一个声明过的下界，也不要拍一个数：客户端拿这个数决定要不要压缩上下文，
+ * 拍高的数会让它把正常请求提前截断。
  */
-export function estimateAnthropicInputTokens(body: unknown): number {
+export interface AnthropicTokenEstimate {
+  tokens: number
+  /** 没能计入的块类型（去重、按出现顺序）。非空时 `tokens` 是下界，响应里必须说出来。 */
+  uncounted: string[]
+}
+
+const CHARS_PER_TOKEN = 4
+const PDF_TOKENS_PER_PAGE = 1590
+/** 解码上限：再大的附件不在本机做字符串扫描，直接登记为未计入。 */
+const MAX_SCANNED_DOCUMENT_BYTES = 8 * 1024 * 1024
+
+/** 数 PDF 里的页对象（`/Type /Page` 与 `/Type/Page` 都认，页树节点 `/Pages` 跳过）。 */
+function pdfPageCount(buffer: Buffer): number {
+  const text = buffer.toString('latin1')
+  let pages = 0
+  let index = 0
+  while (index < text.length) {
+    const hit = text.indexOf('/Type', index)
+    if (hit < 0) break
+    const after = text.slice(hit + 5, hit + 24)
+    // `/Page` 后面不能紧跟 `s`（那是页树 `/Pages`）也不能是更长单词的首字母前缀之外的东西。
+    const match = /^\s*\/(Page[sS]?)/.exec(after)
+    if (match !== null && match[1] === 'Page') pages += 1
+    index = hit + 5
+  }
+  return pages
+}
+
+/** 一个 `document` 块能计入多少 token；返回 `undefined` 表示估不出来（要登记为未计入）。 */
+function documentTokenEstimate(block: Payload): number | undefined {
+  const source = asRecord(block.source)
+  if (source === null) return undefined
+  const mediaType = stringOf(source.media_type)
+  const data = stringOf(source.data)
+  if (data === '') return undefined
+
+  if (mediaType === 'text/plain' || mediaType.startsWith('text/')) {
+    // 文本类文件：`data` 是 base64，解出字符数按同一条 /4 规则计。
+    try {
+      return Math.ceil(Buffer.from(data, 'base64').toString('utf8').length / CHARS_PER_TOKEN)
+    } catch {
+      return undefined
+    }
+  }
+  if (mediaType !== 'application/pdf') return undefined
+
+  if (data.length > MAX_SCANNED_DOCUMENT_BYTES * 1.4) return undefined
+  const pages = pdfPageCount(Buffer.from(data, 'base64'))
+  return pages > 0 ? pages * PDF_TOKENS_PER_PAGE : undefined
+}
+
+export function estimateAnthropicInputTokensDetailed(body: unknown): AnthropicTokenEstimate {
   const source = asRecord(body) ?? {}
+  const uncounted = new Set<string>()
   let characters = systemTextOf(source.system).length
+  let wholeTokens = 0
 
   const rawMessages = Array.isArray(source.messages) ? source.messages : []
   for (const raw of rawMessages) {
@@ -638,14 +812,41 @@ export function estimateAnthropicInputTokens(body: unknown): number {
     for (const rawBlock of content) {
       const block = asRecord(rawBlock)
       if (!block) continue
-      if (block.type === 'tool_use') characters += JSON.stringify(asRecord(block.input) ?? {}).length
+      const type = stringOf(block.type)
+      if (type === 'tool_use') {
+        characters += JSON.stringify(asRecord(block.input) ?? {}).length
+        continue
+      }
+      if (type === 'document') {
+        const tokens = documentTokenEstimate(block)
+        if (tokens === undefined) uncounted.add('document')
+        else wholeTokens += tokens
+        continue
+      }
+      // 图片没有尺寸就要按 Anthropic 的 (w×h)/750 定价，而 base64 里读不到宽高
+      // （要解 PNG IHDR / JPEG SOF，那是另一件事）—— 这里只登记，不拍数。
+      if (type === 'image') uncounted.add('image')
     }
   }
 
   const tools = Array.isArray(source.tools) ? source.tools : []
   if (tools.length > 0) characters += JSON.stringify(tools).length
 
-  return Math.max(1, Math.ceil(characters / 4))
+  return {
+    tokens: Math.max(1, wholeTokens + Math.ceil(characters / CHARS_PER_TOKEN)),
+    uncounted: [...uncounted],
+  }
+}
+
+export function estimateAnthropicInputTokens(body: unknown): number {
+  return estimateAnthropicInputTokensDetailed(body).tokens
+}
+
+/** 清单条目：`context_window` 只在网关真的知道时才带（与 OpenAI 形状同一口径）。 */
+export interface AnthropicListModelEntry {
+  id: string
+  created?: number
+  context_window?: number
 }
 
 /**
@@ -653,14 +854,57 @@ export function estimateAnthropicInputTokens(body: unknown): number {
  *
  * `display_name` 用模型 id：网关的 id 本身就是 `<供应商>/<模型>`，比再编一个
  * 人类可读名更准；`created_at` 用 ISO 时间（anthropic 这一版是字符串，不是秒数）。
+ *
+ * `anthropicNames`（即 `anthropicInbound.modelMap`）的键**排在最前面**，因为只发网关
+ * 内部名等于让客户端自己把整张表过滤空：Claude Desktop 4.4212 的模型发现逐行要求 `id`
+ * 是它认识的 Anthropic 模型名，否则该行必须带 `anthropic_family_tier`
+ * （sonnet/opus/haiku/fable/mythos），两者都没有就整行丢弃，最后写一条
+ * `[custom-3p] Gateway /v1/models returned 0 usable models`（判据取自本机那份安装
+ * `app.asar` 里的解析代码，不是推测）。而用户申报的映射键正是客户端下一轮会原样发回
+ * 来的名字 —— 广告它，「清单里的名字」与「能跑的名字」才是同一份。
+ *
+ * `max_input_tokens` 只在目标模型真有窗口时才发（沿用 `context_window` 的既有裁定：
+ * 省略而不是编 0）；客户端用它判断要不要给这条模型开 1M 变体。
  */
-export function modelsToAnthropicList(models: Array<{ id: string; created?: number }>): Payload {
-  const data = models.map((model) => ({
-    type: 'model',
-    id: model.id,
-    display_name: model.id,
-    created_at: new Date((model.created ?? Math.floor(Date.now() / 1000)) * 1000).toISOString(),
-  }))
+export function modelsToAnthropicList(
+  models: AnthropicListModelEntry[],
+  anthropicNames?: Record<string, string>
+): Payload {
+  const byGatewayName = new Map<string, AnthropicListModelEntry>()
+  for (const model of models) {
+    const key = model.id.trim().toLowerCase()
+    if (key !== '' && !byGatewayName.has(key)) byGatewayName.set(key, model)
+  }
+
+  const now = Math.floor(Date.now() / 1000)
+  const data: Payload[] = []
+  const added = new Set<string>()
+
+  const pushRow = (rawId: string, entry: AnthropicListModelEntry | undefined): void => {
+    const name = rawId.trim()
+    if (name === '') return
+    const key = name.toLowerCase()
+    if (added.has(key)) return
+    added.add(key)
+    data.push({
+      type: 'model',
+      id: name,
+      display_name: name,
+      created_at: new Date((entry?.created ?? now) * 1000).toISOString(),
+      ...(entry?.context_window === undefined ? {} : { max_input_tokens: entry.context_window }),
+    })
+  }
+
+  for (const [name, target] of Object.entries(anthropicNames ?? {})) {
+    const resolved = byGatewayName.get(String(target ?? '').trim().toLowerCase())
+    // 映射指向一个此刻不广告的名字时不发这一行：发出去就是让客户端选中一条必然失败的
+    // 模型，与 `resolveAnthropicModel` 里「映射目标必须被网关认识」是同一条判据。
+    if (resolved === undefined) continue
+    pushRow(name, resolved)
+  }
+
+  for (const model of models) pushRow(model.id, model)
+
   return {
     data,
     has_more: false,

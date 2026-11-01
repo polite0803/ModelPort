@@ -10,6 +10,22 @@ interface ErrorBoundaryProps {
   children: React.ReactNode
 }
 
+/**
+ * 错误文本与组件栈里常带绝对路径（`C:\Users\<用户名>\...`、`/home/<用户名>/...`），而这张
+ * 页面就是用户截图贴进 issue 的那一张。完整信息仍然进控制台（`componentDidCatch`），界面
+ * 上只留脱敏后的形态。
+ */
+function redactLocalPaths(value: string): string {
+  return value
+    .replace(/[A-Za-z]:\\Users\\[^\\/?'"*\s>]+/gi, '[local path]')
+    .replace(/\/(?:home|Users|private\/var\/folders)\/[^/\s"'?]+/g, '[local path]')
+}
+
+function redactStack(value: string | null | undefined): string {
+  if (!value) return ''
+  return redactLocalPaths(value)
+}
+
 class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
   constructor(props: ErrorBoundaryProps) {
     super(props)
@@ -43,8 +59,11 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
             overflow: 'auto',
             maxWidth: '100%'
           }}>
-            {this.state.error?.toString()}
+            {redactStack(this.state.error?.toString())}
           </pre>
+          <p style={{ marginTop: '8px', fontSize: '12px', color: '#888' }}>
+            Full details are in the developer console and the app log.
+          </p>
           {this.state.errorInfo && (
             <details style={{ marginTop: '10px' }}>
               <summary style={{ cursor: 'pointer', color: '#888' }}>Component Stack</summary>
@@ -56,7 +75,7 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
                 maxWidth: '100%',
                 fontSize: '12px'
               }}>
-                {this.state.errorInfo.componentStack}
+                {redactStack(this.state.errorInfo.componentStack)}
               </pre>
             </details>
           )}

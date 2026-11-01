@@ -18,6 +18,14 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog'
+import {
+  LEGACY_SETTINGS_STORAGE_KEY,
+  SETTINGS_STORAGE_KEY,
+  buildExportEnvelope,
+  parseExportEnvelope,
+  pickPersistedPreferences,
+  sanitizePersistedSettings,
+} from '@shared/persistedSettings'
 
 export function DataManagement() {
   const { t } = useTranslation()
@@ -59,12 +67,14 @@ export function DataManagement() {
   const handleExportConfig = async () => {
     setIsExporting(true)
     try {
-      const config = {
-        version: '1.1.2',
-        exportedAt: new Date().toISOString(),
-        settings: localStorage.getItem('modelport-settings'),
-      }
-      const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' })
+      const version = await window.electronAPI?.app?.getVersion?.()
+      const raw = localStorage.getItem(SETTINGS_STORAGE_KEY)
+      // 导出件只含界面偏好：清洗后再出门。磁盘上可能还留着旧版本写进去的 `config`
+      // （含上游 Key 与管理密钥），启动时的清洗要到下次加载才跑，这一趟不能指望它。
+      const cleaned =
+        sanitizePersistedSettings(raw) ?? JSON.stringify({ state: pickPersistedPreferences(useSettingsStore.getState()), version: 0 })
+      const payload = JSON.stringify(buildExportEnvelope(version ?? 'unknown', cleaned), null, 2)
+      const blob = new Blob([payload], { type: 'application/json' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
@@ -95,17 +105,24 @@ export function DataManagement() {
     setIsImporting(true)
     try {
       const text = await file.text()
-      const config = JSON.parse(text)
-      if (config.settings) {
-        localStorage.setItem('modelport-settings', config.settings)
+      // 结构与版本都要过；过不了就明确失败，不把垃圾串写进存储再等重水合出问题。
+      const envelope = parseExportEnvelope(text)
+      if (envelope === null) {
         toast({
-          title: t('common.success'),
-          description: t('settings.importSuccess'),
+          title: t('common.error'),
+          description: t('settings.importFailed'),
+          variant: 'destructive',
         })
-        setTimeout(() => {
-          window.location.reload()
-        }, 1500)
+        return
       }
+      localStorage.setItem(SETTINGS_STORAGE_KEY, envelope.settings)
+      toast({
+        title: t('common.success'),
+        description: t('settings.importSuccess'),
+      })
+      setTimeout(() => {
+        window.location.reload()
+      }, 1500)
     } catch {
       toast({
         title: t('common.error'),
@@ -140,13 +157,16 @@ export function DataManagement() {
   const handleResetApp = async () => {
     setIsResetting(true)
     try {
-      localStorage.clear()
-      sessionStorage.clear()
-      
+      // 顺序：先让主进程清干净，成功之后才动渲染层。反过来做时一旦 `clearAll` 抛错，
+      // 界面已经重置而盘上的厂商、账号、凭据仍在，下次启动全部复活，用户读到的却是
+      // 「重置没生效」。
       if (window.electronAPI?.store?.clearAll) {
         await window.electronAPI.store.clearAll()
       }
-      
+      localStorage.removeItem(SETTINGS_STORAGE_KEY)
+      localStorage.removeItem(LEGACY_SETTINGS_STORAGE_KEY)
+      sessionStorage.clear()
+
       toast({
         title: t('common.success'),
         description: t('settings.resetSuccess'),

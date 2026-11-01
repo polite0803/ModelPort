@@ -67,6 +67,7 @@ test('空壳条目也得到与 legacy 同一套出厂值（缺省≠0，也≠un
     poolStrategies: [],
     includeModels: [],
     excludeModels: [],
+    pinModels: [],
   })
   assert.notEqual(normalized.fast, undefined)
 })
@@ -234,6 +235,7 @@ test('迁移：legacy `autoRouting` 的每一项都原样进 `auto` 路由（含
     poolStrategies: legacy.poolStrategies,
     includeModels: [],
     excludeModels: [],
+    pinModels: [],
   })
 })
 
@@ -249,6 +251,7 @@ test('迁移：没有 legacy 配置时得到一条出厂默认的 `auto`（全�
       poolStrategies: [],
       includeModels: [],
       excludeModels: [],
+      pinModels: [],
     },
   })
 })

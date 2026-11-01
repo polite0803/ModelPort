@@ -19,6 +19,23 @@ import {
 } from '../types'
 
 /**
+ * 回调页要把上游回传的 error / error_description 排进 HTML，这两个值来自 URL 查询串，
+ * 是外部输入；内联给 `window.electronAPI.send` 的 JSON 同理，`</script>` 会提前闭合标签。
+ */
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function escapeInlineJson(value: string): string {
+  return value.replace(/</g, '\\u003c')
+}
+
+/**
  * OAuth adapter abstract base class
  */
 export abstract class BaseOAuthAdapter {
@@ -81,32 +98,57 @@ export abstract class BaseOAuthAdapter {
 
   /**
    * Validate state string
+   *
+   * 常量时间比较：state 是这次登录唯一的「这一笔是我发起的」凭据，明文 `===` 会按
+   * 首个不匹配字节提前返回。
    */
   protected validateState(state: string): boolean {
-    return state === this.state
+    if (!this.state || !state) return false
+    const expected = Buffer.from(this.state, 'utf-8')
+    const provided = Buffer.from(state, 'utf-8')
+    return expected.length === provided.length && crypto.timingSafeEqual(expected, provided)
   }
 
   /**
    * Create local callback server
+   *
+   * 回环绑定是硬性要求，不是偏好：这一页会把 `code` / `token` 交给 `processCallback`
+   * 去换凭据，任何非回环监听都等于让同网段的任意主机替用户完成这一步。端口自增只
+   * 允许有限次，并且始终以 `server.address()` 的实际端口为准 —— `redirect_uri` 用
+   * 的就是这里返回的那个数。
    */
   protected async createCallbackServer(): Promise<number> {
+    const LOOPBACK_HOST = '127.0.0.1'
+    const MAX_PORT_ATTEMPTS = 10
+
     return new Promise((resolve, reject) => {
-      this.callbackServer = http.createServer((req, res) => {
+      const server = http.createServer((req, res) => {
         this.handleCallback(req, res)
       })
+      this.callbackServer = server
 
-      this.callbackServer.listen(this.callbackPort, () => {
-        resolve(this.callbackPort)
-      })
-
-      this.callbackServer.on('error', (error: NodeJS.ErrnoException) => {
-        if (error.code === 'EADDRINUSE') {
-          this.callbackPort++
-          this.callbackServer?.listen(this.callbackPort)
-        } else {
+      let attempts = 0
+      const tryListen = (): void => {
+        attempts++
+        server.once('error', (error: NodeJS.ErrnoException) => {
+          if (error.code === 'EADDRINUSE' && attempts < MAX_PORT_ATTEMPTS) {
+            this.callbackPort++
+            tryListen()
+            return
+          }
+          this.callbackServer = null
           reject(error)
-        }
-      })
+        })
+
+        server.listen(this.callbackPort, LOOPBACK_HOST, () => {
+          const address = server.address()
+          const port = address && typeof address === 'object' ? address.port : this.callbackPort
+          this.callbackPort = port
+          resolve(port)
+        })
+      }
+
+      tryListen()
     })
   }
 
@@ -133,7 +175,17 @@ export abstract class BaseOAuthAdapter {
       errorDescription: url.searchParams.get('error_description') || undefined,
     }
 
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+    // `state` 是这一次登录唯一的「请求由我发起」凭据。缺它或不匹配就拒绝：否则任意
+    // 进程向本机回环端口打一串授权码，就能把攻击者的账号绑进这台机器。
+    // 子类必须在发起授权前调用 generateState()，否则 this.state 为空、回调一律被拒。
+    if (!data.state || !this.validateState(data.state)) {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' })
+      res.end('Invalid or missing OAuth state')
+      this.emitProgress('error', 'OAuth callback rejected: invalid state')
+      return
+    }
+
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' })
     res.end(`
       <!DOCTYPE html>
       <html>
@@ -165,14 +217,14 @@ export abstract class BaseOAuthAdapter {
       <body>
         <div class="container">
           ${data.error 
-            ? `<h1 class="error">❌ Login Failed</h1><p>${data.errorDescription || data.error}</p>`
+            ? `<h1 class="error">❌ Login Failed</h1><p>${escapeHtml(data.errorDescription || data.error || '')}</p>`
             : `<h1 class="success">✅ Login Successful</h1><p>Processing, please wait...</p>`
           }
           <p style="font-size: 12px; opacity: 0.7;">This window can be closed</p>
         </div>
         <script>
           if (window.electronAPI) {
-            window.electronAPI.send('oauth:callback', ${JSON.stringify(data)});
+            window.electronAPI.send('oauth:callback', ${escapeInlineJson(JSON.stringify(data))});
           }
           setTimeout(() => window.close(), 2000);
         </script>
@@ -180,7 +232,11 @@ export abstract class BaseOAuthAdapter {
       </html>
     `)
 
-    this.processCallback(data)
+    // 交换令牌、写 store、通知窗口都在 processCallback 里，全部发生在响应已经发出去
+    // 之后。不接住它的拒绝，用户会看到「登录成功」而账号其实没落地。
+    void this.processCallback(data).catch((error: unknown) => {
+      this.emitProgress('error', error instanceof Error ? error.message : String(error))
+    })
   }
 
   /**

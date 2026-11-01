@@ -13,7 +13,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { RefreshCw, Plus, Minus, RotateCcw, Pencil } from 'lucide-react'
+import { RefreshCw, Plus, Minus, RotateCcw, Pencil, Pin } from 'lucide-react'
 import type {
   CapabilitySource,
   CapabilityState,
@@ -107,8 +107,9 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
         poolStrategies: values.poolStrategies,
         includeModels: values.includeModels,
         excludeModels: values.excludeModels,
+        pinModels: values.pinModels,
       }),
-    [values.poolStrategies, values.includeModels, values.excludeModels]
+    [values.poolStrategies, values.includeModels, values.excludeModels, values.pinModels]
   )
 
   useEffect(() => {
@@ -128,6 +129,7 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
       poolStrategies: values.poolStrategies,
       includeModels: values.includeModels,
       excludeModels: values.excludeModels,
+      pinModels: values.pinModels,
     }
     const tokens = Number(estimatedTokens)
     setIsLoading(true)
@@ -165,6 +167,7 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
     values.poolStrategies,
     values.includeModels,
     values.excludeModels,
+    values.pinModels,
   ])
 
   const loadMarks = useCallback(async () => {
@@ -212,6 +215,27 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
     onChange({
       includeModels: withoutRef(values.includeModels, providerId, displayName),
       excludeModels: withoutRef(values.excludeModels, providerId, displayName),
+      pinModels: withoutRef(values.pinModels, providerId, displayName),
+    })
+  }
+
+  /**
+   * 钉进 / 移出这条路由的名字名单。
+   *
+   * 钉定与 `include` 语义不同，所以不共用一个动作：`include` 是「策略误筛了，把它捞回来」，
+   * 只在没钉定的路由上有意义；一旦钉了，池外模型捞不回来（`applyModelNamePin` 先收基底）。
+   */
+  const togglePin = (model: RoutePreviewModel) => {
+    const ref: RouteModelRef = { providerId: model.providerId, displayName: model.displayName }
+    const already = sameRef(values.pinModels, model.providerId, model.displayName)
+    onChange({
+      pinModels: already
+        ? withoutRef(values.pinModels, model.providerId, model.displayName)
+        : [...values.pinModels, ref],
+      // 钉定与「手动移除」互相矛盾：两个都留着会得到一个空池 + 说不清的原因。
+      ...(already || !sameRef(values.excludeModels, model.providerId, model.displayName)
+        ? {}
+        : { excludeModels: withoutRef(values.excludeModels, model.providerId, model.displayName) }),
     })
   }
 
@@ -219,7 +243,7 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
     const query = search.trim().toLowerCase()
     return (preview?.models ?? []).filter((model) => {
       if (statusFilter === 'kept' && model.status !== 'kept' && model.status !== 'included') return false
-      if (statusFilter === 'dropped' && model.status !== 'filtered' && model.status !== 'excluded') return false
+      if (statusFilter === 'dropped' && model.status !== 'filtered' && model.status !== 'excluded' && model.status !== 'not-pinned') return false
       if (statusFilter === 'unavailable' && model.status !== 'unavailable') return false
       if (query === '') return true
       return (
@@ -404,6 +428,7 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
         {visibleModels.map((model) => {
           const included = sameRef(values.includeModels, model.providerId, model.displayName)
           const excluded = sameRef(values.excludeModels, model.providerId, model.displayName)
+          const pinned = sameRef(values.pinModels, model.providerId, model.displayName)
           return (
             <div
               key={refKey(model.providerId, model.displayName)}
@@ -414,6 +439,9 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
               </Badge>
               <span className="text-xs font-medium">{model.displayName}</span>
               <span className="text-[10px] text-muted-foreground">{model.providerName}</span>
+              {pinned && (
+                <span className="text-[10px] text-muted-foreground">{t('proxy.routePoolPinnedFlag')}</span>
+              )}
               {model.filteredBy !== undefined && (
                 <span className="text-[10px] text-muted-foreground">
                   {t('proxy.routePoolFilteredBy', {
@@ -443,7 +471,17 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
                 >
                   <Pencil className="h-3 w-3" />
                 </Button>
-                {included || excluded ? (
+                <Button
+                  type="button"
+                  variant={pinned ? 'default' : 'ghost'}
+                  size="sm"
+                  className="h-6 px-1.5 text-xs"
+                  title={pinned ? t('proxy.routePoolUnpin') : t('proxy.routePoolPin')}
+                  onClick={() => togglePin(model)}
+                >
+                  <Pin className="h-3 w-3" />
+                </Button>
+                {included || excluded || pinned ? (
                   <Button
                     type="button"
                     variant="ghost"

@@ -2,7 +2,6 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  aliasMappingKeys,
   applyServed,
   buildModelCatalogue,
   isModelRoutable,
@@ -65,27 +64,6 @@ test('stopping every model empties the served slice while the catalogue stays li
   assert.equal(catalogue.length, 2, 'a stopped model must stay on the page so it can be started again')
 })
 
-test('the mapping table only advertises names no provider catalogue owns', () => {
-  const mappings = {
-    'openrouter/gpt-4o': { actualModel: 'gpt-4o' },
-    'my-alias': { actualModel: 'openrouter/gpt-4o' },
-  }
-
-  assert.deepEqual(
-    aliasMappingKeys(mappings, new Set(['openrouter/gpt-4o', 'openrouter/glm'])),
-    ['my-alias']
-  )
-})
-
-test('a stopped model stays out of the advertised list', () => {
-  const shipped = ['openrouter/gpt-4o']
-  const excluded = applyServed([], shipped, false)
-  const catalogue = buildModelCatalogue(shipped, {}, { addedModels: [], excludedModels: excluded })
-  const catalogueNames = new Set(catalogue.map(model => model.displayName))
-
-  assert.deepEqual(aliasMappingKeys({ 'openrouter/gpt-4o': {} }, catalogueNames), [])
-})
-
 test('a served name routes', () => {
   assert.equal(
     isModelRoutable({ model: 'kilo/gpt-4o', servedNames: ['kilo/gpt-4o'], hasCatalogue: true }),
@@ -114,6 +92,20 @@ test('a user alias routes through its target only while that target is served', 
   assert.equal(
     isModelRoutable({ model: 'my-alias', servedNames: [], hasCatalogue: true, mapping }),
     false
+  )
+})
+
+test('a disabled alias never routes, and its stop does not touch the catalogue row', () => {
+  const disabled = { actualModel: 'kilo/gpt-4o', disabled: true }
+  assert.equal(
+    isModelRoutable({ model: 'my-alias', servedNames: ['kilo/gpt-4o'], hasCatalogue: true, mapping: disabled }),
+    false,
+    '别名停用后，即使目标模型正在服务，这个名字也不再被认识'
+  )
+  assert.equal(
+    isModelRoutable({ model: 'kilo/gpt-4o', servedNames: ['kilo/gpt-4o'], hasCatalogue: true, mapping: disabled }),
+    true,
+    '同一张映射表里的记录被停用，不牵连目录里那一行 —— 两本账各记各的'
   )
 })
 

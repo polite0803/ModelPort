@@ -78,18 +78,26 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
   const [routePendingDelete, setRoutePendingDelete] = useState<string | null>(null)
   const [routeError, setRouteError] = useState<string | null>(null)
   const [isRouteBusy, setIsRouteBusy] = useState(false)
+  /**
+   * 路由名 → 这条路由当前的候选模型数。缺席（键不在）代表「没有这个数」，
+   * 界面要显示「读不到」而不是 0 —— 一次存储故障被渲染成「池是空的」是更大的错。
+   */
+  const [poolSizes, setPoolSizes] = useState<Record<string, number>>({})
 
   useEffect(() => {
     fetchAccounts()
     fetchRoutes()
+    fetchPoolSizes()
   }, [])
 
   // 主进程在每次路由写入后广播 CONFIG_CHANGED（载荷带 `routes`），
-  // 管理 API / 另一处入口改的配置也由此同步到本卡片。
+  // 管理 API / 另一处入口改的配置也由此同步到本卡片。候选数是同一份配置折出来的，
+  // 一起重取，不然表刷新了而池的读数还停在旧配置上。
   useEffect(() => {
     const unsubscribe = window.electronAPI?.config?.onConfigChanged?.((config) => {
       if (!config?.routes) return
       setRoutes(sortedRoutes(Object.values(config.routes)))
+      fetchPoolSizes()
     })
     return () => {
       unsubscribe?.()
@@ -188,6 +196,26 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
     }
   }
 
+  /**
+   * 一次采集折全表拿每条路由的候选模型数。不用逐条 `preview`：那把 473 行明细全带回
+   * 渲染进程，而列表页只要一个数字。读不到就清空而不是沿用旧数 —— 配置已经变了，
+   * 旧数在新配置下就是假的。
+   */
+  const fetchPoolSizes = async () => {
+    const api = window.electronAPI?.routes
+    if (!api?.poolSizes) {
+      setPoolSizes({})
+      return
+    }
+    try {
+      const result = await api.poolSizes()
+      setPoolSizes(result.ok ? result.sizes : {})
+    } catch (error) {
+      console.error('Failed to load route pool sizes:', error)
+      setPoolSizes({})
+    }
+  }
+
   const startCreateRoute = () => {
     setIsCreatingRoute(true)
     setNewRouteName('')
@@ -222,6 +250,7 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
       })
       if (result.ok) {
         setRoutes(routesFromRecord(result.routes))
+        void fetchPoolSizes()
         cancelCreateRoute()
         setNewRouteValues(defaultRouteFieldValues(selectedStrategy))
         toast({ title: t('common.success'), description: t('proxy.routeCreatedToast') })
@@ -266,6 +295,7 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
       const result = await api.update(currentName, patch)
       if (result.ok) {
         setRoutes(routesFromRecord(result.routes))
+        void fetchPoolSizes()
         cancelEditRoute()
         toast({ title: t('common.success'), description: t('proxy.routeSavedToast') })
       } else {
@@ -288,6 +318,7 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
       const result = await api.update(route.name, { enabled })
       if (result.ok) {
         setRoutes(routesFromRecord(result.routes))
+        void fetchPoolSizes()
         toast({ title: t('common.success'), description: t('proxy.routeUpdatedToast') })
       } else {
         showRouteError(result.error.message)
@@ -309,6 +340,7 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
       const result = await api.delete(name)
       if (result.ok) {
         setRoutes(routesFromRecord(result.routes))
+        void fetchPoolSizes()
         setRoutePendingDelete(null)
         if (editingRouteName === name) cancelEditRoute()
         toast({ title: t('common.success'), description: t('proxy.routeDeletedToast') })
@@ -486,7 +518,15 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
           <div className="flex items-center justify-between gap-2">
             <Label>{t('proxy.modelRoutes')}</Label>
             <div className="flex gap-1.5">
-              <Button variant="ghost" size="sm" onClick={fetchRoutes} className="h-8 px-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  void fetchRoutes()
+                  void fetchPoolSizes()
+                }}
+                className="h-8 px-2"
+              >
                 <RefreshCw className="h-3.5 w-3.5 mr-1" />
                 {t('common.refresh')}
               </Button>
@@ -607,6 +647,22 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
                 </div>
               </div>
 
+              {/* 候选数三种状态各占一句：读数缺席、池真的空了、池有内容，不许在界面上
+                  被并成同一个「一切正常」。空池的路由仍然出现在 /v1/models 里（它是用户
+                  启用着的路由），但每个请求都会 503，所以这里必须点名说清。 */}
+              {poolSizes[route.name] === undefined ? (
+                <p className="text-xs text-muted-foreground">{t('proxy.routePoolSizeUnknown')}</p>
+              ) : poolSizes[route.name] === 0 ? (
+                <div className="flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  <AlertTriangle className="h-3.5 w-3.5 mt-0.5 flex-shrink-0" />
+                  <span>{t('proxy.routePoolSizeEmpty', { name: route.name })}</span>
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  {t('proxy.routePoolSize', { count: poolSizes[route.name] })}
+                </p>
+              )}
+
               <p className="text-xs text-muted-foreground">
                 {t('proxy.routeAttemptsSummary', { attempts: route.maxAttempts })}
                 {' · '}
@@ -630,6 +686,14 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
                     </span>
                   ))}
                 </div>
+              )}
+
+              {route.pinModels.length > 0 && (
+                // 钉定是「客户端可以点名的名字只有路由」这条口径下，路由名敢说自己是
+                // `claude-opus-5` 的唯一依据：不钉，池就是全目录。
+                <p className="text-xs text-muted-foreground">
+                  {t('proxy.routePinSummary', { total: route.pinModels.length })}
+                </p>
               )}
 
               {(route.includeModels.length > 0 || route.excludeModels.length > 0) && (

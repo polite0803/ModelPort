@@ -6,7 +6,7 @@
 import { Account, Provider, LoadBalanceStrategy } from '../store/types'
 import { AccountSelection } from './types'
 import { storeManager } from '../store/store'
-import { isModelRoutable } from '../store/modelServing'
+import { isMappingActive, isModelRoutable } from '../store/modelServing'
 import { AGGREGATE_REGISTRY } from '../providers/aggregate/registry'
 import { resolveAggregateChain } from '../../shared/aggregateRouting'
 import { aggregateHeadroom, quotaBlockReason } from './quota/gate'
@@ -294,7 +294,7 @@ export class LoadBalancer {
     const config = storeManager.getConfig()
     const mapping = config.modelMappings[model]
 
-    if (mapping && (!mapping.preferredProviderId || mapping.preferredProviderId === provider.id)) {
+    if (isMappingActive(mapping) && (!mapping.preferredProviderId || mapping.preferredProviderId === provider.id)) {
       const actualModel = mapping.actualModel
       console.log(`[LoadBalancer] Model mapped from "${model}" to "${actualModel}" via global mapping`)
       

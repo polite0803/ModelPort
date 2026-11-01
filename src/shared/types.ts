@@ -168,7 +168,7 @@ export interface RoutePreviewSample {
  * - `kept` 策略筛完仍在池里；`included` 手动加回；`excluded` 手动移除；
  * - `filtered` 被某条池策略筛掉；`unavailable` 当前画像会把它硬过滤掉。
  */
-export type RoutePreviewStatus = 'kept' | 'included' | 'excluded' | 'filtered' | 'unavailable'
+export type RoutePreviewStatus = 'kept' | 'included' | 'excluded' | 'filtered' | 'unavailable' | 'not-pinned'
 
 export interface RoutePreviewModel {
   providerId: string
@@ -291,6 +291,21 @@ export interface ModelRoute {
   stickyMinutes: number
   /** Static pool filters, evaluated left to right; empty means no filtering. */
   poolStrategies: AutoPoolStrategy[]
+  /**
+   * Hard name pin: the route's candidate base pool is **only** these models.
+   *
+   * Empty means no pin (the pool stays the whole catalogue), which is what the 17
+   * capability/cost/tier/channel strategies cannot express - none of them selects by
+   * model name. Ordering is fixed: pin restricts the base pool, then `poolStrategies`
+   * filter inside it, then `excludeModels` removes and `includeModels` may only
+   * recover candidates that survived the pin. Same ref shape as those two fields, so
+   * normalization, write-side validation and the preview's `unresolved` report all
+   * reuse one vocabulary instead of a second name-matching dialect.
+   *
+   * This is what makes an Anthropic-facing route name honest: a route called
+   * `claude-opus-5` must not be free to answer with any model in the catalogue.
+   */
+  pinModels: RouteModelRef[]
   /**
    * Models force-added to this route's pool **after** `poolStrategies` ran.
    *
@@ -536,6 +551,12 @@ export interface ModelMapping {
   actualModel: string
   preferredProviderId?: string
   preferredAccountId?: string
+  /**
+   * true = 已停用：这个名字不再被任何解析路径认识。缺席即启用。
+   * 与 `src/main/store/types.ts` 同一份声明（两处都要写），启用位只有这一处落库，
+   * 因为别名不归任何供应商目录管，`excludedModels` 记不到它。
+   */
+  disabled?: boolean
 }
 
 export interface ApiKey {
@@ -564,6 +585,15 @@ export interface AnthropicInboundConfig {
   defaultModel?: string
   /** `客户端模型名/前缀 -> 网关模型名`。 */
   modelMap?: Record<string, string>
+  /**
+   * `document` 附件块要不要翻成 chat 的 `file` 块真的发给上游。
+   *
+   * 可选且**默认开**（只有显式 `false` 才关），与 `trailingUserGuard` 同一形态：客户端
+   * 只在用户真挂了文件时才发这个块，不像 `temperature` 那样每请求都带，所以「上游不吃
+   * file 块而报错」是可接受的诚实结果，胜过「模型答非所问而没人知道附件没送出去」。
+   * 关掉后回到丢弃但记入 `X-ModelPort-Anthropic-Dropped` 的行为。
+   */
+  documentPassThrough?: boolean
 }
 
 export interface AppConfig {
@@ -617,6 +647,14 @@ export interface AppConfig {
    * `undefined` for a hand-built object that never went through the store.
    */
   routes?: Record<string, ModelRoute>
+  /**
+   * Names already handled by the protocol-route seeding
+   * (`main/store/modelRoutes.ts::PRESET_ROUTE_SEEDS`). One-time marker: a name
+   * the user deleted must never be re-created on the next read, so the gate is
+   * "is this name recorded", never "is the table empty". `DEFAULT_CONFIG` does not
+   * preset it - absence means "not seeded yet".
+   */
+  seededPresetRoutes?: string[]
   /**
    * Anthropic 入站（`/v1/messages`）的模型解析规则。缺席即默认行为
    * （见 `AnthropicInboundConfig`），所以老配置无需迁移。
@@ -1055,12 +1093,15 @@ export interface CreateModelMappingRequest {
   actualModel: string
   preferredProviderId?: string
   preferredAccountId?: string
+  disabled?: boolean
 }
 
 export interface UpdateModelMappingRequest {
   actualModel?: string
   preferredProviderId?: string
   preferredAccountId?: string
+  /** PATCH 语义：省略即沿用现值，不是「清掉停用」。 */
+  disabled?: boolean
 }
 
 export interface ProxyStatusResponse {
@@ -1137,7 +1178,11 @@ export interface EffectiveModel {
  * catalogue so a stopped model can be started again from the same place.
  */
 export interface CatalogueModel extends EffectiveModel {
-  /** false = stopped: neither advertised on `/v1/models` nor routable, but still listed */
+  /**
+   * false = stopped: not in any route's candidate pool and not routable by name,
+   * but still listed so it can be started again. `/v1/models` never advertised
+   * individual models, so this says nothing about what a client can list.
+   */
   served: boolean
 }
 

@@ -27,7 +27,9 @@ const DEFAULT_TIMEOUT = 300000 // 5 minutes
 export class OAuthManager extends EventEmitter {
   private adapters: Map<string, BaseOAuthAdapter> = new Map()
   private mainWindow: BrowserWindow | null = null
+  private loginSeq = 0
   private currentLogin: {
+    loginId: number
     providerId: string
     adapter: BaseOAuthAdapter
     resolve: (result: OAuthResult) => void
@@ -99,8 +101,12 @@ export class OAuthManager extends EventEmitter {
 
     return new Promise((resolve, reject) => {
       const adapter = this.getAdapter(options.providerId, options.providerType)
-      
+      const loginId = ++this.loginSeq
+
       const timeout = setTimeout(() => {
+        // 只有还停在本次这一轮才清理：否则一个迟到的旧定时器会把新登录的
+        // currentLogin 一并清掉，界面显示「登录中」而后端已无记录。
+        if (this.currentLogin?.loginId !== loginId) return
         this.cancelLogin()
         const result: OAuthResult = {
           success: false,
@@ -112,6 +118,7 @@ export class OAuthManager extends EventEmitter {
       }, options.timeout || DEFAULT_TIMEOUT)
 
       this.currentLogin = {
+        loginId,
         providerId: options.providerId,
         adapter,
         resolve,

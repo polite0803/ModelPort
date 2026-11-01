@@ -12,6 +12,7 @@ import {
   DEFAULT_CONFIG,
 } from './types'
 import { normalizeToolCallingConfig } from '../../shared/toolCalling'
+import { isMappingActive } from './modelServing'
 import { validateRoutesForWrite } from './modelRoutes'
 import { isLoopbackHost } from '../proxy/authPolicy'
 
@@ -171,7 +172,10 @@ export class ConfigManager {
    */
   static resolveActualModel(requestedModel: string): string {
     const mapping = this.getModelMapping(requestedModel)
-    return mapping?.actualModel || requestedModel
+    // 映射表的又一条读路径，同一个判据必须也在这儿：停用的别名不解析。
+    // （今天它零调用者，但留着一条不过闸的读路径等于给下一个消费者挖坑。）
+    const actual = isMappingActive(mapping) ? mapping.actualModel : ''
+    return actual || requestedModel
   }
 
   // ==================== UI Configuration ====================

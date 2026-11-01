@@ -25,6 +25,7 @@ import type {
   CompressionConfig,
   CompressionAggressiveness,
   OutputSteeringConfig,
+  AnthropicInboundConfig,
   EffectiveModel,
   CatalogueModel,
   RequestLogEntry,
@@ -56,7 +57,17 @@ import type {
   RouteListResult,
   RouteMutationResult,
   RouteRemovalResult,
+  RoutePoolSizesResult,
 } from '../../../shared/modelRouteName'
+import type {
+  AnthropicDiscoveryResult,
+  AnthropicRouteApplyResult,
+} from '../../../shared/anthropicDiscovery'
+export type {
+  AnthropicDiscoveryPlan,
+  AnthropicDiscoveryRoute,
+  AnthropicDiscoverySkipReason,
+} from '../../../shared/anthropicDiscovery'
 import type { DayTokenBucket, DayTokenSummary } from '../../../shared/tokenAccounting'
 
 export type { 
@@ -86,6 +97,7 @@ export type {
   CompressionConfig,
   CompressionAggressiveness,
   OutputSteeringConfig,
+  AnthropicInboundConfig,
   EffectiveModel,
   CatalogueModel,
   RequestLogEntry,
@@ -115,6 +127,7 @@ interface ProxyAPI {
   start: (port?: number) => Promise<boolean>
   stop: () => Promise<boolean>
   getStatus: () => Promise<ProxyStatus>
+  getStatistics: () => Promise<ProxyStatistics>
   onStatusChanged: (callback: (status: ProxyStatus) => void) => () => void
 }
 
@@ -187,7 +200,7 @@ interface ProvidersAPI {
 }
 
 interface AccountsAPI {
-  getAll: (includeCredentials?: boolean) => Promise<Account[]>
+  getAll: () => Promise<Account[]>
   add: (data: {
     providerId: string
     name: string
@@ -379,6 +392,11 @@ interface RoutesAPI {
    * `sample` 是请求画像样本，缺省为纯文本、无工具、短请求。
    */
   preview: (route: ModelRoute, sample?: RoutePreviewSample) => Promise<RoutePreviewResult>
+  /**
+   * 每条路由当前的候选模型数（按供应商分组后数名字）。`sizes` 的键是路由名；
+   * 缺席代表「没数」，界面要显示省略而不是 0 —— 取不到与池是空的不是同一件事。
+   */
+  poolSizes: () => Promise<RoutePoolSizesResult>
 }
 
 interface SessionConfig {
@@ -610,6 +628,15 @@ interface ChannelsAPI {
   onChanged: (callback: () => void) => () => void
 }
 
+/**
+ * Anthropic 客户端可发现名：`plan` 只读预览，`apply` 写进 `config.modelMappings`。
+ * 返回形状与主进程共用 `shared/anthropicDiscovery.ts` 那一份，UI 不另写判据。
+ */
+interface AnthropicDiscoveryAPI {
+  plan: () => Promise<AnthropicDiscoveryResult>
+  apply: () => Promise<AnthropicRouteApplyResult>
+}
+
 interface ElectronAPI {
   proxy: ProxyAPI
   store: StoreAPI
@@ -623,15 +650,13 @@ interface ElectronAPI {
   statistics: StatisticsAPI
   app: AppAPI
   config: ConfigAPI
+  anthropicDiscovery: AnthropicDiscoveryAPI
   routes: RoutesAPI
   session: SessionAPI
   managementApi: ManagementApiAPI
   contextManagement: ContextManagementAPI
   toolCalling: ToolCallingAPI
   tray: TrayAPI
-  on: (channel: string, callback: (...args: unknown[]) => void) => () => void
-  send: (channel: string, ...args: unknown[]) => void
-  invoke: (channel: string, ...args: unknown[]) => Promise<unknown>
 }
 
 declare global {

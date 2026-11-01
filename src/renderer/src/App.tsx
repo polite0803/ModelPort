@@ -1,9 +1,10 @@
 import { lazy, Suspense } from 'react'
-import { Routes, Route } from 'react-router-dom'
+import { Navigate, Route, Routes } from 'react-router-dom'
 import { MainLayout } from '@/components/layout/MainLayout'
 import { TrayView } from '@/components/Tray/TrayView'
 import { Toaster } from '@/components/ui/toaster'
 import { Skeleton } from '@/components/ui/skeleton'
+import ErrorBoundary from '@/components/ErrorBoundary'
 
 const Dashboard = lazy(() => import('@/pages/Dashboard').then(m => ({ default: m.Dashboard })))
 const Providers = lazy(() => import('@/pages/Providers').then(m => ({ default: m.Providers })))
@@ -31,7 +32,7 @@ function App() {
   return (
     <>
       <Routes>
-        <Route path="/tray" element={<TrayView />} />
+        <Route path="/tray" element={<ErrorBoundary><TrayView /></ErrorBoundary>} />
         <Route element={<MainLayout />}>
           <Route path="/" element={<Suspense fallback={<PageLoader />}><Dashboard /></Suspense>} />
           <Route path="/providers" element={<Suspense fallback={<PageLoader />}><Providers /></Suspense>} />
@@ -41,6 +42,9 @@ function App() {
           <Route path="/models" element={<Suspense fallback={<PageLoader />}><Models /></Suspense>} />
           <Route path="/logs" element={<Suspense fallback={<PageLoader />}><Logs /></Suspense>} />
           <Route path="/settings" element={<Suspense fallback={<PageLoader />}><Settings /></Suspense>} />
+          {/* 兜底：书签或深链指向已改名/已删除的路由时，之前是「有侧边栏、内容区空白」，
+              用户读不出是路由错了还是页面坏了。 */}
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
       <Toaster />

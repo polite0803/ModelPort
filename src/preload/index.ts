@@ -4,6 +4,7 @@ import type {
   Provider, 
   Account, 
   ProxyStatus, 
+  ProxyStatistics, 
   ProviderCheckResult, 
   OAuthResult,
   AuthType,
@@ -26,7 +27,12 @@ import type {
   RouteListResult,
   RouteMutationResult,
   RouteRemovalResult,
+  RoutePoolSizesResult,
 } from '../shared/modelRouteName'
+import type {
+  AnthropicDiscoveryResult,
+  AnthropicRouteApplyResult,
+} from '../shared/anthropicDiscovery'
 import type {
   AggregateDetail,
   AggregateListResult,
@@ -56,6 +62,9 @@ const proxyAPI = {
   
   getStatus: (): Promise<ProxyStatus> => 
     ipcRenderer.invoke(IpcChannels.PROXY_GET_STATUS),
+
+  getStatistics: (): Promise<ProxyStatistics> =>
+    ipcRenderer.invoke(IpcChannels.PROXY_GET_STATISTICS),
   
   onStatusChanged: (callback: (status: ProxyStatus) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, status: ProxyStatus) => callback(status)
@@ -182,10 +191,12 @@ const providersAPI = {
 }
 
 const accountsAPI = {
-  getAll: (includeCredentials?: boolean): Promise<Account[]> => 
-    ipcRenderer.invoke(IpcChannels.ACCOUNTS_GET_ALL, includeCredentials),
-  
-  getById: (id: string, includeCredentials?: boolean): Promise<Account | null> => 
+  // `getAll` 没有 `includeCredentials`：列表页拿不到凭据。`getById` 还留着，
+  // 账号编辑框用它预填已存的 Key，去掉它会让界面在编辑时把凭据清空。
+  getAll: (): Promise<Account[]> =>
+    ipcRenderer.invoke(IpcChannels.ACCOUNTS_GET_ALL),
+
+  getById: (id: string, includeCredentials?: boolean): Promise<Account | null> =>
     ipcRenderer.invoke(IpcChannels.ACCOUNTS_GET_BY_ID, id, includeCredentials),
   
   getByProvider: (providerId: string): Promise<Account[]> => 
@@ -521,6 +532,18 @@ const configAPI = {
 }
 
 /**
+ * Anthropic 客户端的可发现名（`config.modelMappings` 里那些 `claude*` / `anthropic*` 入口）。
+ * 两条通道与 `anthropic:discovery-plan|apply` 一一对应：`plan` 只读，`apply` 落库。
+ */
+const anthropicDiscoveryAPI = {
+  plan: (): Promise<AnthropicDiscoveryResult> =>
+    ipcRenderer.invoke(IpcChannels.ANTHROPIC_DISCOVERY_PLAN),
+
+  apply: (): Promise<AnthropicRouteApplyResult> =>
+    ipcRenderer.invoke(IpcChannels.ANTHROPIC_DISCOVERY_APPLY),
+}
+
+/**
  * 多路由 CRUD（`AppConfig.routes`）。四条方法与 `routes:list|create|update|delete`
  * 一一对应，返回形状与 `channels:*` 同风格：`{ok:true,…} | {ok:false,error:{code,message}}`，
  * 错误以可读文本到达界面（不在 IPC 层变成 undefined 或异常）。
@@ -547,6 +570,10 @@ const routesAPI = {
   // 只算不写：用和生产请求同一条采集/策略/手动增删管线，返回逐模型状态。
   preview: (route: ModelRoute, sample?: RoutePreviewSample): Promise<RoutePreviewResult> =>
     ipcRenderer.invoke(IpcChannels.ROUTES_PREVIEW, route, sample),
+
+  // 只算不写：一次采集折全表，返回每条路由的候选模型数（列表页要的是数字，不是明细）。
+  poolSizes: (): Promise<RoutePoolSizesResult> =>
+    ipcRenderer.invoke(IpcChannels.ROUTES_POOL_SIZES),
 }
 
 interface SessionConfig {
@@ -780,26 +807,19 @@ const electronAPI = {
   statistics: statisticsAPI,
   app: appAPI,
   config: configAPI,
+  anthropicDiscovery: anthropicDiscoveryAPI,
   routes: routesAPI,
   session: sessionAPI,
   managementApi: managementApiAPI,
   contextManagement: contextManagementAPI,
   toolCalling: toolCallingAPI,
   tray: trayAPI,
-  
-  on: (channel: string, callback: (...args: unknown[]) => void) => {
-    const subscription = (_event: Electron.IpcRendererEvent, ...args: unknown[]) => callback(...args)
-    ipcRenderer.on(channel, subscription)
-    return () => ipcRenderer.removeListener(channel, subscription)
-  },
-  
-  send: (channel: string, ...args: unknown[]) => {
-    ipcRenderer.send(channel, ...args)
-  },
-  
-  invoke: (channel: string, ...args: unknown[]) => {
-    return ipcRenderer.invoke(channel, ...args)
-  },
+
+  // 这里刻意**没有**通用的 `invoke` / `send` / `on`。曾经有，等于把整个 `ipcRenderer`
+  // 原样交给渲染进程：任何在渲染层执行的 JS 都能调用全部通道，包括
+  // `accounts:get-all(true)`（拿解密后的凭据）与 `store:set('accounts', …)`（绕过加密写盘），
+  // `contextIsolation` 的收益被抵消大半。现在渲染层只能走上面这些具名方法，
+  // 要新增通道就必须在 preload 显式登记 + 在 `shared/types` / `electron.d.ts` 里带上类型。
 }
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI)

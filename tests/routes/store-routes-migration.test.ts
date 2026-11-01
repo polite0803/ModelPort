@@ -100,6 +100,7 @@ test('升级安装：盘上的旧 config（无 `routes` 键）在首次读取时
     poolStrategies: LEGACY_CONFIG.autoRouting.poolStrategies,
     includeModels: [],
     excludeModels: [],
+    pinModels: [],
   })
 })
 
@@ -167,6 +168,7 @@ test('全新安装（config 键都没有）得到一条出厂默认的 `auto`', 
       poolStrategies: [],
       includeModels: [],
       excludeModels: [],
+      pinModels: [],
     },
   })
 })
