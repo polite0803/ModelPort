@@ -866,6 +866,130 @@ export function normalizeFamilyTier(value: unknown): AnthropicFamilyTier | undef
 }
 
 /**
+ * 名字能不能进 Claude Desktop 的**模型选择器**——与上面那道「发现」判据是两回事。
+ *
+ * 判据取自本机那份安装 `app.asar` 里的实现（`Io('gateway', id)` → `Fo(id)`），不是推测：
+ * - 发现这一关：`Fo(id) || 合法 anthropic_family_tier` ⇒ 档位能把行留下。
+ * - 选择器这一关：**只有 `Fo(id)`**，档位救不回来。`Fo` 的三条词表是
+ *   `别家供应商词`（glm/qwen/gpt/codex/deepseek…，命中即丢，优先级最高）、
+ *   `可接受片段`（claude / anthropic / 五个档位词，子串命中即可）与
+ *   `整名恰好是档位词（可带版本号）`。
+ *
+ * 所以 `daily`、`stable`、`performance` 这类内部名会出现「客户端测连说找到 3 个模型，
+ * 但下拉里只有默认模型」——两关都过才算接上，界面上必须把这一格说出来。
+ */
+export type AnthropicNameShape = 'selectable' | 'missing-anthropic-name' | 'other-vendor-name'
+
+/** Desktop 的「这是别家的模型」词表（它的 `wwe`），命中就按非 Anthropic 名丢。 */
+const OTHER_VENDOR_NAME_FRAGMENTS =
+  /ark-code|astron|command-r|deepseek|doubao|gemini|gemma|glm|gpt|grok|hermes|hy3|kimi|lfm|\bling\b|llama|longcat|mimo|minimax|mistral|mixtral|moonshot|nemotron|openai|phi-|qianfan|qwen|tc-code|\bunic\b|yi-|stepfun|step-3|seed-|bytedance|hunyuan|granite|amazon\.nova|nova-|devstral|ministral|ernie|codex|arcee|trinity|abab|phi\d|\bk2\.|\bm2\.|jamba|arctic|solar|mercury|zamba|kat-coder|\bds-|dpsk/
+
+/** 整名就是档位词、后面最多跟版本号（Desktop 的 `xwe`）。 */
+const BARE_TIER_NAME = new RegExp(`^(${ANTHROPIC_FAMILY_TIERS.join('|')})(-[\\d.]+)?$`)
+
+/** 子串命中即算 Anthropic 名（Desktop 的 `Cwe`：claude + 五个档位词 + anthropic）。 */
+const ANTHROPIC_NAME_FRAGMENTS = ['claude', ...ANTHROPIC_FAMILY_TIERS, 'anthropic']
+
+export function anthropicNameShape(name: string): AnthropicNameShape {
+  const value = name.trim().toLowerCase()
+  if (OTHER_VENDOR_NAME_FRAGMENTS.test(value)) return 'other-vendor-name'
+  if (BARE_TIER_NAME.test(value) || ANTHROPIC_NAME_FRAGMENTS.some((fragment) => value.includes(fragment))) {
+    return 'selectable'
+  }
+  return 'missing-anthropic-name'
+}
+
+/**
+ * 标了档位、但客户端选择器不会列出的路由。
+ *
+ * 一条路由的「广告出去的 id」有两个来源：它自己的路由名，以及任何指向它的 `modelMap`
+ * 键（那一行会用键当 id）。只要有一个是 Anthropic 形状，用户就能在下拉里选中它。
+ * 没标档位的路由不在这一节的管辖内：它连发现那一关都过不了，另有文案管着。
+ */
+export function routesAbsentFromClaudePicker(input: {
+  routeNames: string[]
+  routeTiers?: Record<string, string>
+  modelMap?: Record<string, string>
+}): Array<{ route: string; shape: AnthropicNameShape }> {
+  const tiered = new Set(
+    Object.entries(input.routeTiers ?? {})
+      .filter(([, tier]) => normalizeFamilyTier(tier) !== undefined)
+      .map(([route]) => String(route ?? '').trim().toLowerCase()),
+  )
+  const aliasKeysByTarget = new Map<string, string[]>()
+  for (const [clientName, target] of Object.entries(input.modelMap ?? {})) {
+    const key = String(target ?? '').trim().toLowerCase()
+    if (key === '') continue
+    aliasKeysByTarget.set(key, [...(aliasKeysByTarget.get(key) ?? []), clientName])
+  }
+
+  const gaps: Array<{ route: string; shape: AnthropicNameShape }> = []
+  for (const route of input.routeNames) {
+    const routeKey = route.trim().toLowerCase()
+    if (routeKey === '' || !tiered.has(routeKey)) continue
+    const candidates = [route, ...(aliasKeysByTarget.get(routeKey) ?? [])]
+    if (candidates.some((candidate) => anthropicNameShape(candidate) === 'selectable')) continue
+    // 名字自己的形态更能说明该改哪一格：撞了别家词就不该说成「少了 claude」。
+    const own = anthropicNameShape(route)
+    gaps.push({ route: route.trim(), shape: own === 'other-vendor-name' ? 'other-vendor-name' : 'missing-anthropic-name' })
+  }
+  return gaps
+}
+
+/**
+ * 按档位表补出客户端选得中的名字，写进既有的 `modelMap` 通路。
+ *
+ * 为什么走映射而不是在清单里凭空造名：映射键正是客户端下一轮原样发回来的名字，
+ * 请求期由 `resolveAnthropicModel` 折回路由名 —— 名字域仍然只有一个，不新增一条
+ * 「只有网关自己认识」的旁路。
+ *
+ * 名字一律取 `claude-<档位>`（同档第二条起 `claude-sonnet-2`），**不带版本号或日期**：
+ * `claude-sonnet` 说的是「这条池顶的是 sonnet 这一档」，写成 `claude-sonnet-4-5` 就
+ * 变成冒充一个我们并不真服务的发布版本。
+ */
+export function clientNamesForTieredRoutes(input: {
+  routeNames: string[]
+  routeTiers?: Record<string, string>
+  modelMap?: Record<string, string>
+}): { add: Array<{ from: string; to: string }>; blocked: string[] } {
+  const tierByRoute = new Map<string, string>()
+  for (const [route, tier] of Object.entries(input.routeTiers ?? {})) {
+    const key = String(route ?? '').trim().toLowerCase()
+    const normalized = normalizeFamilyTier(tier)
+    if (key !== '' && normalized !== undefined) tierByRoute.set(key, normalized)
+  }
+
+  // 已占用的名字：映射表里已有的键，加上全部路由名 —— 键与路由名撞名会让清单里那一行
+  // 被去重吃掉，补了等于没补。
+  const taken = new Set<string>()
+  for (const key of Object.keys(input.modelMap ?? {})) taken.add(key.trim().toLowerCase())
+  for (const route of input.routeNames) taken.add(route.trim().toLowerCase())
+
+  const add: Array<{ from: string; to: string }> = []
+  const blocked: string[] = []
+  for (const gap of routesAbsentFromClaudePicker(input)) {
+    const tier = tierByRoute.get(gap.route.toLowerCase())
+    if (tier === undefined) continue
+    let chosen = ''
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const candidate = attempt === 0 ? `claude-${tier}` : `claude-${tier}-${attempt + 1}`
+      if (!taken.has(candidate)) {
+        chosen = candidate
+        break
+      }
+    }
+    // 十个槽位都被占着就不再猜：改名是用户的决定，不是这里替他撞掉一条既有映射。
+    if (chosen === '') {
+      blocked.push(gap.route)
+      continue
+    }
+    taken.add(chosen)
+    add.push({ from: chosen, to: gap.route })
+  }
+  return { add, blocked }
+}
+
+/**
  * 网关的 OpenAI 模型清单 → anthropic `/v1/models` 形状。
  *
  * `display_name` 用模型 id：网关的 id 本身就是 `<供应商>/<模型>`，比再编一个
@@ -886,6 +1010,10 @@ export function normalizeFamilyTier(value: unknown): AnthropicFamilyTier | undef
  * 保留一行的条件是「`id` 是它认识的 Anthropic 名 **或** 带合法 `anthropic_family_tier`」，
  * 所以给一条现有路由标档位，就能把它广告给 Desktop，而不必伪造 Anthropic 名字。映射键
  * 继承其目标路由的档位（客户端下一轮发回来的正是那个键）。
+ *
+ * ⚠ 这只过**发现**那一关。客户端的选择器还会按 `anthropicNameShape` 再筛一遍名字，
+ * 档位在那里不作数 —— 所以「标了档位」不等于「用户能选中」，界面用
+ * `routesAbsentFromClaudePicker` 把这一格说出来。
  */
 export function modelsToAnthropicList(
   models: AnthropicListModelEntry[],

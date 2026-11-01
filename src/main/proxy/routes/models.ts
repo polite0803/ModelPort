@@ -9,7 +9,7 @@ import { ModelsResponse, ModelInfo } from '../types'
 import { storeManager } from '../../store/store'
 import { autoRouter } from '../autoRouter'
 import { enabledModelRoutes, findModelRoute, resolvePoolRoute } from '../../store/modelRoutes'
-import { modelsToAnthropicList } from '../../../shared/anthropicWire'
+import { anthropicNameShape, modelsToAnthropicList } from '../../../shared/anthropicWire'
 import type { ModelRoute } from '../../../shared/types'
 
 const router = new Router({ prefix: '/v1' })
@@ -88,13 +88,24 @@ router.get('/models', async (ctx: Context) => {
     ctx.body = list
     // 「广告了几条」必须可查：客户端那边还有一层自己的名字过滤，没有这条日志，
     // 「网关发了 20 条」与「用户在客户端看到 0 条」之间的分歧无法对账。
-    storeManager.addLog('debug', `Anthropic model list: ${String((list.data as unknown[]).length)} rows`, {
+    const advertisedRows = (list.data as Array<{ id?: unknown }>).map(row => String(row?.id ?? ''))
+    // 客户端的选择器还有一道独立于档位的名字关（`anthropicNameShape`）：过不了这一关的
+    // 行会被「发现」收下、被「下拉」丢掉，用户在客户端那边就读成「只有默认模型」。
+    // 这一格把两关分开报，远程排障时不必再靠猜。
+    const selectableRows = advertisedRows.filter(id => anthropicNameShape(id) === 'selectable').length
+    storeManager.addLog('debug', `Anthropic model list: ${String(advertisedRows.length)} rows`, {
       data: {
         gatewayModels: models.length,
         declaredAnthropicNames: Object.keys(mappedNames).length,
         tieredRoutes: Object.keys(config.anthropicInbound?.routeTiers ?? {}).length,
+        selectableRows,
       },
     })
+    if (advertisedRows.length > 0 && selectableRows === 0) {
+      storeManager.addLog('warn', 'Anthropic model list: no row can appear in the Claude model picker', {
+        data: { advertisedRows: advertisedRows.length, rows: advertisedRows.slice(0, 12) },
+      })
+    }
     return
   }
 

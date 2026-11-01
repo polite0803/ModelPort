@@ -23,7 +23,10 @@ import {
   createAnthropicStreamTranslator,
   estimateAnthropicInputTokens,
   estimateAnthropicInputTokensDetailed,
+  anthropicNameShape,
+  clientNamesForTieredRoutes,
   modelsToAnthropicList,
+  routesAbsentFromClaudePicker,
   stopReasonOf,
 } from '../../src/shared/anthropicWire.ts'
 
@@ -695,4 +698,128 @@ test('count_tokens 把数得出页数的 PDF 按每页 1590 计入，数不出�
     documentBody([{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } }]),
   )
   assert.deepEqual(withImage.uncounted, ['image'], '读不到宽高就不按 (w×h)/750 拍数')
+})
+
+/* ------------------------------------------- 客户端选择器那道独立的名称关 */
+
+test('名字形态判据按 Claude Desktop 4.4212 那份实现的四条规则走', () => {
+  // 子串命中 claude / anthropic / 档位词都算 Anthropic 名（它的 `Cwe`）。
+  assert.equal(anthropicNameShape('claude-daily'), 'selectable')
+  assert.equal(anthropicNameShape('anthropic-pool'), 'selectable')
+  assert.equal(anthropicNameShape('Claude-Daily'), 'selectable', '判据不看大小写')
+  // 整名恰好是档位词、后面最多跟版本号也算（它的 `xwe`）。
+  assert.equal(anthropicNameShape('sonnet'), 'selectable')
+  assert.equal(anthropicNameShape('haiku-4.5'), 'selectable')
+  assert.equal(anthropicNameShape('mythos'), 'selectable')
+
+  // 都不命中就是「网关内部名」：发现那一关靠档位能过，选择器这一关过不了。
+  assert.equal(anthropicNameShape('daily'), 'missing-anthropic-name')
+  assert.equal(anthropicNameShape('auto'), 'missing-anthropic-name')
+  assert.equal(anthropicNameShape(''), 'missing-anthropic-name')
+
+  // 别家供应商的词优先级最高，命中即丢 —— 即使同时带着 claude 字样。
+  assert.equal(anthropicNameShape('glm-5'), 'other-vendor-name')
+  assert.equal(anthropicNameShape('codex'), 'other-vendor-name', '播种的 codex 路由名也在这一档')
+  assert.equal(anthropicNameShape('qwen-claude'), 'other-vendor-name', '别家词要在 claude 之前判掉')
+})
+
+test('档位只救「发现」，救不了「选择器」：三条内部名路由两处读数是分开的', () => {
+  const routeNames = ['auto', 'daily', 'stable', 'performance']
+  const tiers = { daily: 'sonnet', stable: 'opus', performance: 'fable' }
+
+  // 发现那一关：三行都发得出去（带合法档位）。
+  const list = modelsToAnthropicList(
+    routeNames.map((id) => ({ id })),
+    undefined,
+    tiers,
+  )
+  assert.deepEqual((list.data as Array<{ id: string }>).map((row) => row.id), routeNames)
+
+  // 选择器那一关：除 `auto`（没标档位、本来就不参与）外全部点不到。
+  assert.deepEqual(
+    routesAbsentFromClaudePicker({ routeNames, routeTiers: tiers }).map((gap) => gap.route),
+    ['daily', 'stable', 'performance'],
+  )
+
+  // 一个 claude 开头的映射键指向某条路由，就把那一条从缺口里摘掉（那一行用键当 id）。
+  assert.deepEqual(
+    routesAbsentFromClaudePicker({
+      routeNames,
+      routeTiers: tiers,
+      modelMap: { 'claude-sonnet-4-6': 'Daily ' },
+    }).map((gap) => gap.route),
+    ['stable', 'performance'],
+    '映射键两侧的空格与大小写都要归一，否则用户填对了却仍被报成缺口',
+  )
+
+  // 负控（少传档位这一参数就是「没标档位」）：一条都不报，缺口判据不是恒真。
+  assert.deepEqual(routesAbsentFromClaudePicker({ routeNames, routeTiers: {} }), [])
+
+  // 「不广告」哨兵值与非法档位都不该进这一节：它们过不了发现那一关，另有文案管着。
+  assert.deepEqual(
+    routesAbsentFromClaudePicker({
+      routeNames: ['daily', 'glm-5'],
+      routeTiers: { daily: '__none__', 'glm-5': 'turbo' },
+    }),
+    [],
+  )
+  // 撞了别家供应商词的那条要点名「是这一档」，不能统一说成「少了 claude」。
+  assert.deepEqual(
+    routesAbsentFromClaudePicker({ routeNames: ['glm-5'], routeTiers: { 'glm-5': 'sonnet' } }),
+    [{ route: 'glm-5', shape: 'other-vendor-name' }],
+  )
+})
+
+test('按档位补客户端名：一条一个名字、同档加序号、不带版本号', () => {
+  const routeNames = ['auto', 'daily', 'stable', 'performance']
+  const tiers = { daily: 'sonnet', stable: 'opus', performance: 'fable' }
+
+  assert.deepEqual(clientNamesForTieredRoutes({ routeNames, routeTiers: tiers }), {
+    add: [
+      { from: 'claude-sonnet', to: 'daily' },
+      { from: 'claude-opus', to: 'stable' },
+      { from: 'claude-fable', to: 'performance' },
+    ],
+    blocked: [],
+  })
+
+  // 同档两条：第二条排到 -2，而不是把第一条的映射顶掉。
+  assert.deepEqual(
+    clientNamesForTieredRoutes({
+      routeNames: ['daily', 'weekly'],
+      routeTiers: { daily: 'sonnet', weekly: 'sonnet' },
+    }).add,
+    [{ from: 'claude-sonnet', to: 'daily' }, { from: 'claude-sonnet-2', to: 'weekly' }],
+  )
+
+  // 键已被占用（哪怕指向别的路由）就换下一格；名字与路由名撞车也算占用。
+  assert.deepEqual(
+    clientNamesForTieredRoutes({
+      routeNames: ['daily', 'claude-sonnet'],
+      routeTiers: { daily: 'sonnet' },
+      modelMap: { 'claude-sonnet': 'other-route' },
+    }).add,
+    [{ from: 'claude-sonnet-2', to: 'daily' }],
+  )
+
+  // 已经能选中的（自己名字像 Anthropic，或已有 claude 键指向它）不补第二条。
+  assert.deepEqual(
+    clientNamesForTieredRoutes({
+      routeNames: ['claude-daily', 'stable'],
+      routeTiers: { 'claude-daily': 'sonnet', stable: 'opus' },
+      modelMap: { 'claude-opus-4-1': 'stable' },
+    }),
+    { add: [], blocked: [] },
+  )
+
+  // 十个槽位全被占时不猜：报成 blocked，让用户自己改名。
+  const takenKeys = Object.fromEntries(
+    ['claude-sonnet', 'claude-sonnet-2', 'claude-sonnet-3', 'claude-sonnet-4', 'claude-sonnet-5',
+      'claude-sonnet-6', 'claude-sonnet-7', 'claude-sonnet-8', 'claude-sonnet-9', 'claude-sonnet-10']
+      .map((key) => [key, 'someone-else']),
+  )
+  assert.deepEqual(
+    clientNamesForTieredRoutes({ routeNames: ['daily'], routeTiers: { daily: 'sonnet' }, modelMap: takenKeys }),
+    { add: [], blocked: ['daily'] },
+  )
 })

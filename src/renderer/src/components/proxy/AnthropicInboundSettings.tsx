@@ -10,7 +10,7 @@
  * 分成两个状态显示，否则空输入框会被读成「已配置成空」。
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Label } from '@/components/ui/label'
@@ -28,6 +28,7 @@ import { useToast } from '@/hooks/use-toast'
 import { Plus, Trash2, Braces, Radar } from 'lucide-react'
 import type { AnthropicDiscoveryPlan, AnthropicInboundConfig } from '@/types/electron'
 import { ANTHROPIC_FAMILY_TIERS, type AnthropicFamilyTier } from '@shared/types'
+import { clientNamesForTieredRoutes, routesAbsentFromClaudePicker } from '@shared/anthropicWire'
 
 /** Radix 的 SelectItem 不许用空串当值，「不广告」这一档另起一个哨兵值。 */
 const TIER_NONE = '__none__'
@@ -210,6 +211,52 @@ export function AnthropicInboundSettings() {
 
   const duplicates = draft === null ? [] : duplicateNames(rows)
 
+  // 客户端名这一节只在目录里真有 Claude 形态的模型时才成立，所以挂载即读一次预览：
+  // 不读就不知道该不该出现，让用户去点「预览」才发现点了是 0 —— 那正是被退回过的形态。
+  useEffect(() => {
+    void readPlan()
+  }, [])
+
+  // 档位只过客户端「发现」那一关，它的下拉还有一道独立的名称关（判据与出处都写在
+  // `shared/anthropicWire.ts`）。按编辑态算，选完档位就能看到「这条名字点不到」，
+  // 不必保存后再去客户端那边猜为什么只有默认模型。
+  const pickerGaps = useMemo(
+    () =>
+      routesAbsentFromClaudePicker({
+        routeNames,
+        routeTiers: tierDraft,
+        modelMap: rowsToMap(rows) ?? {},
+      }),
+    [routeNames, tierDraft, rows],
+  )
+
+  // 补名字这件事的判据也只有一份：面板不自己拼 `claude-` 前缀，撞名与序号都在 shared 里算。
+  const clientNamePlan = useMemo(
+    () =>
+      clientNamesForTieredRoutes({
+        routeNames,
+        routeTiers: tierDraft,
+        modelMap: rowsToMap(rows) ?? {},
+      }),
+    [routeNames, tierDraft, rows],
+  )
+
+  const applyClientNames = () => {
+    if (clientNamePlan.add.length === 0) return
+    // 只写进上面那张映射表的编辑态：用户先看得见补了哪几条，再决定保不保存。
+    setRows(previous => [...previous, ...clientNamePlan.add])
+    setHasChanges(true)
+  }
+
+  // 「生成路由」那一节的成立条件：目录里有候选（要建/已可见/被跳过都算）或读它出过错。
+  // 三堆全空 = 这份安装的目录里根本没有 Claude 形态的模型，那一节就只剩两个点了没反应的
+  // 按钮和三个 0 —— 那是歧义，不是信息，所以整节不出现（有了候选会自己回来）。
+  const discoveryRelevant =
+    planError !== null
+    || failed.length > 0
+    || (plan !== null
+      && (plan.create.length > 0 || plan.alreadyVisible.length > 0 || plan.skipped.length > 0))
+
   return (
     <Card>
       <CardHeader>
@@ -372,101 +419,126 @@ export function AnthropicInboundSettings() {
                   ))}
                 </div>
               )}
-            </div>
 
-            <div className="space-y-3 pt-4 border-t">
-              <div className="space-y-0.5">
-                <Label>{t('anthropicInbound.discoveryTitle')}</Label>
-                <p className="text-sm text-muted-foreground">{t('anthropicInbound.discoveryHint')}</p>
-              </div>
-
-              <div className="flex gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={discoveryBusy}
-                  className="gap-2"
-                  onClick={() => void readPlan()}
-                >
-                  <Radar className="h-4 w-4" />
-                  {t('anthropicInbound.discoveryPreview')}
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={discoveryBusy}
-                  onClick={() => void applyPlan()}
-                >
-                  {t('anthropicInbound.discoveryApply')}
-                </Button>
-              </div>
-
-              {planError !== null && (
-                <p className="text-sm text-destructive">
-                  {t('anthropicInbound.discoveryError', { message: planError })}
-                </p>
-              )}
-
-              {plan !== null && (
-                <div className="space-y-2 text-sm">
-                  {/* 四类结果各占一句：并成一个数字就看不出「少了的那些去了哪」。 */}
-                  {plan.create.length === 0 && plan.alreadyVisible.length === 0 && plan.skipped.length === 0 ? (
-                    // 三个数全 0 不是失败，是「目录里没有真 Claude 模型」。不点名这一句，
-                    // 界面会被读成「档位那节也没救、这里也没结果」的死路。
-                    <p className="text-muted-foreground">{t('anthropicInbound.discoveryNothingFound')}</p>
-                  ) : (
-                    <>
-                  <p>{t('anthropicInbound.discoveryCreate', { total: plan.create.length })}</p>
-                  {plan.create.map(route => (
-                    <p key={route.name} className="font-mono text-xs text-muted-foreground">
-                      {route.name}
-                      {' ← '}
-                      {route.pinModels.map(ref => ref.displayName).join(', ')}
-                      {route.providerNames.length > 1
-                        ? ` · ${t('anthropicInbound.discoveryAlsoServedBy', { names: route.providerNames.join(', ') })}`
-                        : ''}
-                    </p>
-                  ))}
-
-                  {plan.alreadyVisible.length > 0 && (
-                    <p>{t('anthropicInbound.discoveryAlready', { total: plan.alreadyVisible.length })}</p>
-                  )}
-                  {plan.alreadyVisible.length > 0 && (
-                    <p className="font-mono text-xs text-muted-foreground">
-                      {plan.alreadyVisible.join(', ')}
-                    </p>
-                  )}
-
-                  <p>{t('anthropicInbound.discoverySkipped', { total: plan.skipped.length })}</p>
-                  {plan.skipped.map((entry, index) => (
-                    <p key={`${entry.name}-${index}`} className="text-xs text-muted-foreground">
-                      <span className="font-mono">{entry.name}</span>
-                      {' — '}
-                      {t(`anthropicInbound.discoveryReason.${entry.reason}`)}
-                    </p>
-                  ))}
-                    </>
-                  )}
-                </div>
-              )}
-
-              {failed.length > 0 && (
-                // 建到一半失败不倒回去：已建好的是可用产物，这里逐条点名剩下的原因。
+              {/* 客户端的模型选择器还有一道与档位无关的名称关（判据出处见 shared/anthropicWire.ts）。
+                  不说这一格，「测连说找到 3 个模型」与「下拉里只有默认模型」在用户那边就是矛盾。 */}
+              {pickerGaps.length > 0 && (
                 <div className="space-y-1">
                   <p className="text-sm text-destructive">
-                    {t('anthropicInbound.discoveryFailed', { total: failed.length })}
+                    {t('anthropicInbound.pickerGapTitle', { names: pickerGaps.map(gap => gap.route).join(', ') })}
                   </p>
-                  {failed.map(entry => (
-                    <p key={entry.name} className="text-xs text-destructive">
-                      <span className="font-mono">{entry.name}</span>
+                  {pickerGaps.map(gap => (
+                    <p key={gap.route} className="text-xs text-destructive">
+                      <span className="font-mono">{gap.route}</span>
                       {' — '}
-                      {entry.message}
+                      {t(`anthropicInbound.pickerGapReason.${gap.shape}`)}
                     </p>
                   ))}
+                  {clientNamePlan.add.length > 0 && (
+                    <Button type="button" variant="outline" size="sm" onClick={applyClientNames}>
+                      {t('anthropicInbound.pickerGapApply')}
+                    </Button>
+                  )}
+                  {clientNamePlan.blocked.length > 0 && (
+                    // 补不出不冲突的名字时不许静默少补：那几条只能由用户自己改名。
+                    <p className="text-sm text-destructive">
+                      {t('anthropicInbound.pickerGapBlocked', { names: clientNamePlan.blocked.join(', ') })}
+                    </p>
+                  )}
+                  <p className="text-sm text-muted-foreground">{t('anthropicInbound.pickerGapFix')}</p>
                 </div>
               )}
             </div>
+
+            {/* 目录里没有 Claude 形态的模型时整节不出现（成立条件见上面的 `discoveryRelevant`）：
+                两个点了只出三个 0 的按钮是歧义，不是信息；等目录里真出现候选，它会自己回来。 */}
+            {discoveryRelevant && (
+              <div className="space-y-3 pt-4 border-t">
+                <div className="space-y-0.5">
+                  <Label>{t('anthropicInbound.discoveryTitle')}</Label>
+                  <p className="text-sm text-muted-foreground">{t('anthropicInbound.discoveryHint')}</p>
+                </div>
+
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={discoveryBusy}
+                    className="gap-2"
+                    onClick={() => void readPlan()}
+                  >
+                    <Radar className="h-4 w-4" />
+                    {t('anthropicInbound.discoveryPreview')}
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={discoveryBusy}
+                    onClick={() => void applyPlan()}
+                  >
+                    {t('anthropicInbound.discoveryApply')}
+                  </Button>
+                </div>
+
+                {planError !== null && (
+                  <p className="text-sm text-destructive">
+                    {t('anthropicInbound.discoveryError', { message: planError })}
+                  </p>
+                )}
+
+                {plan !== null && (
+                  <div className="space-y-2 text-sm">
+                    {/* 三类结果各占一句：并成一个数字就看不出「少了的那些去了哪」。 */}
+                    <p>{t('anthropicInbound.discoveryCreate', { total: plan.create.length })}</p>
+                    {plan.create.map(route => (
+                      <p key={route.name} className="font-mono text-xs text-muted-foreground">
+                        {route.name}
+                        {' ← '}
+                        {route.pinModels.map(ref => ref.displayName).join(', ')}
+                        {route.providerNames.length > 1
+                          ? ` · ${t('anthropicInbound.discoveryAlsoServedBy', { names: route.providerNames.join(', ') })}`
+                          : ''}
+                      </p>
+                    ))}
+
+                    {plan.alreadyVisible.length > 0 && (
+                      <p>{t('anthropicInbound.discoveryAlready', { total: plan.alreadyVisible.length })}</p>
+                    )}
+                    {plan.alreadyVisible.length > 0 && (
+                      <p className="font-mono text-xs text-muted-foreground">
+                        {plan.alreadyVisible.join(', ')}
+                      </p>
+                    )}
+
+                    <p>{t('anthropicInbound.discoverySkipped', { total: plan.skipped.length })}</p>
+                    {plan.skipped.map((entry, index) => (
+                      <p key={`${entry.name}-${index}`} className="text-xs text-muted-foreground">
+                        <span className="font-mono">{entry.name}</span>
+                        {' — '}
+                        {t(`anthropicInbound.discoveryReason.${entry.reason}`)}
+                      </p>
+                    ))}
+                  </div>
+                )}
+
+                {failed.length > 0 && (
+                  // 建到一半失败不倒回去：已建好的是可用产物，这里逐条点名剩下的原因。
+                  <div className="space-y-1">
+                    <p className="text-sm text-destructive">
+                      {t('anthropicInbound.discoveryFailed', { total: failed.length })}
+                    </p>
+                    {failed.map(entry => (
+                      <p key={entry.name} className="text-xs text-destructive">
+                        <span className="font-mono">{entry.name}</span>
+                        {' — '}
+                        {entry.message}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </>
         )}
 

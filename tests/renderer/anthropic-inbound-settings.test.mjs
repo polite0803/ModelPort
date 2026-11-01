@@ -208,3 +208,77 @@ test('生成器只从数据取名字，UI 不许自己列一份 claude 名单', 
   assert.match(planner, /const ANTHROPIC_DISCOVERABLE_PREFIXES|export const ANTHROPIC_DISCOVERABLE_PREFIXES/)
   assert.match(planner, /startsWith\(prefix\)/)
 })
+
+test('「发现了但选不中」这一格接得上：判据在 shared 一份、面板按 code 取文案、两种语言都有', () => {
+  const source = panel()
+  // 判据只该有一份实现：面板自己抄一份词表就会随客户端版本漂移。
+  assert.match(source, /import \{[^}]*routesAbsentFromClaudePicker[^}]*\} from '@shared\/anthropicWire'/)
+  // 按编辑态算，不是按已落库的那份算 —— 用户选完档位就该看到，不必保存后再去客户端猜。
+  assert.match(source, /routesAbsentFromClaudePicker\(\{[\s\S]{0,200}routeTiers: tierDraft[\s\S]{0,120}modelMap: rowsToMap\(rows\)/)
+  // 原因按 code 取文案，拼英文就等于把判据写进 UI。
+  assert.match(source, /pickerGapReason\.\$\{gap\.shape\}/)
+  assert.match(source, /t\('anthropicInbound\.pickerGapTitle'/)
+  assert.match(source, /t\('anthropicInbound\.pickerGapFix'\)/)
+  assert.match(source, /text-destructive/, '选不中不是提示，是不能让用户以为已接通')
+
+  for (const name of ['zh-CN', 'en-US']) {
+    const tree = locale(name).anthropicInbound
+    for (const key of ['pickerGapTitle', 'pickerGapFix']) {
+      assert.equal(typeof tree?.[key], 'string', `${name} is missing anthropicInbound.${key}`)
+    }
+    for (const shape of ['missing-anthropic-name', 'other-vendor-name']) {
+      assert.equal(typeof tree?.pickerGapReason?.[shape], 'string',
+        `${name} is missing anthropicInbound.pickerGapReason.${shape}`)
+    }
+    assert.match(tree.pickerGapTitle, /\{\{names\}\}/, `${name} lost the {{names}} slot`)
+    // 档位那一节的口径也要一起改：只说「标档位就能广告」会被读成「用户能选中」。
+    // 两种语言各按自己的词查，别把中文断言套到 en-US 上。
+    assert.match(tree.tierHint, name === 'zh-CN' ? /发现/ : /discovery/i,
+      `${name} tierHint must separate discovery from the picker`)
+  }
+})
+
+test('说明文案里没有 markdown 粗体：这些串是纯文本渲染的', () => {
+  // `**或**` 这类从文档里抄来的写法，在界面上会原样露出星号（1.5.1 的档位那一节就是这样），
+  // 用户读到的是「文案坏了」，不是强调。
+  for (const name of ['zh-CN', 'en-US']) {
+    const raw = readFileSync(join(root, 'src/renderer/src/i18n/locales', `${name}.json`), 'utf8')
+    assert.ok(!raw.includes('**'), `${name}.json leaks markdown bold into a plain-text label`)
+  }
+})
+
+test('「按档位补客户端名」这条按钮接得上：判据在 shared、按钮写映射表的编辑态', () => {
+  const source = panel()
+  assert.match(source, /import \{ clientNamesForTieredRoutes[^}]*\} from '@shared\/anthropicWire'/)
+  assert.match(source, /clientNamesForTieredRoutes\(\{[\s\S]{0,200}routeTiers: tierDraft/)
+  // 补出来的是映射表的草稿行：用户先看得见补了哪几条，再决定保不保存（不直接落库）。
+  assert.match(source, /setRows\(previous => \[\.\.\.previous, \.\.\.clientNamePlan\.add\]\)/)
+  assert.match(source, /if \(clientNamePlan\.add\.length === 0\) return[\s\S]{0,200}setHasChanges\(true\)/)
+  assert.match(source, /t\('anthropicInbound\.pickerGapApply'\)/)
+  assert.match(source, /pickerGapBlocked/, '补不出不冲突的名字要单独一句，不许静默少补')
+  // 名字是 shared 算的：面板里再拼一份 `claude-${...}` 就会与判据分叉。
+  assert.doesNotMatch(source, /`claude-\$\{/, '客户端名的构造只该有一处')
+
+  for (const name of ['zh-CN', 'en-US']) {
+    const tree = locale(name).anthropicInbound
+    assert.equal(typeof tree?.pickerGapApply, 'string', `${name} is missing pickerGapApply`)
+    assert.match(tree.pickerGapBlocked, /\{\{names\}\}/, `${name} lost the {{names}} slot`)
+    assert.match(tree.pickerGapFix, /claude/, `${name} pickerGapFix must say what the button generates`)
+  }
+})
+
+test('「生成路由」那一节只在目录里有候选时出现，且挂载即读预览', () => {
+  const source = panel()
+  // 挂载就调 plan（只读）：不读就不知道该不该出现，等于留给用户一个只会出 0 的按钮。
+  assert.match(source, /useEffect\(\(\) => \{\s*\n\s*void readPlan\(\)\s*\n\s*\}, \[\]\)/)
+  assert.match(source, /const discoveryRelevant =[\s\S]{0,320}plan\.create\.length > 0 \|\| plan\.alreadyVisible\.length > 0 \|\| plan\.skipped\.length > 0/)
+  assert.match(source, /\{discoveryRelevant && \(/)
+  // 出错与「建了一半失败」都算有内容：那种时候必须看得见，不能整节消失成「没这功能」。
+  assert.match(source, /planError !== null[\s\S]{0,60}failed\.length > 0/)
+  // 三堆全 0 的那句解释已退役：那一节根本不再出现，留着就是没人渲染的死文案。
+  assert.doesNotMatch(source, /discoveryNothingFound/)
+  for (const name of ['zh-CN', 'en-US']) {
+    assert.equal(locale(name).anthropicInbound.discoveryNothingFound, undefined,
+      `${name} keeps a string nothing renders`)
+  }
+})

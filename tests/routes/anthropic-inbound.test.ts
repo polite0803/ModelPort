@@ -564,3 +564,51 @@ test('列模型时申报过的 claude 名排在最前、带目标路由的广告
     sm.updateConfig({ anthropicInbound: undefined })
   }
 })
+
+test('清单只有「能被发现在、但选不中」的行时，日志把这一格单独报出来', async () => {
+  // 客户端那边还有第二道名称关（档位不作数），所以「发了 N 行」与「下拉里有几项」是两个数。
+  // 不分开记，用户就只能拿「测连说找到 3 个模型」去对「界面上只有默认模型」，然后靠猜。
+  const WARN = 'Anthropic model list: no row can appear in the Claude model picker'
+  // 那条计数明细是 debug 级（默认日志级别下不落库），可选中的行数挂在 warn 那一行上：
+  // 它才是「用户说下拉空了」时唯一会被留痕的一格。
+  const warnRow = () => {
+    const rows = sm.getLogs().filter((row) => row.message === WARN)
+    return rows[rows.length - 1]
+  }
+  const warnRows = () => sm.getLogs().filter((row) => row.message === WARN).length
+
+  // 路由表本条自己钉死：播种预设里只要有一条名字像 Anthropic 的路由，「全都选不中」就假了。
+  const live = sm.getConfig()
+  const auto = Object.values(live.routes ?? {}).find((route) => route.name === 'auto')
+  assert.ok(auto, '夹具里该有播种的 auto 路由')
+
+  sm.updateConfig({ routes: { auto } as never, anthropicInbound: { routeTiers: { auto: 'sonnet' } } })
+  try {
+    const before = warnRows()
+    const response = await proxy.request('GET', '/v1/models', {
+      headers: { 'anthropic-version': '2023-06-01' },
+    })
+    const ids = (response.json.data as Array<{ id: string }>).map((row) => row.id)
+    assert.deepEqual(ids, ['auto'], '档位让这一行过得了发现那一关')
+    assert.equal(warnRows(), before + 1, '一行都选不中时必须新增一条 warn')
+    assert.deepEqual(warnRow()?.data?.rows, ['auto'], 'warn 要带上报的到底是哪几个名字')
+    assert.equal(warnRow()?.data?.advertisedRows, 1)
+
+    // 负控（同一张路由表、只差一个 claude 开头的映射键）：那一行可选，warn 就不该再加。
+    sm.updateConfig({
+      routes: { auto } as never,
+      anthropicInbound: { routeTiers: { auto: 'sonnet' }, modelMap: { 'claude-sonnet-4-6': 'auto' } },
+    })
+    const settled = warnRows()
+    const mapped = await proxy.request('GET', '/v1/models', {
+      headers: { 'anthropic-version': '2023-06-01' },
+    })
+    assert.deepEqual(
+      (mapped.json.data as Array<{ id: string }>).map((row) => row.id),
+      ['claude-sonnet-4-6', 'auto'],
+    )
+    assert.equal(warnRows(), settled, '有一行可选就不许再报「全都选不中」')
+  } finally {
+    sm.updateConfig({ routes: live.routes as never, anthropicInbound: undefined })
+  }
+})
