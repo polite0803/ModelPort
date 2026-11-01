@@ -608,7 +608,13 @@ export type AnthropicFamilyTier = (typeof ANTHROPIC_FAMILY_TIERS)[number]
 export interface AnthropicInboundConfig {
   /** 请求名解析不出来时落到哪个网关模型/路由。缺省 `auto`。 */
   defaultModel?: string
-  /** `客户端模型名/前缀 -> 网关模型名`。 */
+  /**
+   * `客户端里的名字（或前缀）-> 网关路由名`。
+   *
+   * 这是「Claude 里叫什么」唯一的一格：清单行的 id 与 `display_name` 都用这个键，客户端
+   * 筛的是它，下一轮发回来的也是它。曾经另有一个 `routeDisplayNames`（只改显示文字、
+   * 不影响客户端筛名），两条名字列并排就是让人填错的地方，已退役。
+   */
   modelMap?: Record<string, string>
   /**
    * `路由名 -> 档位`：发清单时给这一行带 `anthropic_family_tier`，于是客户端按档位保留
@@ -616,11 +622,6 @@ export interface AnthropicInboundConfig {
    * 这一格不发（判据只在 `modelsToAnthropicList` 一处实现）。
    */
   routeTiers?: Record<string, AnthropicFamilyTier>
-  /**
-   * `路由名 -> 客户端里显示的名字`。清单行的 `display_name` 默认等于 id 本身，
-   * 而 id 必须是能被解析的路由名，所以「想让用户看到别的字」只能改这一格。
-   */
-  routeDisplayNames?: Record<string, string>
   /**
    * `document` 附件块要不要翻成 chat 的 `file` 块真的发给上游。
    *

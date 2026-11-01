@@ -28,7 +28,7 @@ import { useToast } from '@/hooks/use-toast'
 import { Plus, Trash2, Braces, Radar } from 'lucide-react'
 import type { AnthropicDiscoveryPlan, AnthropicInboundConfig } from '@/types/electron'
 import { ANTHROPIC_FAMILY_TIERS, type AnthropicFamilyTier } from '@shared/types'
-import { clientNamesForTieredRoutes, routesAbsentFromClaudePicker } from '@shared/anthropicWire'
+import { anthropicNameShape, clientNamesForTieredRoutes } from '@shared/anthropicWire'
 
 /** Radix 的 SelectItem 不许用空串当值，「不广告」这一档另起一个哨兵值。 */
 const TIER_NONE = '__none__'
@@ -38,16 +38,6 @@ function tiersToRecord(entries: Record<string, string>): AnthropicInboundConfig[
     if ((ANTHROPIC_FAMILY_TIERS as readonly string[]).includes(tier)) {
       kept[route] = tier as AnthropicFamilyTier
     }
-  }
-  return Object.keys(kept).length === 0 ? undefined : kept
-}
-
-/** 空显示名不写键：留空就是「按路由名显示」，写空串进库会让客户端显示空白。 */
-function namesToRecord(entries: Record<string, string>): AnthropicInboundConfig['routeDisplayNames'] {
-  const kept: Record<string, string> = {}
-  for (const [route, label] of Object.entries(entries)) {
-    const value = label.trim()
-    if (route.trim() !== '' && value !== '') kept[route.trim()] = value
   }
   return Object.keys(kept).length === 0 ? undefined : kept
 }
@@ -101,8 +91,6 @@ export function AnthropicInboundSettings() {
   const [hasChanges, setHasChanges] = useState(false)
   // 档位编辑态用裸字符串（含「不广告」哨兵值），落库前才折成合法档位。
   const [tierDraft, setTierDraft] = useState<Record<string, string>>({})
-  // 客户端显示名：id 必须是能被解析的路由名，想让用户看见别的字只能改这一格。
-  const [nameDraft, setNameDraft] = useState<Record<string, string>>({})
   const [routeNames, setRouteNames] = useState<string[]>([])
 
   useEffect(() => {
@@ -122,7 +110,6 @@ export function AnthropicInboundSettings() {
         setDraft({})
         setRows([])
         setTierDraft({})
-        setNameDraft({})
         return
       }
       setDraft(inbound)
@@ -130,7 +117,6 @@ export function AnthropicInboundSettings() {
         Object.entries(inbound.modelMap ?? {}).map(([from, to]) => ({ from, to: String(to ?? '') })),
       )
       setTierDraft({ ...(inbound.routeTiers ?? {}) })
-      setNameDraft({ ...(inbound.routeDisplayNames ?? {}) })
     } catch (error) {
       console.error('Failed to load anthropic inbound config:', error)
       setDraft(null)
@@ -150,7 +136,6 @@ export function AnthropicInboundSettings() {
         defaultModel: draft.defaultModel?.trim() === '' ? undefined : draft.defaultModel,
         modelMap: mergeClientNames(manualMap, clientNamePlan.add),
         routeTiers: tiersToRecord(tierDraft),
-        routeDisplayNames: namesToRecord(nameDraft),
         // 没动过就不写这一格（undefined = 走默认开）；只有用户真关过才落 `false`。
         documentPassThrough: draft.documentPassThrough,
       }
@@ -160,7 +145,6 @@ export function AnthropicInboundSettings() {
         Object.entries(next.modelMap ?? {}).map(([from, to]) => ({ from, to: String(to ?? '') })),
       )
       setTierDraft({ ...(next.routeTiers ?? {}) })
-      setNameDraft({ ...(next.routeDisplayNames ?? {}) })
       setHasChanges(false)
       toast({ title: t('common.success'), description: t('anthropicInbound.configSaved') })
     } catch (error) {
@@ -237,19 +221,6 @@ export function AnthropicInboundSettings() {
     void readPlan()
   }, [])
 
-  // 档位只过客户端「发现」那一关，它的下拉还有一道独立的名称关（判据与出处都写在
-  // `shared/anthropicWire.ts`）。按编辑态算：选完档位就当场说明「这几条现在点不到」，
-  // 并列出保存时会自动补成什么名字 —— 补的动作在 `saveConfig` 里，不另设按钮。
-  const pickerGaps = useMemo(
-    () =>
-      routesAbsentFromClaudePicker({
-        routeNames,
-        routeTiers: tierDraft,
-        modelMap: rowsToMap(rows) ?? {},
-      }),
-    [routeNames, tierDraft, rows],
-  )
-
   // 补名字这件事的判据也只有一份：面板不自己拼 `claude-` 前缀，撞名与序号都在 shared 里算。
   const clientNamePlan = useMemo(
     () =>
@@ -260,6 +231,27 @@ export function AnthropicInboundSettings() {
       }),
     [routeNames, tierDraft, rows],
   )
+
+  /* 下面这张表的每一行末尾给一句结论：这条路由在 Claude 里到底点不点得到。
+     名字来自上面那张映射表（没有键就是路由名本身），档位来自这一行自己。 */
+  const clientNameOf = (route: string): string => {
+    const key = route.trim().toLowerCase()
+    const hit = rows.find(row => row.to.trim().toLowerCase() === key && row.from.trim() !== '')
+    return hit ? hit.from.trim() : route
+  }
+
+  const routeOutcome = (route: string): { label: string; tone: string } => {
+    const name = clientNameOf(route)
+    if (anthropicNameShape(name) === 'selectable') {
+      return { label: t('anthropicInbound.outcomeSelectable', { name }), tone: 'text-foreground' }
+    }
+    const tiered = (ANTHROPIC_FAMILY_TIERS as readonly string[]).includes(tierDraft[route] ?? '')
+    if (tiered) {
+      const auto = clientNamePlan.add.find(entry => entry.to === route)?.from ?? ''
+      return { label: t('anthropicInbound.outcomeNeedsName', { name: auto || name }), tone: 'text-destructive' }
+    }
+    return { label: t('anthropicInbound.outcomeNotAdvertised', { name }), tone: 'text-muted-foreground' }
+  }
 
   // 「生成路由」那一节的成立条件：目录里有候选（要建/已可见/被跳过都算）或读它出过错。
   // 三堆全空 = 这份安装的目录里根本没有 Claude 形态的模型，那一节就只剩两个点了没反应的
@@ -285,6 +277,9 @@ export function AnthropicInboundSettings() {
           </p>
         ) : (
           <>
+            {/* 这张卡有两张表，先一句话交代各管什么：不交代就会被当成同一件事的两个入口。 */}
+            <p className="text-sm text-muted-foreground">{t('anthropicInbound.surfaceLead')}</p>
+
             <div className="flex items-center justify-between p-4 bg-muted/30 rounded-lg">
               <div className="space-y-0.5">
                 <Label htmlFor="anthropic-document-pass-through">{t('anthropicInbound.documentPassThrough')}</Label>
@@ -396,26 +391,14 @@ export function AnthropicInboundSettings() {
                 <p className="text-sm text-muted-foreground">{t('anthropicInbound.tierNoRoutes')}</p>
               ) : (
                 <div className="space-y-2">
-                  {/* 三列必须有表头：中间那一格看着像「填模型名」，实际只改显示文字，
-                      客户端筛的是左边的路由名 —— 没有表头就会被填错（实测就被填错过一次）。 */}
                   <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <span className="flex-1">{t('anthropicInbound.routeColumn')}</span>
-                    <span className="flex-1">{t('anthropicInbound.displayNameColumn')}</span>
-                    <span className="w-[200px]">{t('anthropicInbound.tierColumn')}</span>
+                    <span className="w-[160px] shrink-0">{t('anthropicInbound.routeColumn')}</span>
+                    <span className="w-[200px] shrink-0">{t('anthropicInbound.tierColumn')}</span>
+                    <span className="flex-1">{t('anthropicInbound.outcomeColumn')}</span>
                   </div>
                   {routeNames.map(route => (
                     <div key={route} className="flex items-center gap-2">
-                      <code className="flex-1 font-mono text-sm truncate">{route}</code>
-                      <Input
-                        className="flex-1"
-                        value={nameDraft[route] ?? ''}
-                        placeholder={route}
-                        aria-label={t('anthropicInbound.displayNameColumn')}
-                        onChange={event => {
-                          setNameDraft(previous => ({ ...previous, [route]: event.target.value }))
-                          setHasChanges(true)
-                        }}
-                      />
+                      <code className="w-[160px] shrink-0 font-mono text-sm truncate">{route}</code>
                       <Select
                         value={tierDraft[route] ?? TIER_NONE}
                         onValueChange={value => {
@@ -435,25 +418,18 @@ export function AnthropicInboundSettings() {
                           ))}
                         </SelectContent>
                       </Select>
+                      <p className={`flex-1 text-xs ${routeOutcome(route).tone}`}>
+                        {routeOutcome(route).label}
+                      </p>
                     </div>
                   ))}
                 </div>
               )}
 
-              {/* 客户端的模型选择器还有一道与档位无关的名称关（判据出处见 shared/anthropicWire.ts）。
-                  不说这一格，「测连说找到 3 个模型」与「下拉里只有默认模型」在用户那边就是矛盾。 */}
-              {pickerGaps.length > 0 && (
+              {/* 每行最后一列已经逐条说了结论，这里只说「保存会做什么」和「哪几条补不了」。
+                  判据出处在 shared/anthropicWire.ts：客户端的选择器与「发现」是两道独立的名关。 */}
+              {(clientNamePlan.add.length > 0 || clientNamePlan.blocked.length > 0) && (
                 <div className="space-y-1">
-                  <p className="text-sm text-destructive">
-                    {t('anthropicInbound.pickerGapTitle', { names: pickerGaps.map(gap => gap.route).join(', ') })}
-                  </p>
-                  {pickerGaps.map(gap => (
-                    <p key={gap.route} className="text-xs text-destructive">
-                      <span className="font-mono">{gap.route}</span>
-                      {' — '}
-                      {t(`anthropicInbound.pickerGapReason.${gap.shape}`)}
-                    </p>
-                  ))}
                   {clientNamePlan.add.length > 0 && (
                     <p className="text-sm text-muted-foreground">
                       {t('anthropicInbound.pickerGapAuto', {

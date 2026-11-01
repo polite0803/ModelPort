@@ -209,35 +209,30 @@ test('生成器只从数据取名字，UI 不许自己列一份 claude 名单', 
   assert.match(planner, /startsWith\(prefix\)/)
 })
 
-test('「发现了但选不中」这一格接得上：判据在 shared 一份、面板按 code 取文案、两种语言都有', () => {
+test('「能发现但选不中」只在每行的结论列说一次，不再另开一块重复清单', () => {
   const source = panel()
   // 判据只该有一份实现：面板自己抄一份词表就会随客户端版本漂移。
-  assert.match(source, /import \{[^}]*routesAbsentFromClaudePicker[^}]*\} from '@shared\/anthropicWire'/)
-  // 按编辑态算，不是按已落库的那份算 —— 用户选完档位就该看到，不必保存后再去客户端猜。
-  assert.match(source, /routesAbsentFromClaudePicker\(\{[\s\S]{0,200}routeTiers: tierDraft[\s\S]{0,120}modelMap: rowsToMap\(rows\)/)
-  // 原因按 code 取文案，拼英文就等于把判据写进 UI。
-  assert.match(source, /pickerGapReason\.\$\{gap\.shape\}/)
-  assert.match(source, /t\('anthropicInbound\.pickerGapTitle'/)
+  assert.match(source, /import \{[^}]*anthropicNameShape[^}]*\} from '@shared\/anthropicWire'/)
+  assert.doesNotMatch(source, /pickerGapTitle|pickerGapReason\./,
+    '逐行结论已经说了同一件事，块级再列一遍就是两处口径')
   assert.match(source, /t\('anthropicInbound\.pickerGapFix'\)/)
   assert.match(source, /text-destructive/, '选不中不是提示，是不能让用户以为已接通')
 
+  const shared = readFileSync(join(root, 'src/shared/anthropicWire.ts'), 'utf8')
+  assert.match(shared, /export function routesAbsentFromClaudePicker/)
+  assert.match(shared, /for \(const gap of routesAbsentFromClaudePicker\(input\)\)/)
+
   for (const name of ['zh-CN', 'en-US']) {
     const tree = locale(name).anthropicInbound
-    for (const key of ['pickerGapTitle', 'pickerGapFix']) {
-      assert.equal(typeof tree?.[key], 'string', `${name} is missing anthropicInbound.${key}`)
-    }
-    for (const shape of ['missing-anthropic-name', 'other-vendor-name']) {
-      assert.equal(typeof tree?.pickerGapReason?.[shape], 'string',
-        `${name} is missing anthropicInbound.pickerGapReason.${shape}`)
-    }
-    assert.match(tree.pickerGapTitle, /\{\{names\}\}/, `${name} lost the {{names}} slot`)
+    assert.equal(tree.pickerGapTitle, undefined, `${name} keeps a retired block heading`)
+    assert.equal(tree.pickerGapReason, undefined, `${name} keeps retired per-row reasons`)
+    assert.equal(typeof tree.pickerGapFix, 'string', `${name} is missing pickerGapFix`)
     // 档位那一节的口径也要一起改：只说「标档位就能广告」会被读成「用户能选中」。
     // 两种语言各按自己的词查，别把中文断言套到 en-US 上。
     assert.match(tree.tierHint, name === 'zh-CN' ? /发现/ : /discovery/i,
       `${name} tierHint must separate discovery from the picker`)
   }
 })
-
 test('说明文案里没有 markdown 粗体：这些串是纯文本渲染的', () => {
   // `**或**` 这类从文档里抄来的写法，在界面上会原样露出星号（1.5.1 的档位那一节就是这样），
   // 用户读到的是「文案坏了」，不是强调。
@@ -249,7 +244,7 @@ test('说明文案里没有 markdown 粗体：这些串是纯文本渲染的', (
 
 test('补客户端名随保存自动做掉，不留按钮也不留手工步骤', () => {
   const source = panel()
-  assert.match(source, /import \{ clientNamesForTieredRoutes[^}]*\} from '@shared\/anthropicWire'/)
+  assert.match(source, /import \{[^}]*clientNamesForTieredRoutes[^}]*\} from '@shared\/anthropicWire'/)
   // 保存时把「按档位补出来的名字」折进同一份 modelMap：用户只点一次保存。
   assert.match(source, /modelMap: mergeClientNames\(manualMap, clientNamePlan\.add\)/)
   assert.match(source, /if \(generated\.length === 0\) return manual/)
@@ -285,22 +280,30 @@ test('「生成路由」那一节只在目录里有候选时出现，且挂载�
   }
 })
 
-test('档位那张表有表头，且三列宽度与数据行一一对应', () => {
+test('档位那张表：三列表头与数据行对齐，最后一列直接给结论', () => {
   const source = panel()
-  // 中间那格看着像「填模型名」，实际只改显示文字：没有表头就会被填错（实测被填错过）。
   assert.match(source, /t\('anthropicInbound\.routeColumn'\)/)
-  assert.match(source, /t\('anthropicInbound\.displayNameColumn'\)[\s\S]{0,80}t\('anthropicInbound\.tierColumn'\)/)
-  // 表头三列的宽度类必须与下面数据行的 code / Input / SelectTrigger 一致，否则错位。
+  assert.match(source, /t\('anthropicInbound\.tierColumn'\)[\s\S]{0,80}t\('anthropicInbound\.outcomeColumn'\)/)
+  // 表头三列的宽度类必须与下面数据行的 code / SelectTrigger / 结论段一致，否则错位。
   const header = source.match(/<div className="flex items-center gap-2 text-xs[\s\S]*?<\/div>/)[0]
-  assert.deepEqual(header.match(/flex-1/g)?.length, 2, '表头前两列要与数据行同为 flex-1')
-  assert.match(header, /w-\[200px\]/, '表头第三列要与档位下拉同宽')
-  assert.match(source, /<code className="flex-1 font-mono text-sm truncate">/)
+  assert.match(header, /w-\[160px\] shrink-0/)
+  assert.match(header, /w-\[200px\] shrink-0/)
+  assert.match(source, /<code className="w-\[160px\] shrink-0 font-mono text-sm truncate">/)
   assert.match(source, /<SelectTrigger className="w-\[200px\]"/)
+  // 结论是从「映射表的键 + 这一行的档位」现推的，不是又一个存储字段：两处不会各说一套。
+  assert.match(source, /const clientNameOf = \(route: string\)[\s\S]{0,220}rows\.find\(row => row\.to\.trim\(\)\.toLowerCase\(\) === key/)
+  assert.match(source, /routeOutcome\(route\)\.label/)
 
   for (const name of ['zh-CN', 'en-US']) {
     const tree = locale(name).anthropicInbound
     assert.equal(typeof tree.routeColumn, 'string', `${name} is missing routeColumn`)
-    // 显示名那一格的标签要自己说清「只是文字」，不靠用户猜。
-    assert.match(tree.displayNameColumn, /显示|label/i, `${name} displayNameColumn must say it is a label only`)
+    for (const key of ['outcomeColumn', 'outcomeSelectable', 'outcomeNeedsName', 'outcomeNotAdvertised', 'surfaceLead']) {
+      assert.equal(typeof tree[key], 'string', `${name} is missing anthropicInbound.${key}`)
+    }
+    for (const key of ['outcomeSelectable', 'outcomeNeedsName', 'outcomeNotAdvertised']) {
+      assert.match(tree[key], /\{\{name\}\}/, `${name}.${key} must interpolate {{name}}`)
+    }
+    // 「客户端显示名」那一格已退役：它只改文字、不影响客户端筛名，两条名字列并排就是坑。
+    assert.equal(tree.displayNameColumn, undefined, `${name} keeps the retired label column`)
   }
 })

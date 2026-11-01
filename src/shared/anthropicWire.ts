@@ -992,8 +992,9 @@ export function clientNamesForTieredRoutes(input: {
 /**
  * 网关的 OpenAI 模型清单 → anthropic `/v1/models` 形状。
  *
- * `display_name` 用模型 id：网关的 id 本身就是 `<供应商>/<模型>`，比再编一个
- * 人类可读名更准；`created_at` 用 ISO 时间（anthropic 这一版是字符串，不是秒数）。
+ * `display_name` 恒等于 id，**这里没有第二份名字**：客户端筛的是 id、下一轮发回来的也是
+ * id，另开一个「只显示别的字」的格子只会让人把名字填进那一格而客户端照旧筛掉（实测踩过）。
+ * `created_at` 用 ISO 时间（anthropic 这一版是字符串，不是秒数）。
  *
  * `anthropicNames`（即 `anthropicInbound.modelMap`）的键**排在最前面**，因为只发网关
  * 内部名等于让客户端自己把整张表过滤空：Claude Desktop 4.4212 的模型发现逐行要求 `id`
@@ -1019,7 +1020,6 @@ export function modelsToAnthropicList(
   models: AnthropicListModelEntry[],
   anthropicNames?: Record<string, string>,
   routeTiers?: Record<string, string>,
-  routeDisplayNames?: Record<string, string>
 ): Payload {
   const byGatewayName = new Map<string, AnthropicListModelEntry>()
   for (const model of models) {
@@ -1034,14 +1034,6 @@ export function modelsToAnthropicList(
     if (key !== '' && normalized !== undefined) tierByKey.set(key, normalized)
   }
 
-  // 显示名按小写键取：id 必须是能被解析的路由名，想让用户看见别的字只能改这一格。
-  const displayByKey = new Map<string, string>()
-  for (const [name, label] of Object.entries(routeDisplayNames ?? {})) {
-    const key = name.trim().toLowerCase()
-    const value = typeof label === 'string' ? label.trim() : ''
-    if (key !== '' && value !== '') displayByKey.set(key, value)
-  }
-
   const now = Math.floor(Date.now() / 1000)
   const data: Payload[] = []
   const added = new Set<string>()
@@ -1050,7 +1042,6 @@ export function modelsToAnthropicList(
     rawId: string,
     entry: AnthropicListModelEntry | undefined,
     tier?: AnthropicFamilyTier,
-    displayName?: string,
   ): void => {
     const name = rawId.trim()
     if (name === '') return
@@ -1060,7 +1051,7 @@ export function modelsToAnthropicList(
     data.push({
       type: 'model',
       id: name,
-      display_name: displayName ?? name,
+      display_name: name,
       created_at: new Date((entry?.created ?? now) * 1000).toISOString(),
       ...(entry?.context_window === undefined ? {} : { max_input_tokens: entry.context_window }),
       ...(tier === undefined ? {} : { anthropic_family_tier: tier }),
@@ -1074,17 +1065,11 @@ export function modelsToAnthropicList(
     // 模型，与 `resolveAnthropicModel` 里「映射目标必须被网关认识」是同一条判据。
     if (resolved === undefined) continue
     const rowKey = name.trim().toLowerCase()
-    pushRow(
-      name,
-      resolved,
-      tierByKey.get(targetKey) ?? tierByKey.get(rowKey),
-      displayByKey.get(rowKey) ?? displayByKey.get(targetKey),
-    )
+    pushRow(name, resolved, tierByKey.get(targetKey) ?? tierByKey.get(rowKey))
   }
 
   for (const model of models) {
-    const key = model.id.trim().toLowerCase()
-    pushRow(model.id, model, tierByKey.get(key), displayByKey.get(key))
+    pushRow(model.id, model, tierByKey.get(model.id.trim().toLowerCase()))
   }
 
   return {

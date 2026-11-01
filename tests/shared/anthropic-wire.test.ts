@@ -554,17 +554,11 @@ test('档位是清单行的第二条活路：名字不被客户端认识时靠 t
   assert.ok(!(withoutTiers.data as any[]).some(row => 'anthropic_family_tier' in row))
   assert.equal((withoutTiers.data as any[])[0].display_name, 'stable')
 
-  // 显示名：id 必须是能被解析的路由名，所以「让用户看见别的字」只能改 display_name。
-  const labelled = modelsToAnthropicList(
-    [{ id: 'stable' }, { id: 'daily' }],
-    { 'claude-sonnet-4-6': 'stable' },
-    { stable: 'opus' },
-    { STABLE: '强档（网关池）', daily: '   ' },
-  )
-  const labelledById = new Map((labelled.data as any[]).map(row => [row.id, row]))
-  assert.equal(labelledById.get('stable').display_name, '强档（网关池）', '大小写不敏感地取显示名')
-  assert.equal(labelledById.get('claude-sonnet-4-6').display_name, '强档（网关池）', '映射键沿用目标路由的显示名')
-  assert.equal(labelledById.get('daily').display_name, 'daily', '空白显示名等于没配，不发空串')
+  // `display_name` 恒等于 id：这里没有第二份名字可填。客户端筛的是 id、下一轮发回来的也是
+  // id，另开一格「只显示别的字」只会让人把名字填进那里而客户端照旧筛掉（实测踩过）。
+  for (const row of rows) {
+    assert.equal(row.display_name, row.id, `${row.id} 的显示名不许与 id 分家`)
+  }
 })
 
 test('错误信封用 anthropic 认识的 type，状态码决定它', () => {

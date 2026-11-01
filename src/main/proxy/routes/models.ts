@@ -79,12 +79,9 @@ router.get('/models', async (ctx: Context) => {
   // 「0 usable models」。详见 `modelsToAnthropicList` 的判据来源。
   if (ctx.get('anthropic-version')) {
     const mappedNames = config.anthropicInbound?.modelMap ?? {}
-    const list = modelsToAnthropicList(
-      models,
-      mappedNames,
-      config.anthropicInbound?.routeTiers,
-      config.anthropicInbound?.routeDisplayNames,
-    )
+    // 只有三个参数：清单行的 `display_name` 恒等于 id，客户端筛的、发回来的、这里广告的是
+    // 同一个名字，不再另存一份「只显示用的字」。
+    const list = modelsToAnthropicList(models, mappedNames, config.anthropicInbound?.routeTiers)
     ctx.body = list
     // 「广告了几条」必须可查：客户端那边还有一层自己的名字过滤，没有这条日志，
     // 「网关发了 20 条」与「用户在客户端看到 0 条」之间的分歧无法对账。
