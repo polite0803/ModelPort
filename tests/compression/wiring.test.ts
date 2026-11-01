@@ -85,9 +85,12 @@ test('compression runs BEFORE the managed tool layer', () => {
   const compress = positionOf(/applyCompression\(\{/, 'the compression call')
   // Match the CALL (`this.` prefix), not the method's definition earlier in the
   // file — otherwise this test compares two line numbers that say nothing about
-  // execution order.
+  // execution order. The receiver's argument may be `request` or `guardedRequest`
+  // (the local produced by the trailing-tool guard inside `doForward`); either
+  // way it is the message array handed to the tool layer, so accept both names
+  // rather than pinning one spelling.
   const toolLayer = positionOf(
-    /this\.transformRequestForPromptToolUse\(request, provider\)/,
+    /this\.transformRequestForPromptToolUse\((?:guarded)?Request, provider\)/,
     'the managed tool layer call'
   )
 
@@ -102,7 +105,7 @@ test('the verbosity block runs AFTER compression and BEFORE the tool layer', () 
   const compress = positionOf(/applyCompression\(\{/, 'the compression call')
   const steering = positionOf(/applyVerbositySteering\(/, 'the verbosity call')
   const toolLayer = positionOf(
-    /this\.transformRequestForPromptToolUse\(request, provider\)/,
+    /this\.transformRequestForPromptToolUse\((?:guarded)?Request, provider\)/,
     'the managed tool layer call'
   )
 

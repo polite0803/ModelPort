@@ -93,20 +93,42 @@ const forwarderSource = readFileSync(
   'utf-8',
 )
 
-test('兜底必须排在观测与压缩之后、分派之前', () => {
-  const guard = forwarderSource.indexOf('injectTrailingUser(request.messages)')
-  const duplication = forwarderSource.indexOf('measureCrossTurnDuplication(request.messages)')
-  const compression = forwarderSource.indexOf('const compression = applyCompression({')
-  const beginAttempt = forwarderSource.indexOf('accountRuntime.beginAttempt(account.id)')
+test('兜底排在所有内部消费者之后、三条分派之前（且只能在 doForward 里）', () => {
+  const at = (needle: string, label: string) => {
+    const index = forwarderSource.indexOf(needle)
+    assert.ok(index > 0, `挂点缺失：${label}`)
+    return index
+  }
 
-  assert.ok(guard > 0 && duplication > 0 && compression > 0 && beginAttempt > 0, '四个挂点都必须存在')
-  // 造的这一句不是客户端发来的：混进重复度/存活指标就不测了；排在压缩之后，
-  // 也保证它不会被内容压缩器再改一遍。
-  assert.ok(duplication < guard, '重复度测量必须先看客户端原样字节')
-  assert.ok(compression < guard, '兜底不能被压缩流程改写')
-  assert.ok(guard < beginAttempt, '兜底要在开始记账/分派之前完成')
+  const doForward = at('private async doForward(', 'doForward 定义')
+  const guard = at('injectTrailingUser(request.messages)', '兜底调用')
+  const duplication = at('measureCrossTurnDuplication(request.messages)', '跨轮重复度')
+  const compression = at('const compression = applyCompression({', '内容压缩')
+  const contextTrim = at('await contextService.process(contextMessages)', '上下文裁剪/摘要')
+  const beginAttempt = at('accountRuntime.beginAttempt(account.id)', '账号记账')
+
+  // 「最后一条 user」在本仓不止被上游读，内部也读：重复度/存活指标、压缩、裁剪/摘要
+  // 都会拿它当「用户本轮的诉求」。兜底句是我们造的，一旦被它们看见，就等于把
+  // 自己的文案喂进了统计与历史里 —— 所以这四个都必须跑在 doForward 之前。
+  for (const [index, label] of [[duplication, '重复度'], [compression, '压缩'], [contextTrim, '裁剪/摘要'], [beginAttempt, '记账']] as const) {
+    assert.ok(index < doForward, `${label} 必须早于 doForward，否则会把兜底句当用户输入`)
+  }
+  assert.ok(doForward < guard, '兜底要挂在 doForward 内部：它是三条线路最后一个共用点')
+
+  // 分派出口的三条线路都必须拿到兜底后的那份，漏一条 = 那条线路症状照旧。
+  for (const needle of [
+    'dedicatedForwarder.forward(guardedRequest',
+    'this.forwardResponsesWire(guardedRequest',
+    'this.transformRequestForPromptToolUse(guardedRequest',
+  ]) {
+    const index = at(needle, needle)
+    assert.ok(guard < index, `兜底要早于分派：${needle}`)
+  }
+
   // 开关读的是设置，不是代码常量。
-  assert.match(forwarderSource, /trailingUserGuardEnabled\(config\.trailingUserGuard\)/)
+  assert.match(forwarderSource, /trailingUserGuardEnabled\(storeManager\.getConfig\(\)\.trailingUserGuard\)/)
+  // 不可变：兜底产出局部变量，不得改写调用方传进来的 request。
+  assert.equal(forwarderSource.includes('request.messages = '), false, '不允许原地改写 request.messages')
 })
 
 test('AppConfig 两处声明都有这一格（本仓有「同一字段声明两遍」的历史）', () => {

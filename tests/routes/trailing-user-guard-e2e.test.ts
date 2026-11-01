@@ -116,6 +116,18 @@ test('默认（没配过这一格）出站末条被补成 user', async () => {
   assert.deepEqual(seenMessages.slice(0, 3).map(m => m.role), ['user', 'assistant', 'tool'])
 })
 
+test('兜底句不进请求日志的 userInput（它不是用户本轮说的话）', async () => {
+  const response = await post()
+  assert.equal(response.status, 200)
+  // 出站末条确实变了，否则这条断言是恒真的。
+  assert.equal(seenMessages[seenMessages.length - 1].role, 'user')
+
+  const row = sm.getRequestLogs(1)[0]
+  assert.ok(row, '请求日志默认开启，这一笔必须落一行')
+  assert.equal(row.userInput, '评估仓库完成度，中途不要问我')
+  assert.equal(String(row.userInput).includes('继续执行上一条消息中的任务'), false)
+})
+
 test('关掉开关后出站一字不改，末条仍是 tool', async () => {
   sm.updateConfig({ trailingUserGuard: false } as never)
   try {

@@ -335,23 +335,6 @@ export class RequestForwarder {
       }
     }
 
-    // 末条是工具结果时补一条极简 user，把「继续干活」这个意图钉回序列尾部
-    // （判据与为什么放在这里，见 `trailingUserGuard.ts` 模块头：真流量里第 2 轮起
-    // 出现「I don't see a request…」与 ask_user 反问，第 1 轮从不出现）。
-    //
-    // 位置有三条约束，都在这一格上：
-    // - 必须排在重复度/存活观测与压缩**之后** —— 那三项要看客户端原样发来的字节，
-    //   我们造的这一句不能混进指标，也不能被压缩器再改一遍；
-    // - 必须排在托管工具层注入**之前** —— 注入的是提示词，不该被当成真的一轮用户发言；
-    // - 必须在分派之前 —— 账号渠道、聚合条目与自建供应商三条线路只有这里共用。
-    if (trailingUserGuardEnabled(config.trailingUserGuard)) {
-      const guarded = injectTrailingUser(request.messages)
-      if (guarded.injected) {
-        request = { ...request, messages: guarded.messages as ChatCompletionRequest['messages'] }
-        console.log(`[TrailingUserGuard] 末条为 tool，已追加一条 user 兜底 (request ${request.requestId ?? '-'}, provider ${provider.id})`)
-      }
-    }
-
     // 记录在途与 RPM：仅用于路由打分，下一次请求即可读到
     accountRuntime.beginAttempt(account.id)
 
@@ -812,19 +795,46 @@ export class RequestForwarder {
   ): Promise<ForwardResult> {
     const startTime = Date.now()
 
+    // 末条是工具结果时补一条极简 user，把「继续干活」的意图钉回序列尾部（判据见
+    // `trailingUserGuard.ts` 模块头：真流量第 2 轮起出现「I don't see a request…」
+    // 与 ask_user 反问，第 1 轮从不出现）。
+    //
+    // 位置是这条修复的全部难点，四条约束：
+    // - **必须是最后一个共用点**：账号渠道、聚合条目与自建供应商三条线路只有
+    //   `doForward` 之前不分叉，而 `worker.complete()` 只覆盖渠道那一条；
+    // - **必须晚于所有把「最后一条 user」当用户输入的内部消费者** —— 请求日志的
+    //   `userInput` 与压缩活区在路由里就算好了，上下文裁剪/摘要在 `forwardChatCompletion`
+    //   的循环里跑（在本行之前），所以我们造的这句不会被当成用户本轮的诉求，
+    //   也不会被裁剪器当成「最新 user 消息」而保住它、反而丢掉真实那句；
+    // - **晚于压缩**：这句不该再被内容压缩器改写；
+    // - **早于托管工具层注入**（在 `doForward` 内部，本行之后）：注入的是提示词。
+    //
+    // 局部变量而不是改写 `request`：本函数也被摘要生成器复用，且不可变纪律要求
+    // 不污染调用方传进来的请求对象。
+    const outbound = trailingUserGuardEnabled(storeManager.getConfig().trailingUserGuard)
+      ? injectTrailingUser(request.messages)
+      : { messages: request.messages as unknown, injected: false }
+    if (outbound.injected) {
+      console.log(`[TrailingUserGuard] 末条为 tool，已追加一条 user 兜底 (request ${request.requestId ?? '-'}, provider ${provider.id})`)
+    }
+    const guardedRequest: ChatCompletionRequest = {
+      ...request,
+      messages: outbound.messages as ChatCompletionRequest['messages'],
+    }
+
     const dedicatedForwarder = this.providerForwarders.find(forwarder => forwarder.matches(provider))
     if (dedicatedForwarder) {
-      return dedicatedForwarder.forward(request, account, provider, actualModel, startTime)
+      return dedicatedForwarder.forward(guardedRequest, account, provider, actualModel, startTime)
     }
 
     // 出向 responses：不做 chat 的请求体构建与 prompt 工具注入。
     // responses 自己就有原生 tools，把工具描述塞进 messages 会变成双重提示。
     if (provider.wire === 'openai-responses') {
-      return this.forwardResponsesWire(request, account, provider, actualModel, startTime)
+      return this.forwardResponsesWire(guardedRequest, account, provider, actualModel, startTime)
     }
 
     try {
-      const transformed = this.transformRequestForPromptToolUse(request, provider)
+      const transformed = this.transformRequestForPromptToolUse(guardedRequest, provider)
       const chatPath = provider.chatPath || '/chat/completions'
       const url = this.buildUrl(provider, chatPath)
       const headers = this.buildHeaders(provider, account)
