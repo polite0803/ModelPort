@@ -3030,6 +3030,7 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     "authKind": "none",
     "baseUrl": "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
     "wire": "openai-chat",
+    "dropParams": ["prompt_cache_key", "user"],
     "models": [
       {
         "id": "Meta-Llama-3_3-70B-Instruct",
@@ -3076,7 +3077,7 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
         "name": "Qwen3 Coder 30B A3B Instruct"
       }
     ],
-    "notes": "OVHcloud AI Endpoints keyless anonymous tier, rate-limited per IP (freellmpool port; chat model list verified live 2026-10-30). Qwen3-32B and Llama-3.1-8B-Instruct are disabled upstream and Qwen3.8-27B is kept pin-only after slow canaries, so none of them is in the baseline.",
+    "notes": "OVHcloud AI Endpoints keyless anonymous tier, rate-limited per IP (freellmpool port; chat model list verified live 2026-10-30). Qwen3-32B and Llama-3.1-8B-Instruct are disabled upstream and Qwen3.8-27B is kept pin-only after slow canaries, so none of them is in the baseline. The request schema is stricter than OpenAI: fields outside the official parameter list are rejected with 400 (`feature '...' is not currently supported`), and prompt_cache_key (Codex) and user (Claude Desktop) have each hit it in the field, so dropParams strips both.",
     "website": "https://www.ovhcloud.com/en/public-cloud/ai-endpoints/",
     "freeModelsHint": [
       "Meta-Llama-3_3-70B-Instruct",
