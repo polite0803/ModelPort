@@ -205,10 +205,12 @@ export interface ChannelModelInfo {
    * 上游声明的上下文窗口（token 数），来自渠道包 `/v1/models` 视图的
    * `context_window`，**不是** `model.list`（那份目录没有这个字段）。
    *
-   * ⚠️ 缺失 = 渠道包没说，`auto` 路由会退到 `UNANNOTATED_CONTEXT_FLOOR`（64K）。
+   * ⚠️ 缺失 = 渠道包没说。没说就**既不参与 `/v1/models` 的窗口广告，也不因上下文淘汰
+   * 这个候选**（「没公布上限」不是「超限」的证据）。
    * 绝不能因为「64K 总比没有强」就填一个猜测值：TRAE / loomy / Qoder 实测都在服务
-   * 300K–500K+，一旦这里写死小值，`auto` 会把整条渠道在长上下文请求上判为
-   * 「装不下」而全部排除（`autoRouting.ts` 的 `capability.contextTokens ?? FLOOR`）。
+   * 300K–500K+，写死小值会让 `auto` 把整条渠道在长上下文请求上判为「装不下」而全部
+   * 排除；反过来把它广告出去，客户端会按这个假上界安排压缩时机（2026-11-03 实测
+   * Codex 按 64000×0.95=60800 提前摘要整轮历史，之后模型看不见任务）。
    */
   contextWindow?: number
   /** 用户在渠道包内关掉了这个模型。 */

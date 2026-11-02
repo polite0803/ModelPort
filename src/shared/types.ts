@@ -1059,6 +1059,16 @@ export interface RequestLogEntry {
   upstreamRequestId?: string
   /** Every attempt, in order, including the winning one. */
   attempts?: RequestAttemptTrace[]
+  /**
+   * 「这一轮的请求体量 vs 这一家的窗口」的读数（口径见 `requestContextFit.ts`）。
+   * `inputTokensEstimate` 是估算值，绝不写进 `usage`，也不参与计费。
+   * 没有公布窗口的候选只写估算值与 `contextFit:"unknown"`，不写猜测窗口。
+   */
+  inputTokensEstimate?: number
+  modelContextWindow?: number
+  contextFit?: 'fits' | 'overflow' | 'unknown'
+  /** 该 overflow 来自上游实测报错（而不是判定）时才有 */
+  contextFitSource?: 'measured'
   /** Streaming-only transport facts. */
   streamTrace?: RequestStreamTrace
   /**

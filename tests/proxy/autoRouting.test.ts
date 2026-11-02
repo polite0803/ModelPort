@@ -291,15 +291,18 @@ test('a known context window filters long requests before the fallback floor', (
   assert.deepEqual(ranked.map(item => item.accountId), ['big'])
 })
 
-test('the unannotated context floor keeps the historical 64000 limit', () => {
+test('未公布窗口的候选不因上下文被淘汰，已公布且装不下的才淘汰', () => {
   const profile = { ...profileRequest(textRequest('short')), estimatedTokens: 70_000 }
 
   const ranked = rankCandidates(profile, [
     candidate({ accountId: 'unannotated' }),
+    candidate({ accountId: 'small-window', capabilityHint: { contextTokens: 32_768 } }),
   ], { now: NOW })
 
-  // 64000 硬过滤挡下，随后只放宽一次上下文，所以仍会返回该候选
-  assert.equal(ranked.length, 1)
+  // 过去这里靠「放宽一次上下文」的兜底把未标注的候选捞回来（64K 那个猜数先把它筛掉
+  // 再放行，两步都是同一枚硬币的两面）。现在没有那一步：没公布上限不是超限的证据。
+  assert.deepEqual(ranked.map(item => item.accountId), ['unannotated'],
+    '已公布 32768 的那条才是真装不下 70K 的那一家')
 })
 
 test('contractNeeds only flags requirements that change the response shape', () => {

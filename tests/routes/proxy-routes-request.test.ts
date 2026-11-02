@@ -128,7 +128,7 @@ test('A/请求级：迁移出来的 `auto` 在第一次 HTTP 请求里就被广�
   // 实现（models.ts::routeEntry 注释）+ AGENTS.md + tests/proxy/models-context-window.test.ts
   // 钉的是「广告候选里最小的那个窗口」，空池才省略键；简报里写的「不带 context_window」
   // 与实现不一致，这里按**真实行为**断言，分歧已写进交付说明。
-  assert.equal(auto.context_window, 32000, '有标注候选时广告可证下界（rp1=32000，rp2 未标注按 64000 参与）')
+  assert.equal(auto.context_window, 32000, '有标注候选时广告可证下界（rp1=32000 已公布；rp2 未公布不贡献值）')
   assert.equal(typeof auto.created, 'number')
 })
 

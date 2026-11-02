@@ -87,7 +87,7 @@ function accountFixture(providerId: string) {
 sm.addProvider(providerFixture('big', 'Big-1M', 1_000_000) as never)
 sm.addProvider(providerFixture('mid', 'Mid-128K', 128_000) as never)
 sm.addProvider(providerFixture('small', 'Small-8K', 8192) as never)
-// 未标注：按 `UNANNOTATED_CONTEXT_FLOOR`(64000) 参与，与放行判据同一个数
+// 未标注：不往广告里贡献值，也不因上下文被淘汰（原先它被折算成 64000 当真数用）
 sm.addProvider(providerFixture('noann', 'Unknown-W') as never)
 // 通配符供应商：故意给它一个更小的窗口标注，验证它根本不进池
 sm.addProvider({
@@ -150,11 +150,12 @@ test('A：每条路由报**自己池**的下界，同一次响应里出现不同
   makeRoute('longonly', { poolStrategies: [{ id: 'long-context', operator: 'and' }] })
   assert.equal(await floorOf('longonly'), 128_000)
 
-  // 只剩未标注候选：64K 是真答案，不是 bug —— 放行判据给它的就是同一个数
+  // 只剩未标注候选：一家都没公布窗口就没有可承诺的数，这个键整个省略
   const onlyUnknown = makeRoute('onlyunknown', {
     excludeModels: [ref('big', 'Big-1M'), ref('mid', 'Mid-128K'), ref('small', 'Small-8K')],
   })
-  assert.equal(await floorOf('onlyunknown'), 64_000)
+  assert.equal(await floorOf('onlyunknown'), undefined,
+    '这里原先报的是兜底常量 64000 —— 客户端会把它当真实窗口安排压缩时机')
 
   // 手动标注是唯一能把这个数抬起来的杠杆（标注优先级最高，且不被模型同步清掉）
   sm.setUserModelMark('noann', 'Unknown-W', { contextTokens: 256_000 })

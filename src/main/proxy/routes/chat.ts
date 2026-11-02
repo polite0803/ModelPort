@@ -10,7 +10,7 @@ import { ChatCompletionRequest, ChatCompletionResponse, ProxyContext } from '../
 import type { AccountSelection, ForwardResult } from '../types'
 import { loadBalancer } from '../loadbalancer'
 import { requestForwarder } from '../forwarder'
-import { isAccountFault, isSameProviderRotationStatus } from '../failover'
+import { isAccountFault, isSameProviderRotationStatus, isContextOverflowError } from '../failover'
 import { autoExhaustedResponse } from '../failover'
 import { SSEParser, extractStreamErrorFrame, streamHandler, type StreamErrorFrame } from '../stream'
 import { proxyStatusManager } from '../status'
@@ -37,6 +37,7 @@ import { accountChannelManager } from '../../providers/accountChannels/manager'
 import { accountRuntime } from '../accountRuntime'
 import { storeManager } from '../../store/store'
 import { AUTO_PREFERENCES, type AutoPreference } from '../../../shared/types'
+import { readRequestContextFit } from '../../../shared/requestContextFit.ts'
 import { readOrEstimateUsage, usageInputText, type UsageReading } from '../quota/usage'
 import { aggregateCostUsdOf } from '../../../shared/aggregateCost.ts'
 import { getAggregateEntry } from '../../providers/aggregate/registry.ts'
@@ -53,6 +54,25 @@ import {
 } from '../utils/toolFormatConverter'
 
 const router = new Router({ prefix: '/v1/chat' })
+
+/**
+ * 「本轮请求体量 vs 这一家窗口」的读数工厂。
+ *
+ * 只在路由决策存在时产出（非路由请求没有可信的估算入量，宁可不写也不写 0）。
+ * `measuredOverflow` 来自上游真实报错，优先于判定值，并且带 `contextFitSource`
+ * 标记 —— 判定不冒充实测。估算值绝不写进 usage（口径见 shared/requestContextFit.ts）。
+ */
+function contextReadingFor(
+  decision: AutoRouteDecision | null,
+  measuredOverflow: boolean
+): Partial<RequestLogEntry> {
+  if (decision === null) return {}
+  return readRequestContextFit({
+    estimatedTokens: decision.profile.estimatedTokens,
+    ...(decision.contextWindow === undefined ? {} : { contextWindow: decision.contextWindow }),
+    measuredOverflow,
+  })
+}
 
 /** 请求日志里的 auto 决策记录；非 auto 请求返回 undefined（字段直接不出现） */
 function autoLogRecord(
@@ -682,6 +702,12 @@ router.post('/completions', async (ctx: Context) => {
 
     const latency = Date.now() - startTime
 
+    // 上下文超限的实测来源有两个：最终失败结果、换家循环里被跳过的候选。
+    // 后者也必须算进来 —— 「A 家装不下、B 家承接了」正是这条读数要留下来的事实,
+    // 只看最终结果会把它误记成 fits。
+    const contextMeasuredOverflow = isContextOverflowError(result.error)
+      || autoFailures.some(failure => isContextOverflowError(failure.reason))
+
     // 压缩记录：转发器写在 live zone 上的改动，在这里一次性取出，
     // 既写响应头（客户端无需读日志就能看到省了多少），也写进请求日志。
     // 数字是估算值，绝不写进响应体的 usage。
@@ -783,6 +809,7 @@ router.post('/completions', async (ctx: Context) => {
         userInput,
         client,
         auto: autoLogRecord(autoDecision, autoAttempts, autoFailures),
+        ...contextReadingFor(autoDecision, contextMeasuredOverflow),
         attempts: attemptTrace,
         upstreamRequestId: result.upstreamRequestId,
         captureBodies: traceRequested,
@@ -864,6 +891,7 @@ router.post('/completions', async (ctx: Context) => {
         userInput,
         client,
         auto: autoLogRecord(autoDecision, autoAttempts, autoFailures),
+        ...contextReadingFor(autoDecision, contextMeasuredOverflow),
         attempts: attemptTrace,
         upstreamRequestId: result.upstreamRequestId,
         captureBodies: traceRequested,
@@ -899,6 +927,7 @@ router.post('/completions', async (ctx: Context) => {
         userInput,
         client,
         auto: autoLogRecord(autoDecision, autoAttempts, autoFailures),
+        ...contextReadingFor(autoDecision, contextMeasuredOverflow),
         attempts: attemptTrace,
         upstreamRequestId: result.upstreamRequestId,
         captureBodies: traceRequested,

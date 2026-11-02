@@ -14,19 +14,24 @@ import assert from 'node:assert/strict'
 
 import { advertisedContextFloorOf, UNANNOTATED_CONTEXT_FLOOR } from '../../src/main/proxy/autoRouting.ts'
 
-// 路由条目（`auto` 与用户自建路由）没有上游目录可查，广告的是**候选里最小的窗口**。
+// 路由条目（`auto` 与用户自建路由）没有上游目录可查，广告的是**候选里最小的已标注窗口**。
 // 它必须是下界：客户端按这个数安排发出的字节，而路由可能落到任何候选上。
-test('路由广告取候选最小窗口，未标注的按放行判据同一个下界参与', () => {
+test('路由广告取候选里最小的已公布窗口；未公布的候选不贡献值', () => {
   assert.equal(advertisedContextFloorOf([200_000, 32_768, 128_000]), 32_768)
-  assert.equal(advertisedContextFloorOf([200_000, undefined]), UNANNOTATED_CONTEXT_FLOOR)
-  // 标注值比下界还小时，下界不能把它顶上去
+  // 「没标注」不是「已知 64K」：它既不该把下界压成猜数，也不该被当成上限承诺
+  assert.equal(advertisedContextFloorOf([200_000, undefined]), 200_000)
   assert.equal(advertisedContextFloorOf([8_192, undefined]), 8_192)
 })
 
-test('0 / 负数 / 非数字的标注等同未标注（参与下界，绝不顶大）', () => {
-  assert.equal(advertisedContextFloorOf([0, 200_000]), UNANNOTATED_CONTEXT_FLOOR)
-  assert.equal(advertisedContextFloorOf([-1, 200_000]), UNANNOTATED_CONTEXT_FLOOR)
-  assert.equal(advertisedContextFloorOf(['abc' as unknown as number, 200_000]), UNANNOTATED_CONTEXT_FLOOR)
+test('0 / 负数 / 非数字的标注等同未标注（不贡献值，绝不顶大）', () => {
+  assert.equal(advertisedContextFloorOf([0, 200_000]), 200_000)
+  assert.equal(advertisedContextFloorOf([-1, 200_000]), 200_000)
+  assert.equal(advertisedContextFloorOf(['abc' as unknown as number, 200_000]), 200_000)
+})
+
+test('一家都没公布窗口 → 省略键：没有证据就不承诺（空池同理）', () => {
+  assert.equal(advertisedContextFloorOf([undefined, undefined]), undefined)
+  assert.equal(advertisedContextFloorOf([]), undefined)
 })
 
 test('空池省略键：没有候选就没有可说的，不写默认窗口', () => {

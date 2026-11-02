@@ -87,6 +87,11 @@ export interface AutoCandidate {
 export interface AutoRouteDecision {
   profile: RequestProfile
   candidates: AutoCandidate[]
+  /**
+   * 本次将服务的第一候选**已公布**的上下文窗口（token）。没公布就是 `undefined` ——
+   * 不兜底成猜测值，日志与 `/v1/models` 用同一个口径（`shared/requestContextFit.ts`）。
+   */
+  contextWindow?: number
   /** 会话指纹，成功后可交给 rememberRoute 固化本次选择 */
   conversationKey?: string
   /**
@@ -289,11 +294,14 @@ class AutoRouter {
    *   在变，广告一个随后会变小的数，等于让客户端按它拿不到的上界安排字节；
    * - 不扣请求画像与契约过滤 —— vision/tools/context/`n` 是请求属性而不是路由配置。
    *
-   * 未标注窗口的候选按 `UNANNOTATED_CONTEXT_FLOOR`（64000）参与，与放行判据同源。
-   * 被池策略或 `excludeModels` 剔掉的候选**不再参与**，所以一条只钉了几家大窗模型
-   * 的路由会广告那些模型自己的窗口，而不是被全局最悲观的候选压到 64K；候选收敛到
-   * 一个模型时（同一模型的多个账号算一个），最小值就是那个模型的窗口。
-   * 空池返回 `undefined`：没有候选就没有可说的，键必须省略而不是写个默认值。
+   * 未标注窗口的候选**不往这个数里贡献值**（原先按 64K 那个猜测参与，全池常常就报出
+   * 假数：Codex 按 `×0.95` 把压缩点定在 60800，长会话被客户端提前摘要，之后模型
+   * 看不见任务）。广告的是**已公布窗口里最小的那个**，一家都没公布就省略这个键；
+   * 未标注的候选也不因上下文被淘汰 —— 广告与放行都不拿猜测当读数
+   * （`autoRouting.ts::hardFilterFailure`）。被池策略或 `excludeModels` 剔掉的候选
+   * 不再参与，所以一条只钉了几家大窗模型的路由会广告那些模型自己的窗口；
+   * 候选收敛到一个模型时（同一模型的多个账号算一个），最小值就是那个模型的窗口。
+   * 空池同样返回 `undefined`：没有候选就没有可说的，键必须省略而不是写个默认值。
    */
   advertisedContextFloor(route?: ModelRoute): number | undefined {
     return this.floorOfPool(this.advertisedPool(), route)
@@ -643,6 +651,10 @@ class AutoRouter {
       profile,
       route,
       routeName,
+      // 服务候选已公布的窗口；没公布就不写（`undefined`），日志/头都用同一个数
+      ...(ordered.length === 0 || capabilityOfCandidate(ordered[0]!).contextTokens === undefined
+        ? {}
+        : { contextWindow: capabilityOfCandidate(ordered[0]!).contextTokens }),
       // 换家的基础上限随 decision 交给 forwarder：转发层不许再自己去读
       // legacy 全局 `autoRouting.maxAttempts`，那样逐路由的设置只对第一次
       // 候选裁剪生效、对失败换家不生效。

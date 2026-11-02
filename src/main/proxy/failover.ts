@@ -33,6 +33,46 @@ export function isToolOverflowError(message: string | undefined): boolean {
 }
 
 /**
+ * 「这次的请求装不进这一家的上下文窗口」类 400 的识别（2026-11-03 排查 Codex
+ * 长会话时确认的缺口）。
+ *
+ * ## 为什么这类 400 也必须「换下一家」
+ *
+ * 长上下文请求撞上的 400 说的是**这一家的窗口**，不是客户端写错了什么：
+ * OpenAI 侧 `This model's maximum context length is 8192 tokens ...`（code
+ * `context_length_exceeded`），Anthropic 侧 `prompt is too long: 1000000 tokens >
+ * 200000 maximum`，各家自研网关侧 `上下文长度超限`。同一份请求发给窗口更大的
+ * 候选就能成。
+ *
+ * 原先 400 一律终止（AGENTS.md 的换家状态口径），所以第一个候选装不下时，
+ * `auto` 整场失败，客户端读到「这个路由不可用」，而真正的事实是「这一家装不下,
+ * 池里还有装得下的」。这与工具数超限、目录里没有这个模型是同一类：**这一家
+ * 供不了这次请求，账号本身健康**，所以不记冷却、不计账号失败，换下一家。
+ *
+ * 与 new-api 的差别：它把 `context_length_exceeded` 归进 perf 的
+ * `OutcomeIgnored`（`pkg/perf_metrics/outcome.go:119`，明确不影响重试/禁用），
+ * 也就是分类但不行动；这里要的是行动。
+ *
+ * ⚠️ 识别口径必须**窄**：只认成串的上下文超限说法，不认单独的 `token` /
+ * `too long` —— 正常正文与别的错误里都可能出现这两个词。
+ */
+const CONTEXT_OVERFLOW_PATTERNS: readonly RegExp[] = [
+  /context_length_exceeded/i,
+  /maximum context length/i,
+  /context (?:length|window)[^.\n]{0,40}?\b(?:exceed|too long|larger than|over)/i,
+  /\bexceeded[^.\n]{0,40}?context (?:length|window)/i,
+  /prompt is too long/i,
+  /input[^.\n]{0,30}tokens[^.\n]{0,30}exceed/i,
+  /上下文(?:长度|窗口)?[^.\n]{0,12}(?:超出|超过|过长|不足)/,
+  /(?:超过|超出)(?:了)?(?:该?模型)?(?:的)?(?:上下文|窗口)(?:长度)?/,
+]
+
+export function isContextOverflowError(message: string | undefined): boolean {
+  if (!message) return false
+  return CONTEXT_OVERFLOW_PATTERNS.some(pattern => pattern.test(message))
+}
+
+/**
  * 「历史 assistant 消息缺 reasoning_content」类 400 的识别（用户报障 2026-10-31）。
  *
  * ## 为什么这类 400 也要允许「换下一家」

@@ -109,6 +109,7 @@ import {
   firstStreamEvent,
   isChannelHumanRequiredFailure,
   isChannelModelUnavailableError,
+  isContextOverflowError,
   isFailoverEligibleStatus,
   isForcedToolChoiceUnsupported,
   isMissingReasoningHistoryError,
@@ -734,12 +735,16 @@ export class RequestForwarder {
       }
 
       // 「换一家就能成」类失败（工具数超限、历史缺 reasoning_content、渠道目录不认
-      // 这个模型）：请求在生成之前就被拒，账号本身是健康的，既不该记冷却也不该
-      // 计账号失败 —— 小工具请求/无思考历史的会话/一次目录漂移不该连坐整个账号。
+      // 这个模型、这一家的上下文窗口装不下这次请求）：请求在生成之前就被拒，账号
+      // 本身是健康的，既不该记冷却也不该计账号失败 —— 小工具请求/无思考历史的会话/
+      // 一次目录漂移/一份超长上下文都不该连坐整个账号。
       const capabilityMismatch = isToolOverflowError(result.error)
         || isMissingReasoningHistoryError(result.error)
         || isChannelModelUnavailableError(result.error)
         || isForcedToolChoiceUnsupported(result.error)
+        // 窗口不够是「这一家装不下这次请求」，池里窗口更大的候选能成：原先 400 一律
+        // 终止，第一个候选超长就把整场打死（客户端读成「这条路由不可用」）。
+        || isContextOverflowError(result.error)
         // 普通 404 同样是「这一家供不了这个模型」（目录漂移/能力差异），不是账号
         // 故障：换下一家，但不给账号记冷却 —— 否则一次模型改名会连坐整个账号。
         || result.status === 404
@@ -919,7 +924,9 @@ export class RequestForwarder {
         upstream.destroy()
         return {
           success: false,
-          status: isToolOverflowError(probe.message) || isMissingReasoningHistoryError(probe.message)
+          status: isToolOverflowError(probe.message)
+            || isMissingReasoningHistoryError(probe.message)
+            || isContextOverflowError(probe.message)
             ? 400
             : 502,
           error: probe.message,
@@ -1007,7 +1014,8 @@ export class RequestForwarder {
     if (probe.kind === 'error') {
       const message = probe.details?.message ?? probe.message
       const status = probe.details?.status
-        ?? (isToolOverflowError(message) || isMissingReasoningHistoryError(message) ? 400 : 502)
+        ?? (isToolOverflowError(message) || isMissingReasoningHistoryError(message)
+          || isContextOverflowError(message) ? 400 : 502)
       const details: UpstreamErrorDetails = probe.details
         ? {
             message,

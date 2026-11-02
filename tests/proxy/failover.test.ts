@@ -51,6 +51,7 @@ import {
   isOpaqueAggregateBadRequest,
   isRecoverableChannelFailure,
   isSameTargetRetryableStatus,
+  isContextOverflowError,
   isToolOverflowError,
   probeSseHead,
   shouldTryNextAutoCandidate,
@@ -81,6 +82,49 @@ test('工具数超限识别：窄口径，无关 400 不得误判', () => {
   assert.equal(isToolOverflowError("Invalid value for 'tools': schema is invalid"), false)
   // 普通业务错误不算
   assert.equal(isToolOverflowError('model not found'), false)
+})
+
+test('上下文超限识别：命中各家上游的真实文案', () => {
+  // OpenAI 形状（code 在 details 里，message 自带 maximum context length）
+  assert.ok(isContextOverflowError(
+    "This model's maximum context length is 8192 tokens, however you requested 30000 tokens"))
+  assert.ok(isContextOverflowError('Invalid request: context_length_exceeded'))
+  // Anthropic 形状
+  assert.ok(isContextOverflowError('prompt is too long: 1000000 tokens > 200000 maximum'))
+  // 自研网关的英文与中文措辞
+  assert.ok(isContextOverflowError('context window exceeded for this request'))
+  assert.ok(isContextOverflowError('input tokens exceed the model limit'))
+  assert.ok(isContextOverflowError('请求超出模型上下文长度限制'))
+})
+
+test('上下文超限识别：窄口径，别的 400 一律不得误判成可换家', () => {
+  assert.equal(isContextOverflowError(undefined), false)
+  assert.equal(isContextOverflowError(''), false)
+  // 只有 token / context 单词，没有超限短语
+  assert.equal(isContextOverflowError('usage of tokens is billed per request'), false)
+  assert.equal(isContextOverflowError('context is not a supported field'), false)
+  // 数量超限但不是上下文（消息条数 / 工具数）
+  assert.equal(isContextOverflowError('maximum number of messages is 128'), false)
+  assert.equal(isContextOverflowError("Invalid value for 'tools': maximum number of items is 128."), false)
+  // 额度/计费类超限不该被当成窗口不够
+  assert.equal(isContextOverflowError('quota exceeded, please recharge'), false)
+  assert.equal(isContextOverflowError('rate limit exceeded'), false)
+})
+
+test('转发层把上下文超限接进「换一家就能成」，普通 400 仍终止', () => {
+  assert.match(
+    forwarderSource,
+    /const capabilityMismatch = isToolOverflowError\(result\.error\)[\s\S]{0,600}?\|\| isContextOverflowError\(result\.error\)/,
+    'capabilityMismatch 必须包含上下文超限判据',
+  )
+  // 判据的接线位置只此一处：别的分支（isFailoverEligible / 状态码表）不许出现
+  // isContextOverflowError，否则就等于把 400 整体变成可换家（窄口径由上面的
+  // 路由级用例 proxy-routes-context-overflow 的 generic400 负控钉住）。
+  // 四个调用点都要接上：import + auto 换家分支 + probe 错误帧 + 最终状态映射。
+  // 少了 probe 那一支，流内浮现的超限会被算成 502 账号故障（2026-10-30 的老坑）。
+  assert.equal(forwarderSource.split('isContextOverflowError').length - 1, 4)
+  assert.match(forwarderSource, /\|\| isContextOverflowError\(probe\.message\)/)
+  assert.match(forwarderSource, /\|\| isContextOverflowError\(message\)/)
 })
 
 test('缺 reasoning 历史识别：命中用户报障的上游原文（2026-10-31 beam-free）', () => {
@@ -305,7 +349,7 @@ test('forwarder 的换家判据必须接上：超限 400 参与换家，普通 4
   // probe 错误帧映射：能力不匹配类 400 保持 400（换取「不计账号失败」的换家语义）
   assert.match(
     forwarderSource,
-    /isToolOverflowError\(probe\.message\) \|\| isMissingReasoningHistoryError\(probe\.message\)\s*\n\s*\? 400\s*\n\s*: 502/,
+    /isToolOverflowError\(probe\.message\)[\s\S]{0,160}isContextOverflowError\(probe\.message\)[\s\S]{0,60}\? 400\s*\n\s*: 502/,
     'probe error frames must keep capability-mismatch 400s at 400 so they fail over without account-failure penalty',
   )
   // 2026-11-02 对齐 new-api：400 仍终止（能力类例外由文案判据放行）；

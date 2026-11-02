@@ -485,8 +485,24 @@ interface RequestLogEntry {
   upstreamStatus?: number
   upstreamRequestId?: string
   attempts?: RequestAttemptTrace[]
+  /**
+   * 「这一轮的请求体量 vs 这一家的窗口」读数（与 `shared/types.ts` 同名接口镜像）。
+   * `inputTokensEstimate` 是估算值，绝不写进 `usage`，也不参与计费。
+   */
+  inputTokensEstimate?: number
+  modelContextWindow?: number
+  contextFit?: 'fits' | 'overflow' | 'unknown'
+  contextFitSource?: 'measured'
+  /**
+   * 「本轮请求体量 vs 这一家窗口」的读数，与 `shared/types.ts` 同形（这个镜像声明
+   * 必须一起改，否则渲染层看不到字段）。`inputTokensEstimate` 是估算，绝不进 usage。
+   */
+  inputTokensEstimate?: number
+  modelContextWindow?: number
+  contextFit?: 'fits' | 'overflow' | 'unknown'
+  /** 该 overflow 来自上游实测报错而不是判定时才有 */
+  contextFitSource?: 'measured'
   streamTrace?: RequestStreamTrace
-  captureBodies?: boolean
   /** Caller identified from User-Agent by the proxy; `other` keeps the raw product name */
   client?: { id: string; label: string; version?: string }
 }

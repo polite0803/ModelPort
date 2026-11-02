@@ -337,6 +337,23 @@ export function RequestLogDetail({ log, onClose }: RequestLogDetailProps) {
                     value={log.streamTrace?.upstreamRequestId || log.upstreamRequestId}
                   />
                 )}
+                {/* 「这一轮的请求体量 vs 这一家的窗口」：没公布窗口只说未知，不编数 */}
+                {log.inputTokensEstimate !== undefined && (
+                  <InfoItem
+                    label={t('logs.inputTokensEstimate')}
+                    value={log.modelContextWindow === undefined
+                      ? log.inputTokensEstimate.toLocaleString()
+                      : `${log.inputTokensEstimate.toLocaleString()} / ${log.modelContextWindow.toLocaleString()}`}
+                  />
+                )}
+                {log.contextFit !== undefined && (
+                  <InfoItem
+                    label={t('logs.contextFit')}
+                    value={log.contextFitSource === 'measured'
+                      ? `${t(`logs.contextFit${log.contextFit === 'fits' ? 'Fits' : log.contextFit === 'overflow' ? 'Overflow' : 'Unknown'}`)} · ${t('logs.contextFitMeasured')}`
+                      : t(`logs.contextFit${log.contextFit === 'fits' ? 'Fits' : log.contextFit === 'overflow' ? 'Overflow' : 'Unknown'}`)}
+                  />
+                )}
               </div>
 
               {log.attempts && log.attempts.length > 0 && (

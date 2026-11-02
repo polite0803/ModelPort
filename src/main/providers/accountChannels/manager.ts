@@ -648,8 +648,8 @@ class AccountChannelManager {
    *
    * ⚠️ 但 `model.list` **不带上下文窗口**，所以这里额外取一次 `/v1/models` 视图，
    * 把 `context_window` 合并进去（`attachContextWindows`）。不合并的后果不是"显示
-   * 少一格"，而是功能性的：`auto` 路由把未知窗口按 `UNANNOTATED_CONTEXT_FLOOR`
-   * （64K）算，于是任何超过 64K 的请求会把**全部十二个渠道**判成装不下而排除 ——
+   * 少一格"，而是功能性的：`auto` 路由把未公布的窗口按 `UNANNOTATED_CONTEXT_FLOOR`
+   * （64K）算，于是任何超过 64K 的请求会把**全部十二个渠道**判成装不下而排除（现在这条已改掉：未公布不参与广告也不淘汰，见 `autoRouting.ts::hardFilterFailure`）——
    * 而实测这些渠道正在服务 300K–500K+（TRAE 单请求 503,128 prompt、0 错误）。
    * 视图整轮只拉一次，12 个渠道共用，避免把同步变成 12 次往返。
    */

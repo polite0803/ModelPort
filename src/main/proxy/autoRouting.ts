@@ -540,8 +540,11 @@ const TIER_TARGET: Record<AutoComplexity, number> = {
 export type { AutoModelTier, CapabilityState, ModelCapabilityHint } from '../../shared/types'
 
 /**
- * 上下文窗口未知的模型按这个值做硬过滤（D2：维持既有 64000）。
- * 它只是一个保守上界，不是对真实窗口的声明，也不写进任何响应。
+ * 「没公布窗口」用的保守参考值，现在只服务一件事：请求已经长到接近它时，给未标注
+ * 的候选一点降权（`scoreCandidate` 里的 `uncertainContext`）。
+ *
+ * 它**不再**参与 `/v1/models` 的窗口广告，也**不再**用来淘汰候选 —— 2026-11-03
+ * 之前两处都把它当读数用，客户端因此收到过一个猜的 64000。
  */
 export const UNANNOTATED_CONTEXT_FLOOR = 64000
 
@@ -754,7 +757,8 @@ export interface CapabilityLayers {
  * 查询模型能力（分层版）。
  *
  * 未知是一等状态：vision 未知就不能接图片，tools 未知可以接但要扣分，
- * 上下文未知按 `UNANNOTATED_CONTEXT_FLOOR` 过滤。任何一层都不写默认值。
+ * 上下文未知**不参与淘汰也不参与广告**（没有公布上限不是超限的证据）。
+ * 任何一层都不写默认值。
  */
 export function resolveCapabilityDetail(
   providerId: string,
@@ -861,26 +865,43 @@ export function mergedHintOf(
   return Object.assign({}, ...layers)
 }
 
-function effectiveContextLimit(capability: ModelCapability): number {
-  return capability.contextTokens ?? UNANNOTATED_CONTEXT_FLOOR
+/**
+ * 放行判据用的窗口。**没有标注就是不知道**，返回 `undefined` = 不设上限。
+ *
+ * 原来这里写死 64K，等于把「没标注」当成「已知只有 64K」：一个 70K token 的请求
+ * 会把整池未标注的候选全筛光，用户看到的是 503「缺长上下文能力」，而实际上游
+ * （DeepSeek Flash 一档）报的是 128K。这违反本仓既有口径 —— 「没有公布上限」
+ * 不等于「没有额度」（AGENTS.md Quota/routing 同一条），也正好是 `/v1/models`
+ * 那条「省略而不是猜」的镜像面。真装不下时上游会回 context 类 400，那条现在
+ * 走换家（见 `failover.ts::isContextOverflowError`），代价是一次往返，不是一次误杀。
+ */
+function effectiveContextLimit(capability: ModelCapability): number | undefined {
+  return capability.contextTokens
 }
 
 /**
- * `auto` 在 `/v1/models` 上能承诺的窗口：候选里**最小**的那个。
+ * `auto` 在 `/v1/models` 上能承诺的窗口：候选里**最小的那个已标注值**。
  *
- * 客户端拿这个数决定发多少字节，所以它只能是下界：`auto` 会落到任意候选上，
+ * 客户端拿这个数决定发多少字节，所以它只能是下界：`auto` 会落到任意候选上,
  * 广告一个比某个候选更大的窗口，等于让它把请求发给那个装不下的候选。
- * 未标注的候选按 {@link UNANNOTATED_CONTEXT_FLOOR} 参与 —— 那正是
- * {@link effectiveContextLimit} 在放行判据里给它们的数，广告口径与放行口径同源。
- * 空池返回 `undefined`：没有候选就没有可说的，键必须省略而不是写个默认值。
+ * **只有已公布的窗口参与**：原先把「没标注」折算成
+ * {@link UNANNOTATED_CONTEXT_FLOOR}（64000）一起取最小，全池常常就报出那个猜的
+ * 数 —— Codex 按 `×0.95` 把压缩点定在 60800，一轮 45 turn 的会话在 260K 字符处
+ * 被客户端自动摘要，之后模型被告诫「前面那些请求都不算数」，这就是用户看到的
+ * 「没有可继续的上文 + 反复啰嗦」的来路。一家都没公布时省略这个键（没有证据就
+ * 不承诺），有公布时取其中最小的真数。
+ *
+ * 没标注的候选仍可能装不下：那种请求会拿到上游的 context 类 400，现在按
+ * 「这一家装不下、换下一家」处理（`failover.ts::isContextOverflowError`），
+ * 代价是一次生成前的往返，不是一次误杀，也不是一个假数。
  */
 export function advertisedContextFloorOf(
   windows: readonly (number | undefined)[]
 ): number | undefined {
-  if (windows.length === 0) return undefined
-  return Math.min(...windows.map(window =>
-    typeof window === 'number' && window > 0 ? window : UNANNOTATED_CONTEXT_FLOOR
-  ))
+  const evidenced = windows.filter((window): window is number =>
+    typeof window === 'number' && window > 0)
+  if (evidenced.length === 0) return undefined
+  return Math.min(...evidenced)
 }
 
 /** 硬过滤的失败原因；`undefined` 表示通过 */
@@ -899,7 +920,11 @@ export function hardFilterFailure(
 ): HardFilterFailure | undefined {
   if (profile.needsVision && capability.vision !== 'yes') return 'vision'
   if (profile.needsTools && capability.tools === 'no') return 'tools'
-  if (enforceContext && profile.estimatedTokens > effectiveContextLimit(capability)) return 'context'
+  // 窗口未知的候选不因上下文被淘汰（见 `effectiveContextLimit`）：没有公布上限
+  // 不是超限的证据。已标注且确实装不下的，仍然在这里就换掉，省一次上游往返。
+  if (!enforceContext) return undefined
+  const limit = effectiveContextLimit(capability)
+  if (limit !== undefined && profile.estimatedTokens > limit) return 'context'
   return undefined
 }
 
@@ -941,8 +966,15 @@ export function explainMissing(
   if (profile.needsTools && candidates.length > 0 && candidates.every(c => capabilityOf(c).tools === 'no')) {
     missing.push('tools')
   }
+  // 「装不下」只在**每个候选都公布过窗口且都小于本次请求**时才算缺的能力：只要有
+  // 一个候选没公布上限，我们就没有证据说它装不下（那条请求真发过去会拿到上游的
+  // context 类 400，那条现在换家 —— `failover.ts::isContextOverflowError`）。
+  // 把「没标注」说成「缺长上下文能力」，用户会去翻供应商，而缺的只是一条声明。
   if (candidates.length > 0
-    && candidates.every(c => profile.estimatedTokens > effectiveContextLimit(capabilityOf(c)))) {
+    && candidates.every(candidate => {
+      const limit = effectiveContextLimit(capabilityOf(candidate))
+      return limit !== undefined && profile.estimatedTokens > limit
+    })) {
     missing.push('context')
   }
   return missing
