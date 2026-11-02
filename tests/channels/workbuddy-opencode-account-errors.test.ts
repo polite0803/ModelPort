@@ -60,15 +60,20 @@ test('OpenCode：全部账号限流时返回 429，而不是登录失效', () =>
   )
 })
 
-test('Qoder：池里有账号但全不可用时不得回退默认凭据', () => {
+test('余额门控渠道：池里有账号但全不可用时不得回退默认凭据', () => {
+  for (const product of [
+    'LOBSTERAI', 'QODER', 'QODER_CN', 'TRAE', 'CLINE',
+    'LOOMY', 'RACCOON', 'MINIMAX', 'GEMINI', 'ZCODE',
+  ]) {
+    assert.match(
+      indexSource,
+      new RegExp(`throwIfPoolExhausted\\(${product}, modelId\\)`),
+      `${product} 的默认凭据回退必须先经过共用守卫`,
+    )
+  }
   assert.match(
     indexSource,
-    /pool\.listAccountsByProvider\(QODER\.id\)\.length > 0/,
-    '必须区分「池里没有条目」与「有条目但全不可用」',
-  )
-  assert.match(
-    indexSource,
-    /已停止默认凭据回退/,
+    /已停止回退默认单凭据/,
     '余额门控跳过的账号不能再被默认凭据回退用回来',
   )
 })

@@ -399,6 +399,36 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
     )
   }
 
+  /**
+   * 「池里一个候选都没有」时，先判限流，再**禁止回退默认单凭据**。
+   *
+   * 真实缺陷（2026-11-02 Qoder 国际版）：余额门控把 0 余额账号跳过 →
+   * `getAvailableAccount` 返回 null → resolveCredential 退到默认单凭据 →
+   * 又用同一个 0 余额账号发请求 → 上游排队到 60s 首块超时才失败。
+   * 同样的「池空即回退」写法存在于所有余额门控渠道；这里统一收口：
+   *
+   * - 全部账号限流 → 保留 429 + 解禁时刻（调用 throwIfAllAccountsRateLimited）；
+   * - 池里有账号但一个都不可用（余额 0 / 停用 / 凭据坏）→ 403 + 明确原因；
+   * - 池里**没有任何条目**才返回，让调用方走历史单凭据路径。
+   *
+   * 绝不因为门控/凭据问题把请求重新送回刚被跳过的账号，也不把它伪装成
+   * 「重新登录」。
+   */
+  const throwIfPoolExhausted = (
+    product: { id: string; displayName: string },
+    modelId?: string,
+  ): void => {
+    throwIfAllAccountsRateLimited(product, modelId)
+    if (pool.listAccountsByProvider(product.id).length === 0) return
+    throw new LlmError(
+      `${product.displayName}：账号池中的账号当前均不可用`
+      + '（余额为 0、已停用或凭据不可用），已停止回退默认单凭据；'
+      + '请在 Channel Pack 重测账号或充值（这不是重新登录能解决的问题）。',
+      'QUOTA_EXCEEDED',
+      { status: 403 },
+    )
+  }
+
   // ===== LobsterAI (有道龙虾) 服务 =====
 
   // 而是本地回调 + authCode 换 token（见 src/lobsterai-oauth.ts）。
@@ -418,6 +448,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
         reportLedgerAccount(LOBSTERAI.id, available.entry.id)
         return available.credential as LobsteraiCredential
       }
+      throwIfPoolExhausted(LOBSTERAI, modelId)
       const resolved = await ctx.credentials.resolve(credentialRef(LOBSTERAI.defaultCredentialRef))
       if (!resolved) return undefined
       try {
@@ -494,20 +525,9 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
       }
       // 回退到单凭据路径：没有账号条目可标记，清空以免标记到过期的 id。
       activeQoderAccountId.set(QODER.id, undefined)
-      throwIfAllAccountsRateLimited(QODER, modelId)
-      // 账号池里**有**条目但一个都不可用（余额为 0 / 凭据不可用 / 已停用）时，
-      // 不能再回退到默认单凭据：那会把余额门控刚跳过的账号又用回来，请求在
-      // 上游排队到 60s 超时（2026-11-02 实测：qoder-9a54823f 余额为 0，日志
-      // 已跳过，随后仍走默认凭据并挂死）。只有池里确实没有任何账号条目时才走
-      // 旧单凭据路径，供历史安装迁移。
-      if (pool.listAccountsByProvider(QODER.id).length > 0) {
-        throw new LlmError(
-          'qoder: 账号池中没有可用账号（余额为 0、凭据不可用或账号已停用），'
-          + '已停止默认凭据回退；请充值或在 Channel Pack 重测账号',
-          'QUOTA_EXCEEDED',
-          { status: 403 },
-        )
-      }
+      // 余额门控跳过 0 余额账号后，绝不能再用默认单凭据把它请回来；
+      // 共用守卫只在池里确实没有任何条目时放行历史单凭据路径。
+      throwIfPoolExhausted(QODER, modelId)
       const resolved = await ctx.credentials.resolve(credentialRef(QODER.defaultCredentialRef))
       if (!resolved) return undefined
       try {
@@ -584,7 +604,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
         return available.credential as QoderCredential
       }
       activeQoderAccountId.set(QODER_CN.id, undefined)
-      throwIfAllAccountsRateLimited(QODER_CN, modelId)
+      throwIfPoolExhausted(QODER_CN, modelId)
       const resolved = await ctx.credentials.resolve(credentialRef(QODER_CN.defaultCredentialRef))
       if (!resolved) return undefined
       try {
@@ -650,6 +670,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
         reportLedgerAccount(TRAE.id, available.entry.id)
         return available.credential as TraeCredential
       }
+      throwIfPoolExhausted(TRAE, modelId)
       const resolved = await ctx.credentials.resolve(credentialRef(TRAE.defaultCredentialRef))
       if (!resolved) return undefined
       try {
@@ -710,7 +731,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
       // `cline: no usable credential; log in first` —— 凭据明明在、账号也登录着，
       // 用户却被指去重新登录，方向完全错。故必须在退到单凭据 ref **之前**
       // 先把「其实是限流，预计 X 后解禁」说清楚。
-      throwIfAllAccountsRateLimited(CLINE, modelId)
+      throwIfPoolExhausted(CLINE, modelId)
       const resolved = await ctx.credentials.resolve(credentialRef(CLINE.defaultCredentialRef))
       if (!resolved) return undefined
       try {
@@ -852,8 +873,8 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
         }
       }
 
-      throwIfAllAccountsRateLimited(LOOMY, modelId)
-      // 兜底：账号池为空/全部不可解析时，退回单凭据 ref。
+      throwIfPoolExhausted(LOOMY, modelId)
+      // 兜底：账号池为空时才退回单凭据 ref。
       const resolved = await ctx.credentials.resolve(credentialRef(LOOMY.defaultCredentialRef))
       if (!resolved) return undefined
       try {
@@ -941,7 +962,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
         reportLedgerAccount(RACCOON.id, available.entry.id)
         return available.credential as unknown as RaccoonCredential
       }
-      throwIfAllAccountsRateLimited(RACCOON, modelId)
+      throwIfPoolExhausted(RACCOON, modelId)
       const resolved = await ctx.credentials.resolve(credentialRef(RACCOON.defaultCredentialRef))
       if (!resolved) return undefined
       try {
@@ -1009,6 +1030,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
         reportLedgerAccount(MINIMAX.id, available.entry.id)
         return available.credential as unknown as MinimaxCredential
       }
+      throwIfPoolExhausted(MINIMAX, modelId)
       const resolved = await ctx.credentials.resolve(credentialRef(MINIMAX.defaultCredentialRef))
       if (!resolved) return undefined
       try {
@@ -1127,6 +1149,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
         reportLedgerAccount(GEMINI.id, available.entry.id)
         return available.credential as unknown as GeminiCredential
       }
+      throwIfPoolExhausted(GEMINI, modelId)
       const resolved = await ctx.credentials.resolve(credentialRef(GEMINI.defaultCredentialRef))
       if (!resolved) return undefined
       try {
@@ -1443,6 +1466,7 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
      * ⚠ 同时**清空**记录：没有账号条目可标记，留着旧 id 会误伤一个无辜账号。
      */
     activeZcodeAccountId.set(ZCODE.id, undefined)
+    throwIfPoolExhausted(ZCODE, modelId)
     return await zcode.current()
   },
   refresh: async () => {
