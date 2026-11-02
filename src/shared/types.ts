@@ -1097,6 +1097,12 @@ export interface RequestLogEntry {
      */
     route?: string
     /**
+     * 粘性键的来源：客户端给的会话标识（`prompt_cache_key` / `user` / `session_id`）
+     * 还是内容指纹。会话中途换家的两种解释靠这一格分开 —— `content-hash` 时很可能
+     * 是客户端改了历史（自动摘要改写首条用户消息），不是打分把候选换了顺序。
+     */
+    sessionKeySource?: 'client-session' | 'content-hash'
+    /**
      * Why each skipped candidate was skipped, in attempt order. The chain logs the
      * winner only, so without this a candidate that fails every time (a dead
      * channel, a catalogue that rejects the model) is invisible: `attempts: 4` says

@@ -41,6 +41,7 @@ import {
   contractNeeds,
   explainMissing,
   conversationKey,
+  hashString,
   hardFilterFailure,
   mergedHintOf,
   profileRequest,
@@ -58,6 +59,7 @@ import { AUTO_RECOVERABLE_EXTRA_ATTEMPTS } from './failover.ts'
 import { aggregateContextWindow } from './modelCapabilities.ts'
 import { aggregateThirdPartyHint } from '../../shared/aggregateCapabilities.ts'
 import { costBucketOf, type CostBucket } from '../../shared/channels.ts'
+import type { ClientSessionKey } from '../../shared/clientSessionKey.ts'
 import { aggregateCostOf, costBucketOfAggregateClass, type AggregateCostClass } from '../../shared/aggregateCost.ts'
 import { getAggregateEntry } from '../providers/aggregate/registry.ts'
 
@@ -94,6 +96,12 @@ export interface AutoRouteDecision {
   contextWindow?: number
   /** 会话指纹，成功后可交给 rememberRoute 固化本次选择 */
   conversationKey?: string
+  /**
+   * 上面这个键是客户端给的会话标识（`client-session`）还是内容指纹（`content-hash`）。
+   * 请求日志要能区分：摘要改历史导致的中途换家，只有在这一格是 `content-hash` 时
+   * 才解释得通。
+   */
+  stickyKeySource: 'client-session' | 'content-hash'
   /**
    * 本次决策依据的路由。调用方没传 route 时为 undefined —— 那走的是 legacy
    * `config.autoRouting`，响应头与日志里的路由名仍然是 `auto`。
@@ -544,7 +552,13 @@ class AutoRouter {
     request: ChatCompletionRequest,
     strategy: AutoRoutingStrategy = 'round-robin',
     preferOverride?: AutoPreference,
-    route?: ModelRoute
+    route?: ModelRoute,
+    /**
+     * 入向协议读到的客户端会话标识（`shared/clientSessionKey.ts`）。给了它就用它当
+     * 粘性键 —— agent 客户端自动摘要会改写首条用户消息，内容指纹随之改变，于是同一段
+     * 会话中途被派到别家（`conversationKey` 的口径见 `autoRouting.ts`）。
+     */
+    sessionKey?: ClientSessionKey
   ): AutoRouteDecision {
     const profile = profileRequest(request)
     const now = Date.now()
@@ -598,7 +612,13 @@ class AutoRouter {
     }
 
     const seed = this.seed++
-    const key = conversationKey(request)
+    // 粘性键优先用客户端给的会话标识：agent 客户端自动摘要会改写首条用户消息，内容
+    // 指纹随之改变，同一段会话就会被派到别家。没有标识时逐字沿用内容指纹（老行为）。
+    const stickyKeySource: 'client-session' | 'content-hash' =
+      sessionKey === undefined ? 'content-hash' : 'client-session'
+    const key = sessionKey !== undefined
+      ? `session:${hashString(sessionKey.value)}`
+      : conversationKey(request)
     const stickyKey = key ? stickyMapKey(routeName, key) : ''
     let sticky: StickyHint | undefined
     if (stickyKey && stickyMinutes > 0) {
@@ -664,6 +684,7 @@ class AutoRouter {
       // 账号故障类（5xx/网络）仍然只消耗基础上限家数（分级收口在换家循环里）。
       candidates: candidates.slice(0, maxAttempts + AUTO_RECOVERABLE_EXTRA_ATTEMPTS),
       conversationKey: key,
+      stickyKeySource,
       degraded,
       skipped: [...skipped],
       missing,

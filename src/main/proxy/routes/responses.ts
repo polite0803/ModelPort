@@ -35,6 +35,7 @@ import {
   readUpstreamError,
   setSseHeaders,
 } from '../utils/inboundLoopback'
+import { clientSessionKey } from '../../../shared/clientSessionKey.ts'
 import { mapForwardFailure, withRequestId } from '../errorMapping'
 import { startSseHeartbeat } from '../utils/sseHeartbeat'
 import {
@@ -143,6 +144,14 @@ router.post('/responses', async (ctx: Context) => {
         xApiKey: ctx.get('x-api-key'),
         userAgent: ctx.get('User-Agent'),
         trace: ctx.get('x-modelport-trace'),
+        // 客户端给的会话标识（Responses 的 prompt_cache_key / user，Anthropic 的
+        // metadata.user_id）—— chat 侧拿它当粘性键，摘要改历史就不会中途换家
+        ...(() => {
+          const session = clientSessionKey({ body, headers: ctx.headers })
+          return session === undefined
+            ? {}
+            : { sessionId: session.value, sessionSource: session.source }
+        })(),
       }),
       body: JSON.stringify(chatRequest),
       signal: abort.signal,

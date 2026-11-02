@@ -25,6 +25,7 @@ import assert from 'node:assert/strict'
 import { bootstrapStore, loadModule } from './harness.mjs'
 import type { ChatCompletionRequest } from '../../src/main/proxy/types.ts'
 import type { ModelRoute } from '../../src/shared/types.ts'
+import type { ClientSessionKey } from '../../src/shared/clientSessionKey.ts'
 
 const harness = await bootstrapStore({
   initialData: {
@@ -98,8 +99,12 @@ const REQUEST = {
   messages: [{ role: 'user', content: 'one line question' }],
 } as ChatCompletionRequest
 
-const select = (route?: ModelRoute, request: ChatCompletionRequest = REQUEST, preferOverride?: string) =>
-  autoRouter.select(request, 'round-robin', preferOverride, route)
+const select = (
+  route?: ModelRoute,
+  request: ChatCompletionRequest = REQUEST,
+  preferOverride?: string,
+  session?: ClientSessionKey
+) => autoRouter.select(request, 'round-robin', preferOverride, route, session)
 
 /** 参与决策的模型名（去重后排序）：池语义的断言只关心成员，不关心同名的多账号副本。 */
 const modelsIn = (decision: { candidates: Array<{ displayName: string }> }) =>
@@ -449,6 +454,34 @@ test('E：粘性按对话内容分键 —— 换一段对话不受影响；没�
     anonymous.candidates[0], route)
   assert.equal(select(route).candidates[0].displayName, 'Beta-Lite',
     '没有键的 rememberRoute 是 no-op，不得把已有记录冲掉')
+})
+
+test('E：客户端给了会话标识时，粘性按会话不按内容 —— 自动摘要改写历史也不换家', () => {
+  const route = makeRoute()
+  const session = { value: 'thread-42', source: 'prompt_cache_key' } as const
+
+  const fresh = select(route, undefined, undefined, session)
+  assert.equal(fresh.stickyKeySource, 'client-session')
+  assert.equal(fresh.reason, 'score')
+  autoRouter.rememberRoute(fresh.conversationKey,
+    fresh.candidates.find(candidate => candidate.displayName === 'Beta-Lite')!, route)
+
+  // 摘要后的历史：首条用户消息整段变了（Codex 撞到上下文预算时就是这样）
+  const compacted = {
+    model: 'auto',
+    messages: [{ role: 'user', content: '交接摘要：前面完成了 A 与 B，接下来继续做 C' }],
+  } as ChatCompletionRequest
+
+  const again = select(route, compacted, undefined, session)
+  assert.equal(again.reason, 'sticky', '同一会话标识必须认作同一段会话')
+  assert.equal(again.candidates[0].displayName, 'Beta-Lite')
+
+  // 对照：不带会话标识时照旧按内容分键（既有行为一格不动）
+  const withoutSession = select(route, compacted)
+  assert.notEqual(withoutSession.conversationKey, fresh.conversationKey,
+    '内容指纹确实变了 —— 这正是原来丢粘性的原因')
+  assert.notEqual(withoutSession.reason, 'sticky')
+  assert.equal(withoutSession.stickyKeySource, 'content-hash')
 })
 
 // ------------------------------------------------- C：候选池预览（与 select 同一条管线）

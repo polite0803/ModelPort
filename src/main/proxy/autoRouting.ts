@@ -985,7 +985,8 @@ function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value))
 }
 
-function hashString(value: string): number {
+/** FNV-1a；粘性键与会话标识都只以它的结果落地，客户端原值不进日志 */
+export function hashString(value: string): number {
   let hash = 2166136261
   for (let i = 0; i < value.length; i++) {
     hash ^= value.charCodeAt(i)

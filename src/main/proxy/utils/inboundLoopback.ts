@@ -11,7 +11,7 @@
 import type { AppConfig } from '../../../shared/types'
 import { pickUpstreamErrorDetails } from '../upstreamErrorBody.ts'
 import type { UpstreamErrorDetails } from '../types.ts'
-import { toHeaderValue } from './headerValue'
+import { toHeaderValue } from './headerValue.ts'
 
 /**
  * 网关可能被配置成监听 `0.0.0.0`（对外提供服务），此时回环必须显式走
@@ -38,6 +38,12 @@ export function loopbackRequestHeaders(input: {
   userAgent?: string
   /** Single-request diagnostic trace flag; forwarded so the chat row captures bodies. */
   trace?: string
+  /**
+   * 入向协议（Responses / Anthropic）读到的客户端会话标识，透给 chat 侧做粘性键，
+   * 免得摘要改写历史后被当成另一段会话（`shared/clientSessionKey.ts`）。
+   */
+  sessionId?: string
+  sessionSource?: string
 }): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   const authorization = (input.authorization ?? '').trim()
@@ -48,6 +54,10 @@ export function loopbackRequestHeaders(input: {
   if (userAgent !== '') headers['User-Agent'] = userAgent
   const trace = toHeaderValue(input.trace ?? '').trim()
   if (trace !== '') headers['X-ModelPort-Trace'] = trace
+  const sessionId = toHeaderValue(input.sessionId ?? '').trim()
+  if (sessionId !== '') headers['X-ModelPort-Session-Id'] = sessionId
+  const sessionSource = toHeaderValue(input.sessionSource ?? '').trim()
+  if (sessionSource !== '') headers['X-ModelPort-Session-Source'] = sessionSource
   return headers
 }
 

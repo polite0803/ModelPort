@@ -47,6 +47,7 @@ import { clientHeaderValue, identifyClientByUserAgent } from '../../../shared/cl
 import { takeCompressionReport } from '../compression'
 import { takeDuplication } from '../compression/duplication.ts'
 import { takeConversationTurn } from '../compression/survivorship.ts'
+import { clientSessionKey } from '../../../shared/clientSessionKey.ts'
 import { 
   isAnthropicToolFormat,
   transformResponseToAnthropic,
@@ -89,6 +90,8 @@ function autoLogRecord(
     reason: decision.reason,
     attempts,
     candidates: decision.candidates.slice(0, 5).map(candidate => candidate.displayName),
+    // 粘性键来自客户端会话标识还是内容指纹：中途换家的两种解释靠这一格分开
+    sessionKeySource: decision.stickyKeySource,
     ...(decision.degraded.length > 0 ? { degraded: decision.degraded } : {}),
     // 第一家就命中时数组为空 —— 空数组不写，日志里没成功的请求不会出现空字段。
     ...(failures.length > 0 ? { failures } : {}),
@@ -437,8 +440,13 @@ router.post('/completions', async (ctx: Context) => {
   // 共用一个 code 装两种语义，已删；`route ?? legacy` 的兜底只在 `routable` 时被调用，
   // 因此删除 `auto` 后不可能回退去读 legacy 全局 `autoRouting`。
   const route = routeOutcome.kind === 'routable' ? routeOutcome.route : undefined
+  // 粘性用的会话标识：入向协议（Responses / Anthropic）把客户端 body 里读到的值经回环
+  // 头带过来；直接打 `/v1/chat/completions` 的客户端就在 body / `session-id` 头里现读。
+  // 两者都没有就是 undefined，粘性照旧用内容指纹（`shared/clientSessionKey.ts` 说明为什么
+  // 需要它，以及为什么这条链只有一份判断）。
+  const clientSession = clientSessionKey({ body: request, headers: ctx.headers })
   const autoDecision = route !== undefined
-    ? autoRouter.select(request, config.loadBalanceStrategy, autoPreferenceFromHeader(ctx), route)
+    ? autoRouter.select(request, config.loadBalanceStrategy, autoPreferenceFromHeader(ctx), route, clientSession)
     : null
 
   // 限流预检：worker 内部账号池的模型级限流（loomy spark-x2.6 当日额度用尽、
