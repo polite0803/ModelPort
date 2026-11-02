@@ -6,12 +6,19 @@ on:
       - 'v*.*.*'
       - 'v*.*.*-*'
 
+# 同一个标签不叠两次发布：`cancel-in-progress: false` 是故意的 —— 半途取消正在上传
+# 产物的运行，正是 Releases 留下半套 draft 的来源；第二次推送会排在后面而不是打断它。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # 发布前必须先过门禁。原来 tag 一推就直接 `electron-builder --publish=always`，
   # 也就是一个没跑过类型检查与测试的构建可以被发到 Releases —— CI 的结果完全不参与发布判定。
   gate:
     name: Gate before publish (build + typecheck + test)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
 
@@ -43,6 +50,8 @@ jobs:
   release:
     needs: gate
     runs-on: ${{ matrix.os }}
+    # macOS runner 是这里最稀缺的一档：给它一个明确的上限，拿不到就红，不要静默挂着
+    timeout-minutes: 45
     permissions:
       contents: write
       # `actions: write` 对本流程没有任何必要（不触发也不读取别的 workflow），

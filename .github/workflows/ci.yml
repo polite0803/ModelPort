@@ -4,14 +4,20 @@ on:
   push:
     branches:
       - '**'
-    tags:
-      - '**'
+    # tag 不触发本流程：`npm version` 造的提交与它的标签是**同一个 commit**，双触发
+    # 会让同一次提交跑两遍三平台门禁；而 CI 的矩阵里也有 macos-latest，一次标签推送
+    # 于是排起 4 个 macOS 任务（2×CI + 2×Release），Release 的 macOS 构建反而抢不到
+    # runner，停在 queued 直到被取消，Releases 只剩半套产物。标签的门禁由
+    # release.yml 的 `gate` 负责，口径同为 `npm run gate`。
   pull_request:
 
 jobs:
   gate:
     name: Gate (build + typecheck + test)
     runs-on: ${{ matrix.os }}
+    # 没有超时的排队任务只会一直挂着，最后被人手动取消 —— 那读起来像「CI 总是不对」,
+    # 而不是「runner 拿不到」。失败要看得见。
+    timeout-minutes: 30
     permissions:
       contents: read
 
