@@ -12,6 +12,7 @@ import { PassThrough } from 'node:stream'
 import axios from 'axios'
 import type { Account, Provider } from '../../store/types'
 import { DEFAULT_MAX_OUTPUT_TOKENS } from '../utils/outputCap.ts'
+import { readUpstreamErrorData } from '../upstreamErrorBody.ts'
 import type {
   ChatCompletionMessageToolCall,
   ChatCompletionRequest,
@@ -110,7 +111,7 @@ export class AnthropicAdapter {
         return {
           success: false,
           status: response.status,
-          error: extractErrorMessage(response.data, response.status),
+          error: extractErrorMessage(await readUpstreamErrorData(response.data), response.status),
           latency: Date.now() - startTime,
         }
       }

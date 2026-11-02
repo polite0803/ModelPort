@@ -22,6 +22,7 @@ import type { ToolCallingTransformResult } from './toolCalling/types'
 import { sessionManager } from './sessionManager'
 import { loadBalancer } from './loadbalancer'
 import { autoRouter, type AutoCandidate } from './autoRouter'
+import { pickUpstreamErrorMessage, readUpstreamErrorData } from './upstreamErrorBody'
 
 /** 一个可尝试的目标：与 AutoCandidate 同形，供裸名跨家链复用同一个切换循环。 */
 export interface ChainCandidate {
@@ -894,7 +895,7 @@ export class RequestForwarder {
         return {
           success: false,
           status: response.status,
-          error: this.extractErrorMessage(response),
+          error: await this.extractErrorMessage(response),
           latency,
         }
       }
@@ -986,7 +987,7 @@ export class RequestForwarder {
         return {
           success: false,
           status: response.status,
-          error: this.extractErrorMessage(response),
+          error: await this.extractErrorMessage(response),
           latency,
         }
       }
@@ -1264,33 +1265,13 @@ export class RequestForwarder {
 
   /**
    * Extract Error Message
+   *
+   * 流式请求的 4xx 体是一条流，必须先读成文本再查键：不读的话上游那句真实原因
+   * 一个字节都留不下（机制与实测见 `upstreamErrorBody.ts` 的文档块）。
    */
-  private extractErrorMessage(response: AxiosResponse): string {
-    if (response.data) {
-      if (typeof response.data === 'string') {
-        return response.data
-      }
-
-      if (response.data.error?.message) {
-        return response.data.error.message
-      }
-
-      if (response.data.message) {
-        return response.data.message
-      }
-
-      if (response.data.msg) {
-        return response.data.msg
-      }
-
-      try {
-        return JSON.stringify(response.data)
-      } catch {
-        return 'Unknown error'
-      }
-    }
-
-    return `HTTP ${response.status}`
+  private async extractErrorMessage(response: AxiosResponse): Promise<string> {
+    const data = await readUpstreamErrorData(response.data)
+    return pickUpstreamErrorMessage(data, response.status)
   }
 
   /**
@@ -1330,7 +1311,7 @@ export class RequestForwarder {
         return {
           success: false,
           status: response.status,
-          error: this.extractErrorMessage(response),
+          error: await this.extractErrorMessage(response),
           latency,
         }
       }

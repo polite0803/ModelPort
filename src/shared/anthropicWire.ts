@@ -176,7 +176,12 @@ export interface AnthropicToChatResult {
 
 /**
  * 请求体里被翻译层读取的键。其余键（`thinking`、`top_k`、`service_tier`、
- * `mcp_servers`、`container` 这些）一律进 `dropped`，不猜语义、也不静默吞掉。
+ * `mcp_servers`、`container`、`metadata` 这些）一律进 `dropped`，不猜语义、也不静默吞掉。
+ *
+ * `metadata` 整格不搬是实测逼出来的：客户端把会话身份塞在 `metadata.user_id`，
+ * 照 chat 的形状写成 `user` 透传出去，OVH 那家直接 400
+ * （`feature 'extra arguments: {"user":…}' is not currently supported`），
+ * 而这一格对上游本来就没有用处 —— 报名比转出去更诚实。
  */
 const TRANSLATED_BODY_KEYS: ReadonlySet<string> = new Set([
   'model',
@@ -189,7 +194,6 @@ const TRANSLATED_BODY_KEYS: ReadonlySet<string> = new Set([
   'stream',
   'tools',
   'tool_choice',
-  'metadata',
 ])
 
 /**
@@ -355,10 +359,6 @@ export function anthropicToChatRequest(body: unknown, options: AnthropicToChatOp
     // 静默当「没要求」会让它以为工具被禁了，所以这里也进清单。
     dropped.push('body:tool_choice')
   }
-
-  const metadata = asRecord(source.metadata)
-  const userId = metadata ? stringOf(metadata.user_id) : ''
-  if (userId !== '') request.user = userId
 
   return { request, dropped }
 }

@@ -192,8 +192,8 @@ test('tools 与 tool_choice 的形态一一对应，input_schema 缺失补空对
   }
 })
 
-test('采样参数、stop_sequences 与 metadata.user_id 直通到对应字段', () => {
-  const { request } = anthropicToChatRequest(
+test('采样参数与 stop_sequences 直通到对应字段；metadata 整格报名而不透传', () => {
+  const { request, dropped } = anthropicToChatRequest(
     {
       model: 'claude-x',
       messages: [{ role: 'user', content: 'go' }],
@@ -209,9 +209,12 @@ test('采样参数、stop_sequences 与 metadata.user_id 直通到对应字段',
   assert.equal(request.temperature, 0.2)
   assert.equal(request.top_p, 0.9)
   assert.deepEqual(request.stop, ['END'])
-  assert.equal(request.user, 'u-1')
   // 模型名用解析后的网关名，不是客户端发来的 anthropic 名。
   assert.equal(request.model, 'auto')
+  // `metadata.user_id` 是客户端自己的会话身份串（device_id / session_id），对上游没有
+  // 用处；透传成 chat 的 `user` 会让 OVH 这类家整笔 400（2026-11-02 实测），所以既不搬、也不静默。
+  assert.equal(request.user, undefined, '不得把客户端的会话身份透给上游')
+  assert.deepEqual(dropped, ['body:metadata'])
 })
 
 test('流式必须主动要 usage，否则客户端的上下文余量永远算错', () => {
@@ -264,7 +267,7 @@ test('请求体里没搬运的键逐个报名，搬运了的键一个都不报',
     },
     { model: 'auto', stream: false },
   )
-  assert.deepEqual(dropped, ['body:thinking', 'body:top_k', 'body:service_tier', 'body:mcp_servers', 'body:container'])
+  assert.deepEqual(dropped, ['body:thinking', 'body:top_k', 'body:service_tier', 'body:mcp_servers', 'body:container', 'body:metadata'])
 })
 
 test('一条全认识的请求 dropped 是空数组（证明上面几条不是恒真）', () => {
@@ -280,7 +283,6 @@ test('一条全认识的请求 dropped 是空数组（证明上面几条不是�
       stream: true,
       tools: [{ name: 'a', input_schema: { type: 'object' } }],
       tool_choice: { type: 'auto' },
-      metadata: { user_id: 'u-1' },
     },
     { model: 'auto', stream: true },
   )
