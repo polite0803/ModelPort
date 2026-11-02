@@ -196,7 +196,11 @@ router.post('/responses', async (ctx: Context) => {
     // 回显客户端发来的模型名：它按这个名字做上下文预算与计费，换成网关内部
     // 名字（比如客户端点名路由、实际跑的是某个真模型）会被读成「模型被换了」。
     ctx.set('Content-Type', 'application/json')
-    ctx.body = chatResponseToResponseBody(payload, { model: requestedModel, fallbackId: requestId })
+    ctx.body = chatResponseToResponseBody(payload, {
+      model: requestedModel,
+      fallbackId: requestId,
+      clientPlatform: process.platform,
+    })
     return
   }
 
@@ -207,7 +211,11 @@ router.post('/responses', async (ctx: Context) => {
 
   // Responses 的 `usage` 在没报到时就是 `null`（本仓不变量），没有 anthropic 那个
   // 「`message_start` 必须给数字」的坑，所以这里不需要估算，也不需要估算声明头。
-  const translator = createResponsesStreamTranslator({ model: requestedModel, fallbackId: requestId })
+  const translator = createResponsesStreamTranslator({
+    model: requestedModel,
+    fallbackId: requestId,
+    clientPlatform: process.platform,
+  })
   const out = new PassThrough()
 
   void (async () => {

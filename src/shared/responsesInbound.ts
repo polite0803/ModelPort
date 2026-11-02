@@ -17,6 +17,8 @@
  *    `responsesUnsupportedParams`）。静默接受会让客户端以为后面还取得回来。
  */
 
+import { sanitizeClientToolArguments } from './clientToolArguments.ts'
+
 type Payload = Record<string, unknown>
 
 function asRecord(value: unknown): Payload | null {
@@ -356,6 +358,8 @@ export interface ChatToResponsesOptions {
   model: string
   /** 本路由的 request id，上游没给 id 时用它兜底。 */
   fallbackId: string
+  /** 客户端执行工具的平台；用于校正 exec_command 的 shell/workdir。缺省不校正。 */
+  clientPlatform?: string
 }
 
 /**
@@ -394,13 +398,18 @@ export function chatResponseToResponseBody(payload: unknown, options: ChatToResp
     if (!call) return
     const fn = asRecord(call.function) ?? {}
     const callId = stringOf(call.id)
+    const toolName = stringOf(fn.name)
     output.push({
       id: callId !== '' ? `fc_${callId.replace(/^call_/, '')}` : `fc_${position}`,
       type: 'function_call',
       status: 'completed',
       call_id: callId,
-      name: stringOf(fn.name),
-      arguments: typeof fn.arguments === 'string' ? fn.arguments : '{}',
+      name: toolName,
+      arguments: sanitizeClientToolArguments(
+        toolName,
+        typeof fn.arguments === 'string' ? fn.arguments : '{}',
+        options.clientPlatform,
+      ),
     })
   })
 
@@ -517,7 +526,7 @@ export function createResponsesStreamTranslator(options: ChatToResponsesOptions)
           status: 'completed',
           call_id: item.callId ?? '',
           name: item.name ?? '',
-          arguments: item.text,
+          arguments: sanitizeClientToolArguments(item.name ?? '', item.text, options.clientPlatform),
         }
       : {
           id: item.itemId,
@@ -553,7 +562,7 @@ export function createResponsesStreamTranslator(options: ChatToResponsesOptions)
         output_index: item.outputIndex,
         call_id: item.callId ?? '',
         name: item.name ?? '',
-        arguments: item.text,
+        arguments: sanitizeClientToolArguments(item.name ?? '', item.text, options.clientPlatform),
       }))
     }
 
