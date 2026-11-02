@@ -89,6 +89,7 @@ import {
   isFailoverEligibleStatus,
   isForcedToolChoiceUnsupported,
   isMissingReasoningHistoryError,
+  isOpaqueAggregateBadRequest,
   isRecoverableChannelFailure,
   isToolOverflowError,
   probeSseHead,
@@ -583,12 +584,20 @@ export class RequestForwarder {
         || isMissingReasoningHistoryError(result.error)
         || isChannelModelUnavailableError(result.error)
         || isForcedToolChoiceUnsupported(result.error)
+      // 聚合条目的不透明 400（空错误体 / `Unknown error`）同样是「这一家供不了」，
+      // 但账号本身健康：换下一家，不计账号故障、不进冷却。
+      const opaqueAggregateBadRequest = isOpaqueAggregateBadRequest(
+        result.status,
+        result.error,
+        candidate.provider.type,
+      )
       // 无论后面走哪个分支，这次尝试都已经发生且没有成功 —— 先记账（含 fatal：
       // 它同时是客户端拿到的错误，日志里两处都能看到，宁重不漏）。
       failures.push(describeAttemptFailure({
         candidate: candidate.displayName,
         error: result.error,
         status: result.status,
+        providerType: candidate.provider.type,
       }))
       if (isChannelHumanRequiredFailure(result.error)) {
         // 「这一家当前供不了，且要人或时间恢复」：凭据失效（`no usable credential`
@@ -604,23 +613,25 @@ export class RequestForwarder {
       }
 
       if (!capabilityMismatch) {
-        if (!this.isFailoverEligible(result.status)) {
+        if (!this.isFailoverEligible(result.status) && !opaqueAggregateBadRequest) {
           return finish()
         }
 
         // 分级：429 / 排队 / 额度类失败是「渠道暂时不可服务」，请求在生成之前
         // 就被拒绝（几乎不烧积分），换下一家值得多试 —— 不占账号故障类的上限；
         // 5xx / 网络错误才是账号故障，累计撞满基础上限后由循环头的分级检查收口。
-        if (result.status !== 429 && !isRecoverableChannelFailure(result.error)) {
+        if (result.status !== 429 && !opaqueAggregateBadRequest && !isRecoverableChannelFailure(result.error)) {
           accountFailures += 1
         }
 
         // 429 的冷却已由 forwardChatCompletion 记进 (账号, 模型) 档，这里只补记
         // 5xx / 网络错误那类账号级故障
-        if (result.status !== 429) {
+        if (result.status !== 429 && !opaqueAggregateBadRequest) {
           autoRouter.markAccountCooldown(candidate.account.id, result.status, candidate.actualModel)
         }
-        loadBalancer.markAccountFailed(candidate.account.id)
+        if (!opaqueAggregateBadRequest) {
+          loadBalancer.markAccountFailed(candidate.account.id)
+        }
       }
     }
 

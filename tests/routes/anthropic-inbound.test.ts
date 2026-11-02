@@ -232,6 +232,61 @@ test('modelMap 与 defaultModel 是读得到的设置，解析顺序按四类来
   )
 })
 
+test('defaultModel / modelMap 不落到停用或断引用路由，回落到可路由项', () => {
+  const route = (name: string, overrides: Payload = {}) => ({
+    name,
+    enabled: true,
+    strategy: 'round-robin',
+    prefer: 'balanced',
+    maxAttempts: 2,
+    stickyMinutes: 0,
+    poolStrategies: [],
+    pinModels: [],
+    includeModels: [],
+    excludeModels: [],
+    ...overrides,
+  })
+  const live = sm.getConfig()
+  const routes = {
+    off: route('off', { enabled: false }),
+    broken: route('broken', { basedOnRoute: 'missing' }),
+    on: route('on'),
+  }
+
+  // defaultModel 指向停用路由：不能解析成功（否则内层 chat 立刻 404）。
+  assert.deepEqual(
+    resolveAnthropicModel('claude-x', {
+      ...live,
+      routes,
+      modelMappings: {},
+      anthropicInbound: { defaultModel: 'off' },
+    } as never),
+    { model: 'on', source: 'fallback' },
+  )
+
+  // modelMap 指向断引用路由：跳过它，继续走 defaultModel。
+  assert.deepEqual(
+    resolveAnthropicModel('claude-x', {
+      ...live,
+      routes,
+      modelMappings: {},
+      anthropicInbound: { modelMap: { 'claude-': 'broken' }, defaultModel: 'on' },
+    } as never),
+    { model: 'on', source: 'default' },
+  )
+
+  // fallback 也只从 routable 路由里选：on 之外全不可路由时仍能拿到 on。
+  assert.deepEqual(
+    resolveAnthropicModel('claude-x', {
+      ...live,
+      routes,
+      modelMappings: {},
+      anthropicInbound: {},
+    } as never),
+    { model: 'on', source: 'fallback' },
+  )
+})
+
 test('modelMap 经设置写入后真的影响路由', async () => {
   sm.updateConfig({ anthropicInbound: { modelMap: { 'claude-': 'Test-Model' } } })
 

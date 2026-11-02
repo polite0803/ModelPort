@@ -10,6 +10,7 @@ import { ChatCompletionRequest, ChatCompletionResponse, ProxyContext } from '../
 import type { AccountSelection, ForwardResult } from '../types'
 import { loadBalancer } from '../loadbalancer'
 import { requestForwarder, isFailoverEligibleStatus } from '../forwarder'
+import { autoExhaustedResponse } from '../failover'
 import { streamHandler } from '../stream'
 import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
@@ -679,7 +680,14 @@ router.post('/completions', async (ctx: Context) => {
         loadBalancer.markAccountFailed(account.id)
       }
 
-      const mapped = mapUpstreamError(result.status, result.error)
+      // 自动路由的 404 是「最后一个候选供不了」，不是「这条路由/模型不存在」。
+      // 原样透传会让 Anthropic 客户端（Claude）把候选耗尽当成模型被删除，
+      // 后续整段会话不再请求；路由确实存在时统一收口成可重试的 503。
+      const exhausted = autoDecision
+        ? autoExhaustedResponse(result.status, autoDecision.routeName, result.error, autoAttempts)
+        : null
+      const mapped = exhausted ?? mapUpstreamError(result.status, result.error)
+      const message = exhausted?.message ?? (result.error || 'Request failed')
       ctx.status = mapped.status
       if (mapped.status === 429) {
         const retryAfter = retryAfterHeader(result.headers as Record<string, unknown> | undefined)
@@ -688,14 +696,14 @@ router.post('/completions', async (ctx: Context) => {
       learnQuotaCaps(provider, result.headers, result.error)
       ctx.body = {
         error: {
-          message: result.error || 'Request failed',
+          message,
           type: mapped.type,
           param: null,
           code: mapped.code,
         },
       }
 
-      storeManager.addLog('error', `Request failed: ${result.error}`, {
+      storeManager.addLog('error', `Request failed: ${message}`, {
         requestId,
         providerId: provider.id,
         accountId: account.id,
@@ -706,7 +714,7 @@ router.post('/completions', async (ctx: Context) => {
       const userInput = extractUserInput(request.messages)
       const errorResponseBody = JSON.stringify({
         error: {
-          message: result.error || 'Request failed',
+          message,
           type: mapped.type,
           param: null,
           code: mapped.code,
@@ -715,7 +723,7 @@ router.post('/completions', async (ctx: Context) => {
       storeManager.addRequestLog({
         timestamp: startTime,
         status: 'error',
-        statusCode: result.status || 500,
+        statusCode: mapped.status,
         method: 'POST',
         url: '/v1/chat/completions',
         model: request.model,
@@ -734,11 +742,11 @@ router.post('/completions', async (ctx: Context) => {
         webSearch: request.web_search,
         reasoningEffort: request.reasoning_effort,
         maxTokens: requestedMaxTokens,
-        responseStatus: result.status || 500,
+        responseStatus: mapped.status,
         responseBody: errorResponseBody,
         latency,
         isStream: request.stream || false,
-        errorMessage: result.error,
+        errorMessage: message,
       })
 
       storeManager.recordRequestInStats(false, latency, request.model, provider.id, account.id)

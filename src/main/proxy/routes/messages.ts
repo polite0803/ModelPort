@@ -26,7 +26,7 @@ import {
   setSseHeaders,
   upstreamErrorMessage,
 } from '../utils/inboundLoopback'
-import { findModelRoute, enabledModelRoutes } from '../../store/modelRoutes'
+import { findModelRoute, enabledModelRoutes, resolveRouteRequest } from '../../store/modelRoutes'
 import { isMappingActive } from '../../store/modelServing'
 import {
   anthropicErrorBody,
@@ -49,13 +49,26 @@ const router = new Router({ prefix: '/v1' })
  * 顺序必须与 `/v1/models`、与 chat 的请求解析一致：路由优先，其次用户自建别名，
  * 最后才是供应商目录里的模型名。认识与否只看名字，不看账号是否可用 —— 那是
  * 转发层的事，这里越权判断只会让「有名字但账号临时不可用」的模型被提前拒掉。
+ *
+ * `routableOnly`：解析**兜底目标**（defaultModel / modelMap 目标 / `auto`）时，
+ * 只看 `resolveRouteRequest` 判定为 `routable` 的路由；停用或池引用断掉的路由
+ * 不能当兜底，否则请求会在内层 chat 立刻拿到 404。客户端显式点名的名字仍走
+ * 默认口径（`routableOnly = false`），保留可读的 `route_disabled` / `route_reference_broken`。
  */
-function gatewayKnowsModel(name: string, config: AppConfig): boolean {
+function gatewayKnowsModel(
+  name: string,
+  config: AppConfig,
+  routableOnly = false,
+): boolean {
   const trimmed = name.trim()
   if (trimmed === '') return false
   const lower = trimmed.toLowerCase()
 
-  if (findModelRoute(config.routes, trimmed) !== undefined) return true
+  if (findModelRoute(config.routes, trimmed) !== undefined) {
+    return routableOnly
+      ? resolveRouteRequest(config.routes, trimmed).kind === 'routable'
+      : true
+  }
 
   for (const [key, mapping] of Object.entries(config.modelMappings ?? {})) {
     // 停用的别名不认 —— 与 modelMapper / loadbalancer 同一个判据，否则 anthropic
@@ -90,7 +103,7 @@ export interface ResolvedAnthropicModel {
  * 1. 客户端**本来就发着网关认识的名字**（用户手填的配置），原样透传（`as-requested`）；
  * 2. 用户在 `anthropicInbound.modelMap` 里配了映射（精确键优先，否则按最长前缀）（`model-map`）；
  * 3. `anthropicInbound.defaultModel`，没配则落到 `auto`（`default`）；
- * 4. 连 `auto` 都没有时，取第一条**启用中的**路由名（`fallback`）。
+ * 4. 连 `auto` 都没有时，取第一条**可路由的**（启用且池引用完整）路由名（`fallback`）。
  *
  * ⚠️ 3 与 4 是**有意的兜底**（Claude Code 只会发 `claude-*` 这类名字，硬报 400
  * 等于这个入口对本应用永远不可用），代价是「说的模型」与「跑的模型」可能不一致。
@@ -112,7 +125,7 @@ export function resolveAnthropicModel(requested: string, config: AppConfig): Res
     const exactKey = Object.keys(map).find((key) => key.trim().toLowerCase() === lower)
     if (exactKey !== undefined) {
       const target = String(map[exactKey] ?? '').trim()
-      if (target !== '' && gatewayKnowsModel(target, config)) {
+      if (target !== '' && gatewayKnowsModel(target, config, true)) {
         return { model: target, source: 'model-map' }
       }
     }
@@ -123,21 +136,23 @@ export function resolveAnthropicModel(requested: string, config: AppConfig): Res
       const prefix = key.trim().toLowerCase()
       if (prefix === '' || !lower.startsWith(prefix)) continue
       const target = String(value ?? '').trim()
-      if (target === '' || !gatewayKnowsModel(target, config)) continue
+      if (target === '' || !gatewayKnowsModel(target, config, true)) continue
       if (best === null || prefix.length > best.key.length) best = { key: prefix, target }
     }
     if (best !== null) return { model: best.target, source: 'model-map' }
   }
 
   const configured = String(inbound?.defaultModel ?? '').trim()
-  if (configured !== '' && gatewayKnowsModel(configured, config)) {
+  if (configured !== '' && gatewayKnowsModel(configured, config, true)) {
     return { model: configured, source: 'default' }
   }
-  if (gatewayKnowsModel('auto', config)) {
+  if (gatewayKnowsModel('auto', config, true)) {
     return { model: 'auto', source: 'default' }
   }
 
-  const routes = enabledModelRoutes(config.routes)
+  const routes = enabledModelRoutes(config.routes).filter(
+    (route) => resolveRouteRequest(config.routes, route.name).kind === 'routable'
+  )
   if (routes.length > 0) {
     return { model: routes[0].name, source: 'fallback' }
   }

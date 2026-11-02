@@ -165,8 +165,16 @@ export class SlidingWindowStrategy {
     const systemMessages = messages.filter(msg => msg.role === 'system')
     const nonSystemMessages = messages.filter(msg => msg.role !== 'system')
 
-    const maxNonSystemMessages = this.config.maxMessages - systemMessages.length
-    const keptNonSystemMessages = nonSystemMessages.slice(-maxNonSystemMessages)
+    const maxNonSystemMessages = Math.max(0, this.config.maxMessages - systemMessages.length)
+    const kept = maxNonSystemMessages === 0
+      ? []
+      : nonSystemMessages.slice(-maxNonSystemMessages)
+    // 非 system 全被裁光时保留最新一条：上游会把 `messages: []` 读成「你没传
+    // 消息」而不是「历史太长」。与 TokenLimitStrategy 同一条不变量 ——
+    // 裁剪永远不许把要回答的那句话裁没。
+    const keptNonSystemMessages = kept.length === 0 && nonSystemMessages.length > 0
+      ? [nonSystemMessages[nonSystemMessages.length - 1]]
+      : kept
 
     const result = [...systemMessages, ...keptNonSystemMessages]
 

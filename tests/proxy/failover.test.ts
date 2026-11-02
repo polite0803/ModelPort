@@ -34,6 +34,7 @@ import {
   ATTEMPT_REASON_MAX_CHARS,
   AUTO_RECOVERABLE_EXTRA_ATTEMPTS,
   AUTO_WALL_CLOCK_BUDGET_MS,
+  autoExhaustedResponse,
   createIdleWatchdog,
   describeAttemptFailure,
   FIRST_EVENT_TIMEOUT_MS,
@@ -45,6 +46,7 @@ import {
   isFailoverEligibleStatus,
   isForcedToolChoiceUnsupported,
   isMissingReasoningHistoryError,
+  isOpaqueAggregateBadRequest,
   isRecoverableChannelFailure,
   isToolOverflowError,
   probeSseHead,
@@ -394,11 +396,11 @@ test('forwarder 的换家循环必须按分级上限与墙钟预算收口（源�
     /shouldTryNextAutoCandidate\(\{/,
     'forwardFirstReachable must consult the tiered-attempt predicate before each extra attempt',
   )
-  // 账号故障类计数：可恢复类失败不得计入
+  // 账号故障类计数：可恢复类与聚合不透明 400 都不得计入
   assert.match(
     forwarderSource,
-    /result\.status !== 429 && !isRecoverableChannelFailure\(result\.error\)/,
-    'only non-recoverable failures may count toward the account-failure cap',
+    /result\.status !== 429 && !opaqueAggregateBadRequest && !isRecoverableChannelFailure\(result\.error\)/,
+    'only non-recoverable, non-opaque-aggregate failures may count toward the account-failure cap',
   )
 })
 
@@ -476,6 +478,33 @@ test('失败分类：账号故障与暂时不可服务记 failover，普通 4xx 
   assert.equal(describeAttemptFailure({ candidate: 'buddy/hy3', status: 400, error: 'invalid api key' }).kind, 'fatal')
 })
 
+test('失败分类：聚合条目的不透明 400 可换家，账号渠道仍 fatal', () => {
+  // OVH 2026-11-02 实测：400 + "Unknown error"，换下一家（WorkBuddy/Loomy/Qoder）能成。
+  assert.equal(isOpaqueAggregateBadRequest(400, 'Unknown error', 'aggregate'), true)
+  assert.equal(isOpaqueAggregateBadRequest(400, '', 'aggregate'), true)
+  assert.equal(describeAttemptFailure({
+    candidate: 'ovh/gpt-oss-120b',
+    status: 400,
+    error: 'Unknown error',
+    providerType: 'aggregate',
+  }).kind, 'failover')
+
+  // 负样本：同一状态码在账号渠道上仍是 fatal；聚合条目有明确文案时也不放行。
+  assert.equal(isOpaqueAggregateBadRequest(400, 'Unknown error', 'account'), false)
+  assert.equal(describeAttemptFailure({
+    candidate: 'buddy/hy3',
+    status: 400,
+    error: 'Unknown error',
+    providerType: 'account',
+  }).kind, 'fatal')
+  assert.equal(describeAttemptFailure({
+    candidate: 'ovh/gpt-oss-120b',
+    status: 400,
+    error: 'invalid api key',
+    providerType: 'aggregate',
+  }).kind, 'fatal')
+})
+
 test('失败记录：无状态码时不写 status 键，空错误文本给可读兜底', () => {
   // 「键直接不出现」而不是 undefined：日志消费方（仪表盘/JSON 导出）不能看到
   // 一个把「上游没答」和「上游答了 200」混在一起的 null。
@@ -497,12 +526,26 @@ test('失败记录：文案去首尾空白并按上限截断（日志体积有�
   assert.ok(!record.reason.startsWith(' '), '首尾空白必须先去掉')
 })
 
+test('自动路由候选耗尽：多家试过仍 404 才收口成 503，不伪装成模型不存在', () => {
+  assert.deepEqual(autoExhaustedResponse(404, 'daily', '模型不存在或已停用', 2), {
+    status: 503,
+    type: 'service_unavailable_error',
+    code: 'no_available_model',
+    message: "Route 'daily' exhausted all candidates (last: 模型不存在或已停用)",
+  })
+  // 第一家就 404 是「客户端写了个不存在的模型」，原样透传才准确。
+  assert.equal(autoExhaustedResponse(404, 'daily', 'The model does not exist', 1), null)
+  assert.equal(autoExhaustedResponse(429, 'daily', '排队中', 3), null)
+  assert.equal(autoExhaustedResponse(500, 'daily', 'boom', 3), null)
+  assert.equal(autoExhaustedResponse(undefined, 'daily', undefined, 3), null)
+})
+
 test('换家取证必须落到源码：循环记录每次失败，日志写出 failures（源码钉点）', () => {
   // 循环里的记账点必须在 capability/fatal 分支之前 —— fatal 也要留痕，
   // 否则「为什么链在这里断了」仍然无处可查。
   assert.match(
     forwarderSource,
-    /failures\.push\(describeAttemptFailure\(\{\s*\n\s*candidate: candidate\.displayName,\s*\n\s*error: result\.error,\s*\n\s*status: result\.status,\s*\n\s*\}\)\)[\s\S]{0,1600}?if \(!capabilityMismatch\)/,
+    /failures\.push\(describeAttemptFailure\(\{\s*\n\s*candidate: candidate\.displayName,\s*\n\s*error: result\.error,\s*\n\s*status: result\.status,\s*\n\s*providerType: candidate\.provider\.type,\s*\n\s*\}\)\)[\s\S]{0,1600}?if \(!capabilityMismatch\)/,
     'every failed attempt must be described before the failover branch decides where to go next',
   )
   // 每个出口都要带上清单（成功那轮的返回值同样含此前被跳过的家）

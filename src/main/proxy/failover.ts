@@ -152,6 +152,56 @@ export function isFailoverEligibleStatus(status?: number): boolean {
 }
 
 /**
+ * 聚合条目（keyless 公共池）返回的 400，且错误体为空或只有 `Unknown error`：
+ * 这是**这一家**拒绝，不是请求本身写错（OVH 2026-11-02 实测：同一路由里
+ * OpenCode 404 后命中 OVH 400 Unknown error，链在第二家直接终止）。
+ *
+ * ⚠️ 只对 `type === 'aggregate'` 生效：账号渠道/custom 的 400 仍按普通 4xx
+ * 直接失败 —— 那两类通常是请求本身有问题，或用户点名了那一家。
+ */
+export function isOpaqueAggregateBadRequest(
+  status: number | undefined,
+  message: string | undefined,
+  providerType: string | undefined,
+): boolean {
+  if (status !== 400 || providerType !== 'aggregate') return false
+  const text = (message ?? '').trim()
+  return text === '' || /^unknown error$/i.test(text)
+}
+
+/** 自动路由候选耗尽时的收口形状（chat 路由直接拿去回客户端）。 */
+export interface AutoExhaustedResponse {
+  status: 503
+  type: 'service_unavailable_error'
+  code: 'no_available_model'
+  message: string
+}
+
+/**
+ * 自动路由的最后一个候选报 404 时，不能把「候选供不了」原样透传成
+ * 「这条路由/模型不存在」：客户端（Claude 等）会把 404 当模型被删，后续
+ * 整段会话不再请求。路由确实存在时统一收口成可重试的 503。
+ *
+ * ⚠️ 只在**确实试过多家**（`attempts > 1`）时收口。普通上游 404 在第一家就是
+ * fatal（「客户端写了个不存在的模型」），原样透传才准确 —— 见
+ * `tests/routes/proxy-routes-catalog-404.test.ts` 的窄判据。
+ */
+export function autoExhaustedResponse(
+  status: number | undefined,
+  routeName: string,
+  lastError: string | undefined,
+  attempts: number,
+): AutoExhaustedResponse | null {
+  if (status !== 404 || attempts <= 1) return null
+  return {
+    status: 503,
+    type: 'service_unavailable_error',
+    code: 'no_available_model',
+    message: `Route '${routeName}' exhausted all candidates (last: ${lastError ?? '404'})`,
+  }
+}
+
+/**
  * 可恢复类失败的识别：渠道/模型**暂时不可服务**（排队、当日额度用尽、限流），
  * 但请求本身没问题 —— 换下一家候选往往就能成。
  *
@@ -243,6 +293,8 @@ export function describeAttemptFailure(input: {
   candidate: string
   error?: string
   status?: number
+  /** 只有聚合条目会把「不透明 400」当可换家；缺省按账号渠道处理 */
+  providerType?: string
 }): AutoAttemptFailure {
   const reason = (input.error ?? '').trim().slice(0, ATTEMPT_REASON_MAX_CHARS)
   const kind: AutoAttemptFailure['kind'] = isToolOverflowError(input.error)
@@ -254,9 +306,11 @@ export function describeAttemptFailure(input: {
       // 风控类落的是 400，按纯状态码会被记成 `fatal`，而换家循环实际是**继续往下试**
       // （见 forwarder 的人工介入分支）—— 日志里的 kind 必须与当时走的分支一致。
       ? 'failover'
-      : isFailoverEligibleStatus(input.status)
-      ? 'failover'
-      : 'fatal'
+      : isOpaqueAggregateBadRequest(input.status, input.error, input.providerType)
+        ? 'failover'
+        : isFailoverEligibleStatus(input.status)
+          ? 'failover'
+          : 'fatal'
   return {
     candidate: input.candidate,
     kind,

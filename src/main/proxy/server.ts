@@ -15,6 +15,7 @@ import { proxyStatusManager } from './status'
 import { storeManager } from '../store/store'
 import { sessionManager } from './sessionManager'
 import { loadTlsMaterial, type TlsMaterial, type TlsRuntimeStatus } from './tls'
+import { isClientDisconnectError } from './clientAbort'
 import {
   checkStartupSecurity,
   corsAllowHeaders,
@@ -406,6 +407,18 @@ export class ProxyServer {
     this.app.on('error', (err, ctx) => {
       const status = err.status || 500
       const message = err.message || 'Internal Server Error'
+
+      // 客户端先断开：响应写侧抛 ECONNRESET/EPIPE 是用户取消，不是网关故障。
+      if (isClientDisconnectError(err) && !ctx?.res.writableEnded) {
+        storeManager.addLog('debug', `Client disconnected: ${message}`, {
+          data: {
+            path: ctx?.path,
+            method: ctx?.method,
+            code: (err as NodeJS.ErrnoException).code,
+          },
+        })
+        return
+      }
 
       storeManager.addLog('error', `Server error: ${message}`, {
         data: {
