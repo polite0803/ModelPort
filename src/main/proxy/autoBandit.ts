@@ -15,6 +15,16 @@
  *   （流式请求含生成时长，噪声大，所以只对显著慢的候选轻惩罚）。
  */
 
+/** One upstream attempt as it appears in a request log row. */
+export interface BanditAttemptLogEntry {
+  providerId: string
+  model: string
+  outcome: 'success' | 'failover' | 'fatal' | 'capability' | 'client_abort'
+  status?: number
+  errorCode?: string | number | null
+  latencyMs?: number
+}
+
 /** 参与 Bandit 统计的日志最小切片（RequestLogEntry 的相关字段）。 */
 export interface BanditLogEntry {
   timestamp: number
@@ -29,6 +39,13 @@ export interface BanditLogEntry {
   finishReason?: string
   /** Client-requested output cap. Absent when the client sent neither spelling. */
   maxTokens?: number
+  /**
+   * Per-candidate attempts. A successful row only names the winner at the top
+   * level, so without this a candidate that failed earlier in the chain looks
+   * like it has no record at all — the 2026-11-02 Codex incident: OpenCode 404
+   * and WorkBuddy risk-control were invisible while OVH/Spark kept winning.
+   */
+  attempts?: readonly BanditAttemptLogEntry[]
 }
 
 /** 一个 (provider, model) 的滚动窗口战绩。 */
@@ -43,6 +60,12 @@ export interface BanditStats {
   degraded?: number
   /** Trailing degraded streak, used for immediate demotion without waiting for samples. */
   consecutiveDegraded?: number
+  /** All attempts against this candidate (successes + counted failures). */
+  attemptTotal?: number
+  /** Failed attempts against this candidate in the window. */
+  attemptFailures?: number
+  /** Trailing failure streak, reset by a successful attempt. */
+  consecutiveFailures?: number
 }
 
 /** 默认统计窗口：24 小时（与 PLAN 的滚动 24h 口径一致）。 */
@@ -121,6 +144,8 @@ export function aggregateBanditStats(
     }
   }
 
+  aggregateAttemptStats(windowed, table)
+
   for (const [key, bucket] of latencies) {
     const p50 = latencyP50(bucket)
     if (p50 !== undefined) {
@@ -130,6 +155,68 @@ export function aggregateBanditStats(
   }
 
   return table
+}
+
+interface AttemptRecord {
+  timestamp: number
+  order: number
+  providerId: string
+  actualModel: string
+  status: 'success' | 'error'
+}
+
+/**
+ * 失败尝试也必须进入候选健康分。请求行的顶层 provider/actualModel 只记最终
+ * 赢家；一次成功行里前面的 404/502 不进这张表，失败候选就会永远冷启动、
+ * 一直靠静态能力/免费加分留在前排。
+ */
+function aggregateAttemptStats(
+  entries: readonly BanditLogEntry[],
+  table: Map<string, BanditStats>
+): void {
+  const records: AttemptRecord[] = []
+  let order = 0
+  for (const entry of entries) {
+    if (entry.attempts === undefined) continue
+    for (const attempt of entry.attempts) {
+      order += 1
+      if (attempt.outcome === 'client_abort') continue
+      if (!attempt.providerId || !attempt.model) continue
+      const hard = isHardCandidateFailure(attempt.status, attempt.errorCode)
+      // A plain fatal 400 is the client's contract problem; counting it would
+      // penalize every model for one malformed request.
+      if (attempt.outcome === 'fatal' && !hard) continue
+      records.push({
+        timestamp: entry.timestamp,
+        order,
+        providerId: attempt.providerId,
+        actualModel: attempt.model,
+        status: attempt.outcome === 'success' ? 'success' : 'error',
+      })
+    }
+  }
+
+  records.sort((a, b) => a.timestamp - b.timestamp || a.order - b.order)
+  for (const record of records) {
+    const key = banditKeyOf(record.providerId, record.actualModel)
+    const stats = table.get(key) ?? { total: 0, successes: 0, degraded: 0, consecutiveDegraded: 0 }
+    stats.attemptTotal = (stats.attemptTotal ?? 0) + 1
+    if (record.status === 'success') {
+      stats.consecutiveFailures = 0
+    } else {
+      stats.attemptFailures = (stats.attemptFailures ?? 0) + 1
+      stats.consecutiveFailures = (stats.consecutiveFailures ?? 0) + 1
+    }
+    table.set(key, stats)
+  }
+}
+
+function isHardCandidateFailure(status: number | undefined, code: string | number | null | undefined): boolean {
+  if (status === 404) return true
+  const normalized = String(code ?? '').toLowerCase()
+  return normalized === 'channel_relogin_required'
+    || normalized === 'channel_risk_control'
+    || normalized === 'channel_model_unavailable'
 }
 
 /** 显著慢的门槛：p50 超过它的候选轻惩罚（噪声大，只罚显著的）。 */
@@ -145,15 +232,16 @@ const SLOW_P50_MS = 30_000
 export function banditAdjustment(stats: BanditStats | undefined): number {
   if (stats === undefined) return 0
 
+  const failurePenalty = attemptFailurePenalty(stats)
   // Immediate demotion for repeated unusable successes. This deliberately runs
   // before the cold-start minimum: two consecutive `length` responses with no
   // client cap are enough evidence, even if the model has only 2-4 samples.
   const consecutiveDegraded = stats.consecutiveDegraded ?? 0
   if (consecutiveDegraded >= 2) {
-    return -0.3
+    return Math.max(-0.8, -0.3 + failurePenalty)
   }
 
-  if (stats.total < BANDIT_MIN_SAMPLES) return 0
+  if (stats.total < BANDIT_MIN_SAMPLES) return failurePenalty
 
   // Degraded successes do not count as clean successes (a fully failed model and
   // a model that answers with empty/truncated turns end up on the same side).
@@ -169,5 +257,21 @@ export function banditAdjustment(stats: BanditStats | undefined): number {
   if (stats.latencyP50Ms !== undefined && stats.latencyP50Ms > SLOW_P50_MS) {
     adjustment -= 0.05
   }
-  return adjustment
+  return adjustment + failurePenalty
+}
+
+/**
+ * Per-attempt failure penalty. A single 404 can be catalog drift and must not
+ * evict a healthy candidate; two consecutive failures or a majority-failure
+ * record are the evidence that the target is actually unusable.
+ */
+function attemptFailurePenalty(stats: BanditStats): number {
+  const total = stats.attemptTotal ?? 0
+  const failures = stats.attemptFailures ?? 0
+  const consecutive = stats.consecutiveFailures ?? 0
+  if (consecutive >= 2) return -0.5
+  if (total >= 3 && failures / total >= 0.5) {
+    return -0.3 * (failures / total)
+  }
+  return 0
 }

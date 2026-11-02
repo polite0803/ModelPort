@@ -1411,7 +1411,11 @@ export class BuddyAdapter extends LlmAdapter {
 
     // 4. 发送请求（401/403 时刷新当前账号一次，仍失败则换号重试）
     let response = await this.send(credential, body, options)
-    if (!response.ok && (response.status === 401 || response.status === 403)) {
+    // 11140 在部分站点回 400（不是 403）。先读一次正文，别让状态码把
+    // 「账号被安全策略拦截」降级成「请求写错、不换号」。
+    const initialErrorBody = response.ok ? '' : await response.clone().text().catch(() => '')
+    const initialContentRejected = initialErrorBody.length > 0 && isContentRejection(initialErrorBody)
+    if (!response.ok && (response.status === 401 || response.status === 403 || initialContentRejected)) {
       // ⚠️ 腾讯侧的安全策略拦截（`code:11140`）**也回 HTTP 403**。实测确认它是
       // **账号级**拦截（同一请求体在池里 7 个账号上「2 通 4 拦 1 限流」），因此
       // 处理方式与认证失败一致：**刷新 → 换号 → 全部试完才报错**。
@@ -1423,8 +1427,8 @@ export class BuddyAdapter extends LlmAdapter {
       //
       // 判据必须在认证分支内联判定而非提前 return：坏账号可能排在任何位置，
       // 必须让它和 401/403 一样进入下面的换号循环。
-      const rejectedBody = await response.clone().text().catch(() => '')
-      const contentRejected = isContentRejection(rejectedBody)
+      const rejectedBody = initialErrorBody
+      const contentRejected = initialContentRejected
       if (contentRejected) {
         // 记诊断日志（便于在插件日志里区分「换号」与「被策略拦下」），**不中断**换号，
         // 同时把这个账号在该模型上冷却 —— 否则它下次仍排第一，每轮都要重撞一遍。
@@ -1482,7 +1486,8 @@ export class BuddyAdapter extends LlmAdapter {
        */
       let rejectionStatus = contentRejected ? authStatus : 0
       let rejectionBody = contentRejected ? rejectedBody : ''
-      if ((response.status === 401 || response.status === 403) && this.options.accountPool !== undefined) {
+      if ((response.status === 401 || response.status === 403 || contentRejected)
+        && this.options.accountPool !== undefined) {
         for (;;) {
           // modelId 参与过滤：正在限流期的账号不会被选中（与限流换号同语义）。
           const next = await this.options.accountPool.getAvailableAccount(
@@ -1510,11 +1515,24 @@ export class BuddyAdapter extends LlmAdapter {
             await markPolicyBlockedAccount(
               this.options.accountPool, this.product.id, currentAccountId, options.model,
             )
+            // 11140 可能是 400：不能因为状态码不是 401/403 就停在第一个账号上。
+            continue
           }
           // 只有认证类失败（含安全策略拦截）才继续换号；
           // 429/5xx/400 交给下面的既有分类逻辑。
           if (response.status !== 401 && response.status !== 403) break
         }
+      }
+      // 400 形态的 11140：上面的 401/403 收口只覆盖认证状态，换号耗尽后
+      // 这里必须把「全部账号被安全策略拦截」如实报出来，而不是退回原始 400。
+      if (sawContentRejection && !response.ok
+        && response.status !== 401 && response.status !== 403) {
+        throw contentRejectionError(
+          this.product.id,
+          rejectionStatus === 0 ? authStatus : rejectionStatus,
+          rejectionBody.length === 0 ? rejectedBody : rejectionBody,
+          true,
+        )
       }
       // 刷新既没产出凭据、也没换到别的账号：保留原有的可诊断报错。
       if (refreshedCredential === undefined && !rotated) {

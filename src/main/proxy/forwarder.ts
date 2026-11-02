@@ -85,6 +85,7 @@ import { stripUnsupportedForBuiltin } from './parameterPolicy'
 import { ensureAnthropicOutputCap, outputCapFallbackOf } from './utils/outputCap.ts'
 import { createContextManagementService, SummaryGenerator } from './services/contextManagementService'
 import { accountChannelManager } from '../providers/accountChannels/manager'
+import { sanitizeChatToolDefinitions } from '../channelPack/toolCallValidation'
 import { getAggregateEntry } from '../providers/aggregate/registry'
 import { applyAggregateDropParams } from './aggregateParams'
 import {
@@ -831,6 +832,12 @@ export class RequestForwarder {
       ...rest
     } = request
     const openAi = { ...rest, model: channelModel } as Record<string, unknown>
+    // Codex 的延迟工具发现会发 `function.name: ''` 的占位定义；chat 上游会整条
+    // 拒绝（Raccoon 实测 `tools[14].function.name is invalid or missing`）。
+    // 空名字工具本身不可调用，删掉比让整轮失败更安全。
+    if (openAi.tools !== undefined) {
+      openAi.tools = sanitizeChatToolDefinitions(openAi.tools)
+    }
 
     try {
       if (request.stream !== true) {
@@ -1519,10 +1526,15 @@ export class RequestForwarder {
     }
 
     // 工具三件套只在**有工具**时成组发出（原生模式由 `transformed.tools` 决定）。
+    // 定义先清洗：Codex 的 `tool_search` 占位定义 `function.name:''` 会被严格
+    // 上游整条拒绝；缺 `parameters` 的 freeform 工具同样会被 Agnes 等拒收。
     if (request.tools !== undefined && request.tools.length > 0) {
-      body.tools = request.tools
-      if (request.tool_choice !== undefined) body.tool_choice = request.tool_choice
-      if (request.parallel_tool_calls !== undefined) body.parallel_tool_calls = request.parallel_tool_calls
+      const sanitizedTools = sanitizeChatToolDefinitions(request.tools)
+      if (Array.isArray(sanitizedTools) && sanitizedTools.length > 0) {
+        body.tools = sanitizedTools
+        if (request.tool_choice !== undefined) body.tool_choice = request.tool_choice
+        if (request.parallel_tool_calls !== undefined) body.parallel_tool_calls = request.parallel_tool_calls
+      }
     }
 
     if (request.reasoning_effort !== undefined) {

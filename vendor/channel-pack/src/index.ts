@@ -495,6 +495,19 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
       // 回退到单凭据路径：没有账号条目可标记，清空以免标记到过期的 id。
       activeQoderAccountId.set(QODER.id, undefined)
       throwIfAllAccountsRateLimited(QODER, modelId)
+      // 账号池里**有**条目但一个都不可用（余额为 0 / 凭据不可用 / 已停用）时，
+      // 不能再回退到默认单凭据：那会把余额门控刚跳过的账号又用回来，请求在
+      // 上游排队到 60s 超时（2026-11-02 实测：qoder-9a54823f 余额为 0，日志
+      // 已跳过，随后仍走默认凭据并挂死）。只有池里确实没有任何账号条目时才走
+      // 旧单凭据路径，供历史安装迁移。
+      if (pool.listAccountsByProvider(QODER.id).length > 0) {
+        throw new LlmError(
+          'qoder: 账号池中没有可用账号（余额为 0、凭据不可用或账号已停用），'
+          + '已停止默认凭据回退；请充值或在 Channel Pack 重测账号',
+          'QUOTA_EXCEEDED',
+          { status: 403 },
+        )
+      }
       const resolved = await ctx.credentials.resolve(credentialRef(QODER.defaultCredentialRef))
       if (!resolved) return undefined
       try {
@@ -1752,10 +1765,30 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
   if (config.disableOpencode !== true) {
     const opencodeUA = lazyOpencodeUserAgent()
     opencodeAdapter = registerOpencodeLlm(ctx, {
-      identitySlots: async (model?: string) => listIdentitySlots(
-        await Promise.all(pool.listAccountsByProvider(OPENCODE.id).filter(entry =>
-          model === undefined || !((entry.modelRateLimits?.[model] ?? 0) > Date.now()),
-        ).map(async (entry) => {
+      identitySlots: async (model?: string) => {
+        const all = await pool.listAccountsByProvider(OPENCODE.id)
+        if (model !== undefined && all.length > 0) {
+          const now = Date.now()
+          const available = all.filter(entry => !((entry.modelRateLimits?.[model] ?? 0) > now))
+          if (available.length === 0) {
+            const resets = all
+              .map(entry => entry.modelRateLimits?.[model] ?? 0)
+              .filter(resetAt => resetAt > now)
+            const earliestReset = resets.length === 0 ? undefined : Math.min(...resets)
+            const waitMs = earliestReset === undefined ? undefined : Math.max(0, earliestReset - now)
+            throw new LlmError(
+              'opencode: 该模型的所有通道当前都在限流中'
+              + (waitMs === undefined ? '' : `（最早约 ${Math.ceil(waitMs / 60_000)} 分钟后恢复）`)
+              + '；这不是登录问题，可等待、添加 API key 账号或更换出口代理',
+              'RATE_LIMIT',
+              { status: 429, ...(waitMs === undefined ? {} : { providerRetryAfterMs: waitMs }) },
+            )
+          }
+        }
+        return listIdentitySlots(
+          await Promise.all(all.filter(entry =>
+            model === undefined || !((entry.modelRateLimits?.[model] ?? 0) > Date.now()),
+          ).map(async (entry) => {
           const resolved = await ctx.credentials
             .resolve(credentialRef(entry.credentialRef))
             .catch(() => undefined)
@@ -1795,7 +1828,8 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
         // 首次调用时可能还是产品默认值（探测在后台跑），后续请求才用真机版本 ——
         // 宁可前几次 UA 用兜底值，也不让插件启动阻塞在 2 秒的子进程上。
         opencodeUA(),
-      ),
+      )
+      },
       // ⚠️⚠️ **必须有超时**（真机事故 2026-10-02）：桌面版到 opencode.ai 的
       // fetch 可能**永不 settle**（与同源的 remote.session 故障都是宿主网络问题）。
       // 没有超时 → `loadOpencodeCatalog` 的 try/catch 永远走不到 →

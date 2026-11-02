@@ -35,6 +35,14 @@ function entry(overrides: Partial<{
   actualModel: string
   finishReason: string
   maxTokens: number
+  attempts: Array<{
+    providerId: string
+    model: string
+    outcome: 'success' | 'failover' | 'fatal' | 'capability' | 'client_abort'
+    status?: number
+    errorCode?: string | number | null
+    latencyMs?: number
+  }>
 }>): {
   timestamp: number
   status: 'success' | 'error'
@@ -43,6 +51,14 @@ function entry(overrides: Partial<{
   actualModel?: string
   finishReason?: string
   maxTokens?: number
+  attempts?: Array<{
+    providerId: string
+    model: string
+    outcome: 'success' | 'failover' | 'fatal' | 'capability' | 'client_abort'
+    status?: number
+    errorCode?: string | number | null
+    latencyMs?: number
+  }>
 } {
   return {
     timestamp: NOW - 1000,
@@ -136,6 +152,129 @@ test('degraded：连续两次不可用成功直接重罚，正常一轮会重置
   const mixed = banditAdjustment({ total: 10, successes: 8, degraded: 2, consecutiveDegraded: 0 })
   const clean = banditAdjustment({ total: 10, successes: 8, degraded: 0, consecutiveDegraded: 0 })
   assert.ok(mixed < clean, '混有截断成功的模型必须比干净模型分低')
+})
+
+test('attempt health：成功行里的失败尝试也要记到失败候选头上', () => {
+  const failed = 'opencode/nemotron-3-ultra-free'
+  const winner = 'gpt-oss-120b'
+  const stats = aggregateBanditStats([
+    entry({
+      timestamp: NOW - 1000,
+      providerId: 'ovh',
+      actualModel: winner,
+      attempts: [
+        { providerId: 'opencode', model: failed, outcome: 'capability', status: 404, latencyMs: 200 },
+        { providerId: 'ovh', model: winner, outcome: 'success', status: 200, latencyMs: 2000 },
+      ],
+    }),
+  ], NOW)
+
+  const bad = stats.get(banditKeyOf('opencode', failed))
+  assert.equal(bad?.attemptTotal, 1)
+  assert.equal(bad?.attemptFailures, 1)
+  assert.equal(bad?.consecutiveFailures, 1)
+  assert.equal(banditAdjustment(bad), 0, '单次 404 可能只是目录漂移，不能立刻踢出候选')
+
+  const good = stats.get(banditKeyOf('ovh', winner))
+  assert.equal(good?.attemptTotal, 1)
+  assert.equal(good?.attemptFailures, undefined)
+  assert.equal(banditAdjustment(good), 0)
+
+  const twice = aggregateBanditStats([
+    entry({
+      timestamp: NOW - 1000,
+      attempts: [
+        { providerId: 'opencode', model: failed, outcome: 'capability', status: 404 },
+        { providerId: 'ovh', model: winner, outcome: 'success', status: 200 },
+      ],
+    }),
+    entry({
+      timestamp: NOW - 2000,
+      attempts: [
+        { providerId: 'opencode', model: failed, outcome: 'capability', status: 404 },
+        { providerId: 'ovh', model: winner, outcome: 'success', status: 200 },
+      ],
+    }),
+  ], NOW).get(banditKeyOf('opencode', failed))
+  assert.equal(twice?.consecutiveFailures, 2)
+  assert.equal(banditAdjustment(twice), -0.5, '连续两次失败才显著降权')
+})
+
+test('attempt health：连续两次失败立即重罚，成功一次会重置连续计数', () => {
+  const model = 'workbuddy/hy3'
+  const twoFails = aggregateBanditStats([
+    entry({
+      timestamp: NOW - 1000,
+      attempts: [
+        { providerId: 'workbuddy', model, outcome: 'failover', status: 502 },
+        { providerId: 'workbuddy', model, outcome: 'failover', status: 502 },
+      ],
+    }),
+  ], NOW).get(banditKeyOf('workbuddy', model))
+  assert.equal(twoFails?.consecutiveFailures, 2)
+  assert.equal(banditAdjustment(twoFails), -0.5)
+
+  const recovered = aggregateBanditStats([
+    entry({
+      timestamp: NOW - 1000,
+      attempts: [
+        { providerId: 'workbuddy', model, outcome: 'failover', status: 502 },
+        { providerId: 'workbuddy', model, outcome: 'success', status: 200 },
+      ],
+    }),
+  ], NOW).get(banditKeyOf('workbuddy', model))
+  assert.equal(recovered?.consecutiveFailures, 0)
+  assert.equal(banditAdjustment(recovered), 0, '最近一次已成功，不再按硬失败惩罚')
+})
+
+test('attempt health：风控/重登属于硬失败，客户端自身 400 与 abort 不计', () => {
+  const risk = aggregateBanditStats([
+    entry({
+      timestamp: NOW - 1000,
+      attempts: [
+        { providerId: 'workbuddy', model: 'workbuddy/hy3', outcome: 'fatal', status: 400, errorCode: 'channel_risk_control' },
+        { providerId: 'workbuddy', model: 'workbuddy/hy3', outcome: 'fatal', status: 400, errorCode: 'channel_risk_control' },
+        { providerId: 'client', model: 'client/model', outcome: 'fatal', status: 400 },
+        { providerId: 'client', model: 'client/model', outcome: 'client_abort' },
+      ],
+    }),
+  ], NOW)
+
+  const risky = risk.get(banditKeyOf('workbuddy', 'workbuddy/hy3'))
+  assert.equal(risky?.attemptFailures, 2)
+  assert.equal(banditAdjustment(risky), -0.5)
+
+  assert.equal(risk.get(banditKeyOf('client', 'client/model')), undefined, '客户端错误不能算到模型头上')
+})
+
+test('rankCandidates：有失败尝试的候选要排在同分健康候选之后', () => {
+  const base = {
+    providerId: 'p',
+    providerName: 'P',
+    displayName: 'm',
+    actualModelId: 'm',
+    contractCapable: true,
+    costBucket: 'unknown' as const,
+  }
+  const failed: RankCandidate = {
+    ...base,
+    accountId: 'failed',
+    live: {
+      total: 0,
+      successes: 0,
+      attemptTotal: 2,
+      attemptFailures: 2,
+      consecutiveFailures: 2,
+    },
+  }
+  const fresh: RankCandidate = { ...base, accountId: 'fresh' }
+
+  const ranked = rankCandidates(
+    { complexity: 'standard', needsTools: false, needsVision: false, estimatedTokens: 0 },
+    [failed, fresh],
+    { now: NOW, limit: 2, seed: 0, strategy: 'round-robin', prefer: 'balanced' }
+  )
+  assert.equal(ranked[0]?.accountId, 'fresh')
 })
 
 test('rankCandidates：Bandit 战绩要能改写同分候选的排序', () => {

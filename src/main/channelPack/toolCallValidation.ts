@@ -144,6 +144,44 @@ export interface ToolCallShapeCounts {
   prefixedName: number
 }
 
+/**
+ * 清洗发给账号渠道的**工具定义**。
+ *
+ * 真实缺陷（2026-11-02 Codex → Raccoon）：Codex 的延迟工具发现会带一条
+ * `type:'function', function:{name:'', ...}` 的 `tool_search`；空名字在 Responses
+ * 里是客户端的占位，但 chat completions 上游会直接 400/502：
+ * `tools[14].function.name is invalid or missing`。
+ *
+ * 同一批请求里还有 `apply_patch` / `collaboration` / MCP 工具缺少 `parameters`
+ * （它们是 freeform/custom 工具）。部分上游（Agnes 实测）同样拒收缺字段的定义，
+ * 所以这里补一个空对象 schema，而不是把它们一起删掉 —— 客户端仍能按名字调用，
+ * 参数由客户端自己校验。
+ *
+ * 空名字工具**无法被模型正确调用**，删除不会损失可用能力；把定义原样送上去
+ * 只会让整条请求在严格上游直接失败。返回新数组，不修改入参。
+ */
+export function sanitizeChatToolDefinitions(tools: unknown): unknown {
+  if (!Array.isArray(tools)) return tools
+
+  const sanitized: unknown[] = []
+  for (const tool of tools) {
+    if (tool === null || typeof tool !== 'object') continue
+    const record = tool as { type?: unknown; function?: unknown }
+    if (record.type !== 'function' || record.function === null || typeof record.function !== 'object') {
+      // chat completions 只认 function 工具；其它自定义形状原样发上去只会被拒。
+      continue
+    }
+    const fn = record.function as { name?: unknown; parameters?: unknown }
+    if (typeof fn.name !== 'string' || fn.name.trim().length === 0) continue
+    const nextFunction = fn.parameters === undefined || fn.parameters === null
+      || typeof fn.parameters !== 'object'
+      ? { ...fn, parameters: { type: 'object', properties: {} } }
+      : fn
+    sanitized.push({ ...record, function: nextFunction })
+  }
+  return sanitized
+}
+
 export function countToolCallShapes(messages: unknown): ToolCallShapeCounts {
   const counts: ToolCallShapeCounts = {
     assistantWithCalls: 0,
