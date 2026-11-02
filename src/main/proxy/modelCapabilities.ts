@@ -29,8 +29,25 @@ const PROVIDER_DEFAULT_CAPABILITY: Record<string, ModelCapabilityHint> = {
   deepseek: { vision: 'no' },
   glm: { vision: 'yes' },
   kimi: { vision: 'yes' },
-  minimax: { vision: 'yes' },
   zai: { vision: 'no' },
+  // 账号渠道的 12 个适配器都原生支持工具调用（2026-10-30 盘点；vendor 里唯一
+  // `delete body.tools` 是 `tool_choice:'none'` 归一化）。这里给渠道默认
+  // `tools:'yes'`，否则 Codex 这类工具请求会对每个账户渠道模型扣 0.15 的
+  // 「工具未知」分，聚合免费池（有 tools/reasoning 标注）会长期压过账户渠道。
+  // 供应商记录里的 `tools:'no'` 仍然优先于本默认层。
+  opencode: { tools: 'yes' },
+  lobsterai: { tools: 'yes' },
+  qoder: { tools: 'yes' },
+  qodercn: { tools: 'yes' },
+  trae: { tools: 'yes' },
+  cline: { tools: 'yes' },
+  loomy: { tools: 'yes' },
+  raccoon: { tools: 'yes' },
+  zcode: { tools: 'yes' },
+  buddy: { tools: 'yes' },
+  workbuddy: { tools: 'yes' },
+  gemini: { tools: 'yes' },
+  minimax: { vision: 'yes', tools: 'yes' },
 }
 
 /** 已确认能力的模型行，键为小写模型名（不含 `<provider>/` 前缀） */
