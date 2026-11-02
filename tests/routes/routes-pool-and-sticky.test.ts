@@ -350,6 +350,18 @@ test('E：粘性按路由分键 —— 同一段对话，另一条路由不被�
   assert.equal(select(routeX).candidates[0].displayName, 'Beta-Lite')
 })
 
+test('E：路由层粘性是硬优先 —— 自然分更低的上一轮模型也会排到第一', () => {
+  const route = makeRoute()
+  const fresh = select(route)
+  const gamma = fresh.candidates.find(candidate => candidate.displayName === 'Gamma-Mini')
+  assert.ok(gamma)
+  autoRouter.rememberRoute(fresh.conversationKey, gamma, route)
+
+  const again = select(route)
+  assert.equal(again.candidates[0].displayName, 'Gamma-Mini', 'agent 会话不能每轮换模型')
+  assert.equal(again.reason, 'sticky')
+})
+
 test('E：粘性只是加分不是硬钉 —— 被钉住的模型停服后自然让位，恢复后又回来', () => {
   const route = makeRoute()
   const fresh = select(route)

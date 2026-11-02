@@ -202,6 +202,26 @@ function stickyMapKey(routeName: string, conversationKey: string): string {
   return `${routeName}|${conversationKey}`
 }
 
+/**
+ * 把上一轮成功的模型提到候选队首（精确账号优先），其余顺序不变。
+ *
+ * 纯函数、不修改入参；`sticky` 对应模型不在候选里（停服/冷却/被策略筛掉）
+ * 时原样返回，调用方仍按正常打分让位。
+ */
+function promoteSticky<
+  T extends { providerId: string; accountId: string; displayName: string },
+>(ranked: readonly T[], sticky: StickyHint | undefined): T[] {
+  if (sticky === undefined) return [...ranked]
+  const matches = ranked.filter(candidate =>
+    candidate.providerId === sticky.providerId && candidate.displayName === sticky.displayName
+  )
+  if (matches.length === 0) return [...ranked]
+  const exact = matches.filter(candidate => candidate.accountId === sticky.accountId)
+  const sameModel = matches.filter(candidate => candidate.accountId !== sticky.accountId)
+  const others = ranked.filter(candidate => !matches.includes(candidate))
+  return [...exact, ...sameModel, ...others]
+}
+
 /** 没传路由时（legacy 路径）在粘性表与响应头里使用的名字：就是那个虚拟模型名。 */
 const LEGACY_ROUTE_NAME = AUTO_MODEL_ID
 
@@ -596,8 +616,15 @@ class AutoRouter {
       missing.push(...explainMissing(profile, contractPool))
     }
 
+    // 会话粘性在路由层是**硬优先**：打分里的 0.12 只是「同分时的倾向」，
+    // 盖不过免费/档位/成本差；实测 Codex 同一段对话 21 次请求在 7 个模型之间
+    // 跳，最后被 Spark-X2.6 接成「继续上一轮」。agent 会话换模型比慢一点更
+    // 伤：上下文理解、工具协议、缓存全部重来。这里把上一轮成功的模型提到
+    // 队首；它若停服/冷却，候选池里自然没有它，仍然自动让位。
+    const ordered = promoteSticky(ranked, sticky)
+
     const candidates: AutoCandidate[] = []
-    for (const input of ranked) {
+    for (const input of ordered) {
       const candidate = candidatesByKey.get(
         candidateKey(input.providerId, input.accountId, input.displayName)
       )
@@ -606,8 +633,7 @@ class AutoRouter {
       }
     }
 
-    // 会话粘性已经在打分里加了分，这里不再重排：首选不可用时它自然让位。
-    // 命中粘性的原因仍然要如实报出去，供响应头/日志使用。
+    // 命中粘性的原因如实报出去，供响应头/日志使用。
     const stickyHit = sticky !== undefined
       && candidates[0] !== undefined
       && candidates[0].provider.id === sticky.providerId
