@@ -14,7 +14,12 @@
  *
  * 只认**会话/线程粒度**的字段。入向协议（`/v1/responses`、`/v1/messages`）先在这里
  * 解析一次，再经 `X-ModelPort-Session-Id` / `-Source` 回环头交给 `/v1/chat/completions`，
- * 所以那条头的值优先——同一条链上只留这一份「谁是会话」的判断。回环之后按
+ * 所以那条头的值优先——同一条链上只留这一份「谁是会话」的判断，来源标签也是它带的。
+ * 两条入向腿的 body 情况不同，别当成同一条：Responses 侧 `prompt_cache_key` 两边同名，
+ * 翻译时会原样带到 chat 请求体上（`responsesInbound.ts`：丢掉等于把上游的缓存提示扔了），
+ * 那条腿没有回环头也认得出会话；Anthropic 侧的 `metadata.user_id` **不进** chat body
+ * （它被透传成 `user` 时把 OVH 打成过 400），所以对那条腿回环头是唯一载体。
+ * 直接打 `/v1/chat/completions` 的客户端走回环之后的优先级：
  * `prompt_cache_key` → `user` → `metadata.user_id` → 请求头 `session_id` 取第一个非空。
  * 刻意不收 `installation_id` / `window-id` 这类**比会话更粗**的标识：那会把同一
  * 窗口里的两段不同对话钉到同一个候选上，比原来的问题更糟。

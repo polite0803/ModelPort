@@ -819,9 +819,15 @@ survive a sync. `store/modelMarks.ts::normalizeModelMark` keeps only explicitly 
 `unknown` is not a storable value (delete the entry to return to automatic), and an entry with no
 valid field is removed rather than stored as an empty shell.
 
-Filtering rules: an image request only reaches a model whose vision is `yes` (an image dropped
-upstream is a wrong answer); `tools: no` is excluded but unknown is allowed with a small penalty; a
-known `contextTokens` filters hard and an unknown one uses `UNANNOTATED_CONTEXT_FLOOR` (64000).
+Filtering rules (`hardFilterFailure`, shared with `rankCandidates` and the route preview): an image
+request only reaches a model whose vision is `yes` (an image dropped upstream is a wrong answer);
+`tools: no` is excluded but unknown is allowed with a small penalty; a **published** `contextTokens`
+smaller than the request's estimate filters here, and an unknown one is never filtered - "no
+published ceiling" is not evidence of overflow, so the request goes out and, when that channel really
+cannot fit it, its context-class 400 switches to the next candidate
+(`failover.ts::isContextOverflowError`). `UNANNOTATED_CONTEXT_FLOOR` (64000) is therefore *not* an
+admission threshold any more; it survives only as a scoring one - an un-annotated window costs 0.05
+once the estimate passes half of it, because unknown should yield to evidenced.
 
 **Contract filtering.** `contractNeeds()` derives what the response shape depends on - `n > 1` and
 `response_format: json_object | json_schema`. Only builtin providers fail those (see
@@ -837,34 +843,86 @@ multiplier into a bucket; unknown is neutral, never "cheap". `prefer` is
 0.2, fast 0.2, strong 0.1, cheap 0.6 (cost enters as `weight * (costScore - 0.5)`, so an unknown
 cost contributes exactly zero). Builtin and custom providers have no cost data at all.
 
-**Stickiness is a bonus, not a pin.** The previous candidate for the same conversation
-(`conversationKey` = system prompt + first user message) scores +0.12 (same account) or +0.06 (same
-model, another account). A cooled-down or exhausted candidate simply leaves the pool.
+**Stickiness is a bonus, not a pin.** The previous candidate for the same conversation scores +0.12
+(same account) or +0.06 (same model, another account). A cooled-down or exhausted candidate simply
+leaves the pool.
+
+"Same conversation" is keyed on the client's own session identity **when it supplies one**
+(`shared/clientSessionKey.ts`: `prompt_cache_key` -> `user` -> `metadata.user_id` -> `session_id`
+header, first non-blank wins; the inbound protocols resolve it once and hand it to the chat route over
+`X-ModelPort-Session-Id` / `-Source`, and a forged source label degrades to `session_id_header`). The
+two inbound lanes are not symmetric and that is why the header exists at all: the Responses translation
+copies `prompt_cache_key` onto the chat body verbatim (dropping it would throw away the upstream's own
+cache hint - `responsesInbound.ts`), so that lane resolves the session with or without the header,
+while the Anthropic lane's `metadata.user_id` is deliberately *not* put on the chat body (forwarding it
+as `user` is what got a reasoning model rejected with 400 by OVH), so there the header is the only
+carrier. Identifiers *coarser* than a conversation (`installation_id`, window ids) are deliberately not
+accepted - they would pin two different chats in one window to one candidate, which is worse than the
+problem being fixed. Only when the client gives nothing does the key fall back to the content
+fingerprint (`conversationKey` = system prompt + first user message), which is the whole pre-2026-11-03
+behaviour.
+
+The fingerprint alone was wrong for agent clients, measured: Codex desktop rewrites its own history
+into a hand-off summary when it reaches its client-side budget, and that summary *becomes* the new
+first user message - the fingerprint changes, stickiness is lost, and the conversation is re-dispatched
+mid-session. One remote `prompt_cache_key` covering 79 turns was served by four different models
+(raccoon x55 / loomy x20 / lobsterai x2 / qodercn x2) before this existed. `RequestLogEntry.auto
+.sessionKeySource` (`client-session` / `content-hash`) records which key answered, so "we switched
+because the client rewrote the history" and "we switched because scoring reordered the pool" are two
+different readable states instead of one guess. The identifier's value never reaches a log row - only
+its hash and the source label.
 
 Response headers on every `auto` response: `X-ModelPort-Route` (winner), `X-ModelPort-Auto-Prefer`,
 `X-ModelPort-Auto-Reason` (`only` / `sticky` / `score`), `X-ModelPort-Auto-Attempts` (set after
 forwarding), and `X-ModelPort-Auto-Degraded` when a contract was relaxed. An empty candidate pool
 answers 503 with `details.missing` (`vision` / `tools` / `context` for a request-shape gap,
 `pool_strategy` / `manual_filter` when the route's own configuration emptied the pool) instead of a
-bare "no model". The same decision record is stored on `RequestLogEntry.auto`.
+bare "no model". `context` in that list is claimed only when **every** surviving candidate published a
+window and each published window is smaller than the request: a candidate that published none is not
+evidence it cannot fit, so the row never asserts a capability nobody proved (`explainMissing` - it
+describes the pool, it does not change the verdict). The same decision record is stored on
+`RequestLogEntry.auto`.
 
-**A candidate that answers "this channel does not serve that model" is switched past, not fatal.**
-`isFailoverEligibleStatus` keeps its pure status-code meaning (429 / 5xx / no status), and three
-message-keyed classes are let through it in `forwardFirstReachable` **before** that check, each
+**A candidate that answers "this channel cannot serve this request" is switched past, not fatal.**
+`isFailoverEligibleStatus` keeps its pure status-code meaning (429 / 5xx / no status), and a short list
+of message-keyed classes is let through it in `forwardFirstReachable` **before** that check, each
 without cooldown and without an account-failure count, because the request dies before generation and
-the account is healthy: tool-count overflow, missing `reasoning_content` in history, and
-`isChannelModelUnavailableError` (the channel worker's own `模型不存在或已停用`,
-`src/main/channelPack/worker.ts::complete`). The third exists because the two catalogue views of the
-pack disagree by design: the host's `supportedModels` comes from `model.list` → `listAllModels()`
-(**no** identity gating), while the worker's request-time pre-check reads `listModels`, which for
-`opencode` is free-only when no `sk-` key was pasted - so an anonymous-only install advertises 6 paid
-models it can never serve, and `auto` ranks one of them first (big window + tools + reasoning). Before
-this, that 404 ended the whole chain (`attempts: 1`) and the client read "auto is unavailable" while
-four other candidates were never tried (measured 2026-11-01 08:06:40 / 08:11:00,
-`opencode/qwen3.8-max`). Matching is deliberately a single authored literal, so an upstream's own
-`model does not exist` 404 still fails immediately - pinned by
-`tests/routes/proxy-routes-catalog-404.test.ts`, which drives a real local upstream and asserts both
-the switch and the non-switch.
+the account is healthy: tool-count overflow (`isToolOverflowError`), missing `reasoning_content` in
+history (`isMissingReasoningHistoryError`), the channel worker's own `模型不存在或已停用`
+(`isChannelModelUnavailableError`, `src/main/channelPack/worker.ts::complete`), a forced
+`tool_choice` the target refuses (`isForcedToolChoiceUnsupported`), a context window too small for the
+request (`isContextOverflowError`, `failover.ts`), and **any plain `404`** - a renamed or
+capability-divergent model is "this channel does not supply it", not an account fault, so since
+2026-11-02 (new-api parity) it switches too; previously 400/404 were terminal and one such answer ended
+the whole chain (`attempts: 1`) while four other candidates went untried, which the client read as
+"auto is unavailable". The third class exists because the two catalogue views of the pack disagree by
+design: the host's `supportedModels` comes from `model.list` -> `listAllModels()` (**no** identity
+gating), while the worker's request-time pre-check reads `listModels`, which for `opencode` is
+free-only when no `sk-` key was pasted - an anonymous-only install therefore advertises 6 paid models
+it can never serve, and `auto` ranks one of them first (big window + tools + reasoning). Measured
+2026-11-01 08:06:40 / 08:11:00, `opencode/qwen3.8-max`. An opaque aggregate 400 (empty body /
+`Unknown error`) joins the same switch list via `isOpaqueAggregateBadRequest`, also without
+account penalty; a *described* 400 is still terminal, because 400-means-client-error is what keeps a
+wrong request from being retried down a whole pool. Message-keyed matching stays deliberately narrow
+(each detector requires both a context word and the overflow phrase) and is pinned by
+`tests/routes/proxy-routes-catalog-404.test.ts`, which drives a real local upstream and asserts the
+reproducible candidate order, the catalogue-drift 404 switch and the plain-404 switch, plus
+`tests/proxy/failover.test.ts` for the detectors themselves.
+
+**Pool strategies are set algebra read left-to-right, and a later `or` can void an earlier filter.**
+`route.poolStrategies` is a sequence over the 17 predicates in `STRATEGY_PREDICATES`
+(`AutoPoolStrategyId`), each carrying `operator: 'and' | 'or'`: `and` intersects the running set, `or`
+unions it. So `[free-only, and tools-capable, or vision-capable]` does not mean "free AND tools AND
+vision" - the last step re-adds every vision model the second step removed, including paid
+tool-less ones. That is a real config, not a hypothetical, and the route must not silently promise one
+thing and do another, so `applyPoolStrategies()` returns `conflicts`: one entry per `or` strategy that
+voided an earlier strategy **of a different category** (`capability` / `channel` / `context` / `cost` /
+`tier`, from `AUTO_POOL_STRATEGIES[].category` via `STRATEGY_CATEGORY`), with how many models it added
+back and which steps it broke. Same-category unions are *not* reported - `(free ∪ low-weight ∪ in-plan)`
+is exactly how the money-saving presets are written, and warning about it would train the user to
+ignore the warning. `RoutePoolEditor` renders `preview.conflicts` as a notice, and the 503
+`details.missing` value `pool_strategy` is the same emptied-by-configuration state seen from the
+request side.
 
 **Route-level manual include/exclude is the correction for a wrong mark.** `ModelRoute.includeModels`
 / `excludeModels` (`RouteModelRef = {providerId, displayName}`) are applied by
@@ -1026,15 +1084,30 @@ that path.
   `advertisedContextFloors(routes)` for the list, one pool walk for all routes) feeding the pure
   `autoRouting.ts::advertisedContextFloorOf`. Rules that keep it truthful: it is a floor, never an
   average (a route can land on any candidate in its own pool, so a number above the smallest one is
-  a lie); an unannotated candidate counts as `UNANNOTATED_CONTEXT_FLOOR`, i.e. the same number
-  `satisfiesCapability` filters on, so the advertised value and the admission decision can never
-  disagree; it is computed on **that route's** pool after `poolStrategies` and the manual
+  a lie); **only windows the upstream actually published participate**, and a route whose candidates
+  published none omits the key instead of advertising a guess. The earlier rule - an un-annotated
+  candidate counted as `UNANNOTATED_CONTEXT_FLOOR` (64000), the same number the admission filter used
+  - was a lie in the other direction and is what broke long agent sessions: Codex reads
+  `context_window`, multiplies by 0.95 and sets its compaction point at 64000, so a real pool of
+  200K-window models made it rewrite a 45-turn conversation into a hand-off summary at ~260K
+  characters and tell the model the earlier turns no longer counted, which is the "no previous task to
+  continue / repeated verbosity" the user reported; an un-annotated candidate may still be too small,
+  and that case is now paid for with one pre-generation round trip (the context-class 400 switches to
+  the next candidate) rather than with a fabricated ceiling; it is computed on **that route's** pool
+  after `poolStrategies` and the manual
   include/exclude (candidates those steps drop no longer participate, which is why a route pinned to
   big-window models advertises that window instead of the global worst case; a pool narrowed to one
   model reports that model's own window); transient state (cooldown, quota, daily limit) is
   deliberately not deducted - `collectCandidates` takes `ignoreTransientAvailability` for exactly
   this - because a number that shrinks between requests is worse than a conservative one. An empty
   pool omits the key, which is the same route's own 503 rather than somebody else's window.
+- Every request row also carries the **fit reading**, not just the outcome: `inputTokensEstimate`,
+  `modelContextWindow`, `contextFit` (`fits` / `overflow` / `unknown`) and `contextFitSource`
+  (`measured` when the verdict came from an upstream context-class 400 rather than our own estimate),
+  produced by `shared/requestContextFit.ts::readRequestContextFit` and attached in
+  `routes/chat.ts::contextReadingFor`. "The channel said it was too long" and "we guessed it was too
+  long" must be distinguishable after the fact, because the first is a failover reason and the second
+  is a bug in the estimate.
 - Tool call ids are `call_<requestId>-<n>`. Managed markup that fails to parse is stripped from
   content while the surrounding text is preserved. The anthropic wire maps upstream `tool_use`
   blocks to native OpenAI `tool_calls`.
