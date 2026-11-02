@@ -307,6 +307,8 @@ export interface ForwardResult {
   upstreamRequestId?: string
   /** Every same-target attempt made for this forward (including retries). */
   attempts?: RequestAttemptTrace[]
+  /** Rejected locally by the per-model concurrency gate; no upstream call was made. */
+  localAdmissionRejected?: boolean
   latency?: number
   providerSessionId?: string
   parentMessageId?: string

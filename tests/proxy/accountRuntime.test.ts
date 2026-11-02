@@ -174,3 +174,74 @@ test('限流档每账号有上限：自定义供应商的任意模型名不能�
   assert.equal(runtime.isCooling('a', NOW + 1000, 'm6'), true, '只该摘掉最久没碰的 6 个')
   assert.equal(runtime.isCooling('a', NOW + 1000, 'm0'), false, '超过 64 档的最旧那条必须被摘掉')
 })
+
+/* ---------------- 每模型 AIMD / 短窗口 ---------------- */
+
+test('tryBeginAttempt：每个 (账号, 模型) 的并发到默认上限后拒绝，释放后可再进', () => {
+  const runtime = new AccountRuntime()
+  const model = 'm1'
+
+  for (let i = 0; i < 4; i++) {
+    assert.deepEqual(runtime.tryBeginAttempt('a', model, NOW), { ok: true })
+  }
+  const rejected = runtime.tryBeginAttempt('a', model, NOW)
+  assert.equal(rejected.ok, false)
+  if (!rejected.ok) assert.ok(rejected.retryAfterMs > 0)
+
+  assert.equal(runtime.snapshot('a', NOW, model).modelInFlight, 4)
+  assert.equal(runtime.snapshot('a', NOW, model).modelLimit, 4)
+
+  runtime.endAttempt('a', model)
+  assert.deepEqual(runtime.tryBeginAttempt('a', model, NOW), { ok: true })
+})
+
+test('429 拥塞会乘性降并发；连续成功且冷却够了再慢慢加一', () => {
+  const runtime = new AccountRuntime()
+  const model = 'm1'
+
+  for (let i = 0; i < 4; i++) runtime.tryBeginAttempt('a', model, NOW)
+  for (let i = 0; i < 4; i++) runtime.endAttempt('a', model)
+  runtime.recordAttemptOutcome('a', model, { success: false, status: 429 }, NOW)
+
+  // 4 -> floor(4*0.7)=2；两次准入后第三次必须被拒
+  assert.deepEqual(runtime.tryBeginAttempt('a', model, NOW + 10), { ok: true })
+  assert.deepEqual(runtime.tryBeginAttempt('a', model, NOW + 10), { ok: true })
+  assert.equal(runtime.tryBeginAttempt('a', model, NOW + 10).ok, false)
+
+  for (let i = 0; i < 2; i++) runtime.endAttempt('a', model)
+  // 连续成功 5 次后加一档（距上次降速已经超过 30s）
+  for (let i = 0; i < 5; i++) {
+    runtime.tryBeginAttempt('a', model, NOW + 60_000 + i)
+    runtime.endAttempt('a', model)
+    runtime.recordAttemptOutcome('a', model, { success: true, totalMs: 1000 }, NOW + 60_000 + i)
+  }
+  assert.equal(runtime.snapshot('a', NOW + 61_000, model).modelLimit, 3)
+})
+
+test('短窗口记录首字 EWMA、429/超时/degraded 比例', () => {
+  const runtime = new AccountRuntime()
+  const model = 'm1'
+
+  runtime.tryBeginAttempt('a', model, NOW)
+  runtime.endAttempt('a', model)
+  runtime.recordAttemptOutcome('a', model, { success: true, firstTokenMs: 1000, totalMs: 2000 }, NOW)
+  assert.equal(runtime.snapshot('a', NOW, model).ewmaFirstTokenMs, 1000)
+
+  runtime.tryBeginAttempt('a', model, NOW + 1)
+  runtime.endAttempt('a', model)
+  runtime.recordAttemptOutcome('a', model, { success: false, status: 429 }, NOW + 1)
+
+  runtime.tryBeginAttempt('a', model, NOW + 2)
+  runtime.endAttempt('a', model)
+  runtime.recordStreamOutcome('a', model, {
+    firstTokenMs: 1200,
+    totalMs: 3000,
+    endReason: 'done',
+    degraded: true,
+  }, NOW + 2)
+
+  const snapshot = runtime.snapshot('a', NOW + 3, model)
+  assert.equal(snapshot.rateLimitedRate, 1 / 3)
+  assert.equal(snapshot.degradedRate, 1 / 3)
+  assert.equal(snapshot.timeoutRate, 0)
+})

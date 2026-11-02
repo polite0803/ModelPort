@@ -23,6 +23,82 @@ export interface AccountRuntimeSnapshot {
   consecutiveFailures: number
   /** 冷却截止时间戳（仅当仍在冷却期内才返回） */
   coolingUntil?: number
+  /** (account, model) 的短窗口指标；只有查询时给了 model 且已有流量才返回。 */
+  modelInFlight?: number
+  modelLimit?: number
+  ewmaFirstTokenMs?: number
+  rateLimitedRate?: number
+  timeoutRate?: number
+  degradedRate?: number
+}
+
+/** 一次上游尝试的完成信号，用于 AIMD 与短窗口统计（不参与冷却判定）。 */
+export interface AttemptOutcomeInput {
+  success: boolean
+  status?: number
+  /** 首字/首字节耗时；流式由路由层在流结束时补报。 */
+  firstTokenMs?: number
+  /** 整笔耗时；非流式由 forwarder 直接给，流式由路由层在流结束时补报。 */
+  totalMs?: number
+  /** HTTP 200 但内容被截断/不可用，只影响质量分，不当作拥塞降温。 */
+  degraded?: boolean
+  clientAborted?: boolean
+  timedOut?: boolean
+}
+
+/** 流结束时补报的传输层事实。 */
+export interface StreamOutcomeInput {
+  firstTokenMs?: number
+  totalMs?: number
+  endReason?: 'done' | 'eof' | 'timeout' | 'client_gone' | 'error'
+  /** 未请求输出上限却 finish_reason=length（由路由层判定）。 */
+  degraded?: boolean
+}
+
+/**
+ * 每个 (账号, 模型) 的 AIMD 流控状态。
+ *
+ * 为什么不只看 429：限流真正先表现为首字延迟上升，429 只是队列已经满出来的
+ * 结果。这里用短窗口 EWMA（首字）和失败率做闭环，慢下来先降并发，而不是等到
+ * 429 再冷却。
+ */
+interface ModelFlowState {
+  inFlight: number
+  limit: number
+  successStreak: number
+  lastDecreaseAt: number
+  windowStartedAt: number
+  windowAttempts: number
+  windowRateLimited: number
+  windowTimeouts: number
+  windowDegraded: number
+  ewmaFirstTokenMs?: number
+  ewmaTotalMs?: number
+  fastFirstTokenMs?: number
+  slowFirstTokenMs?: number
+  firstTokenSamples: number
+}
+
+const FLOW_WINDOW_MS = 60 * 1000
+const DEFAULT_MODEL_CONCURRENCY = 4
+const MIN_MODEL_CONCURRENCY = 1
+const MAX_MODEL_CONCURRENCY = 16
+/** 最多保留多少个 (账号, 模型) 流控档；自定义模型名不能把表撑大。 */
+const MAX_MODEL_FLOWS = 512
+/** 两次乘性下降至少隔这么久，避免一个尖峰把并发打到 1 后长期起不来。 */
+const DECREASE_COOLDOWN_MS = 5 * 1000
+/** 连续成功达到这个数、且距上次降速足够久，才加一档。 */
+const INCREASE_STREAK = 5
+const INCREASE_COOLDOWN_MS = 30 * 1000
+/** 快/慢 EWMA 的比值超过它，且绝对值超过下限，视为“队列开始变慢”。 */
+const LATENCY_SPIKE_FACTOR = 1.6
+const LATENCY_SPIKE_FLOOR_MS = 3_000
+const EWMA_FAST_ALPHA = 0.5
+const EWMA_SLOW_ALPHA = 0.1
+const EWMA_ALPHA = 0.3
+
+function ema(previous: number | undefined, sample: number, alpha: number): number {
+  return previous === undefined ? sample : previous + alpha * (sample - previous)
 }
 
 const RPM_WINDOW_MS = 60 * 1000
@@ -67,6 +143,7 @@ const RATE_LIMIT_TIERS_PER_ACCOUNT = 64
 export class AccountRuntime {
   private states = new Map<string, AccountRuntimeState>()
   private rateLimits = new Map<string, Map<string, RateLimitTier>>()
+  private flows = new Map<string, ModelFlowState>()
 
   private state(accountId: string): AccountRuntimeState {
     let state = this.states.get(accountId)
@@ -77,18 +154,121 @@ export class AccountRuntime {
     return state
   }
 
-  /** 记录一次上游尝试：在途 +1，并写入 RPM 窗口 */
-  beginAttempt(accountId: string, now: number = Date.now()): void {
+  /** 记录一次上游尝试：在途 +1，并写入 RPM 窗口。带 model 时同时进入该模型流控。 */
+  beginAttempt(accountId: string, now: number = Date.now(), model?: string): void {
     const state = this.state(accountId)
     state.inFlight += 1
     state.attempts.push(now)
     this.prune(state, now)
+
+    if (model !== undefined) {
+      const flow = this.flowOf(accountId, model, now)
+      flow.inFlight += 1
+      flow.windowAttempts += 1
+    }
   }
 
-  endAttempt(accountId: string): void {
+  /**
+   * 准入门：某个 (账号, 模型) 的 AIMD 并发已满时返回 false。
+   *
+   * 调用方（forwarder）拿不到槽位时应换下一家或返回可重试的 429，而不是继续
+   * 把请求压给同一个模型 —— 那正是“限流延时”越等越长的来源。
+   */
+  tryBeginAttempt(
+    accountId: string,
+    model: string,
+    now: number = Date.now(),
+  ): { ok: true } | { ok: false; retryAfterMs: number } {
+    const flow = this.flowOf(accountId, model, now)
+    if (flow.inFlight >= flow.limit) {
+      const estimated = flow.ewmaTotalMs ?? 2_000
+      return {
+        ok: false,
+        retryAfterMs: Math.max(100, Math.min(1_000, Math.round(estimated / Math.max(1, flow.limit)))),
+      }
+    }
+    this.beginAttempt(accountId, now, model)
+    return { ok: true }
+  }
+
+  endAttempt(accountId: string, model?: string): void {
     const state = this.states.get(accountId)
-    if (!state) return
-    state.inFlight = Math.max(0, state.inFlight - 1)
+    if (state) state.inFlight = Math.max(0, state.inFlight - 1)
+
+    if (model !== undefined) {
+      const flow = this.flows.get(this.flowKey(accountId, model))
+      if (flow) flow.inFlight = Math.max(0, flow.inFlight - 1)
+    }
+  }
+
+  /**
+   * 一次上游尝试的结果。只更新 AIMD/短窗口，不写冷却档（冷却仍由
+   * `recordFailure`/`recordSuccess` 负责）。
+   */
+  recordAttemptOutcome(
+    accountId: string,
+    model: string,
+    outcome: AttemptOutcomeInput,
+    now: number = Date.now(),
+  ): void {
+    const flow = this.flowOf(accountId, model, now)
+    if (outcome.clientAborted) return
+
+    if (outcome.success) {
+      flow.successStreak += 1
+      if (outcome.degraded) {
+        flow.windowDegraded += 1
+        flow.successStreak = 0
+      }
+      this.observeLatency(flow, outcome, now)
+      if (!outcome.degraded) this.maybeIncrease(flow, now)
+      return
+    }
+
+    flow.successStreak = 0
+    if (outcome.status === 429) flow.windowRateLimited += 1
+    if (
+      outcome.timedOut
+      || outcome.status === 408
+      || outcome.status === 504
+      || outcome.status === 524
+    ) {
+      flow.windowTimeouts += 1
+    }
+    // 只对“拥塞类”失败降速：400/401/403/404/422 是请求或能力问题，
+    // 拿它们降并发会让一次客户端写错把所有请求都拖慢。
+    if (this.isCongestionFailure(outcome)) {
+      this.decrease(flow, now)
+    }
+  }
+
+  /** 流结束时补报首字/整笔耗时与 degraded；不重复计 successStreak。 */
+  recordStreamOutcome(
+    accountId: string,
+    model: string,
+    outcome: StreamOutcomeInput,
+    now: number = Date.now(),
+  ): void {
+    const flow = this.flowOf(accountId, model, now)
+    if (outcome.endReason === 'client_gone') return
+
+    if (outcome.endReason === 'error' || outcome.endReason === 'timeout') {
+      this.recordAttemptOutcome(accountId, model, {
+        success: false,
+        timedOut: outcome.endReason === 'timeout',
+      }, now)
+      return
+    }
+
+    if (outcome.degraded) {
+      flow.windowDegraded += 1
+      flow.successStreak = 0
+    }
+    this.observeLatency(flow, {
+      firstTokenMs: outcome.firstTokenMs,
+      totalMs: outcome.totalMs,
+    }, now)
+    if (!outcome.degraded) this.maybeIncrease(flow, now)
   }
 
   /**
@@ -186,6 +366,111 @@ export class AccountRuntime {
     return tier.until
   }
 
+  private flowKey(accountId: string, model: string): string {
+    return `${accountId}\u0000${model}`
+  }
+
+  private flowOf(accountId: string, model: string, now: number): ModelFlowState {
+    const key = this.flowKey(accountId, model)
+    let flow = this.flows.get(key)
+    if (flow === undefined) {
+      if (this.flows.size >= MAX_MODEL_FLOWS) this.evictFlows(now)
+      flow = {
+        inFlight: 0,
+        limit: DEFAULT_MODEL_CONCURRENCY,
+        successStreak: 0,
+        lastDecreaseAt: 0,
+        windowStartedAt: now,
+        windowAttempts: 0,
+        windowRateLimited: 0,
+        windowTimeouts: 0,
+        windowDegraded: 0,
+        firstTokenSamples: 0,
+      }
+      this.flows.set(key, flow)
+    } else {
+      // LRU：最近用过的放到末尾，超限时先摘最久没碰的
+      this.flows.delete(key)
+      this.flows.set(key, flow)
+    }
+    this.pruneFlowWindow(flow, now)
+    return flow
+  }
+
+  private evictFlows(now: number): void {
+    for (const [key, flow] of this.flows) {
+      if (now - flow.windowStartedAt > FLOW_WINDOW_MS * 60) this.flows.delete(key)
+    }
+    while (this.flows.size >= MAX_MODEL_FLOWS) {
+      const oldest = this.flows.keys().next()
+      if (oldest.done) break
+      this.flows.delete(oldest.value)
+    }
+  }
+
+  private pruneFlowWindow(flow: ModelFlowState, now: number): void {
+    if (now - flow.windowStartedAt < FLOW_WINDOW_MS) return
+    flow.windowStartedAt = now
+    flow.windowAttempts = 0
+    flow.windowRateLimited = 0
+    flow.windowTimeouts = 0
+    flow.windowDegraded = 0
+  }
+
+  private observeLatency(
+    flow: ModelFlowState,
+    outcome: Pick<AttemptOutcomeInput, 'firstTokenMs' | 'totalMs'>,
+    now: number,
+  ): void {
+    const first = outcome.firstTokenMs
+    if (typeof first === 'number' && Number.isFinite(first) && first >= 0) {
+      flow.ewmaFirstTokenMs = ema(flow.ewmaFirstTokenMs, first, EWMA_ALPHA)
+      flow.fastFirstTokenMs = ema(flow.fastFirstTokenMs, first, EWMA_FAST_ALPHA)
+      flow.slowFirstTokenMs = ema(flow.slowFirstTokenMs, first, EWMA_SLOW_ALPHA)
+      flow.firstTokenSamples += 1
+
+      // 快 EWMA 明显高于慢 EWMA：队列刚开始变长，而不是已经报 429。
+      if (
+        flow.firstTokenSamples >= 3
+        && flow.fastFirstTokenMs !== undefined
+        && flow.slowFirstTokenMs !== undefined
+        && flow.fastFirstTokenMs > LATENCY_SPIKE_FLOOR_MS
+        && flow.fastFirstTokenMs > flow.slowFirstTokenMs * LATENCY_SPIKE_FACTOR
+      ) {
+        this.decrease(flow, now)
+      }
+    }
+
+    const total = outcome.totalMs
+    if (typeof total === 'number' && Number.isFinite(total) && total >= 0) {
+      flow.ewmaTotalMs = ema(flow.ewmaTotalMs, total, EWMA_ALPHA)
+    }
+  }
+
+  private maybeIncrease(flow: ModelFlowState, now: number): void {
+    if (flow.successStreak < INCREASE_STREAK) return
+    if (now - flow.lastDecreaseAt < INCREASE_COOLDOWN_MS) return
+    flow.limit = Math.min(MAX_MODEL_CONCURRENCY, flow.limit + 1)
+    flow.successStreak = 0
+  }
+
+  private decrease(flow: ModelFlowState, now: number): void {
+    if (now - flow.lastDecreaseAt < DECREASE_COOLDOWN_MS) return
+    flow.lastDecreaseAt = now
+    flow.limit = Math.max(MIN_MODEL_CONCURRENCY, Math.floor(flow.limit * 0.7))
+    flow.successStreak = 0
+  }
+
+  private isCongestionFailure(outcome: AttemptOutcomeInput): boolean {
+    if (outcome.timedOut) return true
+    if (outcome.status === undefined) return true
+    return outcome.status === 429
+      || outcome.status === 408
+      || outcome.status === 504
+      || outcome.status === 524
+      || (outcome.status >= 500 && outcome.status <= 599)
+  }
+
   /**
    * 记录一次**需要人工介入**的失败（凭据失效 / 未登录 / 匿名槽耗尽）。
    *
@@ -229,8 +514,27 @@ export class AccountRuntime {
     // 没有冷却就不发这个键（而不是发 `undefined`）：消费点按「有没有这一格」判断
     const availability = coolingUntil === undefined ? {} : { coolingUntil }
 
+    const flow = model === undefined ? undefined : this.flows.get(this.flowKey(accountId, model))
+    if (flow !== undefined) this.pruneFlowWindow(flow, now)
+    const flowFields = flow === undefined
+      ? {}
+      : {
+          modelInFlight: flow.inFlight,
+          modelLimit: flow.limit,
+          ...(flow.ewmaFirstTokenMs === undefined ? {} : { ewmaFirstTokenMs: flow.ewmaFirstTokenMs }),
+          rateLimitedRate: flow.windowAttempts > 0 ? flow.windowRateLimited / flow.windowAttempts : 0,
+          timeoutRate: flow.windowAttempts > 0 ? flow.windowTimeouts / flow.windowAttempts : 0,
+          degradedRate: flow.windowAttempts > 0 ? flow.windowDegraded / flow.windowAttempts : 0,
+        }
+
     if (!state) {
-      return { inFlight: 0, rpmUsed: 0, consecutiveFailures: 0, ...availability }
+      return {
+        inFlight: 0,
+        rpmUsed: 0,
+        consecutiveFailures: 0,
+        ...availability,
+        ...flowFields,
+      }
     }
 
     this.prune(state, now)
@@ -240,6 +544,7 @@ export class AccountRuntime {
       rpmUsed: state.attempts.length,
       consecutiveFailures: state.consecutiveFailures,
       ...availability,
+      ...flowFields,
     }
   }
 
@@ -260,6 +565,7 @@ export class AccountRuntime {
   reset(): void {
     this.states.clear()
     this.rateLimits.clear()
+    this.flows.clear()
   }
 
   private prune(state: AccountRuntimeState, now: number): void {

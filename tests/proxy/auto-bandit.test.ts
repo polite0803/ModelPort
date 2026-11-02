@@ -33,12 +33,16 @@ function entry(overrides: Partial<{
   latency: number
   providerId: string
   actualModel: string
+  finishReason: string
+  maxTokens: number
 }>): {
   timestamp: number
   status: 'success' | 'error'
   latency: number
   providerId?: string
   actualModel?: string
+  finishReason?: string
+  maxTokens?: number
 } {
   return {
     timestamp: NOW - 1000,
@@ -88,6 +92,50 @@ test('banditAdjustment：成功率说话，显著慢再轻罚', () => {
   const fast = banditAdjustment({ total: 10, successes: 0 })
   const slow = banditAdjustment({ total: 10, successes: 0, latencyP50Ms: 31_000 })
   assert.equal(slow - fast, -0.05)
+})
+
+test('degraded：未请求上限却 finish_reason=length 记为不可用成功，客户端主动截断不算', () => {
+  const key = banditKeyOf('loomy', 'loomy/spark-x2.6')
+  const stats = aggregateBanditStats([
+    // 输入按最新在前；聚合内部按时间升序算连续次数。
+    entry({ timestamp: NOW - 1000, finishReason: 'length' }),
+    entry({ timestamp: NOW - 2000, finishReason: 'length' }),
+    entry({ timestamp: NOW - 3000, finishReason: 'stop' }),
+  ], NOW).get(key)
+
+  assert.deepEqual(stats, {
+    total: 3,
+    successes: 3,
+    degraded: 2,
+    consecutiveDegraded: 2,
+    latencyP50Ms: 1000,
+  })
+
+  const capped = aggregateBanditStats([
+    entry({ timestamp: NOW - 1000, finishReason: 'length', maxTokens: 4096 }),
+  ], NOW).get(key)
+  assert.equal(capped?.degraded, 0, '客户端显式 max_tokens 的 length 是预期截断，不降权')
+})
+
+test('degraded：连续两次不可用成功直接重罚，正常一轮会重置连续计数', () => {
+  assert.equal(
+    banditAdjustment({ total: 2, successes: 2, degraded: 2, consecutiveDegraded: 2 }),
+    -0.3,
+    '样本不足 5 也要立刻降权',
+  )
+
+  const key = banditKeyOf('loomy', 'loomy/spark-x2.6')
+  const reset = aggregateBanditStats([
+    entry({ timestamp: NOW - 1000, finishReason: 'stop' }),
+    entry({ timestamp: NOW - 2000, finishReason: 'length' }),
+    entry({ timestamp: NOW - 3000, finishReason: 'length' }),
+  ], NOW).get(key)
+  assert.equal(reset?.degraded, 2)
+  assert.equal(reset?.consecutiveDegraded, 0, '随后一次 stop 必须重置连续计数')
+
+  const mixed = banditAdjustment({ total: 10, successes: 8, degraded: 2, consecutiveDegraded: 0 })
+  const clean = banditAdjustment({ total: 10, successes: 8, degraded: 0, consecutiveDegraded: 0 })
+  assert.ok(mixed < clean, '混有截断成功的模型必须比干净模型分低')
 })
 
 test('rankCandidates：Bandit 战绩要能改写同分候选的排序', () => {
@@ -166,8 +214,11 @@ test('autoRouter 必须把账本余量与 Bandit 战绩喂进打分（源码钉�
     'quota headroom must come from the existing gate, only for aggregate candidates',
   )
   // 打分函数的两个新因子要进总分（钉 balanced 主路径与 fill-first）
-  assert.match(autoRoutingSource, /- penalty - quotaPenalty \+ costBonus \+ stickyBonus \+ liveBonus/)
+  assert.match(autoRoutingSource, /- penalty - quotaPenalty - operationalPenalty \+ costBonus \+ stickyBonus \+ liveBonus/)
   assert.match(autoRoutingSource, /0\.1 \* \(1 - candidate\.quotaHeadroom \/ 0\.1\)/)
+  assert.match(autoRoutingSource, /candidate\.ewmaFirstTokenMs \/ 60_000/)
+  assert.match(autoRoutingSource, /candidate\.rateLimitedRate \?\? 0/)
+  assert.match(autoRoutingSource, /candidate\.modelInFlight \?\? candidate\.inFlight \?\? 0/)
 })
 
 /* ---------------- P1-4：工具能力位（与 maxTools 同一循环） ---------------- */
@@ -191,4 +242,58 @@ test('autoRouter 的能力位过滤必须与 maxTools 同一循环且 fail-open�
     /skipped\.add\(`\$\{provider\.id\}:tools_unsupported`\)/,
     'capability-excluded channels must be recorded as skipped',
   )
+})
+
+test('rankCandidates：短窗口首字延迟 / 429 / 超时 / 饱和会把候选压后', () => {
+  const base = {
+    providerId: 'p',
+    providerName: 'P',
+    displayName: 'm',
+    actualModelId: 'm',
+    contractCapable: true,
+    costBucket: 'unknown' as const,
+  }
+  const healthy: RankCandidate = {
+    ...base,
+    accountId: 'healthy',
+    modelInFlight: 0,
+    modelLimit: 4,
+    ewmaFirstTokenMs: 800,
+    rateLimitedRate: 0,
+    timeoutRate: 0,
+    degradedRate: 0,
+  }
+  const slow: RankCandidate = {
+    ...base,
+    accountId: 'slow',
+    modelInFlight: 0,
+    modelLimit: 4,
+    ewmaFirstTokenMs: 60_000,
+  }
+  const unhealthy: RankCandidate = {
+    ...base,
+    accountId: 'unhealthy',
+    modelInFlight: 0,
+    modelLimit: 4,
+    ewmaFirstTokenMs: 800,
+    rateLimitedRate: 1,
+    timeoutRate: 1,
+    degradedRate: 1,
+  }
+  const saturated: RankCandidate = {
+    ...base,
+    accountId: 'saturated',
+    modelInFlight: 4,
+    modelLimit: 4,
+  }
+
+  const ranked = rankCandidates(
+    { complexity: 'standard', needsTools: false, needsVision: false, estimatedTokens: 0 },
+    [slow, unhealthy, saturated, healthy],
+    { now: NOW, limit: 4, seed: 0, strategy: 'fill-first', prefer: 'balanced' },
+  )
+  assert.equal(ranked[0]?.accountId, 'healthy')
+  assert.ok(ranked.findIndex(c => c.accountId === 'slow') > 0)
+  assert.ok(ranked.findIndex(c => c.accountId === 'unhealthy') > 0)
+  assert.ok(ranked.findIndex(c => c.accountId === 'saturated') > 0)
 })

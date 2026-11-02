@@ -414,6 +414,16 @@ export interface RankCandidate {
   lastUsed?: number
   /** 当前在途请求数 */
   inFlight?: number
+  /** 当前 (账号, 模型) 的在途数；比账号级更精确，缺省回退到 `inFlight`。 */
+  modelInFlight?: number
+  /** 该 (账号, 模型) 的 AIMD 并发上限 */
+  modelLimit?: number
+  /** 最近短窗口的首字延迟 EWMA（毫秒） */
+  ewmaFirstTokenMs?: number
+  /** 最近短窗口的 429 / 超时 / degraded 比例（0–1） */
+  rateLimitedRate?: number
+  timeoutRate?: number
+  degradedRate?: number
   /** 最近 60 秒内的尝试次数 */
   rpmUsed?: number
   /** 账号自身声明的每分钟请求上限，未声明则按候选集合内的相对负载计算 */
@@ -963,8 +973,28 @@ function scoreCandidate(
       : 0
   const headroom = 1 - rpmLoad
 
-  // 在途越多越不优先；0 在途得满分
-  const concurrency = 1 / (1 + (candidate.inFlight ?? 0))
+  // 在途越多越不优先；优先看 (账号, 模型) 的精确在途数，缺省回退账号级
+  const inFlight = candidate.modelInFlight ?? candidate.inFlight ?? 0
+  const concurrency = 1 / (1 + inFlight)
+
+  // 短窗口运行态：首字变慢、429/超时、degraded、并发已满都要降权。
+  // 这是“限流延时随模型访问量变化”的实时信号，不等 24h Bandit 也不等 429。
+  const saturationPenalty =
+    candidate.modelLimit !== undefined
+    && candidate.modelLimit > 0
+    && inFlight >= candidate.modelLimit
+      ? 0.15
+      : 0
+  const latencyPenalty = candidate.ewmaFirstTokenMs === undefined
+    ? 0
+    : Math.min(0.2, (candidate.ewmaFirstTokenMs / 60_000) * 0.2)
+  const healthPenalty = Math.min(
+    0.3,
+    0.2 * (candidate.rateLimitedRate ?? 0)
+    + 0.2 * (candidate.timeoutRate ?? 0)
+    + 0.1 * (candidate.degradedRate ?? 0),
+  )
+  const operationalPenalty = saturationPenalty + latencyPenalty + healthPenalty
 
   const idleness = candidate.lastUsed ? clamp01((now - candidate.lastUsed) / IDLE_WINDOW_MS) : 1
 
@@ -1009,12 +1039,12 @@ function scoreCandidate(
 
   if (strategy === 'fill-first') {
     return 0.35 * usageRatio + 0.4 * tierFit + 0.15 * headroom + 0.1 * concurrency
-      - penalty - quotaPenalty + costBonus + stickyBonus + liveBonus
+      - penalty - quotaPenalty - operationalPenalty + costBonus + stickyBonus + liveBonus
   }
 
   if (strategy === 'failover') {
     return 0.45 * quota + 0.35 * tierFit + 0.1 * headroom + 0.1 * concurrency
-      - penalty - quotaPenalty + costBonus + stickyBonus + liveBonus
+      - penalty - quotaPenalty - operationalPenalty + costBonus + stickyBonus + liveBonus
   }
 
   // smart / pace 在这个分数里表达的是同一件事：**余量比已经用掉的重要**。
@@ -1023,11 +1053,11 @@ function scoreCandidate(
   // auto 只负责把"余量多、配额健康"的候选排到前面。
   if (strategy === 'smart' || strategy === 'pace') {
     return 0.4 * headroom + 0.3 * quota + 0.2 * tierFit + 0.1 * concurrency
-      - penalty - quotaPenalty + costBonus + stickyBonus + liveBonus
+      - penalty - quotaPenalty - operationalPenalty + costBonus + stickyBonus + liveBonus
   }
 
   return 0.3 * quota + 0.3 * tierFit + 0.15 * headroom + 0.15 * concurrency + 0.1 * idleness
-    + dispersion - penalty - quotaPenalty + costBonus + stickyBonus + liveBonus
+    + dispersion - penalty - quotaPenalty - operationalPenalty + costBonus + stickyBonus + liveBonus
 }
 
 /**

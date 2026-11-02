@@ -407,14 +407,12 @@ export class RequestForwarder {
       }
     }
 
-    // 记录在途与 RPM：仅用于路由打分，下一次请求即可读到
-    accountRuntime.beginAttempt(account.id)
-
     let lastError: string | undefined
     let lastStatus: number | undefined
     let lastErrorDetails: UpstreamErrorDetails | undefined
     let lastErrorBody: string | undefined
     let lastRetryAfter: string | undefined
+    let lastLocalAdmissionRejected = false
     const attempts: RequestAttemptTrace[] = []
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -471,45 +469,46 @@ export class RequestForwarder {
         }
       }
 
-      try {
-        const result = await this.doForward(modifiedRequest, account, provider, actualModel, context)
+      // 每模型 AIMD 准入：并发已满时不把请求继续压给同一家，交给换家循环。
+      const admission = accountRuntime.tryBeginAttempt(account.id, actualModel)
+      if (!admission.ok) {
+        const message = 'Local per-model concurrency limit reached'
+        const retryAfter = String(Math.max(1, Math.ceil(admission.retryAfterMs / 1000)))
+        const result: ForwardResult = {
+          success: false,
+          status: 429,
+          error: message,
+          errorDetails: { message, code: 'local_concurrency_limit' },
+          localAdmissionRejected: true,
+          retryAfter,
+          latency: 0,
+        }
         attempts.push(attemptTraceOf({
           provider,
           account,
           model: actualModel,
           result,
           retryIndex: attempt,
-          aborted: request.signal?.aborted === true,
         }))
-
-        if (result.success) {
-          // 带 actualModel：成功只清这个模型自己的限流档，不牵连同渠道别的模型
-          accountRuntime.recordSuccess(account.id, actualModel)
-          accountRuntime.endAttempt(account.id)
-          return { ...result, attempts }
-        }
-
-        lastError = result.error
-        lastStatus = result.status
+        lastError = message
+        lastStatus = 429
         lastErrorDetails = result.errorDetails
-        lastErrorBody = result.errorBody
-        lastRetryAfter = result.retryAfter
+        lastRetryAfter = retryAfter
+        lastLocalAdmissionRejected = true
+        break
+      }
 
-        // 同目标只重试 5xx / 网络错误：4xx 换一家才有意义（另一家的凭据/目录不同），
-        // 408/504/524 重打同一家只会再赔一遍等待。冷却记录照旧，循环到此为止。
-        if (!isSameTargetRetryableStatus(result.status)) {
-          break
-        }
-
-        // 凭据类 502 也不重试，理由与 429 那一段同构但更强：它不是「隔一会儿就
-        // 好」，而是「要人来处理」（重新登录 / 补 Key / 换出口 IP）。重试等于把同一
-        // 笔等待再付一遍 —— 宿主截止时间 60s 时，一次多余重试就是把 60s 变成 120s。
-        if (isChannelHumanRequiredFailure(result.error)) {
-          break
-        }
+      let result: ForwardResult
+      try {
+        result = await this.doForward(modifiedRequest, account, provider, actualModel, context)
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error'
         lastError = message
+        accountRuntime.recordAttemptOutcome(account.id, actualModel, {
+          success: false,
+          clientAborted: request.signal?.aborted === true,
+        })
+        accountRuntime.endAttempt(account.id, actualModel)
         attempts.push({
           providerId: provider.id,
           ...(provider.name === undefined ? {} : { providerName: provider.name }),
@@ -520,15 +519,59 @@ export class RequestForwarder {
           outcome: request.signal?.aborted === true ? 'client_abort' : 'fatal',
           retryIndex: attempt,
         })
+        continue
+      }
+      accountRuntime.endAttempt(account.id, actualModel)
+
+      accountRuntime.recordAttemptOutcome(account.id, actualModel, {
+        success: result.success,
+        ...(result.status === undefined ? {} : { status: result.status }),
+        // 流式的首字/整笔由路由层在流结束时补报；这里只给非流式的整笔耗时。
+        ...(request.stream === true || result.latency === undefined ? {} : { totalMs: result.latency }),
+        clientAborted: request.signal?.aborted === true,
+        degraded: false,
+      })
+
+      attempts.push(attemptTraceOf({
+        provider,
+        account,
+        model: actualModel,
+        result,
+        retryIndex: attempt,
+        aborted: request.signal?.aborted === true,
+      }))
+
+      if (result.success) {
+        // 带 actualModel：成功只清这个模型自己的限流档，不牵连同渠道别的模型
+        accountRuntime.recordSuccess(account.id, actualModel)
+        return { ...result, attempts }
+      }
+
+      lastError = result.error
+      lastStatus = result.status
+      lastErrorDetails = result.errorDetails
+      lastErrorBody = result.errorBody
+      lastRetryAfter = result.retryAfter
+
+      // 同目标只重试 5xx / 网络错误：4xx 换一家才有意义（另一家的凭据/目录不同），
+      // 408/504/524 重打同一家只会再赔一遍等待。冷却记录照旧，循环到此为止。
+      if (!isSameTargetRetryableStatus(result.status)) {
+        break
+      }
+
+      // 凭据类 502 也不重试，理由与 429 那一段同构但更强：它不是「隔一会儿就
+      // 好」，而是「要人来处理」（重新登录 / 补 Key / 换出口 IP）。重试等于把同一
+      // 笔等待再付一遍 —— 宿主截止时间 60s 时，一次多余重试就是把 60s 变成 120s。
+      if (isChannelHumanRequiredFailure(result.error)) {
+        break
       }
     }
 
-    accountRuntime.endAttempt(account.id)
-
     // 429 说明这个账号跑**这个模型**被上游限流了，按 (账号, 模型) 记指数退避，供后续
     // auto 路由避开；上游的限流窗本来就是按模型计的，整账号清零会让同渠道别的模型
-    // 一次成功就把这里的退避抹掉（见 accountRuntime.ts 头部）
-    if (lastStatus === 429) {
+    // 一次成功就把这里的退避抹掉（见 accountRuntime.ts 头部）。
+    // 本地准入拒绝不是上游 429，不能给它记冷却。
+    if (lastStatus === 429 && !lastLocalAdmissionRejected) {
       accountRuntime.recordFailure(account.id, 429, Date.now(), actualModel)
     }
 
@@ -545,6 +588,7 @@ export class RequestForwarder {
       errorDetails: lastErrorDetails ?? errorDetailsOf(error),
       ...(lastErrorBody === undefined ? {} : { errorBody: lastErrorBody }),
       ...(lastRetryAfter === undefined ? {} : { retryAfter: lastRetryAfter }),
+      ...(lastLocalAdmissionRejected ? { localAdmissionRejected: true } : {}),
       attempts,
       latency: Date.now() - startTime,
     }
@@ -713,6 +757,8 @@ export class RequestForwarder {
         status: result.status,
         providerType: candidate.provider.type,
       }))
+      // 本地并发准入拒绝不是上游故障：换下一家，但不给账号记冷却/失败。
+      if (result.localAdmissionRejected) continue
       if (isChannelHumanRequiredFailure(result.error)) {
         // 「这一家当前供不了，且要人或时间恢复」：凭据失效（`no usable credential`
         // /`凭据未配置`/`没有可用通道`）与上游风控（`request illegal`）。

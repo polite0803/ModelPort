@@ -111,7 +111,7 @@ test('兜底排在所有内部消费者之后、三条分派之前（且只能�
   const duplication = at('measureCrossTurnDuplication(request.messages)', '跨轮重复度')
   const compression = at('const compression = applyCompression({', '内容压缩')
   const contextTrim = at('await contextService.process(contextMessages)', '上下文裁剪/摘要')
-  const beginAttempt = at('accountRuntime.beginAttempt(account.id)', '账号记账')
+  const beginAttempt = at('accountRuntime.tryBeginAttempt(account.id, actualModel)', '账号准入/记账')
 
   // 「最后一条 user」在本仓不止被上游读，内部也读：重复度/存活指标、压缩、裁剪/摘要
   // 都会拿它当「用户本轮的诉求」。兜底句是我们造的，一旦被它们看见，就等于把

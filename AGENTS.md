@@ -157,6 +157,13 @@ the builder script; never hand-edit the output.
 tokens is never converted.
 * Reset times are **derived, never stored**; `smart`/`pace` fall back to `fill-first` order when a
 reset cannot be computed, and an exhausted candidate is a last resort, never a forced pick.
+* The 24h Bandit score counts an HTTP-200 response with `finish_reason=length` as **degraded** when the
+client did not request `max_tokens`; two consecutive degraded responses apply an immediate score
+penalty. A client-requested cap is an explicit truncation and is never penalized.
+* Per-`(account, model)` AIMD admission: default concurrency 4; 429/timeout/5xx shrink it
+multiplicatively (5s cooldown), 5 clean successes grow it by one (30s quiet period). Short-window
+EWMA first-token latency plus 429/timeout/degraded rates feed candidate scoring. A locally rejected
+admission is a 429 `local_concurrency_limit` that fails over without penalising the account.
 * `LoadBalanceStrategy` is declared twice (`src/shared/types.ts`, `src/main/store/types.ts`) plus the
 UI maps and both locales - add a value in all of them or it silently cannot be selected.
 

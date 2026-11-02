@@ -2,8 +2,10 @@
  * Bandit 实时评分（PLAN-auto-routing-freellmapi P2-5 第一步，静态权重先行）。
  *
  * 数据源是 request-logs.ndjson 的内存副本：按 `(providerId, actualModel)` 滚动
- * 24h 统计成功率与延迟 p50，作为 auto 打分的加减分因子，替换"候选只能靠静态
- * 启发式排序"的盲区。Thompson sampling 留给观察后的第二步。
+ * 24h 统计成功率、延迟 p50 与「不可用成功」（HTTP 200 但未请求上限却
+ * `finish_reason=length`），作为 auto 打分的加减分因子，替换"候选只能靠静态
+ * 启发式排序"的盲区。连续两次不可用成功立即重罚，不等时间窗内的 5 个样本。
+ * Thompson sampling 留给观察后的第二步。
  *
  * 设计约束：
  * - **纯函数**：与 autoRouting.ts 同一纪律，node --test 直测，不碰 electron；
@@ -20,6 +22,13 @@ export interface BanditLogEntry {
   latency: number
   providerId?: string
   actualModel?: string
+  /**
+   * `length` means the upstream stopped at its own (or the client's) output cap.
+   * Only an unrequested cap is a quality signal; see `isDegradedSuccess`.
+   */
+  finishReason?: string
+  /** Client-requested output cap. Absent when the client sent neither spelling. */
+  maxTokens?: number
 }
 
 /** 一个 (provider, model) 的滚动窗口战绩。 */
@@ -27,6 +36,13 @@ export interface BanditStats {
   total: number
   successes: number
   latencyP50Ms?: number
+  /**
+   * Successful HTTP responses that hit an unrequested output cap. They are not
+   * usable agent turns even though the transport layer recorded success.
+   */
+  degraded?: number
+  /** Trailing degraded streak, used for immediate demotion without waiting for samples. */
+  consecutiveDegraded?: number
 }
 
 /** 默认统计窗口：24 小时（与 PLAN 的滚动 24h 口径一致）。 */
@@ -54,6 +70,20 @@ export function latencyP50(latenciesMs: number[]): number | undefined {
  * 把请求日志折成 Bandit 表：单遍扫描，只保留窗口内的记录。
  * `providerId`/`actualModel` 缺失的条目无法归因，直接跳过。
  */
+/**
+ * An HTTP-success response that is not a usable agent turn:
+ * the upstream stopped at an output cap the **client did not ask for**.
+ *
+ * A client-requested `max_tokens` is an explicit truncation and must not
+ * penalize the model; a missing cap means the model/provider chose a short
+ * default (the 2026-11-02 Codex incident: `finish_reason=length`, zero content,
+ * 4/5 samples "successful").
+ */
+export function isDegradedSuccess(entry: BanditLogEntry): boolean {
+  if (entry.status !== 'success' || entry.finishReason !== 'length') return false
+  return entry.maxTokens === undefined || entry.maxTokens <= 0
+}
+
 export function aggregateBanditStats(
   entries: readonly BanditLogEntry[],
   nowMs: number,
@@ -63,14 +93,25 @@ export function aggregateBanditStats(
   const latencies = new Map<string, number[]>()
   const table = new Map<string, BanditStats>()
 
-  for (const entry of entries) {
-    if (entry.timestamp < from || entry.timestamp > nowMs) continue
-    if (!entry.providerId || !entry.actualModel) continue
+  // Consecutive streaks need chronological order; request logs arrive newest-first.
+  const windowed = entries
+    .filter(entry => entry.timestamp >= from && entry.timestamp <= nowMs)
+    .filter(entry => entry.providerId && entry.actualModel)
+    .slice()
+    .sort((a, b) => a.timestamp - b.timestamp)
 
-    const key = banditKeyOf(entry.providerId, entry.actualModel)
-    const stats = table.get(key) ?? { total: 0, successes: 0 }
+  for (const entry of windowed) {
+    const key = banditKeyOf(entry.providerId!, entry.actualModel!)
+    const stats = table.get(key) ?? { total: 0, successes: 0, degraded: 0, consecutiveDegraded: 0 }
     stats.total += 1
     if (entry.status === 'success') stats.successes += 1
+
+    if (isDegradedSuccess(entry)) {
+      stats.degraded = (stats.degraded ?? 0) + 1
+      stats.consecutiveDegraded = (stats.consecutiveDegraded ?? 0) + 1
+    } else {
+      stats.consecutiveDegraded = 0
+    }
     table.set(key, stats)
 
     if (typeof entry.latency === 'number' && entry.latency >= 0) {
@@ -102,10 +143,29 @@ const SLOW_P50_MS = 30_000
  * - p50 显著慢（> 30s）再扣 0.05。
  */
 export function banditAdjustment(stats: BanditStats | undefined): number {
-  if (stats === undefined || stats.total < BANDIT_MIN_SAMPLES) return 0
+  if (stats === undefined) return 0
 
-  const successRate = stats.successes / stats.total
+  // Immediate demotion for repeated unusable successes. This deliberately runs
+  // before the cold-start minimum: two consecutive `length` responses with no
+  // client cap are enough evidence, even if the model has only 2-4 samples.
+  const consecutiveDegraded = stats.consecutiveDegraded ?? 0
+  if (consecutiveDegraded >= 2) {
+    return -0.3
+  }
+
+  if (stats.total < BANDIT_MIN_SAMPLES) return 0
+
+  // Degraded successes do not count as clean successes (a fully failed model and
+  // a model that answers with empty/truncated turns end up on the same side).
+  const degraded = stats.degraded ?? 0
+  const effectiveSuccesses = Math.max(0, stats.successes - degraded)
+  const successRate = effectiveSuccesses / stats.total
   let adjustment = 0.15 * (successRate - 0.5)
+  if (degraded > 0) {
+    // A smaller additional drag for a mixed record, so one recurring bad model
+    // cannot hide behind a few good turns.
+    adjustment -= 0.1 * (degraded / stats.total)
+  }
   if (stats.latencyP50Ms !== undefined && stats.latencyP50Ms > SLOW_P50_MS) {
     adjustment -= 0.05
   }

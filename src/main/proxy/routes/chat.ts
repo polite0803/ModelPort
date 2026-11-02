@@ -34,6 +34,7 @@ import { normalizeOutputCap } from '../utils/outputCap'
 import { toHeaderValue, routeHeaderValue } from '../utils/headerValue'
 import { readStreamOutcome } from '../utils/streamOutcome'
 import { accountChannelManager } from '../../providers/accountChannels/manager'
+import { accountRuntime } from '../accountRuntime'
 import { storeManager } from '../../store/store'
 import { AUTO_PREFERENCES, type AutoPreference } from '../../../shared/types'
 import { readOrEstimateUsage, usageInputText, type UsageReading } from '../quota/usage'
@@ -704,7 +705,12 @@ router.post('/completions', async (ctx: Context) => {
       // auto 路由的失败账号已在 forwardAutoCompletion 内逐个标记，这里不重复计数。
       // 只有账号级故障（凭据/权限/超时/限流/5xx/网络）才记账：客户端自己写错的
       // 400/404/422 不该把健康账号打进失败池。
-      if (!autoDecision && !request.signal?.aborted && isAccountFault(result.status, result.error)) {
+      if (
+        !autoDecision
+        && !request.signal?.aborted
+        && !result.localAdmissionRejected
+        && isAccountFault(result.status, result.error)
+      ) {
         loadBalancer.markAccountFailed(account.id)
       }
 
@@ -944,7 +950,23 @@ router.post('/completions', async (ctx: Context) => {
       let bytesOut = 0
       let endReason: RequestStreamTrace['endReason']
       let heartbeat: SseHeartbeat | undefined
+      let streamOutcomeReported = false
       wrapperStream.on('error', () => {})
+
+      const reportStreamOutcome = (
+        reason: RequestStreamTrace['endReason'],
+        totalMs: number,
+        degraded = false,
+      ): void => {
+        if (streamOutcomeReported) return
+        streamOutcomeReported = true
+        accountRuntime.recordStreamOutcome(account.id, actualModel, {
+          ...(firstTokenAt === undefined ? {} : { firstTokenMs: firstTokenAt - startTime }),
+          totalMs,
+          endReason: reason,
+          degraded,
+        })
+      }
 
       const streamTraceOf = (
         reason: RequestStreamTrace['endReason'],
@@ -969,6 +991,7 @@ router.post('/completions', async (ctx: Context) => {
         if (endReason === undefined) {
           endReason = failureStatus === 504 ? 'timeout' : 'error'
         }
+        reportStreamOutcome(endReason, Date.now() - startTime)
 
         // 流失败必须回写请求日志：日志条目是在响应头阶段按 success 建的，
         // 不翻成 error 的话这条请求在日志里永远显示成功（且耗时为响应头时间）。
@@ -1072,6 +1095,11 @@ router.post('/completions', async (ctx: Context) => {
             wrapperStream.write('data: [DONE]\n\n')
           }
           const trace = streamTraceOf(endReason, elapsed)
+          reportStreamOutcome(
+            endReason,
+            elapsed,
+            outcome.finishReason === 'length' && requestedMaxTokens === undefined,
+          )
           // Update log with collected response
           if (logEntryId) {
             storeManager.updateRequestLog(logEntryId, streamError
@@ -1166,6 +1194,11 @@ router.post('/completions', async (ctx: Context) => {
             sawDone = true
             wrapperStream.write('data: [DONE]\n\n')
           }
+          reportStreamOutcome(
+            endReason,
+            elapsed,
+            delivered.finishReason === 'length' && requestedMaxTokens === undefined,
+          )
           // Update log with collected response
           if (logEntryId) {
             storeManager.updateRequestLog(logEntryId, {
