@@ -131,7 +131,20 @@ test('OR 运算符取并集：被第一条筛掉的模型能靠第二条回来',
   assert.equal(outcome.droppedBy.get(neither), 'vision-capable')
 })
 
-test('带「或」的策略把前置筛选作废时，冲突要能读出来（人数按每条前置策略分别计）', () => {
+test('「或」跨类作废能力筛选时要报警（成本 or 作废 tools 筛选）', () => {
+  const toolLy = candidate('toolly', { tools: 'yes' })
+  const freeTier = { ...candidate('freetier'), costBucket: 'free' as const }
+  const outcome = applyPoolStrategiesWithTrace([toolLy, freeTier], [
+    { id: 'tools-capable', operator: 'and' },
+    { id: 'free-only', operator: 'or' },
+  ])
+
+  assert.deepEqual(outcome.conflicts, [
+    { id: 'free-only', adds: 1, breaks: [{ strategy: 'tools-capable', count: 1 }] },
+  ])
+})
+
+test('同类别的「或」（预设里的取并）不算作废：池照旧并，冲突为空', () => {
   const sees = candidate('sees', { vision: 'yes' })
   const toolUser = candidate('tooluser', { tools: 'yes' })
   const outcome = applyPoolStrategiesWithTrace([sees, toolUser], [
@@ -139,9 +152,8 @@ test('带「或」的策略把前置筛选作废时，冲突要能读出来（�
     { id: 'tools-capable', operator: 'or' },
   ])
 
-  assert.deepEqual(outcome.conflicts, [
-    { id: 'tools-capable', adds: 1, breaks: [{ strategy: 'vision-capable', count: 1 }] },
-  ])
+  assert.deepEqual(outcome.kept.map(c => c.displayName), ['sees', 'tooluser'])
+  assert.deepEqual(outcome.conflicts, [])
 })
 
 test('全是「且」的序列不报冲突', () => {

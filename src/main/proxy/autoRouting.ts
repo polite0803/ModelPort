@@ -22,6 +22,7 @@ import type {
 import type { CostBucket } from '../../shared/channels.ts'
 import type { AggregateCostClass } from '../../shared/aggregateCost.ts'
 import { providerDefaultCapability, staticCapabilityHint } from './modelCapabilities.ts'
+import { AUTO_POOL_STRATEGIES } from '../../shared/types.ts'
 import { banditAdjustment, type BanditStats } from './autoBandit.ts'
 
 export type AutoComplexity = 'simple' | 'standard' | 'complex'
@@ -136,6 +137,11 @@ const SOURCE_PRIORITY: Record<CapabilitySource, number> = {
  * 未知就是 unknown，绝不零填充；成本类读 `costBucket`（打分口径的档位）与
  * `costClass`（未折叠的聚合消耗分类）；渠道类读 `providerType`。
  */
+/** 策略 id → 分类：`or` 只在**跨类**作废前面的策略时才报警（同类并集是预设的本意） */
+const STRATEGY_CATEGORY = new Map<string, string>(
+  AUTO_POOL_STRATEGIES.map(meta => [meta.id, meta.category as string])
+)
+
 export const STRATEGY_PREDICATES: Record<AutoPoolStrategyId, (candidate: PoolStrategyCandidate) => boolean> = {
   // 能力类
   'vision-capable': c => capabilityOfStrategy(c).vision === 'yes',
@@ -240,12 +246,12 @@ export interface PoolStrategyOutcome {
   /** 每个策略执行完后的保留数（第一项是只跑第一条策略的结果） */
   steps: { id: AutoPoolStrategyId; kept: number }[]
   /**
-   * 带「或」的策略把前面的策略作废的地方。
+   * 一条 `or` **跨类别**地把排在它前面的策略作废的地方。
    *
-   * 序列是从左到右做集合运算的，所以一条 `or` 会把**没通过前面筛选**的候选重新
-   * 拉回池里 —— 用户看到的是「我勾了工具能力，怎么还是选了不会调工具的免费模型」。
-   * 判定口径不改（改了会让 `vision-first` 这类「或＝取并」的预设走样），但这条
-   * 后果必须能说出来。
+   * 序列是从左到右做集合运算的，同类的并集是预设的本意（`low-cost`＝免费∪低权重、
+   * `vision-first`＝视觉∪多模态），不该报警；真正会咬人的是**成本/档位/渠道类的
+   * 「或」把能力类筛选作废**：勾了「工具能力」，池里却又冒出不会调工具的免费模型。
+   * 判定口径不改（改了那些预设就散了），只把这条跨类后果说出来。
    */
   conflicts: RoutePoolStrategyConflict[]
 }
@@ -297,7 +303,8 @@ export function applyPoolStrategiesWithTrace(
             strategy: earlier.strategy.id,
             count: added.filter(candidate => !earlier.predicate(candidate)).length,
           }))
-          .filter(entry => entry.count > 0)
+          .filter(entry =>
+            entry.count > 0 && STRATEGY_CATEGORY.get(entry.strategy) !== STRATEGY_CATEGORY.get(strategy.id))
         if (breaks.length > 0) conflicts.push({ id: strategy.id, adds: added.length, breaks })
       }
     }
