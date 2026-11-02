@@ -760,6 +760,7 @@ class AutoRouter {
       routeName: route.name,
       profile,
       strategies: strategyOutcome.steps,
+      conflicts: strategyOutcome.conflicts,
       models,
       counts: {
         candidates: models.length,

@@ -131,6 +131,31 @@ test('OR 运算符取并集：被第一条筛掉的模型能靠第二条回来',
   assert.equal(outcome.droppedBy.get(neither), 'vision-capable')
 })
 
+test('带「或」的策略把前置筛选作废时，冲突要能读出来（人数按每条前置策略分别计）', () => {
+  const sees = candidate('sees', { vision: 'yes' })
+  const toolUser = candidate('tooluser', { tools: 'yes' })
+  const outcome = applyPoolStrategiesWithTrace([sees, toolUser], [
+    { id: 'vision-capable', operator: 'and' },
+    { id: 'tools-capable', operator: 'or' },
+  ])
+
+  assert.deepEqual(outcome.conflicts, [
+    { id: 'tools-capable', adds: 1, breaks: [{ strategy: 'vision-capable', count: 1 }] },
+  ])
+})
+
+test('全是「且」的序列不报冲突', () => {
+  const sees = candidate('sees', { vision: 'yes' })
+  const toolUser = candidate('tooluser', { tools: 'yes' })
+  const outcome = applyPoolStrategiesWithTrace([sees, toolUser], [
+    { id: 'vision-capable', operator: 'and' },
+    { id: 'tools-capable', operator: 'and' },
+  ])
+
+  assert.deepEqual(outcome.conflicts, [])
+  assert.deepEqual(outcome.kept, [])
+})
+
 test('空策略序列不过滤（也不产生步骤）', () => {
   const pool = [candidate('a'), candidate('b')]
   const outcome = applyPoolStrategiesWithTrace(pool, [])

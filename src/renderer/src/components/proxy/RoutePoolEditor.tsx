@@ -358,6 +358,22 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
         </p>
       )}
 
+      {preview && preview.conflicts.length > 0 && (
+        <div className="space-y-1 rounded-md border border-dashed px-3 py-2">
+          {preview.conflicts.map((conflict, index) => (
+            <p key={`${conflict.id}-${index}`} className="text-xs text-muted-foreground break-words">
+              {t('proxy.routePoolConflict', {
+                strategy: t(`proxy.autoRoutingPoolStrategy_${conflict.id}`),
+                count: conflict.adds,
+                broken: conflict.breaks
+                  .map((entry) => `${t(`proxy.autoRoutingPoolStrategy_${entry.strategy}`)} × ${entry.count}`)
+                  .join(' / '),
+              })}
+            </p>
+          ))}
+        </div>
+      )}
+
       {preview && preview.missing.length > 0 && (
         <div className="rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">
           {t('proxy.routePoolEmpty', {

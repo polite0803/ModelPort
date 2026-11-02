@@ -483,6 +483,28 @@ test('C/preview：逐模型状态就是决策的一步 —— 策略筛掉 / 手
   )
 })
 
+test('C/preview：「或」把前置策略作废时，预览要说出重新纳入了谁', () => {
+  // fixture 里三家都是 custom：aggregate-only 会把池清空，紧随其后的 free-only(or)
+  // 又把唯一标了 free 的 Alpha-Flash 拉回来 —— 这一步必须能被读出来，否则用户看到的
+  // 是「我筛了渠道，怎么还冒出别的模型」。
+  const preview = autoRouter.preview(
+    makeRoute({
+      poolStrategies: [
+        { id: 'aggregate-only', operator: 'and' },
+        { id: 'free-only', operator: 'or' },
+      ],
+    }),
+  )
+
+  assert.deepEqual(preview.conflicts, [
+    { id: 'free-only', adds: 1, breaks: [{ strategy: 'aggregate-only', count: 1 }] },
+  ])
+  assert.deepEqual(
+    preview.models.filter(model => model.status === 'kept').map(model => model.displayName),
+    ['Alpha-Flash'],
+  )
+})
+
 test('C/preview：手动加回不绕过硬过滤；不在池里的引用进 unresolved 而不是被静默丢弃', () => {
   const route = makeRoute({
     includeModels: [

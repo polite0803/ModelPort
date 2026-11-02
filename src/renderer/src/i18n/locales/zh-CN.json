@@ -626,6 +626,7 @@
     "routePoolUnavailable_tools": "预览画像需要工具调用",
     "routePoolUnavailable_context": "上下文窗口不足",
     "routePoolSummary": "候选 {{candidates}} · 策略后 {{afterStrategies}} · 手动修正后 {{afterManual}} · 画像不可用 {{unavailable}}",
+    "routePoolConflict": "「{{strategy}}」按「或」并入，重新纳入了 {{count}} 个不满足排在它前面的策略的候选（{{broken}}）：那几条已经不再约束这个池了。",
     "routePoolEmpty": "当前配置下没有可路由的模型（{{reasons}}）",
     "routePoolMissing_vision": "没有视觉模型",
     "routePoolMissing_tools": "没有支持工具调用的模型",

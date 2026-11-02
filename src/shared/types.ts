@@ -185,6 +185,23 @@ export interface RoutePreviewModel {
   costClass?: AggregateCostClass
 }
 
+/**
+ * 一条带「或」的策略把前面的策略作废的位置。
+ *
+ * 池策略是从左到右做集合运算的：`and` 取交集，`or` 取并集。所以序列里出现 `or`
+ * 时，它会把**没通过前面筛选**的候选重新拉回池里 —— 勾了「工具能力」却仍然选中
+ * 不会调工具的免费模型，原因就在这一步。判定口径不改（`vision-first` 这类预设
+ * 就是靠「或＝取并」工作的），但这条后果必须能在界面上读出来。
+ */
+export interface RoutePoolStrategyConflict {
+  /** 造成并集的那条策略 */
+  id: AutoPoolStrategyId
+  /** 它新纳入了多少个候选 */
+  adds: number
+  /** 这些候选各自不满足的、排在它前面的策略，以及人数 */
+  breaks: { strategy: AutoPoolStrategyId; count: number }[]
+}
+
 export interface RoutePreviewResult {
   routeName: string
   profile: {
@@ -196,6 +213,8 @@ export interface RoutePreviewResult {
   }
   /** 每条策略执行后的保留数（按配置顺序） */
   strategies: { id: AutoPoolStrategyId; kept: number }[]
+  /** 「或」把排在它前面的筛选作废的地方；空数组＝这条序列自洽 */
+  conflicts: RoutePoolStrategyConflict[]
   models: RoutePreviewModel[]
   counts: {
     /** 经过前置剔除后仍在候选里的模型数 */

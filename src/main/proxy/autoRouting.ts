@@ -17,6 +17,7 @@ import type {
   ModelCapabilityHint,
   ProviderType,
   RouteModelRef,
+  RoutePoolStrategyConflict,
 } from '../../shared/types'
 import type { CostBucket } from '../../shared/channels.ts'
 import type { AggregateCostClass } from '../../shared/aggregateCost.ts'
@@ -238,6 +239,15 @@ export interface PoolStrategyOutcome {
   effective: AutoPoolStrategyId[]
   /** 每个策略执行完后的保留数（第一项是只跑第一条策略的结果） */
   steps: { id: AutoPoolStrategyId; kept: number }[]
+  /**
+   * 带「或」的策略把前面的策略作废的地方。
+   *
+   * 序列是从左到右做集合运算的，所以一条 `or` 会把**没通过前面筛选**的候选重新
+   * 拉回池里 —— 用户看到的是「我勾了工具能力，怎么还是选了不会调工具的免费模型」。
+   * 判定口径不改（改了会让 `vision-first` 这类「或＝取并」的预设走样），但这条
+   * 后果必须能说出来。
+   */
+  conflicts: RoutePoolStrategyConflict[]
 }
 
 /**
@@ -254,7 +264,7 @@ export function applyPoolStrategiesWithTrace(
       pair.predicate !== undefined)
 
   if (pairs.length === 0) {
-    return { kept: candidates.slice(), droppedBy: new Map(), effective: [], steps: [] }
+    return { kept: candidates.slice(), droppedBy: new Map(), effective: [], steps: [], conflicts: [] }
   }
 
   // 第一个策略无条件生效
@@ -265,6 +275,7 @@ export function applyPoolStrategiesWithTrace(
   const steps: { id: AutoPoolStrategyId; kept: number }[] = [
     { id: pairs[0]!.strategy.id, kept: kept.size },
   ]
+  const conflicts: RoutePoolStrategyConflict[] = []
 
   for (let i = 1; i < pairs.length; i++) {
     const { strategy, predicate } = pairs[i]!
@@ -275,6 +286,19 @@ export function applyPoolStrategiesWithTrace(
         if (kept.has(candidate) && passes) next.add(candidate)
       } else {
         if (kept.has(candidate) || passes) next.add(candidate)
+      }
+    }
+    if (strategy.operator !== 'and') {
+      const added = candidates.filter(candidate => !kept.has(candidate) && predicate(candidate))
+      if (added.length > 0) {
+        const breaks = pairs
+          .slice(0, i)
+          .map(earlier => ({
+            strategy: earlier.strategy.id,
+            count: added.filter(candidate => !earlier.predicate(candidate)).length,
+          }))
+          .filter(entry => entry.count > 0)
+        if (breaks.length > 0) conflicts.push({ id: strategy.id, adds: added.length, breaks })
       }
     }
     kept.clear()
@@ -294,6 +318,7 @@ export function applyPoolStrategiesWithTrace(
     droppedBy,
     effective: pairs.map(pair => pair.strategy.id),
     steps,
+    conflicts,
   }
 }
 

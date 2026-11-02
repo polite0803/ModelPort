@@ -626,6 +626,7 @@
     "routePoolUnavailable_tools": "Preview profile needs tool calling",
     "routePoolUnavailable_context": "Context window too small",
     "routePoolSummary": "Candidates {{candidates}} · after strategies {{afterStrategies}} · after manual fixes {{afterManual}} · unavailable {{unavailable}}",
+    "routePoolConflict": "\"{{strategy}}\" joined with \"or\" re-admits {{count}} candidates that fail the strategies before it ({{broken}}): those no longer constrain this pool.",
     "routePoolEmpty": "No routable model under the current configuration ({{reasons}})",
     "routePoolMissing_vision": "no vision model",
     "routePoolMissing_tools": "no tool-calling model",
