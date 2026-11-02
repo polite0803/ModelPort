@@ -24,7 +24,7 @@ Ported (reimplemented in TypeScript, no upstream code is vendored verbatim):
 
 Not ported, deliberately: the Kompress-v2-base ML compressor, tree-sitter
 `CodeCompressor`, `HTMLExtractor` (trafilatura), `DiffCompressor`, and the
-lossless table compaction path. See `docs/PLAN-token-compression.md` for why.
+lossless table compaction path. See `docs/plan/PLAN-token-compression.md` for why.
 
 This attribution covers the ported subset only. Changes made here are our own;
 they are not reviewed by or endorsed by the headroom project.

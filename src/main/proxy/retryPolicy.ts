@@ -62,7 +62,7 @@ export const ACCOUNT_CHANNEL_MAX_RETRIES = 1
  * 账号渠道的非流式完成读 `bridge.ts` 里写死的 `0`（永不超时）。于是用户在 UI 上调
  * 旋钮没有任何效果，而渠道包内部的排队预算（`DSH_QODER_QUEUE_TIMEOUT_MS`，未覆盖时
  * 是 30 分钟）可以单独把一笔请求挂 525s —— 2026-11-01 在 192.168.85.131 实测到的
- * 正是这一格（`docs/PLAN-channel-auto-stability.md` R1/R2）。
+ * 正是这一格（`docs/plan/PLAN-channel-auto-stability.md` R1/R2）。
  *
  * ## 四条值各自的职责
  *

@@ -1,9 +1,11 @@
 # AGENTS.md
 
 Guidance for coding agents working in this repository. This file is deliberately short: it holds the
-rules that change how you work, plus pointers. The full 90 KB reference (every subsystem, every
-historical failure) lives in [`docs/AGENTS-full.md`](docs/AGENTS-full.md) - read the section you need
-from there instead of guessing.
+rules that change how you work, plus pointers. Per-feature plans and decision records live in
+[`docs/plan/`](docs/plan/), provider-specific notes in
+[`docs/providers/`](docs/providers/). There is no single full reference document: when neither
+covers the topic, read the code and the comments in the file you are changing - do not act on a
+pointer to a document that is not there.
 
 ## Project Overview
 
@@ -80,7 +82,7 @@ account, `modelMapper.ts` resolves model names, `quota/` meters usage.
 
 ## Invariants You Must Not Break
 
-Proxy / API contract (`docs/AGENTS-full.md` §Public API Contract for the full list):
+Proxy / API contract (this section is the list; per-subsystem history sits in the code comments and `docs/plan/`):
 
 * **Auth is fail-closed.** With any enabled key, `/v1/\*` always requires it (Bearer or `X-API-Key`,
 constant-time compare). With no key the server binds loopback only and `start()` refuses any other
@@ -179,7 +181,7 @@ JIT crash); it trades performance for stability.
 
 ## Extending
 
-Adding a provider touches five places (details in `docs/AGENTS-full.md` §Adding a New Provider):
+Adding a provider touches five places (provider-specific notes: `docs/providers/`):
 
 1. `src/main/providers/builtin/<provider>.ts` (or the aggregate registry for data entries)
 2. register it in `providers/builtin/index.ts` (`builtinProviders` + `builtinProviderMap`)

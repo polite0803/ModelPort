@@ -2,7 +2,7 @@
  * Context compression — shared types.
  *
  * Ported subset of headroom (https://github.com/headroomlabs-ai/headroom),
- * Apache-2.0. See `docs/PLAN-token-compression.md`.
+ * Apache-2.0. See `docs/plan/PLAN-token-compression.md`.
  *
  * Only the pieces that need neither ML models nor Python are ported:
  * content detection, live-zone selection, statistical JSON row selection,

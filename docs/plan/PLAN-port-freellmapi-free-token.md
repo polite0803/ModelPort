@@ -114,7 +114,7 @@ freellmapi 的目录云 `api.freellmapi.co`（核实：他们免费装也拿月�
 
 MIT：任何转录数据在文件头注明来源仓库与 URL，保留版权与许可声明。
 ToS：freellmapi README 的逐家复核表里 Cohere 明确 ❌ Avoid、NVIDIA / Gemini / Z.ai ⚠️，这些标注随目录进 `notes` 并在聚合页显示。
-不做任何自动注册 / 绕过指纹闸门的逻辑（与 `docs/PLAN-retire-web-providers-aggregate.md` 既有裁定一致）。
+不做任何自动注册 / 绕过指纹闸门的逻辑（与 `docs/plan/PLAN-retire-web-providers-aggregate.md` 既有裁定一致）。
 
 ## 8. 验证口径
 

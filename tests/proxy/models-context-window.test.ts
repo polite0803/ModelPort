@@ -7,7 +7,7 @@
  *
  * 原来另一半钉的是单模型条目的查表函数 `contextWindowOf`（精确名 → 通配名 → 多模式
  * 取最小）。`/v1/models` 不再广告单个模型，那个函数失去了唯一的生产调用者，随
- * `docs/PLAN-routes-only-surface.md` 的 R2 一起退役，这里不再留零调用者的用例。
+ * `docs/plan/PLAN-routes-only-surface.md` 的 R2 一起退役，这里不再留零调用者的用例。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'

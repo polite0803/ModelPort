@@ -1,6 +1,6 @@
 # API 缺陷修复执行状态（2026-10-27）
 
-对应计划：`docs/PLAN-api-defects.md`（D1–D4 全部按推荐值批准）
+对应计划：`docs/plan/PLAN-api-defects.md`（D1–D4 全部按推荐值批准）
 
 ## 门禁读数（剩余两项收尾实测）
 
