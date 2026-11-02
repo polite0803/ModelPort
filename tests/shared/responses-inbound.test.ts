@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import {
   chatResponseToResponseBody,
   createResponsesStreamTranslator,
+  freeformToolNamesOf,
   responsesHasInput,
   responsesToChatRequest,
   responsesUnsupportedParams,
@@ -503,4 +504,142 @@ test('只有 encrypted_content 时不伪造思考文本', () => {
 
   const assistant = request.messages.at(-1) as any
   assert.equal(assistant.reasoning_content, undefined)
+})
+
+/* ---------------------------------------------------- 自由文本（custom）工具 */
+
+// Codex 的 apply_patch 是 `type:'custom'` 的自由文本工具：参数是一段原文，不是 JSON。
+// 这一族用例钉的是「写盘为什么没发生」：声明要给出 input 契约、历史里的补丁要能回到
+// 上游眼前、回来的调用项必须是 custom_tool_call（发成 function_call 客户端不执行）。
+const PATCH = '*** Begin Patch\n*** Update File: src/main/proxy/compression/ccr/markers.ts\n@@\n+export const X = 1\n*** End Patch'
+
+test('freeformToolNamesOf 只认自由文本工具，带 schema 的函数与托管工具都不算', () => {
+  assert.deepEqual(
+    freeformToolNamesOf({
+      tools: [
+        { type: 'function', name: 'exec_command', parameters: { type: 'object', properties: { cmd: { type: 'string' } } } },
+        { type: 'custom', name: 'apply_patch', format: { type: 'text' } },
+        { name: 'web_search', type: 'web_search' },
+        { type: 'function', name: 'no_schema_but_function' },
+        { type: 'freeform', name: 'raw_prompt' },
+      ],
+    }),
+    // 托管工具（web_search）没有「一段原文当参数」这回事，给它编造 input 契约等于
+    // 替客户端改语义；只有 custom/freeform 或带 format 的才是自由文本。
+    ['apply_patch', 'raw_prompt'],
+  )
+})
+
+test('自由文本工具的声明折成 chat 的 input 契约：模型不再只能从 description 猜形状', () => {
+  const request = responsesToChatRequest(
+    {
+      input: 'go',
+      tools: [
+        { type: 'function', name: 'exec_command', parameters: { type: 'object', properties: { cmd: { type: 'string' } } } },
+        { type: 'custom', name: 'apply_patch', description: 'Apply a patch', format: { type: 'text' } },
+      ],
+    },
+    { model: 'codex', stream: false },
+  )
+
+  const patch = (request.tools as Payload[]).find(tool => tool.function.name === 'apply_patch') as Payload
+  assert.deepEqual(patch.function.parameters, {
+    type: 'object',
+    properties: { input: { type: 'string', description: 'Raw text payload for this tool, not JSON.' } },
+    required: ['input'],
+    additionalProperties: false,
+  })
+  assert.equal(patch.function.description, 'Apply a patch')
+  // 函数工具自己的 schema 不被改写
+  const exec = (request.tools as Payload[]).find(tool => tool.function.name === 'exec_command') as Payload
+  assert.equal(exec.function.parameters.properties.cmd.type, 'string')
+})
+
+test('历史里的 custom_tool_call / custom_tool_call_output 折进消息：补丁不再从上游眼前消失', () => {
+  const request = responsesToChatRequest(
+    {
+      input: [
+        { type: 'custom_tool_call', call_id: 'c1', name: 'apply_patch', input: PATCH },
+        { type: 'custom_tool_call_output', call_id: 'c1', output: 'Success. updated 1 file' },
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'next' }] },
+      ],
+    },
+    { model: 'codex', stream: false },
+  )
+
+  const [call, result, next] = request.messages as Payload[]
+  assert.equal(call.role, 'assistant')
+  assert.equal(call.content, null)
+  assert.equal(call.tool_calls[0].id, 'c1')
+  assert.deepEqual(JSON.parse(call.tool_calls[0].function.arguments), { input: PATCH })
+  assert.equal(result.role, 'tool')
+  assert.equal(result.tool_call_id, 'c1')
+  assert.equal(result.content, 'Success. updated 1 file')
+  assert.equal(next.role, 'user')
+})
+
+test('回来的调用项按客户端声明的类型发：自由文本发 custom_tool_call + 原文 input', () => {
+  const body = chatResponseToResponseBody(
+    {
+      id: 'chatcmpl-a',
+      choices: [{ message: { content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'apply_patch', arguments: JSON.stringify({ input: PATCH }) } }] }, finish_reason: 'tool_calls' }],
+    },
+    { model: 'codex', fallbackId: 'r1', freeformTools: ['apply_patch'] },
+  )
+
+  const item = (body.output as Payload[]).find(o => o.type === 'custom_tool_call') as Payload
+  assert.equal(item.call_id, 'call_1')
+  assert.equal(item.name, 'apply_patch')
+  assert.equal(item.input, PATCH)
+  assert.equal(item.arguments, undefined)
+})
+
+test('没声明成自由文本的照旧是 function_call（不替别的客户端改形状）', () => {
+  const body = chatResponseToResponseBody(
+    {
+      id: 'chatcmpl-b',
+      choices: [{ message: { tool_calls: [{ id: 'call_2', function: { name: 'exec_command', arguments: '{"cmd":"ls"}' } }] }, finish_reason: 'tool_calls' }],
+    },
+    { model: 'codex', fallbackId: 'r2', freeformTools: ['apply_patch'] },
+  )
+
+  const item = (body.output as Payload[])[0] as Payload
+  assert.equal(item.type, 'function_call')
+  assert.equal(item.arguments, '{"cmd":"ls"}')
+})
+
+test('流式：自由文本项的骨架是 custom_tool_call，input 在收尾一次给全，不转发半截 JSON', () => {
+  const t = createResponsesStreamTranslator({ model: 'codex', fallbackId: 'r3', freeformTools: ['apply_patch'] })
+  let out = ''
+  const args = JSON.stringify({ input: PATCH })
+  const frame = (payload: Payload): string => 'data: ' + JSON.stringify(payload) + '\n\n'
+  out += t.push(frame({ id: 'chatcmpl-c', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_3', function: { name: 'apply_patch', arguments: args.slice(0, 12) } }] } }] }))
+  out += t.push(frame({ id: 'chatcmpl-c', choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: args.slice(12) } }] } }], finish_reason: 'tool_calls' }))
+  out += t.push('data: [DONE]\n\n')
+  out += t.end()
+
+  const events = decode(out)
+  const added = events.find(e => e.type === 'response.output_item.added') as Payload
+  assert.equal(added.item.type, 'custom_tool_call')
+  assert.equal(added.item.input, '')
+  assert.ok(!out.includes('response.function_call_arguments.delta'), '半截 JSON 不该作为 arguments 片段发给客户端')
+  const done = events.find(e => e.type === 'response.custom_tool_call_input.done') as Payload
+  assert.equal(done.input, PATCH)
+  const item = events.find(e => e.type === 'response.output_item.done') as Payload
+  assert.equal(item.item.type, 'custom_tool_call')
+  assert.equal(item.item.input, PATCH)
+})
+
+test('流式：函数工具仍然逐段发 arguments.delta（自由文本的收紧不波及普通调用）', () => {
+  const t = createResponsesStreamTranslator({ model: 'codex', fallbackId: 'r4', freeformTools: ['apply_patch'] })
+  let out = ''
+  out += t.push('data: {"id":"chatcmpl-d","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_4","function":{"name":"exec_command","arguments":"{\\"cmd\\":"}}]}}]}\n\n')
+  out += t.push('data: {"id":"chatcmpl-d","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"ls\\"}"}}]}}],"finish_reason":"tool_calls"}\n\n')
+  out += t.push('data: [DONE]\n\n')
+  out += t.end()
+
+  assert.ok(out.includes('response.function_call_arguments.delta'))
+  const item = decode(out).find(e => e.type === 'response.output_item.done') as Payload
+  assert.equal(item.item.type, 'function_call')
+  assert.deepEqual(JSON.parse(item.item.arguments), { cmd: 'ls' })
 })

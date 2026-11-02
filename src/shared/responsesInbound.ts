@@ -78,6 +78,53 @@ function reasoningTextOf(item: Payload): string {
     .join('')
 }
 
+/**
+ * 自由文本（custom / freeform）工具在 chat 侧的替身参数：一个必填字符串 `input`。
+ *
+ * chat 的 `tools[].function.parameters` 是唯一能表达参数契约的位置，而 freeform 工具
+ * 的契约就是「一段原文」。没有它，上游模型只能从 description 猜形状 —— 实测同一轮
+ * 会话里前两次 `apply_patch` 猜对了 `{"input":"*** Begin Patch…"}`，后四次直接交回
+ * `arguments: {}`（补丁内容整个没了，模型却以为自己写了）。
+ */
+const FREEFORM_INPUT_PARAMETERS = {
+  type: 'object',
+  properties: { input: { type: 'string', description: 'Raw text payload for this tool, not JSON.' } },
+  required: ['input'],
+  additionalProperties: false,
+} as const
+
+/**
+ * 客户端声明的自由文本工具名。判据是「不是 function、又没有 JSON schema」：
+ * `type:'custom'` / `type:'freeform'` / 带 `format` 的算 freeform；带 `parameters`
+ * 或 `input_schema` 的一律按函数走（那是客户端自己给的契约，不替它改）。
+ */
+export function freeformToolNamesOf(body: unknown): string[] {
+  const source = asRecord(body) ?? {}
+  const tools = Array.isArray(source.tools) ? source.tools : []
+  const names: string[] = []
+  for (const raw of tools) {
+    const record = asRecord(raw)
+    if (!record) continue
+    const name = stringOf(record.name)
+    if (name === '') continue
+    if (asRecord(record.parameters) || asRecord(record.input_schema)) continue
+    const type = stringOf(record.type)
+    if (type === 'custom' || type === 'freeform' || asRecord(record.format)) names.push(name)
+  }
+  return names
+}
+
+/** chat 侧 `{"input":"…"}` 替身 → responses 侧的原始文本 `input`。 */
+function freeformInputOf(rawArguments: string): string {
+  try {
+    const record = asRecord(JSON.parse(rawArguments) as unknown)
+    if (record && typeof record.input === 'string') return record.input
+  } catch {
+    // 上游把补丁当纯文本发回来（没有 JSON 外壳）：原文就是 input，不加工。
+  }
+  return rawArguments
+}
+
 export interface ResponsesToChatOptions {
   /** 交给 chat 那条链的模型名（名字怎么解析由调用方决定，这里只负责搬过去）。 */
   model: string
@@ -145,6 +192,41 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
 
       if (type === 'function_call_output') {
         // 思考项出现在工具结果之前（少见）：先落成 assistant，避免丢。
+        flushReasoning()
+        messages.push({
+          role: 'tool',
+          tool_call_id: stringOf(item.call_id),
+          content: textOfParts(item.output),
+        })
+        continue
+      }
+
+      // 自由文本工具（Codex 的 `apply_patch` 就是 `type:'custom'`）的调用项/结果项是
+      // `custom_tool_call` / `custom_tool_call_output`，参数在 `input` 里是**原始文本**
+      // 而不是 JSON 对象。不认这一对，客户端历史里的补丁就整条消失（2026-11-03 实测：
+      // 一段会话连续 4 轮的请求体里都查不到 `Begin Patch`），模型看不到自己已经试过写盘，
+      // 只能一轮一轮重新宣布「我现在直接落盘」——用户读到的就是「总说完成，文件没变」。
+      if (type === 'custom_tool_call') {
+        messages.push({
+          role: 'assistant',
+          content: null,
+          ...(pendingReasoning !== '' ? { reasoning_content: pendingReasoning } : {}),
+          tool_calls: [
+            {
+              id: stringOf(item.call_id),
+              type: 'function',
+              function: {
+                name: stringOf(item.name),
+                arguments: JSON.stringify({ input: typeof item.input === 'string' ? item.input : '' }),
+              },
+            },
+          ],
+        })
+        pendingReasoning = ''
+        continue
+      }
+
+      if (type === 'custom_tool_call_output') {
         flushReasoning()
         messages.push({
           role: 'tool',
@@ -222,15 +304,19 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
 
   const tools = Array.isArray(source.tools) ? source.tools : []
   if (tools.length > 0) {
+    const freeform = new Set(freeformToolNamesOf(source))
     request.tools = tools.map(tool => {
       const record = asRecord(tool) ?? {}
       // responses 把 function 的字段抬在 tool 自身，chat 要求嵌进 `function`。
+      const parameters = asRecord(record.parameters)
+        ?? asRecord(record.input_schema)
+        ?? (freeform.has(stringOf(record.name)) ? FREEFORM_INPUT_PARAMETERS : undefined)
       return {
         type: 'function',
         function: {
           name: stringOf(record.name),
           ...(stringOf(record.description) !== '' ? { description: stringOf(record.description) } : {}),
-          ...(asRecord(record.parameters) ? { parameters: record.parameters } : {}),
+          ...(parameters ? { parameters } : {}),
         },
       }
     })
@@ -360,6 +446,12 @@ export interface ChatToResponsesOptions {
   fallbackId: string
   /** 客户端执行工具的平台；用于校正 exec_command 的 shell/workdir。缺省不校正。 */
   clientPlatform?: string
+  /**
+   * 本次请求里客户端声明为自由文本的工具名（`freeformToolNamesOf` 的结果）。命中的
+   * 调用回 `custom_tool_call` + 原文 `input`，而不是 `function_call` + JSON `arguments`：
+   * 客户端按项的 `type` 分派执行器，发错类型它就不执行（实测补丁到了客户端却没落地）。
+   */
+  freeformTools?: readonly string[]
 }
 
 /**
@@ -399,17 +491,26 @@ export function chatResponseToResponseBody(payload: unknown, options: ChatToResp
     const fn = asRecord(call.function) ?? {}
     const callId = stringOf(call.id)
     const toolName = stringOf(fn.name)
+    const rawArguments = typeof fn.arguments === 'string' ? fn.arguments : '{}'
+    const itemId = callId !== '' ? `fc_${callId.replace(/^call_/, '')}` : `fc_${position}`
+    if (options.freeformTools?.includes(toolName) === true) {
+      output.push({
+        id: itemId,
+        type: 'custom_tool_call',
+        status: 'completed',
+        call_id: callId,
+        name: toolName,
+        input: freeformInputOf(rawArguments),
+      })
+      return
+    }
     output.push({
-      id: callId !== '' ? `fc_${callId.replace(/^call_/, '')}` : `fc_${position}`,
+      id: itemId,
       type: 'function_call',
       status: 'completed',
       call_id: callId,
       name: toolName,
-      arguments: sanitizeClientToolArguments(
-        toolName,
-        typeof fn.arguments === 'string' ? fn.arguments : '{}',
-        options.clientPlatform,
-      ),
+      arguments: sanitizeClientToolArguments(toolName, rawArguments, options.clientPlatform),
     })
   })
 
@@ -452,7 +553,7 @@ export interface ResponsesStreamTranslator {
 }
 
 interface OpenItem {
-  kind: 'message' | 'function_call'
+  kind: 'message' | 'function_call' | 'custom_tool_call'
   itemId: string
   outputIndex: number
   /** chat 流里一次调用按 `index` 分片，同 index 必须落进同一个 responses 项。 */
@@ -518,23 +619,35 @@ export function createResponsesStreamTranslator(options: ChatToResponsesOptions)
       ? { type: 'refusal', refusal: item.text }
       : { type: 'output_text', text: item.text, annotations: [] }
 
-  const doneItemOf = (item: OpenItem): Payload =>
-    item.kind === 'function_call'
-      ? {
-          id: item.itemId,
-          type: 'function_call',
-          status: 'completed',
-          call_id: item.callId ?? '',
-          name: item.name ?? '',
-          arguments: sanitizeClientToolArguments(item.name ?? '', item.text, options.clientPlatform),
-        }
-      : {
-          id: item.itemId,
-          type: 'message',
-          status: 'completed',
-          role: 'assistant',
-          content: [contentOf(item)],
-        }
+  const doneItemOf = (item: OpenItem): Payload => {
+    if (item.kind === 'custom_tool_call') {
+      return {
+        id: item.itemId,
+        type: 'custom_tool_call',
+        status: 'completed',
+        call_id: item.callId ?? '',
+        name: item.name ?? '',
+        input: freeformInputOf(item.text),
+      }
+    }
+    if (item.kind === 'function_call') {
+      return {
+        id: item.itemId,
+        type: 'function_call',
+        status: 'completed',
+        call_id: item.callId ?? '',
+        name: item.name ?? '',
+        arguments: sanitizeClientToolArguments(item.name ?? '', item.text, options.clientPlatform),
+      }
+    }
+    return {
+      id: item.itemId,
+      type: 'message',
+      status: 'completed',
+      role: 'assistant',
+      content: [contentOf(item)],
+    }
+  }
 
   function closeItem(): string {
     const item = open
@@ -555,6 +668,16 @@ export function createResponsesStreamTranslator(options: ChatToResponsesOptions)
         output_index: item.outputIndex,
         content_index: 0,
         part: contentOf(item),
+      }))
+    } else if (item.kind === 'custom_tool_call') {
+      // 自由文本的 input 只在收尾这一条里给全：逐段转 JSON 片段成原文要在流里解
+      // 半截 JSON，拼错一个转义就把补丁内容改坏了 —— 宁可少一段增量显示。
+      out.push(event('response.custom_tool_call_input.done', {
+        item_id: item.itemId,
+        output_index: item.outputIndex,
+        call_id: item.callId ?? '',
+        name: item.name ?? '',
+        input: freeformInputOf(item.text),
       }))
     } else {
       out.push(event('response.function_call_arguments.done', {
@@ -590,9 +713,19 @@ export function createResponsesStreamTranslator(options: ChatToResponsesOptions)
     })
   }
 
+  /** 本次请求里客户端声明为自由文本的工具：调用项的类型由它决定，不是随便挑的。 */
+  const isFreeformTool = (name: string): boolean => options.freeformTools?.includes(name) === true
+
   function openTool(toolIndex: number, callId: string, name: string): string {
     const itemId = callId !== '' ? `fc_${callId.replace(/^call_/, '')}` : `fc_${idTail(responseId, String(toolIndex))}`
     const outputIndex = nextOutputIndex++
+    if (isFreeformTool(name)) {
+      open = { kind: 'custom_tool_call', itemId, outputIndex, callId, name, toolIndex, text: '' }
+      return event('response.output_item.added', {
+        output_index: outputIndex,
+        item: { id: itemId, type: 'custom_tool_call', status: 'in_progress', call_id: callId, name, input: '' },
+      })
+    }
     open = { kind: 'function_call', itemId, outputIndex, callId, name, toolIndex, text: '' }
     return event('response.output_item.added', {
       output_index: outputIndex,
@@ -611,7 +744,7 @@ export function createResponsesStreamTranslator(options: ChatToResponsesOptions)
    * 「逐段渲染」退化成「最后一次性出现」。
    */
   function useTool(toolIndex: number, callId: string, name: string): string {
-    if (open !== null && open.kind === 'function_call' && open.toolIndex === toolIndex) return ''
+    if (open !== null && open.kind !== 'message' && open.toolIndex === toolIndex) return ''
     return closeItem() + openTool(toolIndex, callId, name)
   }
 
@@ -676,12 +809,16 @@ export function createResponsesStreamTranslator(options: ChatToResponsesOptions)
       const args = stringOf(fn.arguments)
       if (args !== '') {
         item.text += args
-        out.push(event('response.function_call_arguments.delta', {
-          item_id: item.itemId,
-          output_index: item.outputIndex,
-          call_id: item.callId ?? '',
-          delta: args,
-        }))
+        // 自由文本项不逐段转发 arguments：那段是半截 JSON（`{"input":"*** Begin…`），
+        // 客户端要的是原文 `input`，拼错了就是改坏补丁。收尾的 …input.done 给全量。
+        if (item.kind === 'function_call') {
+          out.push(event('response.function_call_arguments.delta', {
+            item_id: item.itemId,
+            output_index: item.outputIndex,
+            call_id: item.callId ?? '',
+            delta: args,
+          }))
+        }
       }
     }
 

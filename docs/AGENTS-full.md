@@ -320,6 +320,22 @@ second copy drifts. Forwarding `User-Agent` is not cosmetic: the request log's `
 fetch client (`node`), which is exactly the lead an operator needs when a harness misbehaves. The UA
 goes through `toHeaderValue` like every other dynamic header value.
 
+**Freeform (`custom`) tools are a separate contract from functions, and both halves are
+load-bearing.** Codex declares `apply_patch` as `{type: 'custom', format: …}` - its argument is raw
+text, not a JSON object - and its call/result items are `custom_tool_call` / `custom_tool_call_output`.
+Chat has exactly one place to express an argument contract (`tools[].function.parameters`), so the
+inbound folds a freeform tool into a single required string `input` (`freeformToolNamesOf` +
+`FREEFORM_INPUT_PARAMETERS`), and the outbound must return the call as a `custom_tool_call` item whose
+`input` is that raw text, because the client dispatches on the item's `type` and does not execute a
+`function_call` for a tool it declared custom. Measured 2026-11-03 on a 1568-line Codex session: 304
+calls - 298 `exec_command`, each with a result, and 6 `apply_patch`, **none** with a result, 4 of them
+with `arguments: {}`. Because the history projection recognized only `function_call`, the patch text
+never reached the model again (the next four turns' request bodies contain no `Begin Patch`), so the
+agent re-declared "我现在直接落盘" turn after turn against a clean working tree - the "says it is done,
+nothing changed" report. Hosted tools (`web_search`) are not freeform and get no invented schema. In
+streaming mode the freeform `input` is delivered once, in `response.custom_tool_call_input.done`:
+forwarding partial JSON as `arguments.delta` would corrupt the patch.
+
 One parameter is carried in both directions under the same name: `prompt_cache_key`. Inbound
 translates it onto the chat request, `buildRequestBody` passes it to the upstream (it is in the
 undeclared-field list next to `response_format` / `stream_options` / `seed`), and the outbound

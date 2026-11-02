@@ -41,6 +41,7 @@ import { startSseHeartbeat } from '../utils/sseHeartbeat'
 import {
   chatResponseToResponseBody,
   createResponsesStreamTranslator,
+  freeformToolNamesOf,
   responsesHasInput,
   responsesToChatRequest,
   responsesUnsupportedParams,
@@ -122,6 +123,9 @@ router.post('/responses', async (ctx: Context) => {
   const wantsStream = body.stream === true
   const config = storeManager.getConfig()
   const chatRequest = responsesToChatRequest(body, { model: requestedModel, stream: wantsStream })
+  // 自由文本工具（Codex 的 apply_patch）的名字要一路带到出向：回来的调用项得是
+  // `custom_tool_call`，客户端才会真的执行它。
+  const freeformTools = freeformToolNamesOf(body)
 
   // 客户端申报「允许保存这次 response」。本代理没有 response 存储，这一格是 no-op，
   // 但必须说出来：不然客户端会以为后面能按 id 取回（而那个 GET 本来也不存在）。
@@ -209,6 +213,7 @@ router.post('/responses', async (ctx: Context) => {
       model: requestedModel,
       fallbackId: requestId,
       clientPlatform: process.platform,
+      freeformTools,
     })
     return
   }
@@ -224,6 +229,7 @@ router.post('/responses', async (ctx: Context) => {
     model: requestedModel,
     fallbackId: requestId,
     clientPlatform: process.platform,
+    freeformTools,
   })
   const out = new PassThrough()
 

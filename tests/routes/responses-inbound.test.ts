@@ -26,7 +26,7 @@ const UPSTREAM_PORT = 18972
 type Payload = Record<string, any>
 
 let seenBodies: Payload[] = []
-let upstreamMode: 'ok' | 'stream' | 'tool' = 'ok'
+let upstreamMode: 'ok' | 'stream' | 'tool' | 'patch' = 'ok'
 
 const upstream = createServer((req, res) => {
   const chunks: Buffer[] = []
@@ -58,6 +58,28 @@ const upstream = createServer((req, res) => {
             role: 'assistant',
             content: null,
             tool_calls: [{ id: 'call_7', type: 'function', function: { name: 'get_weather', arguments: '{"city":"SF"}' } }],
+          },
+          finish_reason: 'tool_calls',
+        }],
+        usage: null,
+      }))
+      return
+    }
+
+    if (upstreamMode === 'patch') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        id: 'chatcmpl-patch',
+        object: 'chat.completion',
+        created: 3,
+        model: body.model ?? '',
+        choices: [{
+          index: 0,
+          message: {
+            role: 'assistant',
+            content: null,
+            // 上游按 chat 的形状回：自由文本工具的原文装在 `input` 这个参数里。
+            tool_calls: [{ id: 'call_9', type: 'function', function: { name: 'apply_patch', arguments: JSON.stringify({ input: PATCH_TEXT }) } }],
           },
           finish_reason: 'tool_calls',
         }],
@@ -137,6 +159,9 @@ const responsesBody = (model: string, extra: Payload = {}): Payload => ({
   input: 'hi',
   ...extra,
 })
+
+/** Codex 的 `apply_patch` 是自由文本工具：参数是一段补丁原文，不是 JSON 对象。 */
+const PATCH_TEXT = '*** Begin Patch\n*** Update File: markers.ts\n@@\n+export const X = 1\n*** End Patch'
 
 const MANAGED_TOOL_CALLING_OFF = {
   toolCallingConfig: {
@@ -271,6 +296,40 @@ test('一轮工具往返：上游的 tool_calls 出去是 function_call 项，us
     { id: 'fc_7', type: 'function_call', status: 'completed', call_id: 'call_7', name: 'get_weather', arguments: '{"city":"SF"}' },
   ])
   assert.equal(response.json.usage, null, '上游没报 usage 就是 null，补 0 等于申报这次没消耗')
+})
+
+test('自由文本工具的一轮写盘：声明带 input 契约、历史里的补丁到得了上游、回来的项是 custom_tool_call', async () => {
+  upstreamMode = 'patch'
+  sm.updateConfig(MANAGED_TOOL_CALLING_OFF as never)
+  try {
+    const response = await proxy.request('POST', '/v1/responses', {
+      body: responsesBody('Test-Model', {
+        tools: [{ type: 'custom', name: 'apply_patch', description: 'Apply a patch', format: { type: 'text' } }],
+        input: [
+          { type: 'custom_tool_call', call_id: 'c9', name: 'apply_patch', input: PATCH_TEXT },
+          { type: 'custom_tool_call_output', call_id: 'c9', output: 'Success. updated 1 file' },
+          { role: 'user', content: [{ type: 'input_text', text: 'continue' }] },
+        ],
+      }),
+    })
+
+    assert.equal(response.status, 200)
+    const sent = seenBodies[0]
+    // 1) 出站声明：chat 侧唯一的参数契约位置要给出 input，否则模型只能猜（实测猜出 4 次空 `{}`）。
+    const declared = (sent.tools as Payload[]).find(tool => tool.function.name === 'apply_patch') as Payload
+    assert.deepEqual(declared.function.parameters.required, ['input'])
+    // 2) 历史：补丁原文必须出现在发给上游的消息里。丢了它，模型看不到自己已经写过，
+    //    就会一轮一轮重新宣布「我现在直接落盘」——用户读到的正是那种反复。
+    const history = JSON.stringify(sent.messages)
+    assert.ok(history.includes('Begin Patch'), '补丁原文没进发给上游的历史')
+    assert.ok(history.includes('Success. updated 1 file'), '写盘结果没进历史')
+    // 3) 回来的调用项：类型必须是客户端声明的那种，否则它根本不执行。
+    assert.deepEqual(response.json.output, [
+      { id: 'fc_9', type: 'custom_tool_call', status: 'completed', call_id: 'call_9', name: 'apply_patch', input: PATCH_TEXT },
+    ])
+  } finally {
+    sm.updateConfig({ toolCallingConfig: undefined } as never)
+  }
 })
 
 test('客户端把工具结果发回来时，上游看到的仍是相邻的调用与结果', async () => {

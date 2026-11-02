@@ -101,6 +101,12 @@ never assistant text. Silent prefill is covered by `: PING` comments, not fabric
 Errors keep the upstream status and the upstream `type`/`code`/`param` when standard; fallbacks are
 401 `authentication_error`, 403 `permission_error`, 404 `not_found_error`, 429 `rate_limit_error`,
 5xx `api_error`. Never rewrite 403 into 401.
+* **Freeform (`custom`) tools keep their own item type on the Responses lane.** Codex's `apply_patch`
+is a freeform tool: raw text argument, `custom_tool_call` / `custom_tool_call_output` items. The
+inbound gives it a required string `input` schema (chat has no other contract slot) and the outbound
+must answer with `custom_tool_call` + that text - the client dispatches on item `type`, so a
+`function_call` there means the write silently never happens. Those items must also be read back out of
+history, or the model cannot see its own attempts and re-declares the write every turn.
 * **Failover status policy**: 400 is terminal (capability-mismatch 400s are explicit exceptions);
 401-407, **404**, 409-499, 5xx and network errors switch to the next candidate; 408/504/524 may switch
 but are never retried against the same target. A 404 means "this channel does not supply that model",
