@@ -197,6 +197,44 @@ const TRANSLATED_BODY_KEYS: ReadonlySet<string> = new Set([
 ])
 
 /**
+ * 把连续的 `user` 消息并成一条。
+ *
+ * Anthropic 官方会先把连续同角色消息合并再交给模型，chat 上游不会：多数模型只把
+ * **最后一条 user** 当本轮诉求。Claude Desktop 的 3P 链路先发「上下文 + 用户问题」，
+ * 再把 `# Environment` 说明作为第二条 user 发出 —— 原样转发时上游只看见环境说明，
+ * 于是每一轮都回「你想做什么」，agent 会话完全跑不动（实测 gpt-oss-120b 对原样
+ * 报文返回空正文，合并后能正确分析项目架构）。
+ *
+ * 两段纯文本保持字符串（老上游对数组兼容性参差）；任一段是数组时按 part 顺序拼接。
+ */
+function mergeConsecutiveUserTurns(messages: Payload[]): Payload[] {
+  const merged: Payload[] = []
+  for (const message of messages) {
+    const previous = merged[merged.length - 1]
+    if (message.role !== 'user' || previous?.role !== 'user') {
+      merged.push(message)
+      continue
+    }
+    merged[merged.length - 1] = {
+      ...previous,
+      content: mergeUserContent(previous.content, message.content),
+    }
+  }
+  return merged
+}
+
+function mergeUserContent(previous: unknown, next: unknown): unknown {
+  if (typeof previous === 'string' && typeof next === 'string') {
+    return `${previous}\n\n${next}`
+  }
+  const toParts = (content: unknown): Payload[] => {
+    if (typeof content === 'string') return content === '' ? [] : [{ type: 'text', text: content }]
+    return Array.isArray(content) ? (content as Payload[]) : []
+  }
+  return [...toParts(previous), ...toParts(next)]
+}
+
+/**
  * anthropic `/v1/messages` 请求体 → chat `/v1/chat/completions` 请求体。
  *
  * 一条 anthropic 消息可能同时带文本与 `tool_use`（合成一个 assistant 消息），
@@ -328,7 +366,7 @@ export function anthropicToChatRequest(body: unknown, options: AnthropicToChatOp
 
   const request: Payload = {
     model: options.model,
-    messages,
+    messages: mergeConsecutiveUserTurns(messages),
   }
   if (options.stream) {
     request.stream = true

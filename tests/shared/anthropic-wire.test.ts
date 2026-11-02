@@ -289,6 +289,86 @@ test('一条全认识的请求 dropped 是空数组（证明上面几条不是�
   assert.deepEqual(dropped, [])
 })
 
+test('连续 user 轮按 anthropic 语义合并：Claude Desktop 3P 的环境说明在后时，任务不再被吞掉', () => {
+  const { request } = anthropicToChatRequest(
+    {
+      model: 'claude-x',
+      system: 'sys',
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: '<system-reminder>context</system-reminder>' },
+            { type: 'text', text: '分析项目的技术架构' },
+          ],
+        },
+        { role: 'user', content: '# Environment\nYou have been invoked in the following environment: ...' },
+      ],
+    },
+    { model: 'auto', stream: false },
+  )
+  assert.equal(request.messages.length, 2, 'system + 合并后的一条 user')
+  assert.equal(request.messages[1].role, 'user')
+  assert.deepEqual(request.messages[1].content, [
+    { type: 'text', text: '<system-reminder>context</system-reminder>' },
+    { type: 'text', text: '分析项目的技术架构' },
+    { type: 'text', text: '# Environment\nYou have been invoked in the following environment: ...' },
+  ])
+})
+
+test('两段纯文本的连续 user 轮并成一条字符串，不改成数组', () => {
+  const { request } = anthropicToChatRequest(
+    {
+      model: 'claude-x',
+      messages: [
+        { role: 'user', content: '第一段' },
+        { role: 'user', content: '第二段' },
+      ],
+    },
+    { model: 'auto', stream: false },
+  )
+  assert.equal(request.messages.length, 1)
+  assert.equal(request.messages[0].content, '第一段\n\n第二段')
+})
+
+test('被 assistant 轮隔开的 user 轮不合并', () => {
+  const { request } = anthropicToChatRequest(
+    {
+      model: 'claude-x',
+      messages: [
+        { role: 'user', content: 'go' },
+        { role: 'assistant', content: 'ok' },
+        { role: 'user', content: 'next' },
+      ],
+    },
+    { model: 'auto', stream: false },
+  )
+  assert.deepEqual(request.messages.map((message: any) => message.role), ['user', 'assistant', 'user'])
+})
+
+test('tool 结果保持独立，只有其后的连续 user 轮合并', () => {
+  const { request } = anthropicToChatRequest(
+    {
+      model: 'claude-x',
+      messages: [
+        { role: 'user', content: 'go' },
+        { role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'f', input: {} }] },
+        {
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: 't', content: 'r' },
+            { type: 'text', text: 'continue' },
+          ],
+        },
+        { role: 'user', content: 'env' },
+      ],
+    },
+    { model: 'auto', stream: false },
+  )
+  assert.deepEqual(request.messages.map((message: any) => message.role), ['user', 'assistant', 'tool', 'user'])
+  assert.equal(request.messages[3].content, 'continue\n\nenv')
+})
+
 test('assistant 轮混进的工具结果、以及发不出去的坏图片，都逐条计数', () => {
   const { request, dropped } = anthropicToChatRequest(
     {
