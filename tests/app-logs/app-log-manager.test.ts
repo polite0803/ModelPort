@@ -93,3 +93,20 @@ test('AppLogManager applies filters, pagination, stats, and trend data', async (
 
   manager.flushSync()
 })
+
+test('错误行保底：info 洪峰不能把最近错误挤出保留窗口', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'app-log-manager-error-floor-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+
+  const manager = new AppLogManager({ storageDir: root, maxEntries: 2 })
+  await manager.initialize()
+  manager.addLog(createLog('err-1', 1, 'error'))
+  for (let index = 0; index < 5; index++) {
+    manager.addLog(createLog(`info-${index}`, index + 2, 'info'))
+  }
+  manager.flushSync()
+
+  const ids = manager.getLogs().map((entry) => entry.id)
+  assert.ok(ids.includes('err-1'), '错误行必须留在日志里')
+  assert.ok(ids.includes('info-4'), '最新行仍然保留')
+})

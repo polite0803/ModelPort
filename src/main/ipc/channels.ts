@@ -124,6 +124,8 @@ export const IpcChannels = {
   REQUEST_LOGS_GET_BY_ID: 'requestLogs:getById',
   REQUEST_LOGS_GET_STATS: 'requestLogs:getStats',
   REQUEST_LOGS_CLEAR: 'requestLogs:clear',
+  REQUEST_LOGS_BUNDLE: 'requestLogs:bundle',
+  REQUEST_LOGS_BUNDLE_SAVE: 'requestLogs:bundleSave',
   /** Main -> renderer: one already-persisted row, so the log list need not poll. */
   REQUEST_LOGS_NEW: 'requestLogs:new',
 

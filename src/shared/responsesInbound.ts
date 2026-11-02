@@ -50,6 +50,32 @@ function textOfParts(content: unknown): string {
     .join('')
 }
 
+/**
+ * Responses 的 reasoning 项 → 可回灌的思考文本。
+ *
+ * 优先 `content[].reasoning_text`，其次 `summary[].summary_text`；两者都没有时
+ * 返回空串（加密内容 `encrypted_content` 无法还原，不伪造）。
+ */
+function reasoningTextOf(item: Payload): string {
+  const fromContent = (Array.isArray(item.content) ? item.content : [])
+    .map(part => {
+      const record = asRecord(part)
+      if (!record) return ''
+      const type = stringOf(record.type)
+      return type === 'reasoning_text' || type === 'text' || type === 'summary_text'
+        ? stringOf(record.text)
+        : ''
+    })
+    .join('')
+  if (fromContent !== '') return fromContent
+  return (Array.isArray(item.summary) ? item.summary : [])
+    .map(part => {
+      const record = asRecord(part)
+      return record ? stringOf(record.text) : ''
+    })
+    .join('')
+}
+
 export interface ResponsesToChatOptions {
   /** 交给 chat 那条链的模型名（名字怎么解析由调用方决定，这里只负责搬过去）。 */
   model: string
@@ -75,16 +101,31 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
   if (typeof input === 'string') {
     if (input !== '') messages.push({ role: 'user', content: input })
   } else if (Array.isArray(input)) {
+    // Responses 把思考单独作为 `reasoning` 项；chat 侧的等价位置是紧随其后的
+    // assistant 消息上的 `reasoning_content`。先攒着，遇到 assistant 调用/消息再挂上。
+    let pendingReasoning = ''
+    const flushReasoning = (): void => {
+      if (pendingReasoning === '') return
+      messages.push({ role: 'assistant', content: null, reasoning_content: pendingReasoning })
+      pendingReasoning = ''
+    }
+
     for (const raw of input) {
       const item = asRecord(raw)
       if (!item) continue
       const type = stringOf(item.type)
+
+      if (type === 'reasoning') {
+        pendingReasoning += reasoningTextOf(item)
+        continue
+      }
 
       if (type === 'function_call') {
         messages.push({
           role: 'assistant',
           // 只有调用时 content 必须是 null：给 '' 会让部分上游把这条算成空回复。
           content: null,
+          ...(pendingReasoning !== '' ? { reasoning_content: pendingReasoning } : {}),
           tool_calls: [
             {
               id: stringOf(item.call_id),
@@ -96,10 +137,13 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
             },
           ],
         })
+        pendingReasoning = ''
         continue
       }
 
       if (type === 'function_call_output') {
+        // 思考项出现在工具结果之前（少见）：先落成 assistant，避免丢。
+        flushReasoning()
         messages.push({
           role: 'tool',
           tool_call_id: stringOf(item.call_id),
@@ -108,9 +152,7 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
         continue
       }
 
-      // `reasoning` 项没有 chat 对应物（思维链不能当正文回灌）；`item_reference`
-      // 需要 response 存储，那种请求在上面就被拒了，不会走到这里。
-      if (type === 'reasoning') continue
+      // `item_reference` 需要 response 存储，那种请求在上面就被拒了，不会走到这里。
 
       const role = stringOf(item.role)
       const normalizedRole =
@@ -121,6 +163,7 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
       const text = textOfParts(content)
 
       if (normalizedRole === 'system') {
+        flushReasoning()
         if (text.trim() !== '') messages.push({ role: 'system', content: text })
         continue
       }
@@ -135,13 +178,22 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
         if (url !== '') imageParts.push({ type: 'image_url', image_url: { url } })
       }
 
-      if (text === '' && imageParts.length === 0) continue
+      if (text === '' && imageParts.length === 0) {
+        flushReasoning()
+        continue
+      }
+      if (normalizedRole !== 'assistant') flushReasoning()
       messages.push({
         role: normalizedRole,
         // 单段纯文本用字符串：老上游对数组形态的兼容性参差，有图片才必须用数组。
         content: imageParts.length > 0 ? [{ type: 'text', text }, ...imageParts] : text,
+        ...(normalizedRole === 'assistant' && pendingReasoning !== ''
+          ? { reasoning_content: pendingReasoning }
+          : {}),
       })
+      if (normalizedRole === 'assistant') pendingReasoning = ''
     }
+    flushReasoning()
   }
 
   const request: Payload = { model: options.model, messages }

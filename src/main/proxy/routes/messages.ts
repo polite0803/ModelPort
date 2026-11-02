@@ -23,14 +23,16 @@ import {
   copyModelPortHeaders,
   loopbackHostOf,
   loopbackRequestHeaders,
+  readUpstreamError,
   setSseHeaders,
-  upstreamErrorMessage,
+  type InboundUpstreamError,
 } from '../utils/inboundLoopback'
 import { findModelRoute, enabledModelRoutes, resolveRouteRequest } from '../../store/modelRoutes'
 import { isMappingActive } from '../../store/modelServing'
 import {
   anthropicErrorBody,
   anthropicErrorTypeOf,
+  anthropicErrorTypeOr,
   anthropicToChatRequest,
   chatResponseToAnthropicMessage,
   createAnthropicStreamTranslator,
@@ -38,6 +40,8 @@ import {
   estimateAnthropicInputTokensDetailed,
 } from '../../../shared/anthropicWire'
 import type { AppConfig } from '../../../shared/types'
+import { mapForwardFailure, withRequestId } from '../errorMapping'
+import { startSseHeartbeat } from '../utils/sseHeartbeat'
 
 type Payload = Record<string, any>
 
@@ -169,6 +173,36 @@ function failWith(ctx: Context, status: number, message: string): void {
   ctx.body = anthropicErrorBody(message, anthropicErrorTypeOf(status))
 }
 
+/**
+ * 上游失败交给 Anthropic 信封：状态码、type、message 原样保留。
+ *
+ * Anthropic 的错误对象只有 `{type, message}`，没有 `code/param` 的位置；把上游的
+ * 机读字段放进响应头，既不破坏客户端解析，也不让信息在回环处消失。
+ */
+function failWithUpstream(ctx: Context, error: InboundUpstreamError, requestId: string): void {
+  const mapped = mapForwardFailure({
+    status: error.status,
+    message: error.message,
+    details: error,
+    retryAfter: error.retryAfter,
+  }, 'anthropic')
+  ctx.status = mapped.status
+  ctx.set('Content-Type', 'application/json')
+  ctx.body = anthropicErrorBody(
+    withRequestId(mapped.message, requestId),
+    anthropicErrorTypeOr(mapped.status, mapped.type),
+  )
+  if ((mapped.status === 429 || mapped.status === 503) && mapped.retryAfter) {
+    ctx.set('Retry-After', mapped.retryAfter)
+  }
+  if (mapped.code !== null && mapped.code !== undefined) {
+    ctx.set('X-ModelPort-Upstream-Code', toHeaderValue(String(mapped.code)))
+  }
+  if (mapped.param) {
+    ctx.set('X-ModelPort-Upstream-Param', toHeaderValue(mapped.param))
+  }
+}
+
 router.post('/messages', async (ctx: Context) => {
   const requestId = randomUUID()
   const started = Date.now()
@@ -240,6 +274,7 @@ router.post('/messages', async (ctx: Context) => {
         authorization: ctx.get('Authorization'),
         xApiKey: ctx.get('x-api-key'),
         userAgent: ctx.get('User-Agent'),
+        trace: ctx.get('x-modelport-trace'),
       }),
       body: JSON.stringify(chatRequest),
       signal: abort.signal,
@@ -258,9 +293,7 @@ router.post('/messages', async (ctx: Context) => {
   copyModelPortHeaders(ctx, response)
 
   if (!response.ok) {
-    const message = await upstreamErrorMessage(response)
-    const status = response.status >= 400 && response.status < 600 ? response.status : 502
-    failWith(ctx, status, message)
+    failWithUpstream(ctx, await readUpstreamError(response), requestId)
     return
   }
 
@@ -331,8 +364,13 @@ router.post('/messages', async (ctx: Context) => {
   // 先把响应头发出去：客户端（Claude Code）对「响应头超时」有自己的计时，
   // 上游首个 token 可能远晚于此，等数据再发头会被判超时。
   ctx.res.flushHeaders()
+  const heartbeat = startSseHeartbeat(out)
+  const stopPing = heartbeat.stop
+  out.once('finish', stopPing)
+  out.once('close', stopPing)
 
   ctx.res.once('close', () => {
+    stopPing()
     if (!out.destroyed) out.destroy()
   })
 })

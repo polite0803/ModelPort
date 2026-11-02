@@ -82,8 +82,8 @@ test('接线：forwarder 与 anthropic 适配器都先把体读出来再取文�
   const adapter = readFileSync(join(root, 'src/main/proxy/adapters/anthropic.ts'), 'utf8')
 
   // 三处 4xx 出口（默认转发 / 出向 responses / 自定义 URL）都要 await；漏一处就退回吞错误那一格
-  assert.equal(forwarder.match(/await this\.extractErrorMessage\(response\)/g)?.length, 3)
-  assert.doesNotMatch(forwarder, /error: this\.extractErrorMessage\(response\)/)
+  assert.equal(forwarder.match(/await this\.extractErrorInfo\(response\)/g)?.length, 3)
+  assert.doesNotMatch(forwarder, /error: this\.extractErrorInfo\(response\)/)
   assert.match(forwarder, /const data = await readUpstreamErrorData\(response\.data\)/)
-  assert.match(adapter, /extractErrorMessage\(await readUpstreamErrorData\(response\.data\), response\.status\)/)
+  assert.match(adapter, /pickUpstreamErrorDetails\(data, response\.status\)/)
 })

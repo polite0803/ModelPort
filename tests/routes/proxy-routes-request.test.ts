@@ -132,6 +132,20 @@ test('A/请求级：迁移出来的 `auto` 在第一次 HTTP 请求里就被广�
   assert.equal(typeof auto.created, 'number')
 })
 
+test('请求日志：转发失败也记尝试链与请求关联 id', async () => {
+  const response = await postChat('auto')
+  assert.notEqual(response.status, 200)
+  const requestId = response.headers['x-request-id']
+  assert.match(String(requestId), /^chatcmpl-/)
+
+  const row = sm.getRequestLogs().find((entry: Record<string, any>) => entry.requestId === requestId)
+  assert.ok(row, '失败请求必须有请求日志行')
+  assert.ok(Array.isArray(row.attempts) && row.attempts.length > 0, '失败请求也要记尝试链')
+  assert.ok(['rp1', 'rp2'].includes(row.attempts[0].providerId), '第一家是谁由轮询状态决定')
+  assert.equal(row.attempts[0].outcome, 'failover')
+  assert.ok(row.attempts.every((attempt: Record<string, any>) => typeof attempt.latencyMs === 'number'))
+})
+
 test('A/请求级：createRoute 之后同一个代理实例（未重启）的下一个 /v1/models 就有它', async () => {
   const created = sm.createRoute({
     name: 'fast',

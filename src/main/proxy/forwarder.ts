@@ -5,16 +5,21 @@
 
 import axios, { AxiosRequestConfig, AxiosResponse, AxiosError } from 'axios'
 import http2 from 'http2'
-import { PassThrough } from 'stream'
+import { PassThrough, type Readable } from 'stream'
 import { Account, Provider } from '../store/types'
 import {
   ForwardResult,
   ChatCompletionRequest,
   ProxyContext,
   type ChatMessage as ContextChatMessage,
+  type UpstreamErrorDetails,
 } from './types'
 import { storeManager } from '../store/store'
-import { DEFAULT_AUTO_ROUTING_CONFIG, type AutoAttemptFailure } from '../../shared/types'
+import {
+  DEFAULT_AUTO_ROUTING_CONFIG,
+  type AutoAttemptFailure,
+  type RequestAttemptTrace,
+} from '../../shared/types'
 import { wrapStreamWithPlan } from './toolCalling/streamPlanWrapper'
 import { AnthropicAdapter } from './adapters/anthropic'
 import { ToolCallingEngine } from './toolCalling/ToolCallingEngine'
@@ -22,7 +27,11 @@ import type { ToolCallingTransformResult } from './toolCalling/types'
 import { sessionManager } from './sessionManager'
 import { loadBalancer } from './loadbalancer'
 import { autoRouter, type AutoCandidate } from './autoRouter'
-import { pickUpstreamErrorMessage, readUpstreamErrorData } from './upstreamErrorBody'
+import {
+  pickUpstreamErrorDetails,
+  readUpstreamErrorData,
+  summarizeUpstreamErrorBody,
+} from './upstreamErrorBody'
 
 /** 一个可尝试的目标：与 AutoCandidate 同形，供裸名跨家链复用同一个切换循环。 */
 export interface ChainCandidate {
@@ -43,10 +52,21 @@ export interface ForwardChainOutcome<T extends ChainCandidate> {
   candidate: T
   attempts: number
   failures: AutoAttemptFailure[]
+  /** Structured per-attempt rows for the request log (winner included). */
+  attemptTrace: RequestAttemptTrace[]
 }
 
 /** 日志里最多留几次失败：候选链本身不超 6 家，留出余量只为防御异常循环。 */
 const MAX_LOGGED_ATTEMPT_FAILURES = 8
+
+/**
+ * axios 流在提交响应头之前的首帧探测窗口。
+ *
+ * 只等这么久：首帧（包括上游的流内错误帧）通常随响应头一起到达；窗口内没数据
+ * 就照常把响应头交给客户端，不把慢模型的 prefill 一并拖慢。窗口内读到的帧
+ * 若已经报错，就能在「写 200」之前换下一家。
+ */
+const STREAM_HEAD_PROBE_MS = 200
 
 /**
  * 换家循环的预算：随**本次决策**传入，不在循环里读全局配置。
@@ -58,6 +78,7 @@ const MAX_LOGGED_ATTEMPT_FAILURES = 8
 export interface FailoverBudget {
   baseCap: number
 }
+import { attemptTraceOf } from './attemptTrace.ts'
 import { accountRuntime } from './accountRuntime'
 import { planAttemptDeadline, planForwardRetries } from './retryPolicy'
 import { stripUnsupportedForBuiltin } from './parameterPolicy'
@@ -82,6 +103,7 @@ import { recordConversationTurn, recordConversationTurnForRequest } from './comp
 // 再导出，chat 路由的既有 import 路径不变。
 import {
   AUTO_WALL_CLOCK_BUDGET_MS,
+  createIdleWatchdog,
   describeAttemptFailure,
   firstStreamEvent,
   isChannelHumanRequiredFailure,
@@ -91,6 +113,7 @@ import {
   isMissingReasoningHistoryError,
   isOpaqueAggregateBadRequest,
   isRecoverableChannelFailure,
+  isSameTargetRetryableStatus,
   isToolOverflowError,
   probeSseHead,
   shouldTryNextAutoCandidate,
@@ -103,6 +126,52 @@ import { isForbiddenProviderHeader } from '../../shared/providerHeaders'
 
 function shouldDeleteSession(): boolean {
   return sessionManager.shouldDeleteAfterChat()
+}
+
+/** 上游 `Retry-After` 的原始值；数组按 HTTP 语义拼成单值，空白值视为没给。 */
+function retryAfterOf(headers: unknown): string | undefined {
+  if (!headers || typeof headers !== 'object') return undefined
+  const record = headers as Record<string, unknown>
+  const value = record['retry-after'] ?? record['Retry-After']
+  if (value === undefined || value === null) return undefined
+  const text = Array.isArray(value) ? value.join(', ') : String(value)
+  return text.trim() || undefined
+}
+
+/**
+ * Upstream request id exposed by common gateways. It is the one value a
+ * provider's support team will ask for, so capture it without logging headers.
+ */
+function upstreamRequestIdOf(headers: unknown): string | undefined {
+  if (!headers || typeof headers !== 'object') return undefined
+  const record = headers as Record<string, unknown>
+  const names = new Set([
+    'x-request-id',
+    'request-id',
+    'x-openai-request-id',
+    'cf-ray',
+    'x-amzn-requestid',
+    'x-amzn-request-id',
+  ])
+  for (const [key, value] of Object.entries(record)) {
+    if (!names.has(key.toLowerCase())) continue
+    const text = Array.isArray(value) ? value.join(', ') : typeof value === 'string' ? value : ''
+    if (text.trim() !== '') return text.trim()
+  }
+  return undefined
+}
+
+interface ExtractedUpstreamError {
+  message: string
+  details: UpstreamErrorDetails
+  body?: string
+  retryAfter?: string
+  upstreamRequestId?: string
+}
+
+/** 只有一句话可交时，仍给出最小结构化错误，避免下游两套形状。 */
+function errorDetailsOf(message: string): UpstreamErrorDetails {
+  return { message }
 }
 
 type ProviderForwarder = {
@@ -343,6 +412,10 @@ export class RequestForwarder {
 
     let lastError: string | undefined
     let lastStatus: number | undefined
+    let lastErrorDetails: UpstreamErrorDetails | undefined
+    let lastErrorBody: string | undefined
+    let lastRetryAfter: string | undefined
+    const attempts: RequestAttemptTrace[] = []
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       if (attempt > 0) {
@@ -400,21 +473,31 @@ export class RequestForwarder {
 
       try {
         const result = await this.doForward(modifiedRequest, account, provider, actualModel, context)
+        attempts.push(attemptTraceOf({
+          provider,
+          account,
+          model: actualModel,
+          result,
+          retryIndex: attempt,
+          aborted: request.signal?.aborted === true,
+        }))
 
         if (result.success) {
           // 带 actualModel：成功只清这个模型自己的限流档，不牵连同渠道别的模型
           accountRuntime.recordSuccess(account.id, actualModel)
           accountRuntime.endAttempt(account.id)
-          return result
+          return { ...result, attempts }
         }
 
         lastError = result.error
         lastStatus = result.status
+        lastErrorDetails = result.errorDetails
+        lastErrorBody = result.errorBody
+        lastRetryAfter = result.retryAfter
 
-        // 429 是上游限流：同一个账号隔 5 秒再打一次基本没用，只会把配额和等待
-        // 一起赔进去（OpenCode 配额耗尽时一次失败就要 20 多秒，重试 3 次就是两分钟）。
-        // 冷却记录照旧，循环到此为止。
-        if (result.status && result.status < 500) {
+        // 同目标只重试 5xx / 网络错误：4xx 换一家才有意义（另一家的凭据/目录不同），
+        // 408/504/524 重打同一家只会再赔一遍等待。冷却记录照旧，循环到此为止。
+        if (!isSameTargetRetryableStatus(result.status)) {
           break
         }
 
@@ -425,7 +508,18 @@ export class RequestForwarder {
           break
         }
       } catch (error) {
-        lastError = error instanceof Error ? error.message : 'Unknown error'
+        const message = error instanceof Error ? error.message : 'Unknown error'
+        lastError = message
+        attempts.push({
+          providerId: provider.id,
+          ...(provider.name === undefined ? {} : { providerName: provider.name }),
+          accountId: account.id,
+          ...(account.name === undefined ? {} : { accountName: account.name }),
+          model: actualModel,
+          errorMessage: message.slice(0, 500),
+          outcome: request.signal?.aborted === true ? 'client_abort' : 'fatal',
+          retryIndex: attempt,
+        })
       }
     }
 
@@ -438,11 +532,20 @@ export class RequestForwarder {
       accountRuntime.recordFailure(account.id, 429, Date.now(), actualModel)
     }
 
+    const error = lastError || 'Request failed after retries'
+    // 客户端取消不是上游故障：Axios 的中止错误没有 response，status 会是
+    // undefined，换家循环会把它当网络错误继续试、账号还会被记一次失败。
+    // 统一落成 400（与账号渠道的客户端断开分支同义），让环立刻停手。
+    const aborted = request.signal?.aborted === true
     return {
       success: false,
       // 丢掉状态码的话，路由层会把它映射成 500，客户端就看不到"被限流/请求有问题"
-      status: lastStatus,
-      error: lastError || 'Request failed after retries',
+      status: aborted ? 400 : lastStatus,
+      error,
+      errorDetails: lastErrorDetails ?? errorDetailsOf(error),
+      ...(lastErrorBody === undefined ? {} : { errorBody: lastErrorBody }),
+      ...(lastRetryAfter === undefined ? {} : { retryAfter: lastRetryAfter }),
+      attempts,
       latency: Date.now() - startTime,
     }
   }
@@ -516,6 +619,7 @@ export class RequestForwarder {
     // 被跳过的候选各自的失败样貌（判据与换家分支同源，见 describeAttemptFailure）。
     // 请求日志只记最终赢家，没有这个数组就分不清「这家天天错」和「这家偶发排队」。
     const failures: AutoAttemptFailure[] = []
+    const attemptTrace: RequestAttemptTrace[] = []
     let attempts = 0
     // 账号故障类（5xx/网络）失败计数：达到基础上限就停手 —— 积分账号每次失败
     // 都可能烧钱，5xx 通常意味着系统性问题，多试只是多烧（PLAN P0-1）。
@@ -529,7 +633,13 @@ export class RequestForwarder {
     // 循环的每个出口都带上失败清单（`failures` 是同一数组引用，退出时的内容
     // 就是「被跳过的家」，成功那轮从不进入）。
     const finish = (): ForwardChainOutcome<T> | null =>
-      last === null ? null : { ...last, failures: failures.slice(0, MAX_LOGGED_ATTEMPT_FAILURES) }
+      last === null
+        ? null
+        : {
+            ...last,
+            failures: failures.slice(0, MAX_LOGGED_ATTEMPT_FAILURES),
+            attemptTrace: attemptTrace.slice(),
+          }
 
     for (const candidate of candidates) {
       // 分级尝试上限 + 墙钟预算（分级判据本体与测试在 failover.ts；候选列表
@@ -570,6 +680,7 @@ export class RequestForwarder {
         { maxRetries: 0 }
       )
 
+      attemptTrace.push(...(result.attempts ?? []))
       attempts += 1
       last = { result, candidate, attempts }
 
@@ -584,6 +695,9 @@ export class RequestForwarder {
         || isMissingReasoningHistoryError(result.error)
         || isChannelModelUnavailableError(result.error)
         || isForcedToolChoiceUnsupported(result.error)
+        // 普通 404 同样是「这一家供不了这个模型」（目录漂移/能力差异），不是账号
+        // 故障：换下一家，但不给账号记冷却 —— 否则一次模型改名会连坐整个账号。
+        || result.status === 404
       // 聚合条目的不透明 400（空错误体 / `Unknown error`）同样是「这一家供不了」，
       // 但账号本身健康：换下一家，不计账号故障、不进冷却。
       const opaqueAggregateBadRequest = isOpaqueAggregateBadRequest(
@@ -707,31 +821,37 @@ export class RequestForwarder {
         // 它永远等不到检查点，所以超时必须在这里兑现：销毁源流触发 openStream
         // 的 close → cancel，渠道 worker 才会中止上游请求；504 参与换家。
         upstream.destroy()
+        const timeoutMessage = `渠道 ${Math.round(firstEventMs / 1000)}s 内未产出任何首块（疑似假死），已中止并换下一家`
         return {
           success: false,
           status: 504,
-          error: `渠道 ${Math.round(firstEventMs / 1000)}s 内未产出任何首块（疑似假死），已中止并换下一家`,
+          error: timeoutMessage,
+          errorDetails: errorDetailsOf(timeoutMessage),
           latency: Date.now() - startTime,
         }
       }
       if (first.kind === 'error') {
         const failure = first.error as { message?: string; status?: number }
+        const message = failure.message ?? '渠道请求失败'
         return {
           success: false,
           status: failure.status ?? 502,
-          error: failure.message ?? '渠道请求失败',
+          error: message,
+          errorDetails: errorDetailsOf(message),
           latency: Date.now() - startTime,
         }
       }
       if (first.kind === 'closed') {
         // 客户端已断开的中止也走这里：400 让换家循环立刻停手 —— 请求已死，
         // 换下一家只是白打上游。
+        const message = signal?.aborted
+          ? '客户端已断开，渠道请求已中止'
+          : '渠道在建流阶段提前结束，没有产出任何响应'
         return {
           success: false,
           status: signal?.aborted ? 400 : 502,
-          error: signal?.aborted
-            ? '客户端已断开，渠道请求已中止'
-            : '渠道在建流阶段提前结束，没有产出任何响应',
+          error: message,
+          errorDetails: errorDetailsOf(message),
           latency: Date.now() - startTime,
         }
       }
@@ -750,6 +870,7 @@ export class RequestForwarder {
             ? 400
             : 502,
           error: probe.message,
+          errorDetails: errorDetailsOf(probe.message),
           latency: Date.now() - startTime,
         }
       }
@@ -791,13 +912,105 @@ export class RequestForwarder {
       }
     } catch (error) {
       const failure = error as { message?: string; status?: number }
+      const message = failure.message ?? '渠道请求失败'
       return {
         success: false,
         status: failure.status ?? 502,
-        error: failure.message ?? '渠道请求失败',
+        error: message,
+        errorDetails: errorDetailsOf(message),
         latency: Date.now() - startTime,
       }
     }
+  }
+
+  /**
+   * 在把响应头交给客户端之前，先看一眼 axios 流的头。
+   *
+   * 解决的问题：很多网关先回 HTTP 200、再把上游的 400/403 以**流内错误帧**
+   * 发出来。旧路径拿到 200 就判成功并 flushHeaders，之后任何错误都只能作为
+   * 一条已经开始的流死在客户端，换家循环再也看不到它。这里在写头之前等一个
+   * 很短的窗口：窗口内读到错误帧就按失败返回并换家；没数据就照常放行，不把
+   * 慢模型的 prefill 拖长。
+   */
+  private async probeAndWrapStream(source: Readable): Promise<
+    | { ok: true; stream: Readable }
+    | { ok: false; status: number; message: string; details: UpstreamErrorDetails }
+  > {
+    const first = await firstStreamEvent(source, STREAM_HEAD_PROBE_MS)
+    if (first.kind === 'timeout') {
+      return { ok: true, stream: this.withIdleWatchdog(source) }
+    }
+    if (first.kind === 'error') {
+      const failure = first.error as { message?: string; status?: number }
+      const message = failure.message ?? '上游在建流阶段失败'
+      return { ok: false, status: failure.status ?? 502, message, details: errorDetailsOf(message) }
+    }
+    if (first.kind === 'closed') {
+      const message = '上游在产出任何内容之前就结束了'
+      return { ok: false, status: 502, message, details: errorDetailsOf(message) }
+    }
+
+    const probe = await probeSseHead(source, first.chunk, STREAM_HEAD_PROBE_MS)
+    if (probe.kind === 'error') {
+      const message = probe.details?.message ?? probe.message
+      const status = probe.details?.status
+        ?? (isToolOverflowError(message) || isMissingReasoningHistoryError(message) ? 400 : 502)
+      const details: UpstreamErrorDetails = probe.details
+        ? {
+            message,
+            ...(probe.details.type === undefined ? {} : { type: probe.details.type }),
+            ...(probe.details.code === undefined ? {} : { code: probe.details.code }),
+            ...(probe.details.param === undefined ? {} : { param: probe.details.param }),
+          }
+        : errorDetailsOf(message)
+      source.destroy()
+      return { ok: false, status, message, details }
+    }
+
+    // probe 已经读走首块（可能还有更多），先原样补发再 pipe 接管，不能丢块。
+    const replay = new PassThrough()
+    replay.on('error', () => {})
+    for (const chunk of probe.buffered) replay.write(chunk)
+    source.once('error', (error) => replay.destroy(error))
+    replay.once('close', () => {
+      if (!source.destroyed && !source.readableEnded) source.destroy()
+    })
+    source.pipe(replay)
+    return { ok: true, stream: this.withIdleWatchdog(replay) }
+  }
+
+  /** 首块之后的块间静默看门狗：与账号渠道共用同一判据。 */
+  private withIdleWatchdog(source: Readable): Readable {
+    const idleMs = requestDeadlines().idleMs
+    if (!(idleMs > 0)) return source
+    const out = new PassThrough()
+    out.on('error', () => {})
+    const watchdog = createIdleWatchdog(idleMs, () => {
+      const error = Object.assign(
+        new Error(`上游流在 ${Math.round(idleMs / 1000)}s 内没有新数据，已中止`),
+        { status: 504 },
+      )
+      source.destroy(error)
+      if (!out.destroyed) out.destroy(error)
+    })
+    watchdog.arm()
+    source.once('error', (error) => {
+      watchdog.clear()
+      if (!out.destroyed) out.destroy(error)
+    })
+    source.once('end', () => watchdog.clear())
+    source.once('close', () => {
+      watchdog.clear()
+      if (!out.destroyed && !out.readableEnded) out.end()
+    })
+    out.once('close', () => {
+      watchdog.clear()
+      if (!source.destroyed && !source.readableEnded) source.destroy()
+    })
+    source.pipe(out)
+    // pipe 之后再挂 data 监听，避免先进入 flowing 模式把首块丢掉。
+    source.on('data', () => watchdog.arm())
+    return out
   }
 
   /**
@@ -903,22 +1116,44 @@ export class RequestForwarder {
       const latency = Date.now() - startTime
 
       if (response.status >= 400) {
+        const failure = await this.extractErrorInfo(response)
         return {
           success: false,
           status: response.status,
-          error: await this.extractErrorMessage(response),
+          error: failure.message,
+          errorDetails: failure.details,
+          ...(failure.body === undefined ? {} : { errorBody: failure.body }),
+          ...(failure.retryAfter === undefined ? {} : { retryAfter: failure.retryAfter }),
+          ...(failure.upstreamRequestId === undefined
+            ? {}
+            : { upstreamRequestId: failure.upstreamRequestId }),
           latency,
         }
       }
 
       if (request.stream) {
+        const headers = this.extractHeaders(response.headers)
+        const probed = await this.probeAndWrapStream(response.data as Readable)
+        if (!probed.ok) {
+          const retryAfter = retryAfterOf(response.headers)
+          return {
+            success: false,
+            status: probed.status,
+            error: probed.message,
+            errorDetails: probed.details,
+            ...(retryAfter === undefined ? {} : { retryAfter }),
+            upstreamRequestId: upstreamRequestIdOf(response.headers),
+            latency: Date.now() - startTime,
+          }
+        }
         return {
           success: true,
           status: response.status,
-          headers: this.extractHeaders(response.headers),
-          stream: wrapStreamWithPlan(response.data, transformed.plan) as any,
+          headers,
+          upstreamRequestId: upstreamRequestIdOf(response.headers),
+          stream: wrapStreamWithPlan(probed.stream, transformed.plan) as any,
           skipTransform: transformed.plan.shouldParseResponse,
-          latency,
+          latency: Date.now() - startTime,
         }
       }
 
@@ -928,6 +1163,7 @@ export class RequestForwarder {
         success: true,
         status: response.status,
         headers: this.extractHeaders(response.headers),
+        upstreamRequestId: upstreamRequestIdOf(response.headers),
         body: response.data,
         latency,
       }
@@ -995,10 +1231,17 @@ export class RequestForwarder {
       const latency = Date.now() - startTime
 
       if (response.status >= 400) {
+        const failure = await this.extractErrorInfo(response)
         return {
           success: false,
           status: response.status,
-          error: await this.extractErrorMessage(response),
+          error: failure.message,
+          errorDetails: failure.details,
+          ...(failure.body === undefined ? {} : { errorBody: failure.body }),
+          ...(failure.retryAfter === undefined ? {} : { retryAfter: failure.retryAfter }),
+          ...(failure.upstreamRequestId === undefined
+            ? {}
+            : { upstreamRequestId: failure.upstreamRequestId }),
           latency,
         }
       }
@@ -1008,6 +1251,7 @@ export class RequestForwarder {
           success: true,
           status: response.status,
           headers: this.extractHeaders(response.headers),
+          upstreamRequestId: upstreamRequestIdOf(response.headers),
           body: responsesBodyToChat(response.data, actualModel),
           latency,
         }
@@ -1017,6 +1261,7 @@ export class RequestForwarder {
         success: true,
         status: response.status,
         headers: this.extractHeaders(response.headers),
+        upstreamRequestId: upstreamRequestIdOf(response.headers),
         stream: this.translateResponsesStream(response.data, actualModel),
         // 已经是 chat 形状，主线不必再转一次
         skipTransform: true,
@@ -1249,7 +1494,20 @@ export class RequestForwarder {
     //   为什么变慢，只会以为上游慢了）。
     // 聚合条目的地盘很严时由条目自己的 `dropParams` 剥（`applyAggregateDropParams`
     // 就在这之后跑），内建供应商仍由 `stripUnsupportedForBuiltin` 先删掉它们。
-    for (const key of ['response_format', 'stream_options', 'seed', 'prompt_cache_key'] as const) {
+    for (const key of [
+      'response_format',
+      'stream_options',
+      'seed',
+      'prompt_cache_key',
+      'logprobs',
+      'top_logprobs',
+      'prediction',
+      'modalities',
+      'audio',
+      'service_tier',
+      'reasoning',
+      'top_k',
+    ] as const) {
       const value = (request as unknown as Record<string, unknown>)[key]
       if (value !== undefined) body[key] = value
     }
@@ -1280,9 +1538,19 @@ export class RequestForwarder {
    * 流式请求的 4xx 体是一条流，必须先读成文本再查键：不读的话上游那句真实原因
    * 一个字节都留不下（机制与实测见 `upstreamErrorBody.ts` 的文档块）。
    */
-  private async extractErrorMessage(response: AxiosResponse): Promise<string> {
+  private async extractErrorInfo(response: AxiosResponse): Promise<ExtractedUpstreamError> {
     const data = await readUpstreamErrorData(response.data)
-    return pickUpstreamErrorMessage(data, response.status)
+    const details = pickUpstreamErrorDetails(data, response.status)
+    const body = summarizeUpstreamErrorBody(data)
+    const retryAfter = retryAfterOf(response.headers)
+    const upstreamRequestId = upstreamRequestIdOf(response.headers)
+    return {
+      message: details.message,
+      details,
+      ...(body === undefined ? {} : { body }),
+      ...(retryAfter === undefined ? {} : { retryAfter }),
+      ...(upstreamRequestId === undefined ? {} : { upstreamRequestId }),
+    }
   }
 
   /**
@@ -1319,10 +1587,17 @@ export class RequestForwarder {
       const latency = Date.now() - startTime
 
       if (response.status >= 400) {
+        const failure = await this.extractErrorInfo(response)
         return {
           success: false,
           status: response.status,
-          error: await this.extractErrorMessage(response),
+          error: failure.message,
+          errorDetails: failure.details,
+          ...(failure.body === undefined ? {} : { errorBody: failure.body }),
+          ...(failure.retryAfter === undefined ? {} : { retryAfter: failure.retryAfter }),
+          ...(failure.upstreamRequestId === undefined
+            ? {}
+            : { upstreamRequestId: failure.upstreamRequestId }),
           latency,
         }
       }
@@ -1332,6 +1607,7 @@ export class RequestForwarder {
           success: true,
           status: response.status,
           headers: this.extractHeaders(response.headers),
+          upstreamRequestId: upstreamRequestIdOf(response.headers),
           stream: response.data,
           latency,
         }
@@ -1341,6 +1617,7 @@ export class RequestForwarder {
         success: true,
         status: response.status,
         headers: this.extractHeaders(response.headers),
+        upstreamRequestId: upstreamRequestIdOf(response.headers),
         body: response.data,
         latency,
       }

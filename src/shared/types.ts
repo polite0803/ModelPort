@@ -780,6 +780,25 @@ export interface LogEntry {
   data?: Record<string, unknown>
 }
 
+/**
+ * One request plus the surrounding evidence, for copying out of a user's
+ * machine. Contains no credentials or request bodies unless the row was
+ * captured with an explicit trace.
+ */
+export interface RequestDiagnosticBundle {
+  generatedAt: string
+  app: {
+    version: string
+    electron: string
+    node: string
+    platform: string
+    arch: string
+  }
+  request: RequestLogEntry | null
+  relatedLogs: LogEntry[]
+  config: Record<string, unknown>
+}
+
 export interface ProxyStatus {
   isRunning: boolean
   port: number
@@ -901,6 +920,49 @@ export interface AutoAttemptFailure {
   reason: string
 }
 
+/**
+ * One upstream attempt inside a request.
+ *
+ * A request can try several providers/accounts (failover) and several times
+ * against one target (5xx retry). The final row used to keep only the winner,
+ * so `attempts: 4` could not explain what the first three answered.
+ */
+export interface RequestAttemptTrace {
+  providerId: string
+  providerName?: string
+  accountId?: string
+  accountName?: string
+  /** Display name sent upstream (route/aggregate chains keep the provider prefix). */
+  model: string
+  status?: number
+  errorType?: string
+  errorCode?: string | number | null
+  errorMessage?: string
+  latencyMs?: number
+  /** `success` is the winning attempt; the rest say why it was skipped. */
+  outcome: 'success' | 'failover' | 'fatal' | 'capability' | 'client_abort'
+  /** 0 = first attempt against this target, 1 = same-target retry. */
+  retryIndex?: number
+}
+
+/** Transport-level facts for a streaming response. */
+export interface RequestStreamTrace {
+  /** Time from request start to the first upstream data chunk. */
+  firstTokenMs?: number
+  /** Time from request start to the end of the client stream. */
+  totalMs?: number
+  /** Bytes forwarded to the client (SSE text). */
+  bytesOut?: number
+  /** Why the stream ended. `client_gone` is a client cancel, not an upstream fault. */
+  endReason?: 'done' | 'eof' | 'timeout' | 'client_gone' | 'error'
+  /** Whether a `[DONE]` sentinel was observed (including one appended by the proxy). */
+  sawDone?: boolean
+  /** Number of `: PING` comments written while waiting for upstream data. */
+  pingCount?: number
+  /** Upstream request id when the provider exposes one (support ticket evidence). */
+  upstreamRequestId?: string
+}
+
 export interface RequestLogEntry {
   /** Log ID */
   id: string
@@ -911,6 +973,8 @@ export interface RequestLogEntry {
   /** HTTP status code */
   statusCode: number
 
+  /** Correlation id shared with app logs and the X-Request-Id response header. */
+  requestId?: string
   /** HTTP method */
   method: string
   /** Request URL path */
@@ -964,8 +1028,26 @@ export interface RequestLogEntry {
 
   /** Error message */
   errorMessage?: string
-  /** Error stack trace */
+  /** Error stack trace (redacted and truncated before persistence) */
   errorStack?: string
+  /** Machine-readable error fields preserved from the upstream envelope. */
+  errorType?: string
+  errorCode?: string | number | null
+  errorParam?: string | null
+  /** HTTP status the upstream actually returned (before any client-facing mapping). */
+  upstreamStatus?: number
+  /** Upstream request id (support ticket evidence); also mirrored inside streamTrace. */
+  upstreamRequestId?: string
+  /** Every attempt, in order, including the winning one. */
+  attempts?: RequestAttemptTrace[]
+  /** Streaming-only transport facts. */
+  streamTrace?: RequestStreamTrace
+  /**
+   * Explicit per-request trace: capture bodies even when global body logging is
+   * off. Set by the `X-ModelPort-Trace: 1` header; persisted so stream-end
+   * updates keep using the same decision.
+   */
+  captureBodies?: boolean
 
   /**
    * Decision record for a request that asked for a route (`auto` and any route the

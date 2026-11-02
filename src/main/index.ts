@@ -9,6 +9,7 @@ import { UpdaterManager } from './updater'
 import { storeManager } from './store/store'
 import { aggregateProviderManager } from './providers/aggregate'
 import { detectHiddenLaunch, reconcileAutoStart } from './autostartHost'
+import { recordProcessCrash, setCrashLogWriter } from './logging/crashReporter'
 
 // Keep the Electron profile directory stable across product renames.
 // safeStorage seals store.key and every stored credential against this profile
@@ -46,13 +47,16 @@ migrateLegacyDirectory(
 )
 migrateLegacyDirectory(join(homedir(), '.chat2api'), join(homedir(), '.modelport'), 'data directory')
 
-// Prevent uncaught exceptions from crashing the app
+// Keep the process alive, but never lose the evidence: a packaged GUI has no
+// terminal attached, so console.error alone leaves an invisible crash.
 process.on('uncaughtException', (error) => {
   console.error('Uncaught Exception:', error)
+  recordProcessCrash('uncaughtException', error)
 })
 
 process.on('unhandledRejection', (reason) => {
   console.error('Unhandled Rejection:', reason)
+  recordProcessCrash('unhandledRejection', reason)
 })
 
 // Workaround for V8 JIT compiler crash on macOS ARM64 (Electron 33 bug)
@@ -139,6 +143,11 @@ async function setupApp(): Promise<void> {
   })
 
   await registerIpcHandlers(mainWindow)
+
+  // 存储就绪后把启动早期缓冲的崩溃写进应用日志；存储不可用时保留 crash-fallback.ndjson。
+  if (!storeManager.hasInitializationError()) {
+    setCrashLogWriter((entry) => storeManager.appendLogEntry(entry))
+  }
 
   // 凭据加密降级必须让人看见：打包后的 GUI 里没人看 stdout，只写一条应用日志等于静默
   // 明文落盘。这里只提示、不阻断 —— 阻断会让这些机器直接无法使用。

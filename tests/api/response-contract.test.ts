@@ -14,9 +14,10 @@ function read(relativePath: string): string {
   return readFileSync(`${proxyRoot}/${relativePath}`, 'utf8')
 }
 
-test('upstream status maps to OpenAI error types', () => {
+test('upstream status maps to OpenAI error types without rewriting 403 to 401', () => {
   assert.deepEqual(mapUpstreamError(401), { status: 401, type: 'authentication_error', code: 'upstream_unauthorized' })
-  assert.deepEqual(mapUpstreamError(403), { status: 401, type: 'authentication_error', code: 'upstream_unauthorized' })
+  // 403 是「没权限/地区/套餐」，不是「凭据不对」；改成 401 会让客户端轮换自己的 Key。
+  assert.deepEqual(mapUpstreamError(403), { status: 403, type: 'permission_error', code: 'upstream_unauthorized' })
   assert.deepEqual(mapUpstreamError(429), { status: 429, type: 'rate_limit_error', code: 'rate_limit_exceeded' })
   assert.equal(mapUpstreamError(400).type, 'invalid_request_error')
   assert.equal(mapUpstreamError(502).type, 'api_error')
@@ -68,7 +69,7 @@ test('stream failures are an SSE error frame, not assistant content', () => {
   assert.equal(payload.choices, undefined)
 
   const source = read('routes/chat.ts')
-  assert.match(source, /buildStreamErrorFrame\(err\.message\)/)
+  assert.match(source, /buildStreamErrorFrame\(err\.message, \{/)
   assert.doesNotMatch(source, /\[Error: \$\{err\.message\}\]/)
 })
 
@@ -114,17 +115,17 @@ test('risk-control rejections get their own code and never masquerade as an auth
   })
   assert.equal(mapUpstreamError(502, illegal).code, 'channel_risk_control')
   assert.equal(mapUpstreamError(502, illegal).type, 'api_error')
-  // 同一条文案配 403 时必须**不**落到 authentication_error。
+  // 同一条文案配 403 时必须**不**落到 authentication_error；403 本身保留。
   assert.deepEqual(mapUpstreamError(403, illegal), {
     status: 403,
-    type: 'invalid_request_error',
+    type: 'permission_error',
     code: 'channel_risk_control',
   })
 
-  // 负样本：真认证失败（无风控文案）仍按 401 / authentication_error。
+  // 负样本：真认证失败（无风控文案）保留 403，类型是 permission_error。
   assert.deepEqual(mapUpstreamError(403, 'upstream rejected the token'), {
-    status: 401,
-    type: 'authentication_error',
+    status: 403,
+    type: 'permission_error',
     code: 'upstream_unauthorized',
   })
   // 429 也不被文案劫持。

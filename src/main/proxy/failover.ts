@@ -5,9 +5,10 @@
  * store / 渠道管理器，node --test 拉不动；这两个判据是 auto 换家语义的核心，
  * 必须能被真实单测钉住，不能只靠源码文本断言。
  */
-import type { PassThrough } from 'stream'
+import type { Readable } from 'stream'
 import type { AutoAttemptFailure } from '../../shared/types'
 import { DEFAULT_FIRST_EVENT_TIMEOUT_MS } from './retryPolicy.ts'
+import { extractStreamErrorFrame, type StreamErrorFrame } from './stream.ts'
 
 /**
  * 工具数量超限类 400 的识别。
@@ -140,15 +141,75 @@ export function isForcedToolChoiceUnsupported(message: string | undefined): bool
 }
 
 /**
- * 429 / 5xx / 无状态码（网络错误、超时）才值得换目标；4xx 换目标没有意义。
+ * 哪些状态码值得**换下一家**。
  *
- * 例外是「渠道能力不匹配」类 400（工具数超限、历史缺 reasoning_content）与
- * 「渠道目录不认这个模型」类 404：那三类由调用方在状态码判定**之前**单独放行
- * （forwarder.ts 的 `forwardFirstReachable`），本函数保持纯状态码语义。
+ * 对齐 new-api 的 `AutomaticRetryStatusCodeRanges`（`1xx/3xx/401-407/409-499/
+ * 500-503/505-523/525-599` 可重试；`400/408/504/524` 例外），但保留本仓的
+ * 「换一家」语义：
+ *
+ * - **400 不换**：通常是请求本身写错；能力不匹配类 400（工具超限、历史缺
+ *   reasoning、强制 tool_choice）由调用方在状态码判定之前单独放行。
+ * - **401/403/404/409-499 换**：这些错误在不同账号/渠道之间确实不同
+ *   （凭据失效、权限/地区限制、目录漂移、冲突/限流）。旧口径只在 429/5xx
+ *   换家，多账号池在第一个 401/403/404 上就整条链终止 —— 这是「错误太多」
+ *   最直接的一类来源。
+ * - **408/504/524 换，但不重试同一目标**：超时类故障重打同一家只会再赔一次
+ *   等待；换一家才有意义（见 {@link isSameTargetRetryableStatus}）。
+ * - 无状态码（网络错误、DNS、连接重置）继续换。
  */
 export function isFailoverEligibleStatus(status?: number): boolean {
   if (status === undefined) return true
-  return status === 429 || status >= 500
+  if (status === 400) return false
+  if (status === 408) return true
+  if (status >= 401 && status <= 407) return true
+  if (status >= 409 && status <= 499) return true
+  return status >= 500 && status <= 599
+}
+
+/**
+ * 同一个目标是否值得**原地重试**（不换家）。
+ *
+ * 与 {@link isFailoverEligibleStatus} 分开的原因：4xx 换家有意义（另一家的
+ * 凭据/目录不同），但原地重试同一条请求没有意义；408/504/524 则是「换家有用、
+ * 原地重试只会再等一遍」。`undefined`（网络错误）原地重试一次仍可能自愈。
+ */
+export function isSameTargetRetryableStatus(status?: number): boolean {
+  if (status === undefined) return true
+  if (status === 408 || status === 504 || status === 524) return false
+  return status >= 500 && status <= 599
+}
+
+/**
+ * 这次失败是否该记到**账号**头上。
+ *
+ * 旧实现（`chat.ts`）对任何 `>=400` 都 `markAccountFailed`：客户端自己写错一个
+ * 400、点名一个不存在的 404，都会把健康账号打进失败池，后续请求被无理由绕开。
+ * 只有「换账号可能解决」的故障才记账：401/403（凭据/权限）、408/429（超时/限流）、
+ * 5xx、网络错误；400/404/409-499 的其余状态与 422 不记。
+ */
+export function isAccountFaultStatus(status?: number): boolean {
+  if (status === undefined) return true
+  return status === 401
+    || status === 403
+    || status === 408
+    || status === 429
+    || (status >= 500 && status <= 599)
+}
+
+/** 账号本身有故障：状态码属于上一条，或文案命中「要人处理」的凭据/风控类。 */
+export function isAccountFault(status: number | undefined, message: string | undefined): boolean {
+  return isAccountFaultStatus(status) || isChannelHumanRequiredFailure(message)
+}
+
+/**
+ * 同一供应商换 Key 是否可能有用。
+ *
+ * 只有账号级故障（凭据/权限/超时/限流/5xx/网络）才轮换 Key。404 是模型目录问题，
+ * 同一供应商的其它 Key 看到的目录通常一样，轮换只是白打；这类交给跨供应商的
+ * 换家循环。
+ */
+export function isSameProviderRotationStatus(status?: number): boolean {
+  return isAccountFaultStatus(status)
 }
 
 /**
@@ -425,7 +486,7 @@ export type FirstStreamEvent =
  */
 export type SseProbeResult =
   | { kind: 'ok'; buffered: Array<Buffer | string> }
-  | { kind: 'error'; message: string }
+  | { kind: 'error'; message: string; details?: StreamErrorFrame }
 
 /** 头部嗅探的安全网上限：触顶按 ok 放行，宁可漏判也不拖死正常流。 */
 const PROBE_MAX_BYTES = 64 * 1024
@@ -448,8 +509,9 @@ const PROBE_TIMEOUT_MS = 10_000
  * - 安全网（64KB / 200 帧 / 10s）触顶按 ok 放行——宁可漏判也不能拖死正常流。
  */
 export function probeSseHead(
-  stream: PassThrough,
-  firstChunk: Buffer | string
+  stream: Readable,
+  firstChunk: Buffer | string,
+  timeoutMs: number = PROBE_TIMEOUT_MS,
 ): Promise<SseProbeResult> {
   return new Promise((resolve) => {
     const buffered: Array<Buffer | string> = [firstChunk]
@@ -469,8 +531,8 @@ export function probeSseHead(
       resolve(result)
     }
 
-    /** 解析一行 data 载荷；true=内容帧，string=错误帧文案，null=跳过。 */
-    const inspectDataLine = (payload: string): true | string | null => {
+    /** 解析一行 data 载荷；true=内容帧，错误帧=结构化对象，null=跳过。 */
+    const inspectDataLine = (payload: string): true | StreamErrorFrame | null => {
       const trimmed = payload.trim()
       if (trimmed === '' || trimmed === '[DONE]') return null
       let parsed: unknown
@@ -487,20 +549,13 @@ export function probeSseHead(
       // 当成内容帧，嗅探放行，auto 换家机制对整类流内错误失明。内容帧绝不带
       // error 键，先判 error 零误伤。
       if (record.error !== undefined) {
-        const error = record.error
-        if (typeof error === 'string') return error
-        if (error !== null && typeof error === 'object') {
-          const message = (error as Record<string, unknown>).message
-          if (typeof message === 'string' && message !== '') return message
-          return JSON.stringify(error)
-        }
-        return String(error)
+        return extractStreamErrorFrame(record) ?? { message: String(record.error) }
       }
       if ('choices' in record) return true
       return null
     }
 
-    const inspectText = (): true | string | null => {
+    const inspectText = (): true | StreamErrorFrame | null => {
       // SSE 帧以空行分隔；最后一段可能是半帧，留到下一块再判。
       const segments = text.split('\n\n')
       pending = segments.pop() ?? ''
@@ -526,8 +581,8 @@ export function probeSseHead(
         buffered.push(chunk)
         text = pending + (typeof chunk === 'string' ? chunk : chunk.toString('utf-8'))
         const verdict = inspectText()
-        if (typeof verdict === 'string') {
-          finish({ kind: 'error', message: verdict })
+        if (verdict !== null && verdict !== true) {
+          finish({ kind: 'error', message: verdict.message, details: verdict })
           return
         }
         if (verdict === true) {
@@ -544,20 +599,22 @@ export function probeSseHead(
     }
     const onError = (error: Error): void => {
       // 已缓冲的块里若见过内容帧（unlikely here）按 ok；否则按错误上报。
-      const message = text !== '' ? inspectText() : null
-      finish(typeof message === 'string' ? { kind: 'error', message } : { kind: 'ok', buffered })
+      const verdict = text !== '' ? inspectText() : null
+      finish(verdict !== null && verdict !== true
+        ? { kind: 'error', message: verdict.message, details: verdict }
+        : { kind: 'ok', buffered })
     }
     const onClosed = (): void => {
       // 流在产出内容帧之前就结束：错误帧流（只报错就关）或空流，都按失败处理。
       const verdict = text !== '' ? inspectText() : null
-      if (typeof verdict === 'string') {
-        finish({ kind: 'error', message: verdict })
+      if (verdict !== null && verdict !== true) {
+        finish({ kind: 'error', message: verdict.message, details: verdict })
       } else {
         finish({ kind: 'error', message: '渠道流在产出任何内容之前就结束了' })
       }
     }
 
-    timer = setTimeout(() => finish({ kind: 'ok', buffered }), PROBE_TIMEOUT_MS)
+    timer = setTimeout(() => finish({ kind: 'ok', buffered }), timeoutMs)
     stream.once('readable', onData)
     stream.once('error', onError)
     stream.once('end', onClosed)
@@ -565,8 +622,8 @@ export function probeSseHead(
     // 首块可能已经带上了完整判断依据，先查一次再挂监听。
     {
       const verdict = inspectText()
-      if (typeof verdict === 'string') {
-        finish({ kind: 'error', message: verdict })
+      if (verdict !== null && verdict !== true) {
+        finish({ kind: 'error', message: verdict.message, details: verdict })
         return
       }
       if (verdict === true) {
@@ -589,7 +646,7 @@ export function probeSseHead(
  * 假死会让这次尝试永远不返回，换家循环的墙钟预算永远等不到检查点。
  */
 export function firstStreamEvent(
-  stream: PassThrough,
+  stream: Readable,
   timeoutMs: number = FIRST_EVENT_TIMEOUT_MS
 ): Promise<FirstStreamEvent> {
   return new Promise((resolve) => {

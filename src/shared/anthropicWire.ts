@@ -272,6 +272,7 @@ export function anthropicToChatRequest(body: unknown, options: AnthropicToChatOp
     const parts: Payload[] = []
     const toolCalls: Payload[] = []
     const toolResults: Payload[] = []
+    const reasoningParts: string[] = []
     let hasImage = false
     let hasFile = false
 
@@ -322,14 +323,64 @@ export function anthropicToChatRequest(body: unknown, options: AnthropicToChatOp
         continue
       }
       if (type === 'tool_result') {
+        const resultText = textOfContent(block.content)
+        const isError = block.is_error === true
         toolResults.push({
           role: 'tool',
           tool_call_id: stringOf(block.tool_use_id),
-          content: textOfContent(block.content),
+          // OpenAI 的 tool 消息没有 `is_error`；用显式前缀保留语义，模型至少知道
+          // 这次工具执行失败了，而不是把错误文本当成正常结果继续推理。
+          content: isError
+            ? (resultText !== '' ? `[tool_error] ${resultText}` : '[tool_error]')
+            : resultText,
         })
+        // chat 的 tool 消息只收文本；工具结果里的图片/文件放进**随后**的 user
+        // 消息，顺序保持不变（tool 消息先到，附件后到）。
+        if (Array.isArray(block.content)) {
+          for (const rawPart of block.content) {
+            const part = asRecord(rawPart)
+            if (!part) continue
+            const partType = stringOf(part.type)
+            if (partType === 'image') {
+              const image = imagePartOf(part)
+              if (image) {
+                parts.push(image)
+                hasImage = true
+              } else {
+                dropped.push('tool_result:image')
+              }
+            } else if (partType === 'document') {
+              const document = options.documentsAsFileParts === false
+                ? null
+                : documentPartOf(part, parts.length)
+              if (document) {
+                parts.push(document)
+                hasFile = true
+              } else {
+                dropped.push('tool_result:document')
+              }
+            } else if (partType !== 'text') {
+              dropped.push(`tool_result:${partType || 'unknown'}`)
+            }
+          }
+        }
         continue
       }
-      // `thinking` / `redacted_thinking` / `document` / 未知块：不猜语义，但必须留痕。
+      if (type === 'thinking') {
+        // Claude 的思考块在 OpenAI 兼容上游里没有对应位置；DeepSeek 系把历史思考
+        // 放在 assistant.reasoning_content。不带回去，多轮推理会缺上下文，部分
+        // 上游甚至直接 400「每一条 assistant 都要有 reasoning_content」。
+        const thinking = stringOf(block.thinking) || stringOf(block.text)
+        if (thinking !== '') reasoningParts.push(thinking)
+        else dropped.push('thinking')
+        continue
+      }
+      if (type === 'redacted_thinking') {
+        // 加密的思考块无法还原成文本，只能报缺席；伪造内容比丢失更糟。
+        dropped.push('redacted_thinking')
+        continue
+      }
+      // `document` / 未知块：不猜语义，但必须留痕。
       dropped.push(stringOf(block.type) || 'unknown')
     }
 
@@ -347,12 +398,15 @@ export function anthropicToChatRequest(body: unknown, options: AnthropicToChatOp
         role: 'assistant',
         // 只有工具调用时 content 必须是 null，给 '' 会让部分上游把这条消息算成空回复。
         content: text !== '' ? text : toolCalls.length > 0 ? null : '',
+        ...(reasoningParts.length > 0 ? { reasoning_content: reasoningParts.join('') } : {}),
       }
       if (toolCalls.length > 0) assistant.tool_calls = toolCalls
       if (text !== '' || toolCalls.length > 0) messages.push(assistant)
       continue
     }
 
+    // 非 assistant 轮里混进 thinking 属于客户端放错位置：chat 侧没有承载它的地方。
+    if (reasoningParts.length > 0) dropped.push('thinking')
     for (const result of toolResults) messages.push(result)
     if (parts.length > 0) {
       // 单段纯文本用字符串：老上游对数组形态的兼容性参差；有图片才必须用数组。
@@ -419,6 +473,10 @@ export function stopReasonOf(finishReason: unknown): string {
 interface ChatUsageShape {
   prompt_tokens?: unknown
   completion_tokens?: unknown
+  prompt_tokens_details?: {
+    cached_tokens?: unknown
+    cache_creation_tokens?: unknown
+  } | null
 }
 
 function usageOf(value: unknown): ChatUsageShape | null {
@@ -427,6 +485,15 @@ function usageOf(value: unknown): ChatUsageShape | null {
 
 function tokenCountOf(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
+}
+
+/** OpenAI 把缓存命中放在 `prompt_tokens_details`；Anthropic 用两个独立的顶层字段。 */
+function cacheTokensOf(usage: ChatUsageShape | null): { cached: number; created: number } {
+  const details = asRecord(usage?.prompt_tokens_details)
+  return {
+    cached: tokenCountOf(details?.cached_tokens),
+    created: tokenCountOf(details?.cache_creation_tokens),
+  }
 }
 
 /**
@@ -507,9 +574,15 @@ export function chatResponseToAnthropicMessage(
   }
   // usage 只在真有数时出现：anthropic 客户端用它算上下文余量，编 0 会让它以为没消耗。
   if (usage) {
+    const { cached, created } = cacheTokensOf(usage)
+    const prompt = tokenCountOf(usage.prompt_tokens)
     result.usage = {
-      input_tokens: tokenCountOf(usage.prompt_tokens),
+      // Anthropic 的 input_tokens 不含缓存读写；OpenAI 的 prompt_tokens 含它们。
+      // 不拆开的话，客户端会把缓存命中算成普通输入，费用与上下文余量都偏高。
+      input_tokens: Math.max(0, prompt - cached - created),
       output_tokens: tokenCountOf(usage.completion_tokens),
+      ...(cached > 0 ? { cache_read_input_tokens: cached } : {}),
+      ...(created > 0 ? { cache_creation_input_tokens: created } : {}),
     }
   }
   return result
@@ -554,6 +627,8 @@ export function createAnthropicStreamTranslator(options: ChatToAnthropicOptions)
   let finishReason: string | null = null
   let inputTokens = 0
   let outputTokens = 0
+  let cachedTokens = 0
+  let cacheCreationTokens = 0
 
   const messageId = `msg_${options.fallbackId ?? Date.now().toString(36)}`
 
@@ -625,6 +700,9 @@ export function createAnthropicStreamTranslator(options: ChatToAnthropicOptions)
     if (usage) {
       inputTokens = tokenCountOf(usage.prompt_tokens) || inputTokens
       outputTokens = tokenCountOf(usage.completion_tokens) || outputTokens
+      const cache = cacheTokensOf(usage)
+      cachedTokens = cache.cached || cachedTokens
+      cacheCreationTokens = cache.created || cacheCreationTokens
     }
 
     const text = textOfContent(delta.content)
@@ -709,7 +787,14 @@ export function createAnthropicStreamTranslator(options: ChatToAnthropicOptions)
         delta: { stop_reason: stopReasonOf(finishReason), stop_sequence: null },
         // 真数一旦到达就在这里覆盖 `message_start` 的那格估算（anthropic 自己也用
         // `message_delta.usage` 增量更新用量，多带一个 `input_tokens` 是合规的）。
-        usage: { output_tokens: outputTokens, ...(inputTokens > 0 ? { input_tokens: inputTokens } : {}) },
+        usage: {
+          output_tokens: outputTokens,
+          ...(inputTokens > 0
+            ? { input_tokens: Math.max(0, inputTokens - cachedTokens - cacheCreationTokens) }
+            : {}),
+          ...(cachedTokens > 0 ? { cache_read_input_tokens: cachedTokens } : {}),
+          ...(cacheCreationTokens > 0 ? { cache_creation_input_tokens: cacheCreationTokens } : {}),
+        },
       })
     )
     out.push(sseEvent('message_stop', { type: 'message_stop' }))
@@ -761,19 +846,60 @@ export function createAnthropicStreamTranslator(options: ChatToAnthropicOptions)
  * `authentication_error` / `api_error` / `overloaded_error`），否则客户端只会
  * 显示「unknown error」。
  */
+export type AnthropicErrorType =
+  | 'invalid_request_error'
+  | 'authentication_error'
+  | 'permission_error'
+  | 'not_found_error'
+  | 'rate_limit_error'
+  | 'request_too_large'
+  | 'timeout_error'
+  | 'api_error'
+  | 'overloaded_error'
+
+const ANTHROPIC_ERROR_TYPES = new Set<string>([
+  'invalid_request_error',
+  'authentication_error',
+  'permission_error',
+  'not_found_error',
+  'rate_limit_error',
+  'request_too_large',
+  'timeout_error',
+  'api_error',
+  'overloaded_error',
+])
+
 export function anthropicErrorBody(
   message: string,
-  type: 'invalid_request_error' | 'authentication_error' | 'api_error' | 'overloaded_error' = 'api_error'
+  type: AnthropicErrorType = 'api_error'
 ): Payload {
   return { type: 'error', error: { type, message } }
 }
 
-/** HTTP 状态码 → anthropic 错误类型。 */
-export function anthropicErrorTypeOf(status: number): 'invalid_request_error' | 'authentication_error' | 'api_error' | 'overloaded_error' {
-  if (status === 401 || status === 403) return 'authentication_error'
-  if (status === 429 || status === 529) return 'overloaded_error'
+/**
+ * HTTP 状态码 → anthropic 错误类型。
+ *
+ * 403 是 `permission_error` 而不是 `authentication_error`：前者让客户端知道
+ * 「这个 Key 有效，但没权限/地区不对」，后者会触发它去轮换自己的 Key。
+ */
+export function anthropicErrorTypeOf(status: number): AnthropicErrorType {
+  if (status === 401) return 'authentication_error'
+  if (status === 403) return 'permission_error'
+  if (status === 404) return 'not_found_error'
+  if (status === 408 || status === 504) return 'timeout_error'
+  if (status === 413) return 'request_too_large'
+  if (status === 429) return 'rate_limit_error'
+  if (status === 529) return 'overloaded_error'
   if (status >= 400 && status < 500) return 'invalid_request_error'
   return 'api_error'
+}
+
+/** 上游给了 Anthropic 认识的标准类型就原样用，否则按状态码兜底。 */
+export function anthropicErrorTypeOr(status: number, upstreamType?: string): AnthropicErrorType {
+  const normalized = upstreamType?.trim().toLowerCase()
+  return normalized !== undefined && ANTHROPIC_ERROR_TYPES.has(normalized)
+    ? (normalized as AnthropicErrorType)
+    : anthropicErrorTypeOf(status)
 }
 
 /**

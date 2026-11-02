@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, writeFile, rename, unlink } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 
@@ -29,6 +29,8 @@ export class RequestLogManager {
   private initialized = false
   private persistTimer: NodeJS.Timeout | null = null
   private dirty = false
+  private persistInFlight = false
+  private persistGeneration = 0
   private readonly persistDelayMs = 2000
 
   constructor(options: RequestLogManagerOptions) {
@@ -102,9 +104,10 @@ export class RequestLogManager {
       return false
     }
 
+    const existing = this.requestLogs[index]
     this.requestLogs[index] = {
-      ...this.requestLogs[index],
-      ...sanitizeRequestLogUpdates(updates, this.config),
+      ...existing,
+      ...sanitizeRequestLogUpdates(updates, this.config, existing.captureBodies === true),
     }
     this.schedulePersist()
     return true
@@ -163,7 +166,7 @@ export class RequestLogManager {
   }
 
   flushSync(): void {
-    if (!this.initialized) {
+    if (!this.initialized || !this.config.enabled) {
       return
     }
 
@@ -172,6 +175,12 @@ export class RequestLogManager {
       this.persistTimer = null
     }
 
+    // Invalidate an in-flight async write: it carries an older snapshot and
+    // must not rename over the synchronous one during quit. Force the sync
+    // write even if the async pass already cleared `dirty` — otherwise an
+    // in-flight snapshot discarded by the generation bump would leave nothing.
+    this.persistGeneration += 1
+    this.dirty = true
     this.persistNow()
   }
 
@@ -213,8 +222,51 @@ export class RequestLogManager {
 
     this.persistTimer = setTimeout(() => {
       this.persistTimer = null
-      this.persistNow()
+      this.persistAsync()
     }, this.persistDelayMs)
+  }
+
+  /**
+   * Timed persistence is async: serializing thousands of rows and writing them
+   * on the main thread can stall the proxy during an error storm. `flushSync`
+   * remains the quit path and invalidates any stale in-flight snapshot.
+   */
+  private persistAsync(): void {
+    if (!this.dirty || this.persistInFlight) return
+    this.persistInFlight = true
+    this.dirty = false
+    const generation = ++this.persistGeneration
+    const content = this.requestLogs.map((entry) => JSON.stringify(entry)).join('\n')
+    // Unique per generation: flushSync may write a newer snapshot while this
+    // write is still in flight; sharing `.tmp` would let the older rename win.
+    const tempFile = `${this.logFile}.${generation}.tmp`
+    writeFile(tempFile, content, 'utf-8', (error) => {
+      if (error) {
+        this.persistInFlight = false
+        const code = (error as NodeJS.ErrnoException).code
+        this.dirty = code !== 'ENOENT'
+        console.error('[RequestLogs] async persist failed:', error)
+        if (code !== 'ENOENT') this.schedulePersist()
+        return
+      }
+      if (generation !== this.persistGeneration) {
+        this.persistInFlight = false
+        unlink(tempFile, () => {})
+        return
+      }
+      rename(tempFile, this.logFile, (renameError) => {
+        this.persistInFlight = false
+        if (renameError) {
+          const code = (renameError as NodeJS.ErrnoException).code
+          this.dirty = code !== 'ENOENT'
+          console.error('[RequestLogs] async rename failed:', renameError)
+          unlink(tempFile, () => {})
+          if (code !== 'ENOENT') this.schedulePersist()
+          return
+        }
+        if (this.dirty) this.schedulePersist()
+      })
+    })
   }
 
   private persistNow(): void {
@@ -225,10 +277,16 @@ export class RequestLogManager {
     const content = this.requestLogs.map((entry) => JSON.stringify(entry)).join('\n')
     // 先写临时文件再改名替换：直接覆盖时若进程在写入中途退出，ndjson 末行会留下半条，
     // 下次加载按行 parse 失败就整条丢弃 —— 那次会话的请求日志静默消失。
-    const tempFile = `${this.logFile}.tmp`
-    writeFileSync(tempFile, content, 'utf-8')
-    renameSync(tempFile, this.logFile)
+    const tempFile = `${this.logFile}.${this.persistGeneration}.tmp`
     this.dirty = false
+    try {
+      writeFileSync(tempFile, content, 'utf-8')
+      renameSync(tempFile, this.logFile)
+    } catch (error) {
+      this.dirty = true
+      console.error('[RequestLogs] sync persist failed:', error)
+      unlink(tempFile, () => {})
+    }
   }
 }
 

@@ -42,7 +42,7 @@ test('instructions 也接受分片数组形态', () => {
   assert.deepEqual(request.messages, [{ role: 'system', content: 'AB' }])
 })
 
-test('developer 角色折成 system，reasoning 项不回灌成正文', () => {
+test('developer 角色折成 system；reasoning 进 reasoning_content，不进正文', () => {
   const request = responsesToChatRequest(
     {
       input: [
@@ -56,6 +56,8 @@ test('developer 角色折成 system，reasoning 项不回灌成正文', () => {
 
   assert.deepEqual(request.messages, [
     { role: 'system', content: 'dev order' },
+    // 没有紧随其后的 assistant 时，思考项单独落成一条 assistant；content 仍为 null。
+    { role: 'assistant', content: null, reasoning_content: 'private chain' },
     { role: 'user', content: 'hello' },
   ])
 })
@@ -460,4 +462,45 @@ test('上游一个字也没发就断线：仍给出 created 与唯一的 complet
     'response.completed',
   ])
   assert.deepEqual(decode(out).at(-1)?.response.output, [])
+})
+
+/* ---------------- 2026-11-02：reasoning 项回灌为 assistant.reasoning_content ---------------- */
+
+test('reasoning 项挂到紧随其后的 assistant 消息上', () => {
+  const request = responsesToChatRequest({
+    input: [
+      { type: 'reasoning', summary: [{ type: 'summary_text', text: 'think first' }] },
+      { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'done' }] },
+    ],
+  }, { model: 'auto', stream: false })
+
+  const assistant = request.messages.at(-1) as any
+  assert.equal(assistant.role, 'assistant')
+  assert.equal(assistant.content, 'done')
+  assert.equal(assistant.reasoning_content, 'think first')
+})
+
+test('reasoning 项挂在 function_call 上，工具轮不丢思考', () => {
+  const request = responsesToChatRequest({
+    input: [
+      { type: 'reasoning', content: [{ type: 'reasoning_text', text: 'need a tool' }] },
+      { type: 'function_call', call_id: 'call_1', name: 'lookup', arguments: '{"q":"x"}' },
+    ],
+  }, { model: 'auto', stream: false })
+
+  const assistant = request.messages.at(-1) as any
+  assert.equal(assistant.reasoning_content, 'need a tool')
+  assert.equal(assistant.tool_calls?.[0]?.id, 'call_1')
+})
+
+test('只有 encrypted_content 时不伪造思考文本', () => {
+  const request = responsesToChatRequest({
+    input: [
+      { type: 'reasoning', encrypted_content: 'ciphertext' },
+      { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] },
+    ],
+  }, { model: 'auto', stream: false })
+
+  const assistant = request.messages.at(-1) as any
+  assert.equal(assistant.reasoning_content, undefined)
 })

@@ -48,7 +48,8 @@ function createConfig(overrides: Partial<RequestLogConfig> = {}): RequestLogConf
 test('sanitizeRequestLogEntry redacts and truncates persisted fields', () => {
   const sanitized = sanitizeRequestLogEntry(createEntry(), createConfig())
 
-  assert.equal(sanitized.errorStack, undefined)
+  // 栈现在必须保留（只对错误行有用），但仍要脱敏/截断。
+  assert.equal(sanitized.errorStack, 'very long stack trace')
   assert.ok(sanitized.userInput?.includes('[truncated'))
   assert.ok(sanitized.requestBody?.includes('[REDACTED]'))
   assert.ok(sanitized.requestBody?.includes('[truncated'))
@@ -63,7 +64,8 @@ test('sanitizeRequestLogEntry drops request and response bodies when disabled', 
 
   assert.equal(sanitized.requestBody, undefined)
   assert.equal(sanitized.responseBody, undefined)
-  assert.equal(sanitized.errorStack, undefined)
+  // 栈是排障证据，和正文开关无关；只有正文被关掉。
+  assert.equal(sanitized.errorStack, 'very long stack trace')
 })
 
 test('sanitizeRequestLogUpdates applies the same persistence rules to updates', () => {
@@ -76,7 +78,7 @@ test('sanitizeRequestLogUpdates applies the same persistence rules to updates', 
     createConfig(),
   )
 
-  assert.equal(sanitized.errorStack, undefined)
+  assert.equal(sanitized.errorStack, 'stack')
   assert.ok(sanitized.requestBody?.includes('[REDACTED]'))
   assert.ok(sanitized.responseBody?.includes('[truncated'))
 })
@@ -107,6 +109,19 @@ test('trimRequestLogsToMaxEntries keeps the newest entries only', () => {
     trimmed.map((entry) => entry.id),
     ['2', '3'],
   )
+})
+
+test('错误行保底保留：成功行再多也不挤掉最近 100 条错误', () => {
+  const entries = [
+    { id: 'err-1', ...createEntry({ timestamp: 1, status: 'error' }) },
+    ...Array.from({ length: 5 }, (_, index) => ({
+      id: `ok-${index}`,
+      ...createEntry({ timestamp: index + 2, status: 'success' }),
+    })),
+  ]
+  const trimmed = trimRequestLogsToMaxEntries(entries, createConfig({ maxEntries: 2 }))
+  assert.ok(trimmed.some((entry) => entry.id === 'err-1'), '错误行不能被成功流量挤掉')
+  assert.ok(trimmed.some((entry) => entry.id === 'ok-4'), '仍然保留最新的成功行')
 })
 
 test('normalizeRequestLogConfig：默认 maxBodyChars 抬到 200000，存量旧默认随升级迁移', () => {

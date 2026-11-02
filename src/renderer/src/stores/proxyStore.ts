@@ -66,6 +66,29 @@ const DEFAULT_PROXY_CONFIG: ProxyConfig = {
   maxConnections: 100,
 }
 
+/**
+ * The persisted AppConfig is the only source of truth for the listener form.
+ * Both the initial fetch and CONFIG_CHANGED broadcasts go through this mapping,
+ * so one window changing the host/HTTPS settings cannot leave the other
+ * window's form (or its rollback snapshot) on defaults/stale values.
+ */
+function proxyConfigFromAppConfig(config: AppConfig): ProxyConfig {
+  return {
+    ...DEFAULT_PROXY_CONFIG,
+    port: config.proxyPort,
+    host: config.proxyHost || '127.0.0.1',
+    httpsEnabled: config.httpsEnabled ?? false,
+    httpsPort: config.httpsPort ?? 8443,
+    httpsSanHosts: config.httpsSanHosts ?? [],
+    httpsCertPath: config.httpsCertPath,
+    httpsKeyPath: config.httpsKeyPath,
+    timeout: config.requestTimeout,
+    retryCount: config.retryCount,
+    defaultMaxOutputTokens: config.defaultMaxOutputTokens,
+    trailingUserGuard: config.trailingUserGuard,
+  }
+}
+
 const DEFAULT_STATISTICS: ProxyStatistics = {
   totalRequests: 0,
   successRequests: 0,
@@ -181,20 +204,7 @@ export const useProxyStore = create<ProxyState>((set, get) => ({
           appConfig: config,
           loadBalanceStrategy: config.loadBalanceStrategy,
           modelMappings: Object.values(config.modelMappings || {}),
-          proxyConfig: {
-            ...DEFAULT_PROXY_CONFIG,
-            port: config.proxyPort,
-            host: config.proxyHost || '127.0.0.1',
-            httpsEnabled: config.httpsEnabled ?? false,
-            httpsPort: config.httpsPort ?? 8443,
-            httpsSanHosts: config.httpsSanHosts ?? [],
-            httpsCertPath: config.httpsCertPath,
-            httpsKeyPath: config.httpsKeyPath,
-            timeout: config.requestTimeout,
-            retryCount: config.retryCount,
-            defaultMaxOutputTokens: config.defaultMaxOutputTokens,
-            trailingUserGuard: config.trailingUserGuard,
-          },
+          proxyConfig: proxyConfigFromAppConfig(config),
         })
       }
     } catch (error) {
@@ -268,7 +278,10 @@ export const useProxyStore = create<ProxyState>((set, get) => ({
 // 路由，也不会再把别的配置写回旧值。载荷是主进程归一后的完整 AppConfig，与盘上同形。
 if (typeof window !== 'undefined') {
   window.electronAPI?.config?.onConfigChanged?.((config) => {
-    useProxyStore.setState({ appConfig: config })
+    useProxyStore.setState({
+      appConfig: config,
+      proxyConfig: proxyConfigFromAppConfig(config),
+    })
   })
 }
 

@@ -9,7 +9,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { Copy, Check, Clock, Zap, Server, User, FileJson, AlertCircle, Globe, Brain, SlidersHorizontal } from 'lucide-react'
+import { Copy, Check, Clock, Zap, Server, User, FileJson, AlertCircle, Globe, Brain, SlidersHorizontal, Download } from 'lucide-react'
 import type { RequestLogEntry } from '@/types/electron'
 import { useSettingsStore } from '@/stores/settingsStore'
 
@@ -98,6 +98,7 @@ function InfoItem({ label, value, icon }: InfoItemProps) {
 export function RequestLogDetail({ log, onClose }: RequestLogDetailProps) {
   const { t } = useTranslation()
   const [activeTab, setActiveTab] = useState('info')
+  const [savingBundle, setSavingBundle] = useState(false)
   const includeBodies = useSettingsStore((state) => state.config?.requestLogConfig?.includeBodies)
   const fetchConfig = useSettingsStore((state) => state.fetchConfig)
 
@@ -127,6 +128,18 @@ export function RequestLogDetail({ log, onClose }: RequestLogDetailProps) {
     return status === 'success'
       ? 'badge-success hover:opacity-80'
       : 'badge-error hover:opacity-80'
+  }
+
+  const handleSaveBundle = async () => {
+    if (savingBundle) return
+    setSavingBundle(true)
+    try {
+      await window.electronAPI?.requestLogs?.saveBundle(log.id)
+    } catch (error) {
+      console.error('Failed to save diagnostic bundle:', error)
+    } finally {
+      setSavingBundle(false)
+    }
   }
 
   const renderJsonViewer = (jsonString: string | undefined) => {
@@ -185,6 +198,16 @@ export function RequestLogDetail({ log, onClose }: RequestLogDetailProps) {
                 → {log.actualModel}
               </span>
             )}
+            <Button
+              variant="outline"
+              size="sm"
+              className="ml-auto h-8"
+              onClick={handleSaveBundle}
+              disabled={savingBundle}
+            >
+              <Download className="h-3.5 w-3.5 mr-1.5" />
+              {t('logs.saveDiagnosticBundle')}
+            </Button>
           </DialogTitle>
         </DialogHeader>
 
@@ -293,7 +316,58 @@ export function RequestLogDetail({ log, onClose }: RequestLogDetailProps) {
                     ? '-'
                     : log.streamTruncated ? t('common.yes') : t('common.no')}
                 />
+                {log.streamTrace?.firstTokenMs !== undefined && (
+                  <InfoItem label={t('logs.streamFirstToken')} value={formatLatency(log.streamTrace.firstTokenMs)} />
+                )}
+                {log.streamTrace?.totalMs !== undefined && (
+                  <InfoItem label={t('logs.duration')} value={formatLatency(log.streamTrace.totalMs)} />
+                )}
+                {log.streamTrace?.bytesOut !== undefined && (
+                  <InfoItem label={t('logs.streamBytes')} value={log.streamTrace.bytesOut.toLocaleString()} />
+                )}
+                {log.streamTrace?.endReason !== undefined && (
+                  <InfoItem label={t('logs.streamEndReason')} value={log.streamTrace.endReason} />
+                )}
+                {log.streamTrace?.pingCount !== undefined && (
+                  <InfoItem label={t('logs.streamPings')} value={log.streamTrace.pingCount} />
+                )}
+                {(log.streamTrace?.upstreamRequestId || log.upstreamRequestId) && (
+                  <InfoItem
+                    label={t('logs.upstreamRequestId')}
+                    value={log.streamTrace?.upstreamRequestId || log.upstreamRequestId}
+                  />
+                )}
               </div>
+
+              {log.attempts && log.attempts.length > 0 && (
+                <div className="mt-6">
+                  <SectionHeader title={t('logs.attempts')} icon={<Server className="h-4 w-4" />} />
+                  <div className="space-y-2">
+                    {log.attempts.map((attempt, index) => (
+                      <div key={`${attempt.providerId}-${attempt.accountId}-${index}`} className="rounded-lg border border-border/50 p-3 text-xs space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono font-medium">
+                            {index + 1}. {attempt.providerName || attempt.providerId}
+                          </span>
+                          {attempt.status !== undefined && (
+                            <Badge variant="outline">{attempt.status}</Badge>
+                          )}
+                          <Badge variant="outline">{attempt.outcome}</Badge>
+                          {attempt.latencyMs !== undefined && (
+                            <span className="text-muted-foreground">{formatLatency(attempt.latencyMs)}</span>
+                          )}
+                          {attempt.errorCode !== undefined && attempt.errorCode !== null && (
+                            <span className="font-mono text-muted-foreground">{String(attempt.errorCode)}</span>
+                          )}
+                        </div>
+                        {attempt.errorMessage && (
+                          <div className="text-muted-foreground break-all">{attempt.errorMessage}</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </TabsContent>
 
             {/* Request Tab */}
@@ -356,6 +430,19 @@ export function RequestLogDetail({ log, onClose }: RequestLogDetailProps) {
                       </pre>
                     </div>
                   </div>
+
+                  {(log.errorType || log.errorCode || log.errorParam || log.upstreamStatus !== undefined) && (
+                    <div className="grid grid-cols-2 gap-3">
+                      {log.errorType && <InfoItem label={t('logs.errorType')} value={log.errorType} />}
+                      {log.errorCode !== undefined && log.errorCode !== null && (
+                        <InfoItem label={t('logs.errorCode')} value={String(log.errorCode)} />
+                      )}
+                      {log.errorParam && <InfoItem label={t('logs.errorParam')} value={log.errorParam} />}
+                      {log.upstreamStatus !== undefined && (
+                        <InfoItem label={t('logs.upstreamStatus')} value={log.upstreamStatus} />
+                      )}
+                    </div>
+                  )}
 
                   {/* Stack Trace */}
                   {log.errorStack && (

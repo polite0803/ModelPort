@@ -96,6 +96,27 @@ test('custom providers go through the same tool pipeline', () => {
     forwarder,
     /buildRequestBody\(\s*\{[\s\S]{0,400}?messages: transformed\.messages[\s\S]{0,200}?tools: transformed\.tools/,
   )
-  assert.match(forwarder, /stream: wrapStreamWithPlan\(response\.data, transformed\.plan\)/)
+  assert.match(forwarder, /stream: wrapStreamWithPlan\(probed\.stream, transformed\.plan\)/)
   assert.match(forwarder, /this\.applyToolCallsToResponse\(response\.data, transformed\)/)
+})
+
+test('新增的可选参数：自定义/聚合透传，内置按能力剥离', () => {
+  const extra = {
+    logprobs: true,
+    top_logprobs: 3,
+    prediction: { type: 'content', content: 'x' },
+    modalities: ['text'],
+    audio: { format: 'wav' },
+    service_tier: 'flex',
+    reasoning: { effort: 'low' },
+    top_k: 5,
+  }
+  const strippedForCustom = stripUnsupportedForBuiltin(request(extra), custom) as any
+  for (const key of Object.keys(extra)) {
+    assert.notEqual(strippedForCustom[key], undefined, `${key} 应对自定义供应商透传`)
+  }
+  const strippedForBuiltin = stripUnsupportedForBuiltin(request(extra), builtin) as any
+  for (const key of Object.keys(extra)) {
+    assert.equal(strippedForBuiltin[key], undefined, `${key} 应从内置供应商剥离`)
+  }
 })

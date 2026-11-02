@@ -16,6 +16,7 @@ import type {
   EffectiveModel,
   CatalogueModel,
   RequestLogEntry,
+  RequestDiagnosticBundle,
   AppLogTrendPoint,
   ModelsFetchFailure,
   ModelRoute,
@@ -373,6 +374,12 @@ const requestLogsAPI = {
   
   clear: (): Promise<void> => 
     ipcRenderer.invoke(IpcChannels.REQUEST_LOGS_CLEAR),
+
+  bundle: (key: string): Promise<RequestDiagnosticBundle> =>
+    ipcRenderer.invoke(IpcChannels.REQUEST_LOGS_BUNDLE, key),
+
+  saveBundle: (key: string): Promise<{ saved: boolean; path?: string }> =>
+    ipcRenderer.invoke(IpcChannels.REQUEST_LOGS_BUNDLE_SAVE, key),
   
   onNewLog: (callback: (log: RequestLogEntry) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, log: RequestLogEntry) => callback(log)

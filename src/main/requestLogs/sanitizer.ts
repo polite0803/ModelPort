@@ -1,5 +1,15 @@
-import type { RequestLogEntry } from '../store/types.ts'
-import type { RequestLogConfig } from './types.ts'
+import type { RequestAttemptTrace, RequestLogEntry, RequestStreamTrace } from '../../shared/types.ts'
+import { DEFAULT_MAX_BODY_CHARS, type RequestLogConfig } from './types.ts'
+import { redactAndTruncate, redactSensitiveText, truncateText } from '../logging/redaction.ts'
+
+/** 栈只对错误行有用；16KB 足够看清调用链，又不至于让一行日志变成整份 bundle。 */
+const MAX_ERROR_STACK_CHARS = 16_000
+/** 一次请求最多留这么多尝试；正常候选链 ≤ 6，留余量只为异常循环。 */
+const MAX_ATTEMPTS = 12
+const MAX_ATTEMPT_MESSAGE_CHARS = 500
+const MAX_UPSTREAM_REQUEST_ID_CHARS = 200
+/** 错误行保底条数：普通成功行再多也不能把要查的那条错误挤掉。 */
+export const REQUEST_ERROR_LOG_RETENTION = 100
 
 export function sanitizeRequestLogEntry(
   entry: Omit<RequestLogEntry, 'id'>,
@@ -8,10 +18,15 @@ export function sanitizeRequestLogEntry(
   const sanitized: Omit<RequestLogEntry, 'id'> = {
     ...entry,
     userInput: truncateText(redactText(entry.userInput, config), 500),
-    errorStack: undefined,
+    errorStack: sanitizeErrorStack(entry.errorStack, config),
+    attempts: sanitizeAttempts(entry.attempts, config),
+    streamTrace: sanitizeStreamTrace(entry.streamTrace),
+    ...(entry.upstreamRequestId === undefined
+      ? {}
+      : { upstreamRequestId: entry.upstreamRequestId.slice(0, MAX_UPSTREAM_REQUEST_ID_CHARS) }),
   }
 
-  if (!config.includeBodies) {
+  if (!config.includeBodies && entry.captureBodies !== true) {
     sanitized.requestBody = undefined
     sanitized.responseBody = undefined
     sanitized.responsePreview = truncateText(redactText(entry.responsePreview, config), 1000)
@@ -19,8 +34,11 @@ export function sanitizeRequestLogEntry(
     return sanitized
   }
 
-  sanitized.requestBody = sanitizeRequestLogBody(entry.requestBody, config)
-  sanitized.responseBody = sanitizeRequestLogBody(entry.responseBody, config)
+  const bodyConfig = entry.captureBodies === true && config.maxBodyChars <= 0
+    ? { ...config, maxBodyChars: DEFAULT_MAX_BODY_CHARS }
+    : config
+  sanitized.requestBody = sanitizeRequestLogBody(entry.requestBody, bodyConfig)
+  sanitized.responseBody = sanitizeRequestLogBody(entry.responseBody, bodyConfig)
   sanitized.responsePreview = truncateText(redactText(entry.responsePreview, config), 1000)
   sanitized.errorMessage = truncateText(redactText(entry.errorMessage, config), 1000)
 
@@ -36,6 +54,7 @@ export function sanitizeRequestLogEntry(
 export function sanitizeRequestLogUpdates(
   updates: Partial<RequestLogEntry>,
   config: RequestLogConfig,
+  forceBodies = false,
 ): Partial<RequestLogEntry> {
   const sanitized: Partial<RequestLogEntry> = { ...updates }
 
@@ -44,18 +63,34 @@ export function sanitizeRequestLogUpdates(
   }
 
   if ('errorStack' in updates) {
-    sanitized.errorStack = undefined
+    sanitized.errorStack = sanitizeErrorStack(updates.errorStack, config)
   }
 
+  if ('attempts' in updates) {
+    sanitized.attempts = sanitizeAttempts(updates.attempts, config)
+  }
+
+  if ('streamTrace' in updates) {
+    sanitized.streamTrace = sanitizeStreamTrace(updates.streamTrace)
+  }
+
+  if ('upstreamRequestId' in updates) {
+    sanitized.upstreamRequestId = updates.upstreamRequestId?.slice(0, MAX_UPSTREAM_REQUEST_ID_CHARS)
+  }
+
+  const bodyConfig = forceBodies && config.maxBodyChars <= 0
+    ? { ...config, maxBodyChars: DEFAULT_MAX_BODY_CHARS }
+    : config
+
   if ('requestBody' in updates) {
-    sanitized.requestBody = config.includeBodies
-      ? sanitizeRequestLogBody(updates.requestBody, config)
+    sanitized.requestBody = config.includeBodies || forceBodies
+      ? sanitizeRequestLogBody(updates.requestBody, bodyConfig)
       : undefined
   }
 
   if ('responseBody' in updates) {
-    sanitized.responseBody = config.includeBodies
-      ? sanitizeRequestLogBody(updates.responseBody, config)
+    sanitized.responseBody = config.includeBodies || forceBodies
+      ? sanitizeRequestLogBody(updates.responseBody, bodyConfig)
       : undefined
   }
 
@@ -83,7 +118,54 @@ export function trimRequestLogsToMaxEntries(
     return entries
   }
 
-  return entries.slice(entries.length - maxEntries)
+  // Recent rows plus an error floor: a burst of successful traffic must not
+  // evict the one failure we need to diagnose.
+  const keptIds = new Set(entries.slice(entries.length - maxEntries).map((entry) => entry.id))
+  for (const entry of entries.filter((entry) => entry.status === 'error').slice(-REQUEST_ERROR_LOG_RETENTION)) {
+    keptIds.add(entry.id)
+  }
+  return entries.filter((entry) => keptIds.has(entry.id))
+}
+
+function sanitizeErrorStack(
+  stack: string | undefined,
+  config: RequestLogConfig,
+): string | undefined {
+  return redactAndTruncate(stack, MAX_ERROR_STACK_CHARS, config.redactSensitiveData)
+}
+
+function sanitizeAttempts(
+  attempts: RequestAttemptTrace[] | undefined,
+  config: RequestLogConfig,
+): RequestAttemptTrace[] | undefined {
+  if (!Array.isArray(attempts) || attempts.length === 0) return undefined
+  return attempts.slice(-MAX_ATTEMPTS).map((attempt) => ({
+    ...attempt,
+    errorMessage: redactAndTruncate(
+      attempt.errorMessage,
+      MAX_ATTEMPT_MESSAGE_CHARS,
+      config.redactSensitiveData,
+    ),
+    ...(typeof attempt.errorCode === 'string'
+      ? {
+          errorCode: redactAndTruncate(
+            attempt.errorCode,
+            MAX_ATTEMPT_MESSAGE_CHARS,
+            config.redactSensitiveData,
+          ) ?? null,
+        }
+      : {}),
+  }))
+}
+
+function sanitizeStreamTrace(trace: RequestStreamTrace | undefined): RequestStreamTrace | undefined {
+  if (!trace) return undefined
+  return {
+    ...trace,
+    ...(trace.upstreamRequestId === undefined
+      ? {}
+      : { upstreamRequestId: trace.upstreamRequestId.slice(0, MAX_UPSTREAM_REQUEST_ID_CHARS) }),
+  }
 }
 
 function sanitizeRequestLogBody(value: string | undefined, config: RequestLogConfig): string | undefined {
@@ -91,13 +173,6 @@ function sanitizeRequestLogBody(value: string | undefined, config: RequestLogCon
 
   const redacted = config.redactSensitiveData ? redactSensitiveText(value) : value
   return truncateText(redacted, config.maxBodyChars)
-}
-
-function truncateText(value: string | undefined, maxChars: number): string | undefined {
-  if (!value) return value
-  if (maxChars <= 0) return undefined
-  if (value.length <= maxChars) return value
-  return `${value.slice(0, maxChars)}...[truncated ${value.length - maxChars} chars]`
 }
 
 /**
@@ -110,21 +185,4 @@ function truncateText(value: string | undefined, maxChars: number): string | und
 function redactText(value: string | undefined, config: RequestLogConfig): string | undefined {
   if (value === undefined) return value
   return config.redactSensitiveData ? redactSensitiveText(value) : value
-}
-
-function redactSensitiveText(value: string): string {
-  return (
-    value
-      // 1. 「字段名 + 分隔符 + 值」：含带 X- 前缀的会话/凭据头名。
-      .replace(
-        /(\"?(?:authorization|x-[a-z0-9-]*(?:key|token|secret)|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?key|cookie|set-cookie|password|secret|token)\"?\s*[:=]\s*)\"?[^\",}\]\s]+\"?/gi,
-        '$1"[REDACTED]"',
-      )
-      // 2. 独立的 `Bearer <token>`，句子中间出现的那种。
-      .replace(/\bBearer\s+[A-Za-z0-9\-._~+/]{8,}=*/gi, 'Bearer [REDACTED]')
-      // 3. 裸 key 形态（sk- / sk-proj- / sk-ant- …），不依赖任何字段名。
-      .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[REDACTED]')
-      // 4. URL 查询串里的凭据。
-      .replace(/([?&](?:key|token|api_key|access_token|secret)=)[^&\s\"']+[^&\s\"']*/gi, '$1[REDACTED]')
-  )
 }

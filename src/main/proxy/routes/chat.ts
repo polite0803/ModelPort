@@ -9,16 +9,23 @@ import { PassThrough, type Readable } from 'stream'
 import { ChatCompletionRequest, ChatCompletionResponse, ProxyContext } from '../types'
 import type { AccountSelection, ForwardResult } from '../types'
 import { loadBalancer } from '../loadbalancer'
-import { requestForwarder, isFailoverEligibleStatus } from '../forwarder'
+import { requestForwarder } from '../forwarder'
+import { isAccountFault, isSameProviderRotationStatus } from '../failover'
 import { autoExhaustedResponse } from '../failover'
-import { streamHandler } from '../stream'
+import { SSEParser, extractStreamErrorFrame, streamHandler, type StreamErrorFrame } from '../stream'
 import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
 import { autoRouter } from '../autoRouter'
 import type { AutoCandidate, AutoRouteDecision } from '../autoRouter'
 import { resolveRouteRequest, routePoolBreakMessage } from '../../store/modelRoutes'
-import type { AutoAttemptFailure, RequestLogEntry } from '../../../shared/types'
-import { buildStreamErrorFrame, mapUpstreamError, retryAfterHeader } from '../errorMapping'
+import type {
+  AutoAttemptFailure,
+  RequestAttemptTrace,
+  RequestLogEntry,
+  RequestStreamTrace,
+} from '../../../shared/types'
+import { buildStreamErrorFrame, mapForwardFailure, retryAfterHeader, withRequestId } from '../errorMapping'
+import { startSseHeartbeat, type SseHeartbeat } from '../utils/sseHeartbeat'
 import { findUnsupportedParameter, unsupportedParameterError } from '../parameterPolicy'
 import { createToolViolationTap } from '../utils/toolViolationTap'
 import { normalizeMessageRoles } from '../utils/messageRoles'
@@ -222,6 +229,12 @@ router.post('/completions', async (ctx: Context) => {
   const startTime = Date.now()
   const requestId = generateRequestId()
   ctx.set('X-Request-Id', requestId)
+  // Explicit single-request trace: capture bodies even when global body logging
+  // is off. The client sends `X-ModelPort-Trace: 1`; the response says whether
+  // the capture was accepted so the caller knows it can reproduce the issue.
+  const traceHeader = ctx.headers['x-modelport-trace']
+  const traceRequested = String(Array.isArray(traceHeader) ? traceHeader[0] : traceHeader ?? '').trim() === '1'
+  if (traceRequested) ctx.set('X-ModelPort-Trace', 'captured')
   // 按 UA 归类调用方：只用于日志与响应头（Trae / WorkBuddy / Qoder / dsh …），
   // 不参与选路。识别失败不报错，落到 other + 原始产品名。
   const client = identifyClientByUserAgent(ctx.headers['user-agent'])
@@ -278,6 +291,11 @@ router.post('/completions', async (ctx: Context) => {
       `[Chat] 历史 tool_calls.arguments 修复 ${argNormalized.repaired} 个调用`
       + (argNormalized.discarded > 0 ? `，其中 ${argNormalized.discarded} 个无法修复已降级为空参数` : ''),
     )
+    // 降级不能静默：客户端至少能从响应头看到「这次历史里有坏参数被兜底了」。
+    ctx.set('X-ModelPort-Tool-Args-Repaired', String(argNormalized.repaired))
+    if (argNormalized.discarded > 0) {
+      ctx.set('X-ModelPort-Tool-Args-Discarded', String(argNormalized.discarded))
+    }
   }
   request = normalizeOutputCap({ ...request, messages: argNormalized.messages })
 
@@ -524,6 +542,7 @@ router.post('/completions', async (ctx: Context) => {
   let autoAttempts = 0
   // 换家循环里被跳过的候选（判据与循环分支同源）；第一家命中时为空。
   let autoFailures: AutoAttemptFailure[] = []
+  let attemptTrace: RequestAttemptTrace[] = []
 
   // auto 的候选可能分属内置与自定义供应商，只有所有候选都拒绝时才整体报错
   const unsupportedParam = autoDecision
@@ -579,6 +598,7 @@ router.post('/completions', async (ctx: Context) => {
       result = outcome.result
       autoAttempts = outcome.attempts
       autoFailures = outcome.failures
+      attemptTrace = outcome.attemptTrace
       ctx.set('X-ModelPort-Auto-Attempts', String(outcome.attempts))
       chosenCandidate = outcome.candidate
       account = outcome.candidate.account
@@ -617,6 +637,7 @@ router.post('/completions', async (ctx: Context) => {
       account = outcome.candidate.account
       provider = outcome.candidate.provider
       actualModel = outcome.candidate.actualModel
+      attemptTrace = outcome.attemptTrace
       ctx.set('X-ModelPort-Aggregate-Chain', toHeaderValue(provider.id))
     } else {
       result = await requestForwarder.forwardChatCompletion(
@@ -626,11 +647,15 @@ router.post('/completions', async (ctx: Context) => {
         actualModel,
         context
       )
+      const firstAttempts = result.attempts ?? []
+      attemptTrace = firstAttempts
 
-      // 同一聚合供应商配了多把 Key：这把失败且属于可切换错误（429/5xx/网络错误）时，
-      // 轮换到该供应商其余 Key 继续试；客户端拿到的是最后一次尝试的结果，
-      // 全部失败时失败样貌不变（429 仍带 Retry-After）。用户点名了具体账号（硬性指定）时不轮换。
-      if (!result.success && !preferredAccountId && isFailoverEligibleStatus(result.status)) {
+      // 同一聚合供应商配了多把 Key：这把失败且属于**账号级**故障（401/403/408/
+      // 429/5xx/网络错误）时，轮换到该供应商其余 Key 继续试；客户端拿到的是最后
+      // 一次尝试的结果，全部失败时失败样貌不变（429 仍带 Retry-After）。404 不在
+      // 其中：同一供应商的其它 Key 看到的模型目录通常一样，轮换只是白打。
+      // 用户点名了具体账号（硬性指定）时不轮换。
+      if (!result.success && !preferredAccountId && isSameProviderRotationStatus(result.status)) {
         const siblings = loadBalancer.selectSameProviderCandidates(request.model, provider.id, account.id)
         if (siblings.length > 0) {
           const outcome = await requestForwarder.forwardChainCompletion(
@@ -648,6 +673,7 @@ router.post('/completions', async (ctx: Context) => {
             account = outcome.candidate.account
             provider = outcome.candidate.provider
             actualModel = outcome.candidate.actualModel
+            attemptTrace = [...firstAttempts, ...outcome.attemptTrace]
           }
         }
       }
@@ -675,8 +701,10 @@ router.post('/completions', async (ctx: Context) => {
     if (!result.success) {
       proxyStatusManager.recordRequestFailure(latency)
 
-      // auto 路由的失败账号已在 forwardAutoCompletion 内逐个标记，这里不重复计数
-      if (!autoDecision && result.status && result.status >= 400) {
+      // auto 路由的失败账号已在 forwardAutoCompletion 内逐个标记，这里不重复计数。
+      // 只有账号级故障（凭据/权限/超时/限流/5xx/网络）才记账：客户端自己写错的
+      // 400/404/422 不该把健康账号打进失败池。
+      if (!autoDecision && !request.signal?.aborted && isAccountFault(result.status, result.error)) {
         loadBalancer.markAccountFailed(account.id)
       }
 
@@ -686,22 +714,41 @@ router.post('/completions', async (ctx: Context) => {
       const exhausted = autoDecision
         ? autoExhaustedResponse(result.status, autoDecision.routeName, result.error, autoAttempts)
         : null
-      const mapped = exhausted ?? mapUpstreamError(result.status, result.error)
-      const message = exhausted?.message ?? (result.error || 'Request failed')
+      const mapped = exhausted
+        ? {
+            status: exhausted.status,
+            type: exhausted.type,
+            message: exhausted.message,
+            param: null,
+            code: exhausted.code as string | number | null,
+            metadata: undefined,
+            retryAfter: undefined,
+          }
+        : mapForwardFailure({
+            status: result.status,
+            message: result.error,
+            details: result.errorDetails,
+            retryAfter: result.retryAfter,
+          })
+      const message = withRequestId(mapped.message, requestId)
       ctx.status = mapped.status
-      if (mapped.status === 429) {
-        const retryAfter = retryAfterHeader(result.headers as Record<string, unknown> | undefined)
+      if (mapped.status === 429 || mapped.status === 503) {
+        const retryAfter =
+          mapped.retryAfter
+          ?? retryAfterHeader(result.headers as Record<string, unknown> | undefined)
         if (retryAfter) ctx.set('Retry-After', retryAfter)
       }
       learnQuotaCaps(provider, result.headers, result.error)
-      ctx.body = {
+      const errorBody = {
         error: {
           message,
           type: mapped.type,
-          param: null,
+          param: mapped.param,
           code: mapped.code,
+          ...(mapped.metadata === undefined ? {} : { metadata: mapped.metadata }),
         },
       }
+      ctx.body = errorBody
 
       storeManager.addLog('error', `Request failed: ${message}`, {
         requestId,
@@ -712,20 +759,14 @@ router.post('/completions', async (ctx: Context) => {
       })
 
       const userInput = extractUserInput(request.messages)
-      const errorResponseBody = JSON.stringify({
-        error: {
-          message,
-          type: mapped.type,
-          param: null,
-          code: mapped.code,
-        },
-      })
+      const errorResponseBody = JSON.stringify(errorBody)
       storeManager.addRequestLog({
         timestamp: startTime,
         status: 'error',
         statusCode: mapped.status,
         method: 'POST',
         url: '/v1/chat/completions',
+        requestId,
         model: request.model,
         actualModel,
         providerId: provider.id,
@@ -736,6 +777,9 @@ router.post('/completions', async (ctx: Context) => {
         userInput,
         client,
         auto: autoLogRecord(autoDecision, autoAttempts, autoFailures),
+        attempts: attemptTrace,
+        upstreamRequestId: result.upstreamRequestId,
+        captureBodies: traceRequested,
         compression: compressionReport,
         duplication,
         conversationTurn,
@@ -747,6 +791,10 @@ router.post('/completions', async (ctx: Context) => {
         latency,
         isStream: request.stream || false,
         errorMessage: message,
+        upstreamStatus: result.status,
+        errorType: mapped.type,
+        errorCode: mapped.code,
+        errorParam: mapped.param,
       })
 
       storeManager.recordRequestInStats(false, latency, request.model, provider.id, account.id)
@@ -799,6 +847,7 @@ router.post('/completions', async (ctx: Context) => {
         statusCode: 200,
         method: 'POST',
         url: '/v1/chat/completions',
+        requestId,
         model: request.model,
         actualModel,
         providerId: provider.id,
@@ -809,6 +858,9 @@ router.post('/completions', async (ctx: Context) => {
         userInput,
         client,
         auto: autoLogRecord(autoDecision, autoAttempts, autoFailures),
+        attempts: attemptTrace,
+        upstreamRequestId: result.upstreamRequestId,
+        captureBodies: traceRequested,
         compression: compressionReport,
         duplication,
         conversationTurn,
@@ -830,6 +882,7 @@ router.post('/completions', async (ctx: Context) => {
         statusCode: 200,
         method: 'POST',
         url: '/v1/chat/completions',
+        requestId,
         model: request.model,
         actualModel,
         providerId: provider.id,
@@ -840,6 +893,9 @@ router.post('/completions', async (ctx: Context) => {
         userInput,
         client,
         auto: autoLogRecord(autoDecision, autoAttempts, autoFailures),
+        attempts: attemptTrace,
+        upstreamRequestId: result.upstreamRequestId,
+        captureBodies: traceRequested,
         compression: compressionReport,
         duplication,
         conversationTurn,
@@ -880,14 +936,44 @@ router.post('/completions', async (ctx: Context) => {
 
       // Collect stream content for logging (raw SSE output)
       let collectedContent = ''
+      // 每个响应恰好一个 [DONE]：直通路径可能由上游给，转换路径由转换器给；
+      // 错误路径只在还没写过时补一个。
+      let sawDone = false
+      let streamSettled = false
+      let firstTokenAt: number | undefined
+      let bytesOut = 0
+      let endReason: RequestStreamTrace['endReason']
+      let heartbeat: SseHeartbeat | undefined
+      wrapperStream.on('error', () => {})
 
-      // Handle stream errors
-      result.stream.once('error', (err: Error) => {
+      const streamTraceOf = (
+        reason: RequestStreamTrace['endReason'],
+        totalMs: number,
+      ): RequestStreamTrace => ({
+        ...(firstTokenAt === undefined ? {} : { firstTokenMs: firstTokenAt - startTime }),
+        totalMs,
+        bytesOut,
+        endReason: reason,
+        sawDone,
+        pingCount: heartbeat?.pingCount() ?? 0,
+        ...(result.upstreamRequestId === undefined
+          ? {}
+          : { upstreamRequestId: result.upstreamRequestId }),
+      })
+
+      const failStream = (err: Error) => {
+        if (streamSettled) return
+        streamSettled = true
+        const details = err as Error & Partial<StreamErrorFrame>
+        const failureStatus = details.status ?? 502
+        if (endReason === undefined) {
+          endReason = failureStatus === 504 ? 'timeout' : 'error'
+        }
+
         // 流失败必须回写请求日志：日志条目是在响应头阶段按 success 建的，
         // 不翻成 error 的话这条请求在日志里永远显示成功（且耗时为响应头时间）。
         // 客户端已断开也要写 —— 那正是用户看到失败、日志却全绿的情形。
         if (logEntryId) {
-          const failureStatus = (err as { status?: number }).status ?? 502
           storeManager.updateRequestLog(logEntryId, {
             status: 'error',
             statusCode: failureStatus,
@@ -895,7 +981,24 @@ router.post('/completions', async (ctx: Context) => {
             responsePreview: err.message,
             // 错误页签读的是 errorMessage，只写 responsePreview 的话这条失败在详情里是空的。
             errorMessage: err.message,
+            errorType: details.type,
+            errorCode: details.code ?? null,
+            errorParam: details.param ?? null,
+            streamTrace: streamTraceOf(endReason, Date.now() - startTime),
           })
+        }
+
+        // 已经正常收尾的流不再追加错误帧，避免 [DONE] 之后又冒出 data。
+        // 逐块标志可能漏掉跨块拆开的 `[DONE]`，结算时按累计文本再确认一次。
+        if (collectedContent.includes('data: [DONE]')) sawDone = true
+        if (sawDone) {
+          storeManager.addLog('error', `Stream error after completion: ${err.message}`, {
+            requestId,
+            providerId: provider.id,
+            accountId: account.id,
+            model: request.model,
+          })
+          return
         }
 
         // 客户端已断开时不再回写错误帧，避免 write after end
@@ -903,7 +1006,12 @@ router.post('/completions', async (ctx: Context) => {
 
         console.error('[Chat] Stream error:', err.message)
 
-        wrapperStream.write(buildStreamErrorFrame(err.message))
+        wrapperStream.write(buildStreamErrorFrame(err.message, {
+          ...(details.type === undefined ? {} : { type: details.type }),
+          code: details.code ?? null,
+          param: details.param ?? null,
+        }))
+        sawDone = true
         wrapperStream.write('data: [DONE]\n\n')
         wrapperStream.end()
 
@@ -913,31 +1021,83 @@ router.post('/completions', async (ctx: Context) => {
           accountId: account.id,
           model: request.model,
         })
-      })
+      }
+
+      result.stream.once('error', failStream)
 
       // Check if stream is already in correct SSE format (from adapters like Kimi, GLM, DeepSeek)
       if (result.skipTransform) {
-        // Stream is already formatted, pipe through wrapper and collect
+        // Stream is already formatted, pipe through wrapper and collect.
+        // 同时扫一遍错误帧：直通路径把上游 SSE 原样交给客户端，但不该让请求
+        // 日志继续显示成功；缺失 [DONE] 时由本层补一个，保证客户端契约。
+        const errorScanner = new SSEParser()
+        let streamError: StreamErrorFrame | undefined
         result.stream.on('data', (chunk: Buffer) => {
-          collectedContent += chunk.toString()
+          const text = chunk.toString()
+          if (firstTokenAt === undefined) firstTokenAt = Date.now()
+          bytesOut += Buffer.byteLength(text)
+          collectedContent += text
+          for (const event of errorScanner.parse(text)) {
+            const data = event.data.trim()
+            if (data === '[DONE]') {
+              sawDone = true
+              continue
+            }
+            if (streamError) continue
+            try {
+              const frame = extractStreamErrorFrame(JSON.parse(data))
+              if (frame) streamError = frame
+            } catch {
+              // 非 JSON / 半帧：交给下一次 parse；不把未知事件当错误。
+            }
+          }
         })
 
         result.stream.pipe(wrapperStream, { end: false })
 
         // When source stream ends normally, update log and end wrapper
         result.stream.once('end', () => {
+          streamSettled = true
           const elapsed = Date.now() - startTime
           // 这条流的输出就是上游 SSE 本身，结束原因与「有没有结束原因」直接从它读。
           const outcome = readStreamOutcome(collectedContent)
+          const upstreamSawDone = sawDone
+          if (endReason === undefined) {
+            endReason = streamError ? 'error' : upstreamSawDone ? 'done' : 'eof'
+          }
+          // 先补 [DONE] 再结算 trace，这样 trace.sawDone 的口径是「客户端最终
+          // 拿到的流里有没有收尾符」，同时 endReason 仍按上游是否真的宣布过来判。
+          if (!sawDone && !wrapperStream.destroyed) {
+            sawDone = true
+            wrapperStream.write('data: [DONE]\n\n')
+          }
+          const trace = streamTraceOf(endReason, elapsed)
           // Update log with collected response
           if (logEntryId) {
-            storeManager.updateRequestLog(logEntryId, {
-              responseBody: collectedContent || undefined,
-              finishReason: outcome.finishReason,
-              streamTruncated: !outcome.sawFinish,
-              // 延迟型响应（响应头先发、正文后补）的耗时是整段，不是首字节
-              ...(result.deferred ? { latency: elapsed } : {}),
-            })
+            storeManager.updateRequestLog(logEntryId, streamError
+              ? {
+                  status: 'error',
+                  statusCode: streamError.status ?? 502,
+                  responseStatus: streamError.status ?? 502,
+                  responseBody: collectedContent || undefined,
+                  responsePreview: streamError.message,
+                  errorMessage: streamError.message,
+                  errorType: streamError.type,
+                  errorCode: streamError.code ?? null,
+                  errorParam: streamError.param ?? null,
+                  finishReason: outcome.finishReason,
+                  streamTruncated: !outcome.sawFinish,
+                  streamTrace: trace,
+                  ...(result.deferred ? { latency: elapsed } : {}),
+                }
+              : {
+                  responseBody: collectedContent || undefined,
+                  finishReason: outcome.finishReason,
+                  streamTruncated: !outcome.sawFinish,
+                  streamTrace: trace,
+                  // 延迟型响应（响应头先发、正文后补）的耗时是整段，不是首字节
+                  ...(result.deferred ? { latency: elapsed } : {}),
+                })
           }
           meterQuota(
             provider,
@@ -949,6 +1109,14 @@ router.post('/completions', async (ctx: Context) => {
               : 0
           )
           wrapperStream.end()
+          if (streamError) {
+            storeManager.addLog('error', `Stream error: ${streamError.message}`, {
+              requestId,
+              providerId: provider.id,
+              accountId: account.id,
+              model: request.model,
+            })
+          }
         })
       } else {
         // Need to transform the stream
@@ -962,13 +1130,25 @@ router.post('/completions', async (ctx: Context) => {
 
         // Collect from transform stream output
         transformStream.on('data', (chunk: Buffer) => {
-          collectedContent += chunk.toString()
+          const text = chunk.toString()
+          bytesOut += Buffer.byteLength(text)
+          collectedContent += text
+          if (text.includes('data: [DONE]')) sawDone = true
+        })
+
+        // 转换器内部抛出的错误（例如上游错误帧）必须在这里接住：原先没有
+        // error 监听者，事件会变成未捕获异常，客户端只看到流停住。
+        transformStream.once('error', (err: Error) => {
+          const source = result.stream as Readable
+          if (!source.destroyed) source.destroy()
+          failStream(err)
         })
 
         // 断流判定必须看上游原始 SSE：转换器在上游没给结束原因时会补一个 stop，
         // 只看输出就再也分不出「答完」和「被掐断」。结束帧都在流尾，留 8KB 够判。
         let upstreamTail = ''
         result.stream.on('data', (chunk: Buffer) => {
+          if (firstTokenAt === undefined) firstTokenAt = Date.now()
           upstreamTail = (upstreamTail + chunk.toString()).slice(-8192)
         })
 
@@ -976,14 +1156,23 @@ router.post('/completions', async (ctx: Context) => {
         transformStream.pipe(wrapperStream, { end: false })
 
         transformStream.once('end', () => {
+          streamSettled = true
+          const elapsed = Date.now() - startTime
           const delivered = readStreamOutcome(collectedContent)
           const upstream = readStreamOutcome(upstreamTail)
+          const upstreamSawDone = sawDone
+          if (endReason === undefined) endReason = upstreamSawDone ? 'done' : 'eof'
+          if (!sawDone && !wrapperStream.destroyed) {
+            sawDone = true
+            wrapperStream.write('data: [DONE]\n\n')
+          }
           // Update log with collected response
           if (logEntryId) {
             storeManager.updateRequestLog(logEntryId, {
               responseBody: collectedContent || undefined,
               finishReason: delivered.finishReason,
               streamTruncated: !upstream.sawFinish,
+              streamTrace: streamTraceOf(endReason, elapsed),
             })
           }
           meterQuota(
@@ -1008,9 +1197,16 @@ router.post('/completions', async (ctx: Context) => {
       // 立即发送响应头：客户端通常只对“响应头”计时（例如 10s），首个 token 可能远晚于此
       ctx.res.flushHeaders()
 
+      heartbeat = startSseHeartbeat(wrapperStream)
+      const stopPing = heartbeat.stop
+      wrapperStream.once('finish', stopPing)
+      wrapperStream.once('close', stopPing)
+
       // 客户端提前断开时中止上游流，避免继续占用账号与上游配额
       ctx.res.once('close', () => {
+        stopPing()
         if (ctx.res.writableEnded) return
+        if (endReason === undefined) endReason = 'client_gone'
         const source = result.stream as Readable
         if (!source.destroyed) source.destroy()
       })
@@ -1092,6 +1288,7 @@ router.post('/completions', async (ctx: Context) => {
       statusCode: 500,
       method: 'POST',
       url: '/v1/chat/completions',
+      requestId,
       model: request.model,
       actualModel,
       providerId: provider.id,
@@ -1101,6 +1298,8 @@ router.post('/completions', async (ctx: Context) => {
       requestBody: JSON.stringify(request),
       userInput,
       auto: autoLogRecord(autoDecision, autoAttempts, autoFailures),
+      attempts: attemptTrace,
+      captureBodies: traceRequested,
       webSearch: request.web_search,
       reasoningEffort: request.reasoning_effort,
       maxTokens: requestedMaxTokens,
@@ -1110,6 +1309,9 @@ router.post('/completions', async (ctx: Context) => {
       isStream: request.stream || false,
       errorMessage,
       errorStack,
+      errorType: 'internal_error',
+      errorCode: null,
+      errorParam: null,
     })
 
     storeManager.recordRequestInStats(false, latency, request.model, provider.id, account.id)

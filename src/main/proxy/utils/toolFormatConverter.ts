@@ -32,6 +32,24 @@ export function isAnthropicToolFormat(toolFormat?: string): boolean {
 }
 
 /**
+ * `arguments` 是无法保证合法的 JSON 字符串（模型可能写出截断/单引号）。
+ * Anthropic 的 `input` 必须是对象：解析成功用对象；失败时把原文放进
+ * `__raw_arguments`，既不 500，也不把这次调用伪装成「无参数」。
+ */
+function parseToolInput(argumentsText: string): Record<string, any> {
+  const text = typeof argumentsText === 'string' ? argumentsText.trim() : ''
+  if (text === '') return {}
+  try {
+    const parsed: unknown = JSON.parse(text)
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, any>)
+      : {}
+  } catch {
+    return { __raw_arguments: argumentsText }
+  }
+}
+
+/**
  * Convert OpenAI tool_calls to Anthropic tool_use format
  */
 export function openaiToAnthropicToolCalls(toolCalls: ToolCall[]): AnthropicToolUse[] {
@@ -39,7 +57,7 @@ export function openaiToAnthropicToolCalls(toolCalls: ToolCall[]): AnthropicTool
     type: 'tool_use' as const,
     id: tc.id,
     name: tc.function.name,
-    input: JSON.parse(tc.function.arguments),
+    input: parseToolInput(tc.function.arguments),
   }))
 }
 

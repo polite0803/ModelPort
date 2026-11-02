@@ -1736,6 +1736,18 @@ class StoreManager {
   }
 
   /**
+   * Append a pre-built entry.
+   *
+   * Crash reports carry their own id/timestamp (taken at the moment of the
+   * crash, which may be before the store finished initializing), so they cannot
+   * go through addLog() and get a fresh timestamp at flush time.
+   */
+  appendLogEntry(entry: LogEntry): void {
+    this.ensureInitialized()
+    this.getAppLogManager().addLog(entry)
+  }
+
+  /**
    * Get Logs
    * @param limit Limit count
    * @param level Log level filter

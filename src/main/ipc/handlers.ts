@@ -1,4 +1,5 @@
-import { ipcMain, app, BrowserWindow, shell } from 'electron'
+import { ipcMain, app, BrowserWindow, dialog, shell } from 'electron'
+import { writeFileSync } from 'node:fs'
 import axios from 'axios'
 import { IpcChannels } from './channels'
 import { installTrustedSenderGuard } from './trustedSender'
@@ -36,6 +37,7 @@ import { ConfigManager } from '../store/config'
 import { generateManagementSecret } from '../proxy/middleware/managementAuth'
 import { runToolCallingSmoke } from '../proxy/toolCalling/diagnostics'
 import { UpdaterManager } from '../updater'
+import { buildRequestDiagnosticBundle } from '../logging/diagnosticBundle'
 import { setTitleBarTheme } from '../window/manager'
 import type { Provider, Account, ProxyStatus, ProviderCheckResult, OAuthResult, AuthType, CredentialField, LogLevel, LogEntry, ProviderVendor, ModelRoute, ModelCapabilityHint } from '../../shared/types'
 import type { RouteListResult, RouteMutationResult, RouteRemovalResult, RoutePoolSizesResult } from '../../shared/modelRouteName'
@@ -1140,6 +1142,22 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
 
   ipcMain.handle(IpcChannels.REQUEST_LOGS_CLEAR, async (): Promise<void> => {
     storeManager.clearRequestLogs()
+  })
+
+  ipcMain.handle(IpcChannels.REQUEST_LOGS_BUNDLE, async (_, key: string) => {
+    return buildRequestDiagnosticBundle(String(key))
+  })
+
+  ipcMain.handle(IpcChannels.REQUEST_LOGS_BUNDLE_SAVE, async (_, key: string) => {
+    const bundle = buildRequestDiagnosticBundle(String(key))
+    const result = await dialog.showSaveDialog({
+      title: 'Save ModelPort diagnostic bundle',
+      defaultPath: `modelport-diagnostic-${String(key).replace(/[^a-zA-Z0-9_-]/g, '_')}.json`,
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    })
+    if (result.canceled || !result.filePath) return { saved: false }
+    writeFileSync(result.filePath, JSON.stringify(bundle, null, 2), 'utf-8')
+    return { saved: true, path: result.filePath }
   })
 
   // ==================== Statistics Handlers ====================

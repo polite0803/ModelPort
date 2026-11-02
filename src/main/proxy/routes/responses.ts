@@ -32,8 +32,11 @@ import {
   copyModelPortHeaders,
   loopbackHostOf,
   loopbackRequestHeaders,
+  readUpstreamError,
   setSseHeaders,
 } from '../utils/inboundLoopback'
+import { mapForwardFailure, withRequestId } from '../errorMapping'
+import { startSseHeartbeat } from '../utils/sseHeartbeat'
 import {
   chatResponseToResponseBody,
   createResponsesStreamTranslator,
@@ -139,6 +142,7 @@ router.post('/responses', async (ctx: Context) => {
         authorization: ctx.get('Authorization'),
         xApiKey: ctx.get('x-api-key'),
         userAgent: ctx.get('User-Agent'),
+        trace: ctx.get('x-modelport-trace'),
       }),
       body: JSON.stringify(chatRequest),
       signal: abort.signal,
@@ -155,22 +159,29 @@ router.post('/responses', async (ctx: Context) => {
   copyModelPortHeaders(ctx, response)
 
   if (!response.ok) {
-    const status = response.status >= 400 && response.status < 600 ? response.status : 502
-    let innerError: Payload | null = null
-    const text = await response.text().catch(() => '')
-    try {
-      const parsed = JSON.parse(text) as Payload
-      innerError = parsed?.error && typeof parsed.error === 'object' ? parsed.error : null
-    } catch {
-      innerError = null
-    }
-    // 内层已经是 OpenAI 信封（本代理自己的错误也在这个形状里）：原样透，
-    // 连 `code`/`param` 一起，免得同一个错误经过一次回环就换了名字。
-    ctx.status = status
+    // 内层已经是 OpenAI 信封（本代理自己的错误也在这个形状里）：保留状态码、
+    // type、code、param，只补客户端可见的 request id。经过回环不应换名字。
+    const innerError = await readUpstreamError(response)
+    const mapped = mapForwardFailure({
+      status: innerError.status,
+      message: innerError.message,
+      details: innerError,
+      retryAfter: innerError.retryAfter,
+    })
+    ctx.status = mapped.status
     ctx.set('Content-Type', 'application/json')
-    ctx.body = innerError
-      ? { error: { ...innerError, code: innerError.code ?? 'upstream_error' } }
-      : { error: { message: text.trim() === '' ? `Upstream responded with ${status}` : text.slice(0, 2000), type: errorTypeOf(status), code: 'upstream_error' } }
+    if ((mapped.status === 429 || mapped.status === 503) && mapped.retryAfter) {
+      ctx.set('Retry-After', mapped.retryAfter)
+    }
+    ctx.body = {
+      error: {
+        message: withRequestId(mapped.message, requestId),
+        type: mapped.type,
+        param: mapped.param,
+        code: mapped.code,
+        ...(mapped.metadata === undefined ? {} : { metadata: mapped.metadata }),
+      },
+    }
     return
   }
 
@@ -228,6 +239,16 @@ router.post('/responses', async (ctx: Context) => {
   setSseHeaders(ctx)
   ctx.status = 200
   ctx.body = out
+  // 与 /v1/messages 同口径：先交响应头，再用心跳覆盖上游的长 prefill。
+  ctx.res.flushHeaders()
+  const heartbeat = startSseHeartbeat(out)
+  const stopPing = heartbeat.stop
+  out.once('finish', stopPing)
+  out.once('close', stopPing)
+  ctx.res.once('close', () => {
+    stopPing()
+    if (!out.destroyed) out.destroy()
+  })
   // 先把响应头发出去：客户端对「响应头超时」有自己的计时，上游首个 token 可能
   // 远晚于此，等数据再发头会被判超时。
   ctx.res.flushHeaders()

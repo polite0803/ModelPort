@@ -44,19 +44,29 @@ export interface ChannelCompletionRequest {
   openAi: Record<string, unknown>
 }
 
+/** Correlation context for worker log lines; absent for lifecycle events. */
+export interface ChannelLogContext {
+  requestId?: string
+  providerId?: string
+  model?: string
+  jobId?: string
+  activeJobs?: number
+}
+
 export interface ChannelBridgeOptions {
   /** App data dir; the pack keeps `channel-pack/state.json` under it. */
   dataDir: string
   vault: ChannelCredentialVault
   /** Called whenever the pack reports an account/model change. */
   onChanged?: () => void
-  onLog?: (level: string, message: string) => void
+  onLog?: (level: string, message: string, context?: ChannelLogContext) => void
 }
 
 interface Job {
   resolve: (value: unknown) => void
   reject: (error: Error) => void
   stream?: PassThrough
+  context?: ChannelLogContext
   timer?: NodeJS.Timeout
   /**
    * 流式**首块之后**的块间静默看门狗（只在见过第一帧 `sse` 后才开始计时）。
@@ -70,6 +80,16 @@ interface Job {
 
 const START_TIMEOUT_MS = 30_000
 const RPC_TIMEOUT_MS = 120_000
+
+function contextOf(request: ChannelCompletionRequest): ChannelLogContext {
+  const slash = request.model.indexOf('/')
+  const providerId = slash > 0 ? request.model.slice(0, slash) : undefined
+  return {
+    requestId: request.requestId,
+    ...(providerId === undefined ? {} : { providerId }),
+    model: request.model,
+  }
+}
 
 export function resolveChannelPackDir(): string {
   const base = app.isPackaged
@@ -161,7 +181,7 @@ export class ChannelBridge {
         void this.handleMessage(message)
       })
       worker.on('error', (error: Error) => {
-        this.options.onLog?.('error', `渠道运行时错误：${error.message}`)
+        this.options.onLog?.('error', `渠道运行时错误：${error.message}`, { activeJobs: this.jobs.size })
         markChannelRuntimeStopped(error.message)
         finish(error)
         this.failAllJobs(new ChannelBridgeError(`渠道运行时错误：${error.message}`))
@@ -169,7 +189,7 @@ export class ChannelBridge {
       })
       worker.on('exit', (code: number) => {
         if (this.shuttingDown) return
-        this.options.onLog?.('error', `渠道运行时已退出（code=${code}）`)
+        this.options.onLog?.('error', `渠道运行时已退出（code=${code}）`, { activeJobs: this.jobs.size })
         markChannelRuntimeStopped(`退出码 ${code}`)
         finish(new ChannelBridgeError('渠道运行时已退出'))
         this.failAllJobs(new ChannelBridgeError('渠道运行时已退出', 502))
@@ -210,7 +230,15 @@ export class ChannelBridge {
       case 'ready':
         return
       case 'log':
-        this.options.onLog?.(String(message.level ?? 'info'), String(message.message ?? ''))
+        this.options.onLog?.(
+          String(message.level ?? 'info'),
+          String(message.message ?? ''),
+          {
+            ...(typeof message.requestId === 'string' ? { requestId: message.requestId } : {}),
+            ...(typeof message.provider === 'string' ? { providerId: message.provider } : {}),
+            ...(typeof message.model === 'string' ? { model: message.model } : {}),
+          },
+        )
         return
       case 'changed':
         this.options.onChanged?.()
@@ -258,6 +286,7 @@ export class ChannelBridge {
           String(message.message ?? '渠道请求失败'),
           typeof message.status === 'number' ? message.status : undefined,
         )
+        this.options.onLog?.('error', error.message, { ...job.context, jobId: String(message.id) })
         if (job.stream) {
           job.stream.destroy(error)
         }
@@ -290,10 +319,9 @@ export class ChannelBridge {
     const idleMs = requestDeadlines().idleMs
     this.settle(id)
     this.worker?.postMessage({ type: 'cancel', id })
-    job.stream?.destroy(new ChannelBridgeError(
-      `渠道在 ${Math.round(idleMs / 1000)}s 内没有再产出任何数据（疑似停摆），已中止`,
-      504,
-    ))
+    const message = `渠道在 ${Math.round(idleMs / 1000)}s 内没有再产出任何数据（疑似停摆），已中止`
+    this.options.onLog?.('error', message, { ...job.context, jobId: id })
+    job.stream?.destroy(new ChannelBridgeError(message, 504))
   }
 
   private async handleCredential(message: Record<string, any>): Promise<void> {
@@ -355,6 +383,7 @@ export class ChannelBridge {
       'complete',
       { request },
       timeoutMs !== undefined && timeoutMs > 0 ? timeoutMs : requestDeadlines().completeMs,
+      contextOf(request),
     )
     if (value === null || typeof value !== 'object') {
       throw new ChannelBridgeError('渠道没有返回对话结果', 502)
@@ -375,6 +404,7 @@ export class ChannelBridge {
       resolve: () => undefined,
       reject: (error) => undefined,
       stream,
+      context: contextOf(request),
     }
     // 停摆看门狗此刻**不**计时：首块之前归 `firstStreamEvent` 管。第一帧 `sse`
     // 到达才 `arm()`，之后每一帧续一次。
@@ -396,10 +426,15 @@ export class ChannelBridge {
     return stream
   }
 
-  private request(type: string, payload: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
+  private request(
+    type: string,
+    payload: Record<string, unknown>,
+    timeoutMs: number,
+    context?: ChannelLogContext,
+  ): Promise<unknown> {
     const id = this.nextId()
     return this.workerOrThrow().then(worker => new Promise<unknown>((resolve, reject) => {
-      const job: Job = { resolve, reject }
+      const job: Job = { resolve, reject, ...(context === undefined ? {} : { context }) }
       if (timeoutMs > 0) {
         job.timer = setTimeout(() => {
           this.settle(id)

@@ -232,7 +232,7 @@ test('流式必须主动要 usage，否则客户端的上下文余量永远算�
   assert.equal(plain.stream_options, undefined, '非流式不该带 stream_options')
 })
 
-test('不认识的块（thinking / document）丢掉而不猜成文本，但必须留下清单', () => {
+test('thinking 映射为 reasoning_content；仍翻不出去的 document 留下清单', () => {
   const { request, dropped } = anthropicToChatRequest(
     {
       model: 'claude-x',
@@ -248,8 +248,9 @@ test('不认识的块（thinking / document）丢掉而不猜成文本，但必�
     { model: 'auto', stream: false },
   )
   assert.equal(request.messages[0].content, '答案')
+  assert.equal(request.messages[0].reasoning_content, '私密推理')
   // 「丢掉」与「丢掉并且看得见」是两件事：客户端附件没生效时，这条清单是唯一线索。
-  assert.deepEqual(dropped, ['thinking', 'document'])
+  assert.deepEqual(dropped, ['document'])
 })
 
 test('请求体里没搬运的键逐个报名，搬运了的键一个都不报', () => {
@@ -649,9 +650,11 @@ test('错误信封用 anthropic 认识的 type，状态码决定它', () => {
     error: { type: 'authentication_error', message: '密钥不对' },
   })
   assert.equal(anthropicErrorTypeOf(401), 'authentication_error')
-  assert.equal(anthropicErrorTypeOf(403), 'authentication_error')
+  // 403 是 permission_error：凭据有效但没权限，客户端不该去换 Key。
+  assert.equal(anthropicErrorTypeOf(403), 'permission_error')
+  assert.equal(anthropicErrorTypeOf(404), 'not_found_error')
   assert.equal(anthropicErrorTypeOf(400), 'invalid_request_error')
-  assert.equal(anthropicErrorTypeOf(429), 'overloaded_error')
+  assert.equal(anthropicErrorTypeOf(429), 'rate_limit_error')
   assert.equal(anthropicErrorTypeOf(529), 'overloaded_error')
   assert.equal(anthropicErrorTypeOf(500), 'api_error')
   assert.equal(anthropicErrorTypeOf(502), 'api_error')
@@ -898,4 +901,80 @@ test('按档位补客户端名：一条一个名字、同档加序号、不带�
     clientNamesForTieredRoutes({ routeNames: ['daily'], routeTiers: { daily: 'sonnet' }, modelMap: takenKeys }),
     { add: [], blocked: ['daily'] },
   )
+})
+
+/* ---------------- 2026-11-02：工具结果附件、is_error、thinking 与 cache usage ---------------- */
+
+test('tool_result 的图片与 is_error 不再静默丢失', () => {
+  const { request, dropped } = anthropicToChatRequest({
+    messages: [{
+      role: 'user',
+      content: [{
+        type: 'tool_result',
+        tool_use_id: 'toolu_1',
+        is_error: true,
+        content: [
+          { type: 'text', text: 'command failed' },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
+        ],
+      }],
+    }],
+  }, { model: 'auto', stream: false })
+
+  const tool = request.messages.find((message: any) => message.role === 'tool')
+  assert.equal(tool?.content, '[tool_error] command failed')
+  // 图片放进随后的 user 消息，而不是被 textOfContent 吃掉。
+  const user = request.messages.find(
+    (message: any) => message.role === 'user' && Array.isArray(message.content),
+  )
+  assert.ok(user?.content.some((part: any) => part.type === 'image_url'))
+  assert.equal(dropped.includes('tool_result:image'), false)
+})
+
+test('assistant 历史的 thinking 映射为 reasoning_content', () => {
+  const { request } = anthropicToChatRequest({
+    messages: [{
+      role: 'assistant',
+      content: [
+        { type: 'thinking', thinking: 'let me plan' },
+        { type: 'text', text: 'here is the answer' },
+      ],
+    }],
+  }, { model: 'auto', stream: false })
+
+  const assistant = request.messages.find((message: any) => message.role === 'assistant')
+  assert.equal(assistant?.content, 'here is the answer')
+  assert.equal(assistant?.reasoning_content, 'let me plan')
+})
+
+test('redacted_thinking 只报缺席，不伪造内容', () => {
+  const { dropped } = anthropicToChatRequest({
+    messages: [{
+      role: 'assistant',
+      content: [
+        { type: 'redacted_thinking', data: 'encrypted' },
+        { type: 'text', text: 'ok' },
+      ],
+    }],
+  }, { model: 'auto', stream: false })
+  assert.ok(dropped.includes('redacted_thinking'))
+})
+
+test('cache token 从 OpenAI usage 拆回 Anthropic 的 input/cache 字段', () => {
+  const message = chatResponseToAnthropicMessage({
+    id: 'chatcmpl-1',
+    choices: [{ message: { role: 'assistant', content: 'hi' }, finish_reason: 'stop' }],
+    usage: {
+      prompt_tokens: 100,
+      completion_tokens: 10,
+      prompt_tokens_details: { cached_tokens: 40, cache_creation_tokens: 10 },
+    },
+  }, { model: 'claude-sonnet' })
+
+  assert.deepEqual(message.usage, {
+    input_tokens: 50,
+    output_tokens: 10,
+    cache_read_input_tokens: 40,
+    cache_creation_input_tokens: 10,
+  })
 })

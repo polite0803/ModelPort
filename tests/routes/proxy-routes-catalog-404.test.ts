@@ -188,12 +188,15 @@ test('目录漂移类 404：换成下一家并成功，账号不被记冷却/记
   assert.deepEqual([...after.skipped], [], 'Bad 的账号没有因为这次 404 被记故障')
 })
 
-test('普通上游 404：判据是窄的 —— 仍然直接失败，不把三家都试一遍', async () => {
+test('普通上游 404 也换下一家（2026-11-02 对齐 new-api）', async () => {
   mode = 'generic'
 
   const response = await postAuto()
 
-  assert.equal(response.status, 404, '「客户端写了个不存在的模型」这类 404 换家没有意义')
-  assert.match(String(response.json.error.message), /does not exist/, '上游原文要透出去')
-  assert.deepEqual(seenModels, ['badp-upstream'], '只打了第一家，没有连带去试 Good')
+  // 同一个路由里两家对「这个模型在不在」可以给出不同答案：一家 404 不代表
+  // 路由不可用。仍由 autoExhaustedResponse 在**多家都 404** 时收口成 503。
+  assert.equal(response.status, 200)
+  assert.match(response.headers['x-modelport-route'], /Upstream Provider goodp/)
+  assert.equal(response.headers['x-modelport-auto-attempts'], '2')
+  assert.deepEqual(seenModels, ['badp-upstream', 'goodp-upstream'])
 })

@@ -20,6 +20,8 @@ import { rejectionEntryFromContext } from '../rejectionLog'
 import { createTextCompletionChunkTransform, toTextCompletion } from '../utils/textCompletion'
 import { routeHeaderValue, toHeaderValue } from '../utils/headerValue'
 import { clientHeaderValue, identifyClientByUserAgent } from '../../../shared/clientProfile'
+import { mapForwardFailure, retryAfterHeader, withRequestId } from '../errorMapping'
+import { startSseHeartbeat } from '../utils/sseHeartbeat'
 
 const router = new Router({ prefix: '/v1' })
 
@@ -63,6 +65,9 @@ router.post('/completions', async (ctx: Context) => {
   const startTime = Date.now()
   const requestId = generateRequestId()
   ctx.set('X-Request-Id', requestId)
+  const traceHeader = ctx.headers['x-modelport-trace']
+  const traceRequested = String(Array.isArray(traceHeader) ? traceHeader[0] : traceHeader ?? '').trim() === '1'
+  if (traceRequested) ctx.set('X-ModelPort-Trace', 'captured')
   // 与 chat 路由同口径：UA 归类只进日志与响应头，不参与选路
   const client = identifyClientByUserAgent(ctx.headers['user-agent'])
   ctx.set('X-ModelPort-Client', clientHeaderValue(client))
@@ -317,13 +322,57 @@ router.post('/completions', async (ctx: Context) => {
     if (!result.success) {
       proxyStatusManager.recordRequestFailure(latency)
 
-      ctx.status = result.status || 500
-      ctx.body = {
+      const mapped = mapForwardFailure({
+        status: result.status,
+        message: result.error,
+        details: result.errorDetails,
+        retryAfter: result.retryAfter,
+      })
+      const message = withRequestId(mapped.message, requestId)
+      ctx.status = mapped.status
+      if (mapped.status === 429 || mapped.status === 503) {
+        const retryAfter =
+          mapped.retryAfter
+          ?? retryAfterHeader(result.headers as Record<string, unknown> | undefined)
+        if (retryAfter) ctx.set('Retry-After', retryAfter)
+      }
+      const errorBody = {
         error: {
-          message: result.error || 'Request failed',
-          type: 'api_error',
+          message,
+          type: mapped.type,
+          param: mapped.param,
+          code: mapped.code,
+          ...(mapped.metadata === undefined ? {} : { metadata: mapped.metadata }),
         },
       }
+      ctx.body = errorBody
+      storeManager.addRequestLog({
+        timestamp: startTime,
+        status: 'error',
+        statusCode: mapped.status,
+        method: 'POST',
+        url: '/v1/completions',
+        requestId,
+        model: request.model,
+        actualModel,
+        providerId: provider.id,
+        providerName: provider.name,
+        accountId: account.id,
+        accountName: account.name,
+        requestBody: JSON.stringify(request),
+        attempts: result.attempts,
+        upstreamRequestId: result.upstreamRequestId,
+        captureBodies: traceRequested,
+        responseStatus: mapped.status,
+        responseBody: JSON.stringify(errorBody),
+        latency,
+        isStream: request.stream || false,
+        errorMessage: message,
+        upstreamStatus: result.status,
+        errorType: mapped.type,
+        errorCode: mapped.code,
+        errorParam: mapped.param,
+      })
       return
     }
 
@@ -370,9 +419,14 @@ router.post('/completions', async (ctx: Context) => {
 
       // 立即发送响应头：客户端通常只对“响应头”计时（例如 10s），首个 token 可能远晚于此
       ctx.res.flushHeaders()
+      const heartbeat = startSseHeartbeat(textTransform)
+      const stopPing = heartbeat.stop
+      textTransform.once('finish', stopPing)
+      textTransform.once('close', stopPing)
 
       // 客户端提前断开时中止上游流，避免继续占用账号与上游配额
       ctx.res.once('close', () => {
+        stopPing()
         if (ctx.res.writableEnded) return
         const source = result.stream as Readable
         if (!source.destroyed) source.destroy()

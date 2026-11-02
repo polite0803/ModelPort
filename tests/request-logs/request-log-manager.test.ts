@@ -155,3 +155,22 @@ test('RequestLogManager buffers writes until flush', async (t) => {
   assert.match(persisted, /"timestamp":1/)
   assert.match(persisted, /"timestamp":2/)
 })
+
+test('单请求 trace：全局正文关闭时仍捕获正文，流式更新不丢', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'request-log-manager-trace-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+
+  const manager = new RequestLogManager({
+    storageDir: root,
+    config: createConfig({ maxEntries: 5, includeBodies: false }),
+  })
+
+  await manager.initialize()
+  const entry = manager.addRequestLog({ ...createEntryInput(1), captureBodies: true })
+  assert.ok(entry.requestBody, '显式 trace 必须绕过全局正文关闭')
+
+  manager.updateRequestLog(entry.id, { responseBody: 'stream-body' })
+  const updated = manager.getRequestLogById(entry.id)
+  assert.equal(updated?.responseBody, 'stream-body')
+  manager.flushSync()
+})

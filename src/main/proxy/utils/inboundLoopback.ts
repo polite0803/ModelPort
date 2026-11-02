@@ -9,6 +9,8 @@
  */
 
 import type { AppConfig } from '../../../shared/types'
+import { pickUpstreamErrorDetails } from '../upstreamErrorBody.ts'
+import type { UpstreamErrorDetails } from '../types.ts'
 import { toHeaderValue } from './headerValue'
 
 /**
@@ -34,6 +36,8 @@ export function loopbackRequestHeaders(input: {
   authorization?: string
   xApiKey?: string
   userAgent?: string
+  /** Single-request diagnostic trace flag; forwarded so the chat row captures bodies. */
+  trace?: string
 }): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   const authorization = (input.authorization ?? '').trim()
@@ -42,6 +46,8 @@ export function loopbackRequestHeaders(input: {
   if (xApiKey !== '') headers['X-API-Key'] = xApiKey
   const userAgent = toHeaderValue(input.userAgent ?? '').trim()
   if (userAgent !== '') headers['User-Agent'] = userAgent
+  const trace = toHeaderValue(input.trace ?? '').trim()
+  if (trace !== '') headers['X-ModelPort-Trace'] = trace
   return headers
 }
 
@@ -56,19 +62,45 @@ export function setSseHeaders(ctx: HeaderSetter): void {
   ctx.set('X-Accel-Buffering', 'no')
 }
 
-/** 从上游错误响应里抠出人话；非 JSON（网关自己的纯文本错误）就原样用。 */
-export async function upstreamErrorMessage(response: Response): Promise<string> {
+export interface InboundUpstreamError extends UpstreamErrorDetails {
+  status: number
+  retryAfter?: string
+}
+
+/**
+ * 从回环那笔 chat 的错误响应里取出完整结构，而不是只取一句话。
+ *
+ * 内层已经是本代理自己的 OpenAI 信封（`{error:{message,type,param,code}}`）；
+ * 只取 message 会让外层入口重新按状态码猜 type/code，等于把上游的机读信息
+ * 在回环处丢掉一次。
+ */
+export async function readUpstreamError(response: Response): Promise<InboundUpstreamError> {
+  const status = response.status >= 400 && response.status < 600 ? response.status : 502
+  const retryAfter = response.headers.get('retry-after')?.trim() || undefined
   const text = await response.text().catch(() => '')
-  if (text.trim() === '') return `Upstream responded with ${response.status}`
+  if (text.trim() === '') {
+    return {
+      status,
+      message: `Upstream responded with ${status}`,
+      ...(retryAfter === undefined ? {} : { retryAfter }),
+    }
+  }
+  let payload: unknown = text
   try {
-    const parsed = JSON.parse(text) as Record<string, unknown>
-    const error = parsed?.error as Record<string, unknown> | undefined
-    const message = typeof error?.message === 'string' ? error.message : parsed?.message
-    if (typeof message === 'string' && message.trim() !== '') return message
+    payload = JSON.parse(text)
   } catch {
     // 非 JSON：当成文本
   }
-  return text.slice(0, 2000)
+  return {
+    status,
+    ...pickUpstreamErrorDetails(payload, status),
+    ...(retryAfter === undefined ? {} : { retryAfter }),
+  }
+}
+
+/** 兼容旧调用点：只要人话。 */
+export async function upstreamErrorMessage(response: Response): Promise<string> {
+  return (await readUpstreamError(response)).message
 }
 
 /**

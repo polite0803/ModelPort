@@ -332,6 +332,17 @@ test('流式：端到端恰好一套块骨架，正文完整，上游 usage 真�
   // 回环那笔主动要了 usage —— 没有这一句上游根本不会发那个块。
   assert.deepEqual(seenBodies[0].stream_options, { include_usage: true })
   assert.match(response.headers['x-request-id'] ?? '', /^chatcmpl-/)
+
+  // 流生命周期与尝试链必须真的落到请求日志里，而不只是代码里有字段。
+  const row = await findLogRow(
+    entry => entry.requestId === response.headers['x-request-id'] && entry.streamTrace !== undefined,
+  )
+  assert.ok(row, '流式请求日志行必须带 streamTrace')
+  assert.equal(row.streamTrace.endReason, 'done')
+  assert.equal(row.streamTrace.sawDone, true)
+  assert.ok((row.streamTrace.bytesOut ?? 0) > 0)
+  assert.ok(Array.isArray(row.attempts) && row.attempts.length > 0, '成功请求也要记尝试链')
+  assert.equal(row.attempts.at(-1).outcome, 'success')
 })
 
 test('回环的 chat 流式响应自己也带 usage（本批修掉的 transformChunk 丢帧缺陷）', async () => {

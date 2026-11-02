@@ -15,6 +15,14 @@ const STRIPPED_FOR_BUILTIN = [
   'max_tokens',
   'seed',
   'logit_bias',
+  'logprobs',
+  'top_logprobs',
+  'prediction',
+  'modalities',
+  'audio',
+  'service_tier',
+  'reasoning',
+  'top_k',
 ] as const
 
 export function findUnsupportedParameter(

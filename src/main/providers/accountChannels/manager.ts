@@ -98,7 +98,24 @@ class AccountChannelManager {
         onChanged: () => {
           this.notifyChanged()
         },
-        onLog: (level, message) => {
+        onLog: (level, message, context) => {
+          // Worker logs used to be console-only, invisible in a packaged GUI.
+          // Persist them with the request/provider correlation when available.
+          const logLevel = level === 'error' ? 'error' : level === 'warn' ? 'warn' : level === 'debug' ? 'debug' : 'info'
+          try {
+            storeManager.addLog(logLevel, message, {
+              ...(context?.providerId === undefined ? {} : { providerId: context.providerId }),
+              ...(context?.requestId === undefined ? {} : { requestId: context.requestId }),
+              ...(context?.model === undefined ? {} : { model: context.model }),
+              data: {
+                source: 'channel-pack',
+                ...(context?.jobId === undefined ? {} : { jobId: context.jobId }),
+                ...(context?.activeJobs === undefined ? {} : { activeJobs: context.activeJobs }),
+              },
+            })
+          } catch (error) {
+            console.error('[ChannelPack] failed to persist worker log:', error)
+          }
           if (level === 'error') console.error(`[ChannelPack] ${message}`)
           else if (level === 'warn') console.warn(`[ChannelPack] ${message}`)
           else console.log(`[ChannelPack] ${message}`)

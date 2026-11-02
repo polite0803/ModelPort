@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rename, renameSync, unlink, writeFile, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { isDayRetained, oldestTimestamp, recentLocalDays } from '../../shared/localDay.ts'
@@ -10,6 +10,9 @@ interface AppLogManagerOptions {
   maxEntries?: number
 }
 
+/** Error lines kept in addition to maxEntries, so info/debug traffic cannot evict them. */
+const APP_ERROR_LOG_RETENTION = 500
+
 export class AppLogManager {
   private readonly logFile: string
   private readonly storageDir: string
@@ -18,6 +21,8 @@ export class AppLogManager {
   private initialized = false
   private persistTimer: NodeJS.Timeout | null = null
   private dirty = false
+  private persistInFlight = false
+  private persistGeneration = 0
   private readonly persistDelayMs = 2000
 
   constructor(options: AppLogManagerOptions) {
@@ -158,6 +163,10 @@ export class AppLogManager {
       this.persistTimer = null
     }
 
+    // Invalidate an in-flight async snapshot so it cannot rename over this one.
+    // Force the sync write even if the async pass already cleared `dirty`.
+    this.persistGeneration += 1
+    this.dirty = true
     this.persistNow()
   }
 
@@ -218,7 +227,12 @@ export class AppLogManager {
       return []
     }
 
-    return logs.length > this.maxEntries ? logs.slice(-this.maxEntries) : logs
+    if (logs.length <= this.maxEntries) return logs
+    const keptIds = new Set(logs.slice(-this.maxEntries).map((entry) => entry.id))
+    for (const entry of logs.filter((entry) => entry.level === 'error').slice(-APP_ERROR_LOG_RETENTION)) {
+      keptIds.add(entry.id)
+    }
+    return logs.filter((entry) => keptIds.has(entry.id))
   }
 
   private schedulePersist(): void {
@@ -230,8 +244,44 @@ export class AppLogManager {
 
     this.persistTimer = setTimeout(() => {
       this.persistTimer = null
-      this.persistNow()
+      this.persistAsync()
     }, this.persistDelayMs)
+  }
+
+  private persistAsync(): void {
+    if (!this.dirty || this.persistInFlight) return
+    this.persistInFlight = true
+    this.dirty = false
+    const generation = ++this.persistGeneration
+    const content = this.logs.map((entry) => JSON.stringify(entry)).join('\n')
+    const tempFile = `${this.logFile}.${generation}.tmp`
+    writeFile(tempFile, content, 'utf-8', (error) => {
+      if (error) {
+        this.persistInFlight = false
+        const code = (error as NodeJS.ErrnoException).code
+        this.dirty = code !== 'ENOENT'
+        console.error('[AppLogs] async persist failed:', error)
+        if (code !== 'ENOENT') this.schedulePersist()
+        return
+      }
+      if (generation !== this.persistGeneration) {
+        this.persistInFlight = false
+        unlink(tempFile, () => {})
+        return
+      }
+      rename(tempFile, this.logFile, (renameError) => {
+        this.persistInFlight = false
+        if (renameError) {
+          const code = (renameError as NodeJS.ErrnoException).code
+          this.dirty = code !== 'ENOENT'
+          console.error('[AppLogs] async rename failed:', renameError)
+          unlink(tempFile, () => {})
+          if (code !== 'ENOENT') this.schedulePersist()
+          return
+        }
+        if (this.dirty) this.schedulePersist()
+      })
+    })
   }
 
   private persistNow(): void {
@@ -241,9 +291,15 @@ export class AppLogManager {
 
     const content = this.logs.map((entry) => JSON.stringify(entry)).join('\n')
     // 与请求日志同一口径：改名替换是原子的，崩溃不会留下半行被截断的日志。
-    const tempFile = `${this.logFile}.tmp`
-    writeFileSync(tempFile, content, 'utf-8')
-    renameSync(tempFile, this.logFile)
+    const tempFile = `${this.logFile}.${this.persistGeneration}.tmp`
     this.dirty = false
+    try {
+      writeFileSync(tempFile, content, 'utf-8')
+      renameSync(tempFile, this.logFile)
+    } catch (error) {
+      this.dirty = true
+      console.error('[AppLogs] sync persist failed:', error)
+      unlink(tempFile, () => {})
+    }
   }
 }

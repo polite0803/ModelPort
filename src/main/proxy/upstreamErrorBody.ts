@@ -9,8 +9,13 @@
  * 整条链路上一个字节都没留下；按文案判定的换家判据也因此一条都不命中。
  */
 
+import type { UpstreamErrorDetails } from './types.ts'
+
 /** 只读到这个字节数：错误体再长也不是给人整段读的。 */
 const MAX_ERROR_BYTES = 32 * 1024
+
+/** 原文进日志的上限：读取上限是 32KB，但一条日志不该被整份 HTML 撑满。 */
+const MAX_ERROR_BODY_LOG_CHARS = 4_000
 
 /** 读取超时：上游挂着不结束时要能退回状态码，而不是把请求拖到自己的截止线上。 */
 const READ_TIMEOUT_MS = 3_000
@@ -83,23 +88,89 @@ export async function readUpstreamErrorData(data: unknown): Promise<unknown> {
  * 文案）→ `msg`；都没有就把整个体贴出来，最后才是 `HTTP <状态码>`。
  */
 export function pickUpstreamErrorMessage(payload: unknown, status: number): string {
+  return pickUpstreamErrorDetails(payload, status).message
+}
+
+function textOf(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+}
+
+function codeOf(value: unknown): string | number | null | undefined {
+  if (typeof value === 'string' || typeof value === 'number') return value
+  return value === null ? null : undefined
+}
+
+/** 原文只进日志/诊断；调用方负责不要把它直接拼进客户端可见文案。 */
+export function summarizeUpstreamErrorBody(payload: unknown): string | undefined {
+  if (payload === null || payload === undefined) return undefined
+  let text: string | undefined
   if (typeof payload === 'string') {
-    return payload.trim() !== '' ? payload : `HTTP ${status}`
-  }
-
-  if (payload && typeof payload === 'object') {
-    const record = payload as Record<string, unknown>
-    const nested = record.error && typeof record.error === 'object' ? (record.error as Record<string, unknown>) : undefined
-    const candidates = [nested?.message, nested?.error, record.message, record.msg]
-    for (const candidate of candidates) {
-      if (typeof candidate === 'string' && candidate.trim() !== '') return candidate
-    }
+    text = payload
+  } else {
     try {
-      return JSON.stringify(payload)
+      text = JSON.stringify(payload)
     } catch {
-      return 'Unknown error'
+      text = undefined
     }
   }
+  if (text === undefined || text === '') return undefined
+  return text.slice(0, MAX_ERROR_BODY_LOG_CHARS)
+}
 
-  return `HTTP ${status}`
+/**
+ * 从上游错误体里取结构化字段，而不是只取一句话。
+ *
+ * 覆盖三种实际形状：
+ * - OpenAI 兼容：`{error:{message,type,param,code,metadata}}`
+ * - Claude：`{type:"error",error:{type,message}}`（内部 `type` 是错误类，不是信封类）
+ * - Gemini / 顶层消息：`{error:{code,message,status}}`、`{message}`、`{msg}`
+ *
+ * `type/code/param` 只在**上游真的给了**时出现；没给就留给路由层按状态码兜底，
+ * 避免伪造一个看起来来自上游的机读字段。
+ */
+export function pickUpstreamErrorDetails(payload: unknown, status: number): UpstreamErrorDetails {
+  const fallback = `HTTP ${status}`
+  if (typeof payload === 'string') {
+    return { message: payload.trim() || fallback }
+  }
+  if (!payload || typeof payload !== 'object') {
+    return { message: fallback }
+  }
+
+  const record = payload as Record<string, unknown>
+  const nested = record.error
+  if (nested && typeof nested === 'object') {
+    const error = nested as Record<string, unknown>
+    const message =
+      textOf(error.message)
+      ?? textOf(error.error)
+      ?? textOf(record.message)
+      ?? textOf(record.msg)
+      ?? fallback
+    const type = textOf(error.type) ?? textOf(error.status)
+    const param =
+      typeof error.param === 'string' || error.param === null ? error.param : undefined
+    const code = codeOf(error.code)
+    return {
+      message,
+      ...(type === undefined ? {} : { type }),
+      ...(param === undefined ? {} : { param }),
+      ...(code === undefined ? {} : { code }),
+      ...(error.metadata === undefined ? {} : { metadata: error.metadata }),
+    }
+  }
+  if (typeof nested === 'string' && nested.trim() !== '') {
+    return { message: nested.trim() }
+  }
+
+  const message = textOf(record.message) ?? textOf(record.msg) ?? textOf(record.detail) ?? fallback
+  const type = textOf(record.type)
+  const param = typeof record.param === 'string' || record.param === null ? record.param : undefined
+  const code = codeOf(record.code)
+  return {
+    message,
+    ...(type === undefined ? {} : { type }),
+    ...(param === undefined ? {} : { param }),
+    ...(code === undefined ? {} : { code }),
+  }
 }

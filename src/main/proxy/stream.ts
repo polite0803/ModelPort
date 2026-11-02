@@ -123,6 +123,60 @@ export class SSEFormatter {
   }
 }
 
+/** 上游 SSE 里错误帧的结构化样子；`status` 允许缺失（很多网关只给 message）。 */
+export interface StreamErrorFrame {
+  message: string
+  type?: string
+  code?: string | number | null
+  param?: string | null
+  status?: number
+}
+
+/**
+ * 从一条已解析的 SSE data 里取错误帧。
+ *
+ * 只看 `error` 键，不把 `choices:[] + finish_reason` 这类正常空帧误判成错误。
+ * 兼容三种实际形状：`{error:{message,type,code,param,statusCode}}`、
+ * `{error:"...",status:400}`、以及错误体平铺在顶层（少数网关）。
+ */
+export function extractStreamErrorFrame(data: unknown): StreamErrorFrame | null {
+  if (!data || typeof data !== 'object') return null
+  const record = data as Record<string, unknown>
+  const raw = record.error
+  if (raw === undefined || raw === null) return null
+  if (typeof raw === 'string') {
+    return raw.trim() === '' ? null : { message: raw.trim() }
+  }
+  if (typeof raw !== 'object') return null
+  const error = raw as Record<string, unknown>
+  const message =
+    typeof error.message === 'string' && error.message.trim() !== ''
+      ? error.message
+      : typeof error.error === 'string' && error.error.trim() !== ''
+        ? error.error
+        : 'Upstream stream error'
+  const status =
+    typeof error.status === 'number'
+      ? error.status
+      : typeof error.statusCode === 'number'
+        ? error.statusCode
+        : typeof record.status === 'number'
+          ? record.status
+          : typeof record.statusCode === 'number'
+            ? record.statusCode
+            : undefined
+  const type = typeof error.type === 'string' && error.type.trim() !== '' ? error.type : undefined
+  const code = typeof error.code === 'string' || typeof error.code === 'number' ? error.code : null
+  const param = typeof error.param === 'string' || error.param === null ? error.param : null
+  return {
+    message,
+    ...(type === undefined ? {} : { type }),
+    code,
+    param,
+    ...(status === undefined ? {} : { status }),
+  }
+}
+
 /**
  * `reasoningAccum` 的累积上限（字符）。它唯一的用途是「content 全程为空时回填一帧」，
  * 不是正文通道，所以留够头即可，不必按模型上下文长度无界留着。
@@ -213,6 +267,20 @@ export class StreamHandler {
             } catch {
               this.push(formatter.format(event))
               continue
+            }
+
+            // 上游在流里报错时，旧实现把它当「无内容帧」丢掉，客户端看到的是
+            // 一条正常结束的截断答案。这里改成抛出带结构的错误：路由层统一写
+            // 错误帧 + 恰好一个 [DONE]，并把请求日志翻成 error。
+            const streamError = extractStreamErrorFrame(parsedData)
+            if (streamError) {
+              const error = new Error(streamError.message) as Error & Partial<StreamErrorFrame>
+              error.name = 'UpstreamStreamError'
+              if (streamError.status !== undefined) error.status = streamError.status
+              if (streamError.type !== undefined) error.type = streamError.type
+              if (streamError.code !== undefined && streamError.code !== null) error.code = streamError.code
+              if (streamError.param !== undefined && streamError.param !== null) error.param = streamError.param
+              throw error
             }
 
             const transformedData = transformChunk(parsedData, model, responseId, created, isFirstChunk)

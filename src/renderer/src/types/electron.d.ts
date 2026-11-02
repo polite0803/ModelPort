@@ -29,6 +29,9 @@ import type {
   EffectiveModel,
   CatalogueModel,
   RequestLogEntry,
+  RequestDiagnosticBundle,
+  RequestAttemptTrace,
+  RequestStreamTrace,
   AppLogTrendPoint,
   ModelsFetchFailure,
   ModelCapabilityHint,
@@ -475,6 +478,15 @@ interface RequestLogEntry {
   isStream: boolean
   errorMessage?: string
   errorStack?: string
+  requestId?: string
+  errorType?: string
+  errorCode?: string | number | null
+  errorParam?: string | null
+  upstreamStatus?: number
+  upstreamRequestId?: string
+  attempts?: RequestAttemptTrace[]
+  streamTrace?: RequestStreamTrace
+  captureBodies?: boolean
   /** Caller identified from User-Agent by the proxy; `other` keeps the raw product name */
   client?: { id: string; label: string; version?: string }
 }
@@ -499,6 +511,8 @@ interface RequestLogsAPI {
   getById: (id: string) => Promise<RequestLogEntry | undefined>
   getStats: () => Promise<RequestLogStats>
   clear: () => Promise<void>
+  bundle: (key: string) => Promise<RequestDiagnosticBundle>
+  saveBundle: (key: string) => Promise<{ saved: boolean; path?: string }>
   /** Live push of one already-persisted row; subscribe for as long as the list is mounted. */
   onNewLog: (callback: (log: RequestLogEntry) => void) => () => void
 }

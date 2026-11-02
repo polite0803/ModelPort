@@ -12,7 +12,11 @@ import { PassThrough } from 'node:stream'
 import axios from 'axios'
 import type { Account, Provider } from '../../store/types'
 import { DEFAULT_MAX_OUTPUT_TOKENS } from '../utils/outputCap.ts'
-import { readUpstreamErrorData } from '../upstreamErrorBody.ts'
+import {
+  pickUpstreamErrorDetails,
+  readUpstreamErrorData,
+  summarizeUpstreamErrorBody,
+} from '../upstreamErrorBody.ts'
 import type {
   ChatCompletionMessageToolCall,
   ChatCompletionRequest,
@@ -108,10 +112,16 @@ export class AnthropicAdapter {
       })
 
       if (response.status >= 400) {
+        const data = await readUpstreamErrorData(response.data)
+        const details = pickUpstreamErrorDetails(data, response.status)
+        const body = summarizeUpstreamErrorBody(data)
         return {
           success: false,
           status: response.status,
-          error: extractErrorMessage(await readUpstreamErrorData(response.data), response.status),
+          error: details.message,
+          errorDetails: details,
+          ...(body === undefined ? {} : { errorBody: body }),
+          upstreamRequestId: upstreamRequestIdOf(response.headers),
           latency: Date.now() - startTime,
         }
       }
@@ -121,6 +131,7 @@ export class AnthropicAdapter {
           success: true,
           status: response.status,
           headers: { 'Content-Type': 'text/event-stream' },
+          upstreamRequestId: upstreamRequestIdOf(response.headers),
           stream: convertAnthropicStream(
             response.data as NodeJS.ReadableStream,
             request.model,
@@ -135,26 +146,19 @@ export class AnthropicAdapter {
         success: true,
         status: response.status,
         body: convertAnthropicResponse(response.data, request.model),
+        upstreamRequestId: upstreamRequestIdOf(response.headers),
         latency: Date.now() - startTime,
       }
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
       return {
         success: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: message,
+        errorDetails: { message },
         latency: Date.now() - startTime,
       }
     }
   }
-}
-
-function extractErrorMessage(payload: unknown, status: number): string {
-  if (payload && typeof payload === 'object') {
-    const record = payload as Record<string, any>
-    const nested = record.error && typeof record.error === 'object' ? record.error : record
-    const message = nested.message || nested.error
-    if (typeof message === 'string' && message) return message
-  }
-  return `Anthropic endpoint returned HTTP ${status}`
 }
 
 function toText(blocks: AnthropicBlock[]): string {
@@ -290,6 +294,25 @@ export function buildAnthropicRequest(
   return body
 }
 
+/** Same evidence list as the main forwarder; Anthropic gateways expose all of these. */
+function upstreamRequestIdOf(headers: unknown): string | undefined {
+  if (!headers || typeof headers !== 'object') return undefined
+  const names = new Set([
+    'x-request-id',
+    'request-id',
+    'x-openai-request-id',
+    'cf-ray',
+    'x-amzn-requestid',
+    'x-amzn-request-id',
+  ])
+  for (const [key, value] of Object.entries(headers as Record<string, unknown>)) {
+    if (!names.has(key.toLowerCase())) continue
+    const text = Array.isArray(value) ? value.join(', ') : typeof value === 'string' ? value : ''
+    if (text.trim() !== '') return text.trim()
+  }
+  return undefined
+}
+
 function mapStopReason(reason: string | null | undefined): 'stop' | 'length' | 'tool_calls' | 'content_filter' {
   switch (reason) {
     case 'max_tokens':
@@ -303,14 +326,32 @@ function mapStopReason(reason: string | null | undefined): 'stop' | 'length' | '
   }
 }
 
-function openAiUsage(usage: { input_tokens?: number; output_tokens?: number } | undefined) {
+function openAiUsage(usage: {
+  input_tokens?: number
+  output_tokens?: number
+  cache_read_input_tokens?: number
+  cache_creation_input_tokens?: number
+} | undefined) {
   if (!usage || typeof usage.input_tokens !== 'number' || typeof usage.output_tokens !== 'number') {
     return undefined
   }
+  const cached = typeof usage.cache_read_input_tokens === 'number' ? usage.cache_read_input_tokens : 0
+  const created = typeof usage.cache_creation_input_tokens === 'number' ? usage.cache_creation_input_tokens : 0
+  // Anthropic 的 input_tokens 不含缓存读写；OpenAI 的 prompt_tokens 含。加回去，
+  // 回环里的 anthropicWire 再拆出来，两边语义才对得上。
+  const promptTokens = usage.input_tokens + cached + created
   return {
-    prompt_tokens: usage.input_tokens,
+    prompt_tokens: promptTokens,
     completion_tokens: usage.output_tokens,
-    total_tokens: usage.input_tokens + usage.output_tokens,
+    total_tokens: promptTokens + usage.output_tokens,
+    ...(cached > 0 || created > 0
+      ? {
+          prompt_tokens_details: {
+            ...(cached > 0 ? { cached_tokens: cached } : {}),
+            ...(created > 0 ? { cache_creation_tokens: created } : {}),
+          },
+        }
+      : {}),
   }
 }
 

@@ -94,8 +94,13 @@ alias is `ModelMapping.disabled` (declared in both `shared/types.ts` and `main/s
 through `modelServing.ts::isMappingActive` at every use site), not `excludedModels` - an alias
 belongs to no provider catalogue.
 * **Every stream carries exactly one `\[DONE]`**; a post-stream failure is a `data: {"error": …}` frame,
-never assistant text. Errors keep OpenAI shapes (401/403 `authentication\_error`, 429
-`rate\_limit\_error`, 5xx `api\_error`).
+never assistant text. Silent prefill is covered by `: PING` comments, not fabricated tokens.
+Errors keep the upstream status and the upstream `type`/`code`/`param` when standard; fallbacks are
+401 `authentication_error`, 403 `permission_error`, 404 `not_found_error`, 429 `rate_limit_error`,
+5xx `api_error`. Never rewrite 403 into 401.
+* **Failover status policy**: 400 is terminal (capability-mismatch 400s are explicit exceptions);
+401-407, 409-499, 5xx and network errors switch to the next candidate; 408/504/524 may switch but
+are never retried against the same target. Client-caused 400/404/422 never penalize an account.
 * **History trimming never empties history.** Always keep the newest non-system message;
 `messages: \[]` is rejected upstream as "non-empty array required", which the client reads as
 "you sent no messages".
@@ -123,6 +128,25 @@ deletes builtins whose id no longer exists. Edit builtin config in
 `src/main/providers/builtin/<provider>.ts` only; UI edits to those fields are discarded on restart.
 (There is currently no builtin to edit - `builtinProviders` has been empty since the OpenCode runtime
 retirement.)
+
+Logging / diagnostics:
+
+* Request rows carry `requestId`, every `attempts` entry (provider/account/status/error code/latency),
+  `streamTrace` (first token, total, bytes, end reason, `[DONE]`, ping count, upstream request id),
+  `errorType`/`errorCode`/`errorParam`, `upstreamStatus` and `upstreamRequestId`. `errorStack` is
+  redacted and truncated, not dropped.
+* Error rows have a retention floor (request logs keep the newest 100 errors; app logs keep the newest
+  500) so a burst of successful traffic cannot evict the failure being diagnosed.
+* `X-ModelPort-Trace: 1` captures request/response bodies for that one request even when global body
+  logging is off; the Logs detail dialog can export a diagnostic bundle (row + related app logs +
+  sanitized config/version snapshot). Process-level `uncaughtException`/`unhandledRejection` go to the
+  app log and to `~/.modelport/logs/crash-fallback.ndjson` before the store is ready.
+* Timed log persistence is async and atomic (unique temp + rename); `flushSync()` remains the quit path
+  and invalidates stale in-flight snapshots. Worker logs carry `providerId`/`requestId` when available.
+* Settings forms must not render editable controls before `appConfig` loads. `ProxyConfigForm` waits for
+  the persisted config and then syncs unless the user has unsaved edits; otherwise its default
+  127.0.0.1 / HTTPS-off state gets saved back over `proxyHost`/`httpsEnabled`/`httpsSanHosts`.
+  `CONFIG_CHANGED` updates both `appConfig` and the form's `proxyConfig` mirror.
 
 Quota / routing:
 

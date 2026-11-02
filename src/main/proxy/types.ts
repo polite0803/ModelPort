@@ -3,6 +3,8 @@
  * Defines core data structures for proxy service
  */
 
+import type { RequestAttemptTrace } from '../../shared/types'
+
 /**
  * OpenAI Message Format
  */
@@ -112,6 +114,17 @@ export interface ChatCompletionRequest {
   reasoning_effort?: 'low' | 'medium' | 'high'
   /** Reasoning effort level (camelCase, for AI SDK compatibility) */
   reasoningEffort?: 'low' | 'medium' | 'high'
+  /** OpenAI 兼容的可选参数：白名单以前会把它们静默丢掉，这里显式承载。 */
+  logprobs?: boolean
+  top_logprobs?: number
+  prediction?: unknown
+  modalities?: string[]
+  audio?: unknown
+  service_tier?: string
+  /** Responses/OpenRouter 风格的嵌套 reasoning 配置（与 reasoning_effort 并存）。 */
+  reasoning?: unknown
+  /** 部分 OpenAI 兼容上游（以及 Anthropic wire）接受的 top_k。 */
+  top_k?: number
   /** Enable deep research mode (GLM specific) */
   deep_research?: boolean
   /** Tools for function calling */
@@ -258,6 +271,22 @@ export interface ProxyContext {
 }
 
 /**
+ * 上游错误的结构化字段。
+ *
+ * 为什么不能只留 `error: string`：OpenAI/Claude 的错误体里 `code`、`param`、`type`
+ * 是客户端做处置的机读依据（例如区分「凭据失效」与「参数写错」）。旧实现把整份
+ * 错误体压成一句话，路由层再按状态码重建信封，`param/code` 恒为 null —— 上游说
+ * 得再具体，客户端也只能看到一句通用文案。
+ */
+export interface UpstreamErrorDetails {
+  message: string
+  type?: string
+  param?: string | null
+  code?: string | number | null
+  metadata?: unknown
+}
+
+/**
  * Request Forward Result
  */
 export interface ForwardResult {
@@ -268,6 +297,16 @@ export interface ForwardResult {
   stream?: NodeJS.ReadableStream
   skipTransform?: boolean
   error?: string
+  /** 上游错误体里的机读字段；`error` 仍是给人读的兜底文案。 */
+  errorDetails?: UpstreamErrorDetails
+  /** 上游错误体原文（已截断）；只进日志与诊断，不直接回给客户端。 */
+  errorBody?: string
+  /** 上游给的 `Retry-After`，由路由原样透传。 */
+  retryAfter?: string
+  /** Upstream request id exposed by the provider, if any. */
+  upstreamRequestId?: string
+  /** Every same-target attempt made for this forward (including retries). */
+  attempts?: RequestAttemptTrace[]
   latency?: number
   providerSessionId?: string
   parentMessageId?: string

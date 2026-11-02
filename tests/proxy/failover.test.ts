@@ -39,15 +39,18 @@ import {
   describeAttemptFailure,
   FIRST_EVENT_TIMEOUT_MS,
   firstStreamEvent,
+  isAccountFaultStatus,
   isChannelCredentialFailure,
   isChannelHumanRequiredFailure,
   isChannelRiskControlFailure,
   isChannelModelUnavailableError,
   isFailoverEligibleStatus,
+  isSameProviderRotationStatus,
   isForcedToolChoiceUnsupported,
   isMissingReasoningHistoryError,
   isOpaqueAggregateBadRequest,
   isRecoverableChannelFailure,
+  isSameTargetRetryableStatus,
   isToolOverflowError,
   probeSseHead,
   shouldTryNextAutoCandidate,
@@ -305,11 +308,38 @@ test('forwarder 的换家判据必须接上：超限 400 参与换家，普通 4
     /isToolOverflowError\(probe\.message\) \|\| isMissingReasoningHistoryError\(probe\.message\)\s*\n\s*\? 400\s*\n\s*: 502/,
     'probe error frames must keep capability-mismatch 400s at 400 so they fail over without account-failure penalty',
   )
-  // 钉不变量：普通 4xx（非超限）依旧不可换家 —— 这条语义不许被顺手改掉
+  // 2026-11-02 对齐 new-api：400 仍终止（能力类例外由文案判据放行）；
+  // 401-407 / 409-499 / 5xx / 网络错误都可以换下一家。
   assert.equal(isFailoverEligibleStatus(400), false)
-  assert.equal(isFailoverEligibleStatus(404), false, '404 仍靠消息判据单独放行，纯状态码语义不许漂')
+  assert.equal(isFailoverEligibleStatus(401), true, '凭据失效要换账号')
+  assert.equal(isFailoverEligibleStatus(403), true, '权限/地区限制要换渠道')
+  assert.equal(isFailoverEligibleStatus(404), true, '目录漂移要换下一家')
+  assert.equal(isFailoverEligibleStatus(408), true, '超时要换下一家')
+  assert.equal(isFailoverEligibleStatus(409), true)
   assert.equal(isFailoverEligibleStatus(429), true)
   assert.equal(isFailoverEligibleStatus(502), true)
+  // 同目标重试与换家分开：408/504/524 不原地重试。
+  assert.equal(isSameTargetRetryableStatus(408), false)
+  assert.equal(isSameTargetRetryableStatus(504), false)
+  assert.equal(isSameTargetRetryableStatus(524), false)
+  assert.equal(isSameTargetRetryableStatus(429), false)
+  assert.equal(isSameTargetRetryableStatus(502), true)
+  assert.equal(isSameTargetRetryableStatus(undefined), true)
+})
+
+test('账号记账只收渠道级故障：客户端 400/404/422 不把健康账号打进失败池', () => {
+  for (const status of [401, 403, 408, 429, 500, 502, 503]) {
+    assert.equal(isAccountFaultStatus(status), true, `${status} 应记账号故障`)
+  }
+  for (const status of [400, 404, 405, 409, 413, 422, 499]) {
+    assert.equal(isAccountFaultStatus(status), false, `${status} 不该记账号故障`)
+  }
+  assert.equal(isAccountFaultStatus(undefined), true, '网络错误记账号故障')
+
+  // 同供应商换 Key 只在账号级故障时有用；404 是目录问题，换 Key 白打。
+  assert.equal(isSameProviderRotationStatus(401), true)
+  assert.equal(isSameProviderRotationStatus(404), false)
+  assert.equal(isSameProviderRotationStatus(429), true)
 })
 
 test('forwarder 的流式路径必须等首事件再定成败（建流失败要能进换家循环）', () => {
@@ -551,8 +581,8 @@ test('换家取证必须落到源码：循环记录每次失败，日志写出 f
   // 每个出口都要带上清单（成功那轮的返回值同样含此前被跳过的家）
   assert.match(
     forwarderSource,
-    /const finish = \(\): ForwardChainOutcome<T> \| null =>\s*\n\s*last === null \? null : \{ \.\.\.last, failures: failures\.slice\(0, MAX_LOGGED_ATTEMPT_FAILURES\) \}/,
-    'the chain loop must return the failure list from a single capped exit helper',
+    /const finish = \(\): ForwardChainOutcome<T> \| null =>[\s\S]{0,400}?failures: failures\.slice\(0, MAX_LOGGED_ATTEMPT_FAILURES\),[\s\S]{0,200}?attemptTrace: attemptTrace\.slice\(\)/,
+    'the chain loop must return the failure list and attempt trace from one capped exit helper',
   )
   // 日志侧：非空才写键，第一家命中时不出现空数组
   assert.match(
