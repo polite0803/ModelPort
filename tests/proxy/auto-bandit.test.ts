@@ -4,7 +4,8 @@
  * - P1-3 配额余量降权：账本（quota/ledger.ts）、429 学习（learnQuotaCaps）、
  *   前置剔除（quotaBlockReason）都是既有能力，本轮只补「余量进打分」这一环；
  * - P1-4 工具能力位：与 maxTools 同一循环，fail-open（缺省不限）；
- * - P2-5 Bandit 第一步：滚动 24h 成功率 + latency p50 加减分，冷启动乐观先验。
+ * - P2-5 Bandit：滚动 24h 成功率 + latency p50 加减分，冷启动乐观先验；
+ *   第二步把成功率项换成可播种的 Beta 后验采样，安全罚项保持确定性。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -15,7 +16,9 @@ import {
   aggregateBanditStats,
   banditAdjustment,
   banditKeyOf,
+  createBanditRandom,
   latencyP50,
+  sampleBanditSuccessRate,
 } from '../../src/main/proxy/autoBandit.ts'
 import { rankCandidates, type RankCandidate } from '../../src/main/proxy/autoRouting.ts'
 
@@ -23,6 +26,7 @@ const NOW = 1_800_000_000_000
 
 const autoRoutingSource = readFileSync('src/main/proxy/autoRouting.ts', 'utf-8')
 const autoRouterSource = readFileSync('src/main/proxy/autoRouter.ts', 'utf-8')
+const autoBanditSource = readFileSync('src/main/proxy/autoBandit.ts', 'utf-8')
 const channelsSource = readFileSync('src/shared/channels.ts', 'utf-8')
 
 /* ---------------- P2-5：Bandit 统计与加减分 ---------------- */
@@ -96,6 +100,56 @@ test('aggregateBanditStats：latency p50（奇偶样本）', () => {
 test('banditAdjustment：冷启动乐观先验 —— 无样本/样本不足不调整', () => {
   assert.equal(banditAdjustment(undefined), 0)
   assert.equal(banditAdjustment({ total: BANDIT_MIN_SAMPLES - 1, successes: 0 }), 0)
+  assert.equal(
+    banditAdjustment({ total: BANDIT_MIN_SAMPLES - 1, successes: 0 }, createBanditRandom(123)),
+    0,
+    'Thompson 只作用于有足够战绩的候选，不让新候选被先验噪声压住',
+  )
+})
+
+test('Thompson：后验采样可复现，强/弱候选的期望分界保留', () => {
+  const strong = { total: 20, successes: 20 }
+  const weak = { total: 20, successes: 0 }
+  const strongFirst = banditAdjustment(strong, createBanditRandom(42))
+  assert.equal(strongFirst, banditAdjustment(strong, createBanditRandom(42)), '同 seed 必须可复现')
+  assert.ok(strongFirst > 0)
+  assert.ok(banditAdjustment(weak, createBanditRandom(42)) < 0)
+
+  const rate = sampleBanditSuccessRate(strong, createBanditRandom(42))
+  assert.equal(rate, sampleBanditSuccessRate(strong, createBanditRandom(42)))
+  assert.ok(rate > 0.5)
+  assert.ok(sampleBanditSuccessRate(weak, createBanditRandom(42)) < 0.5)
+})
+
+test('Thompson：degraded 成功从后验分子移出，等同失败证据', () => {
+  const clean = sampleBanditSuccessRate({ total: 10, successes: 8 }, createBanditRandom(7))
+  const degraded = sampleBanditSuccessRate(
+    { total: 10, successes: 8, degraded: 4 },
+    createBanditRandom(7),
+  )
+  assert.ok(clean > degraded, '不可用成功必须比干净成功更不像可用候选')
+})
+
+test('Thompson：安全罚项确定性执行，不随 seed 抖动', () => {
+  const seeds = [1, 7, 42, 991, 0x7fffffff]
+  const cases = [
+    { total: 2, successes: 2, degraded: 2, consecutiveDegraded: 2 },
+    { total: 0, successes: 0, attemptTotal: 2, attemptFailures: 2, consecutiveFailures: 2 },
+  ] as const
+  for (const stats of cases) {
+    const expected = banditAdjustment(stats, createBanditRandom(42))
+    for (const seed of seeds) {
+      assert.equal(banditAdjustment(stats, createBanditRandom(seed)), expected)
+    }
+  }
+
+  const sampled = { total: 10, successes: 0 }
+  const base = banditAdjustment(sampled, createBanditRandom(42))
+  const slow = banditAdjustment(
+    { ...sampled, latencyP50Ms: 31_000 },
+    createBanditRandom(42),
+  )
+  assert.equal(slow - base, -0.05, '慢 p50 罚项加在采样后的成功率项上，但本身不随机')
 })
 
 test('banditAdjustment：成功率说话，显著慢再轻罚', () => {
@@ -303,6 +357,37 @@ test('rankCandidates：Bandit 战绩要能改写同分候选的排序', () => {
     { now: NOW, limit: 2, seed: 0, strategy: 'round-robin', prefer: 'balanced' }
   )
   assert.equal(ranked[0]?.accountId, 'a1', '高成功率候选应排前')
+})
+
+test('rankCandidates：Thompson 采样必须由候选身份 + 每请求 seed 派生', () => {
+  // 负控：如果接线退回第一步的点估计，这里会红。
+  assert.match(
+    autoRoutingSource,
+    /createBanditRandom\(\r?\n\s*\(seed \^ hashString\(/,
+    'Thompson seed must combine the per-request seed and candidate identity',
+  )
+  assert.match(
+    autoRoutingSource,
+    /banditAdjustment\(candidate\.live, liveRandom\)/,
+    'the live score must consume the sampled posterior',
+  )
+  // 负控：如果实现丢掉采样器或随机化安全罚项，这里会红。
+  assert.match(autoBanditSource, /sampleBanditSuccessRate\(/)
+  assert.match(
+    autoBanditSource,
+    /const sampled = random !== undefined/,
+    'cold-start and deterministic penalties must remain outside Thompson',
+  )
+  assert.match(
+    autoBanditSource,
+    /if \(consecutiveDegraded >= 2\)/,
+    'repeated unusable successes must stay an immediate deterministic penalty',
+  )
+  assert.match(
+    autoBanditSource,
+    /if \(consecutive >= 2\) return -0\.5/,
+    'attempt failure streaks must stay deterministic',
+  )
 })
 
 /* ---------------- P1-3：配额余量降权 ---------------- */

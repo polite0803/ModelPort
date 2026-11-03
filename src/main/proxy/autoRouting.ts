@@ -23,7 +23,7 @@ import type { CostBucket } from '../../shared/channels.ts'
 import type { AggregateCostClass } from '../../shared/aggregateCost.ts'
 import { providerDefaultCapability, staticCapabilityHint } from './modelCapabilities.ts'
 import { AUTO_POOL_STRATEGIES } from '../../shared/types.ts'
-import { banditAdjustment, type BanditStats } from './autoBandit.ts'
+import { banditAdjustment, createBanditRandom, type BanditStats } from './autoBandit.ts'
 
 export type AutoComplexity = 'simple' | 'standard' | 'complex'
 /** 与 loadBalanceStrategy 保持一致，用于选择打分口径 */
@@ -1116,8 +1116,15 @@ function scoreCandidate(
     ? 0.1 * (1 - candidate.quotaHeadroom / 0.1)
     : 0
 
-  // Bandit 实时加减分（PLAN P2-5 第一步）：24h 战绩说话，冷启动不调整。
-  const liveBonus = banditAdjustment(candidate.live)
+  // Bandit 实时加减分（PLAN P2-5 第二步）：24h 战绩说话，冷启动不调整；
+  // 成功率项做 Beta 后验采样，候选身份 + 每请求 seed 保证同一请求可复现。
+  const liveRandom = candidate.live === undefined
+    ? undefined
+    : createBanditRandom(
+      (seed ^ hashString(`${candidate.providerId}:${candidate.displayName}:${candidate.actualModelId}:${candidate.accountId}`))
+      >>> 0
+    )
+  const liveBonus = banditAdjustment(candidate.live, liveRandom)
 
   // 会话粘性是加分而非硬钉：首选不可用时它会自然让位给其它候选
   const stickyBonus = sticky === undefined

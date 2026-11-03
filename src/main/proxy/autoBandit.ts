@@ -1,11 +1,14 @@
 /**
- * Bandit 实时评分（PLAN-auto-routing-freellmapi P2-5 第一步，静态权重先行）。
+ * Bandit 实时评分（PLAN-auto-routing-freellmapi P2-5）。
  *
  * 数据源是 request-logs.ndjson 的内存副本：按 `(providerId, actualModel)` 滚动
  * 24h 统计成功率、延迟 p50 与「不可用成功」（HTTP 200 但未请求上限却
  * `finish_reason=length`），作为 auto 打分的加减分因子，替换"候选只能靠静态
  * 启发式排序"的盲区。连续两次不可用成功立即重罚，不等时间窗内的 5 个样本。
- * Thompson sampling 留给观察后的第二步。
+ * 第一步用确定性点估计观察真实事故并校准了安全罚项；第二步把「成功率加减
+ * 分」换成 Beta 后验采样（Thompson sampling）：强候选大概率得高分，弱候选
+ * 仍保留被探索的概率。安全罚项（连续退化、attempt 连败、显著慢）继续
+ * 确定性执行，不让随机性稀释事故证据。
  *
  * 设计约束：
  * - **纯函数**：与 autoRouting.ts 同一纪律，node --test 直测，不碰 electron；
@@ -13,6 +16,9 @@
  *   不会被统计空窗永远压住，轮不到就没有数据、没数据就永远轮不到；
  * - **口径诚实**：日志里没有 TTFT 字段，速度用整笔 latency 的 p50 近似
  *   （流式请求含生成时长，噪声大，所以只对显著慢的候选轻惩罚）。
+ * - **可复现随机**：Thompson 的后验采样由每请求 seed 派生，同一请求内的
+ *   排序可复现；候选身份也进 seed，避免候选在输入数组里的位置改变它自己的
+ *   采样。
  * - **两类不可用成功**：`finish_reason=length` 且客户端未请求上限，以及流内重复
  *   退化读数命中（`shared/streamRepetition.ts`）。后者是 2026-11-03 补的：那一类
  *   流 HTTP 200、`finish_reason=tool_calls`，被客户端掐掉后在我们这边只是
@@ -88,6 +94,21 @@ export const BANDIT_WINDOW_MS = 24 * 60 * 60_000
 
 /** 样本量下限：低于它的键不参与调整（乐观先验，见模块头注释）。 */
 export const BANDIT_MIN_SAMPLES = 5
+
+/** 可播种的 32-bit PRNG；供 Thompson sampling 与测试复现。 */
+export type BanditRandom = () => number
+
+/** mulberry32：小而快、可播种，输出 [0,1)。 */
+export function createBanditRandom(seed: number): BanditRandom {
+  let state = seed >>> 0
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0
+    let value = state
+    value = Math.imul(value ^ (value >>> 15), value | 1)
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61)
+    return ((value ^ (value >>> 14)) >>> 0) / 0x1_0000_0000
+  }
+}
 
 /** Bandit 表的键：与请求日志里的 (providerId, actualModel) 同形。 */
 export function banditKeyOf(providerId: string, actualModel: string): string {
@@ -174,6 +195,55 @@ export function aggregateBanditStats(
   return table
 }
 
+/**
+ * 从 Beta(successes + 1, failures + 1) 后验采样成功率。
+ *
+ * degraded 是「HTTP 成功但不可用」，因此从分子移出并计入分母；两个 1 是
+ * Beta 先验（等价于观察到一次成败），把 0/0 与 5/5 拉向保守中间值。
+ */
+export function sampleBanditSuccessRate(
+  stats: BanditStats,
+  random: BanditRandom
+): number {
+  const degraded = Math.max(0, Math.min(stats.degraded ?? 0, stats.successes))
+  const successes = Math.max(0, stats.successes - degraded)
+  const failures = Math.max(0, stats.total - stats.successes) + degraded
+  const alpha = sampleGamma(successes + 1, random)
+  const beta = sampleGamma(failures + 1, random)
+  const denominator = alpha + beta
+  return denominator === 0 ? 0.5 : alpha / denominator
+}
+
+/**
+ * Marsaglia-Tsang gamma sampler。Node 没有 Beta 采样器；两条 Gamma 的商就是
+ * Beta。shape >= 1 走 rejection loop，shape < 1 用幂变换折到上一段。
+ */
+function sampleGamma(shape: number, random: BanditRandom): number {
+  if (shape < 1) {
+    return sampleGamma(shape + 1, random) * Math.pow(random(), 1 / shape)
+  }
+
+  const d = shape - 1 / 3
+  const c = 1 / Math.sqrt(9 * d)
+  for (;;) {
+    let x: number
+    let v: number
+    do {
+      // Box-Muller；mulberry32 不会返回 1，0 则由 exp/log 侧安全处理。
+      const u1 = random()
+      const u2 = random()
+      x = Math.sqrt(-2 * Math.log(Math.max(u1, Number.MIN_VALUE)))
+        * Math.cos(2 * Math.PI * u2)
+      v = Math.pow(1 + c * x, 3)
+    } while (v <= 0)
+
+    const u = random()
+    if (Math.log(Math.max(u, Number.MIN_VALUE)) < 0.5 * x * x / d) {
+      return d * v
+    }
+  }
+}
+
 interface AttemptRecord {
   timestamp: number
   order: number
@@ -242,11 +312,14 @@ const SLOW_P50_MS = 30_000
 /**
  * Bandit 加减分（进 auto 打分的总分，量级与 uncertainTools 扣分同级）：
  * - 无数据 / 样本 < 5 → 0（乐观先验，见模块头）；
- * - 成功率 1.0 → +0.075，0.5 → 0，0 → -0.075：够把长期失败的候选压下去，
- *   又不至于一两次失败就把候选踢出前排；
+ * - 第二步：成功率项从 Beta 后验采样；同 seed 可复现，候选身份参与 seed，
+ *   强候选大概率得高分，弱候选仍保留被探索的机会；
  * - p50 显著慢（> 30s）再扣 0.05。
  */
-export function banditAdjustment(stats: BanditStats | undefined): number {
+export function banditAdjustment(
+  stats: BanditStats | undefined,
+  random?: BanditRandom
+): number {
   if (stats === undefined) return 0
 
   const failurePenalty = attemptFailurePenalty(stats)
@@ -262,9 +335,12 @@ export function banditAdjustment(stats: BanditStats | undefined): number {
 
   // Degraded successes do not count as clean successes (a fully failed model and
   // a model that answers with empty/truncated turns end up on the same side).
+  const sampled = random !== undefined
   const degraded = stats.degraded ?? 0
   const effectiveSuccesses = Math.max(0, stats.successes - degraded)
-  const successRate = effectiveSuccesses / stats.total
+  const successRate = sampled
+    ? sampleBanditSuccessRate(stats, random)
+    : effectiveSuccesses / stats.total
   let adjustment = 0.15 * (successRate - 0.5)
   if (degraded > 0) {
     // A smaller additional drag for a mixed record, so one recurring bad model
