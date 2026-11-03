@@ -125,11 +125,12 @@ const SOURCE_PRIORITY: Record<CapabilitySource, number> = {
   manual: 0,
   'provider-record': 1,
   'aggregate-official': 2,
-  static: 3,
-  'provider-default': 4,
-  'third-party': 5,
-  heuristic: 6,
-  unknown: 7,
+  catalog: 3,
+  static: 4,
+  'provider-default': 5,
+  'third-party': 6,
+  heuristic: 7,
+  unknown: 8,
 }
 
 /**
@@ -492,6 +493,12 @@ export interface RankCandidate {
    * 永远不覆盖已有标注。
    */
   thirdPartyHint?: ModelCapabilityHint
+  /**
+   * 用户从「标准模型库」逐字段采用的第三方值（adoption ledger）。
+   * 优先级落在官方声明之后、静态规则与第三方旁表之前；只带能力字段，
+   * **不带价格** —— 价格只展示，不参与路由、权重或额度换算。
+   */
+  catalogHint?: ModelCapabilityHint
   /** 该供应商能否满足本次请求的契约（`n > 1` / `response_format`），由采集层填入 */
   contractCapable?: boolean
   /** 成本档；缺省按 unknown 参与打分（中性） */
@@ -794,7 +801,7 @@ export function conversationKey(request: ChatCompletionRequest): string | undefi
 
 /**
  * 一个模型的标注层。字段名直接对应 {@link CapabilitySource}，顺序就是优先级：
- * `manual > record > aggregate-official > static > provider-default > third-party`，
+ * `manual > record > aggregate-official > catalog > static > provider-default > third-party`，
  * 名字启发式排在最后（只对 `tier` 生效），再没有就是 `unknown`。
  *
  * 分层的意义不只是取最权威的值：`ModelCapability.sources` 会把每个字段的来源
@@ -804,6 +811,7 @@ export interface CapabilityLayers {
   manual?: ModelCapabilityHint
   record?: ModelCapabilityHint
   aggregateOfficial?: ModelCapabilityHint
+  catalog?: ModelCapabilityHint
   thirdParty?: ModelCapabilityHint
 }
 
@@ -836,6 +844,7 @@ export function resolveCapabilityDetail(
   if (layers.aggregateOfficial !== undefined) {
     ordered.push({ source: 'aggregate-official', hint: layers.aggregateOfficial })
   }
+  if (layers.catalog !== undefined) ordered.push({ source: 'catalog', hint: layers.catalog })
   if (ruleHint !== undefined) ordered.push({ source: 'static', hint: ruleHint })
   if (providerDefaults !== undefined) ordered.push({ source: 'provider-default', hint: providerDefaults })
   if (layers.thirdParty !== undefined) ordered.push({ source: 'third-party', hint: layers.thirdParty })
@@ -899,19 +908,20 @@ export function resolveCapability(
 
 /** 把一个候选的标注层拆出来，所有判定都经过同一个函数，口径不会分叉 */
 export function capabilityLayersOf(
-  candidate: Pick<RankCandidate, 'manualHint' | 'capabilityHint' | 'officialHint' | 'thirdPartyHint'>
+  candidate: Pick<RankCandidate, 'manualHint' | 'capabilityHint' | 'officialHint' | 'catalogHint' | 'thirdPartyHint'>
 ): CapabilityLayers {
   return {
     ...(candidate.manualHint === undefined ? {} : { manual: candidate.manualHint }),
     ...(candidate.capabilityHint === undefined ? {} : { record: candidate.capabilityHint }),
     ...(candidate.officialHint === undefined ? {} : { aggregateOfficial: candidate.officialHint }),
+    ...(candidate.catalogHint === undefined ? {} : { catalog: candidate.catalogHint }),
     ...(candidate.thirdPartyHint === undefined ? {} : { thirdParty: candidate.thirdPartyHint }),
   }
 }
 
 /** 候选的合并能力描述：硬过滤、策略筛选、档位打分共用 */
 export function capabilityOfCandidate(
-  candidate: Pick<RankCandidate, 'providerId' | 'displayName' | 'manualHint' | 'capabilityHint' | 'officialHint' | 'thirdPartyHint'>
+  candidate: Pick<RankCandidate, 'providerId' | 'displayName' | 'manualHint' | 'capabilityHint' | 'officialHint' | 'catalogHint' | 'thirdPartyHint'>
 ): ModelCapability {
   return resolveCapabilityDetail(candidate.providerId, candidate.displayName, capabilityLayersOf(candidate))
 }

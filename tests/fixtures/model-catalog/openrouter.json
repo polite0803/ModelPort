@@ -1,0 +1,12 @@
+{
+  "data": [
+    {
+      "id": "vendor/model-x",
+      "context_length": 131072,
+      "top_provider": { "max_completion_tokens": 8192 },
+      "architecture": { "input_modalities": ["text", "image"] },
+      "supported_parameters": ["tools", "temperature"],
+      "pricing": { "prompt": "0.000003", "completion": "0.000015" }
+    }
+  ]
+}

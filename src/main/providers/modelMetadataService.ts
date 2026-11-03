@@ -25,6 +25,12 @@ import {
   type ModelMetadataRow,
 } from '../../shared/modelMetadata.ts'
 import { probeRowKey, probeRowToLayer, type ModelProbeSidecar } from '../../shared/modelProbe.ts'
+import {
+  adoptionsForModel,
+  catalogAdoptionEvidence,
+  catalogAdoptionHint,
+  type CatalogAdoption,
+} from '../../shared/modelCatalog.ts'
 import { readModelProbeSidecar } from './modelProbeStore.ts'
 
 function costLedgerLayer(provider: Provider, actualModelId: string): MetadataLayer | undefined {
@@ -87,11 +93,40 @@ function upstreamLayers(provider: Provider, displayName: string, actualModelId: 
   return layers
 }
 
+/**
+ * 标准库层：只认用户已采用的字段。未采用的候选即使匹配到也不会进入解析链，
+ * 所以「打开页面 / 刷新快照」本身不会改变任何模型的可路由能力。
+ *
+ * 价格 adoption 不进 hint（`catalogAdoptionHint` 显式跳过），因此这一层不会
+ * 影响权重/免费位/额度判定。
+ */
+function catalogLayer(
+  adoptions: readonly CatalogAdoption[],
+  providerId: string,
+  displayName: string,
+): MetadataLayer | undefined {
+  const mine = adoptionsForModel(adoptions, providerId, displayName)
+  const hint = catalogAdoptionHint(mine)
+  if (!hint) return undefined
+  const asOf = mine
+    .map((item) => item.adoptedAt)
+    .sort()
+    .at(-1)
+  return {
+    source: 'catalog',
+    confidence: 'inferred',
+    ...(asOf === undefined ? {} : { asOf }),
+    evidence: catalogAdoptionEvidence(mine),
+    hint,
+  }
+}
+
 function layersForModel(input: {
   provider: Provider
   displayName: string
   actualModelId: string
   marks: ReturnType<typeof storeManager.getUserModelMarks>
+  adoptions: readonly CatalogAdoption[]
   probes: ModelProbeSidecar
   nowMs: number
 }): MetadataLayer[] {
@@ -108,6 +143,9 @@ function layersForModel(input: {
   }
 
   layers.push(...upstreamLayers(input.provider, input.displayName, input.actualModelId))
+
+  const catalog = catalogLayer(input.adoptions, input.provider.id, input.displayName)
+  if (catalog) layers.push(catalog)
 
   const family = familyRuleLayer(input.actualModelId)
   if (family) layers.push(family)
@@ -150,6 +188,7 @@ export async function getResolvedModelMetadata(input: {
       displayName: model.displayName,
       actualModelId: model.actualModelId,
       marks: storeManager.getUserModelMarks(),
+      adoptions: storeManager.getCatalogAdoptions(),
       probes: await readModelProbeSidecar(),
       nowMs: input.nowMs ?? Date.now(),
     }),
@@ -170,6 +209,7 @@ export async function getModelMetadataReport(
 ): Promise<ModelMetadataReport> {
   const probes = await readModelProbeSidecar()
   const marks = storeManager.getUserModelMarks()
+  const adoptions = storeManager.getCatalogAdoptions()
   const modelUsage = storeManager.getStatistics().modelUsage
 
   const records: ModelMetadata[] = []
@@ -185,6 +225,7 @@ export async function getModelMetadataReport(
             displayName: model.displayName,
             actualModelId: model.actualModelId,
             marks,
+            adoptions,
             probes,
             nowMs,
           }),

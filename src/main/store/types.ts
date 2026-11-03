@@ -28,6 +28,7 @@ import {
 } from '../../shared/types.ts'
 import { RETIRED_PROVIDER_IDS } from '../../shared/types.ts'
 import type { DayTokenBucket } from '../../shared/tokenAccounting.ts'
+import type { CatalogAdoption } from '../../shared/modelCatalog.ts'
 import type { AggregateCreditSnapshot, AggregateCreditSnapshots } from '../../shared/aggregateCredit.ts'
 import type { RepetitionGuardSettings } from '../../shared/streamRepetition.ts'
 
@@ -711,6 +712,9 @@ export type UserModelMarks = Record<string, Record<string, ModelCapabilityHint>>
 
 export const DEFAULT_USER_MODEL_MARKS: UserModelMarks = {}
 
+/** 标准模型库 adoption 出厂为空：未采用任何第三方字段。 */
+export const DEFAULT_CATALOG_ADOPTIONS: CatalogAdoption[] = []
+
 /**
  * Effective Model Information
  * Defined once in shared/types, shared with preload and the renderer
@@ -747,6 +751,14 @@ export interface StoreSchema {
   userModelOverrides: UserModelOverrides
   /** Manual capability corrections; merged on top of every automatic mark */
   userModelMarks: UserModelMarks
+  /**
+   * 标准模型库的逐字段采用记录。
+   *
+   * 与 `userModelMarks` 分开：人工标注是用户自己的判断（优先级最高），adoption
+   * 是「从第三方台账抄了这一格」，来源固定为 `catalog`，撤销即回到自动解析。
+   * 两者混存会让界面无法回答「这个值是用户写的还是抄来的」，也会让撤销误删人工值。
+   */
+  catalogAdoptions: CatalogAdoption[]
   /**
    * 账号级实时额度快照，一个聚合条目一行（`entryId -> 那一次问回来的余额`）。
    *

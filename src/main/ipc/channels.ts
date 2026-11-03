@@ -66,6 +66,12 @@ export const IpcChannels = {
   // 元数据解析报表（覆盖率 + 待标注队列）与手动探测（打开页面不发起请求）
   PROVIDERS_GET_MODEL_METADATA: 'providers:getModelMetadata',
   PROVIDERS_PROBE_MODEL: 'providers:probeModel',
+  // 标准模型库：读取快照只读磁盘；刷新必须由用户显式触发（无定时、无开页自动抓取）
+  PROVIDERS_GET_CATALOG_STATUSES: 'providers:getCatalogStatuses',
+  PROVIDERS_REFRESH_CATALOG: 'providers:refreshCatalog',
+  PROVIDERS_GET_CATALOG_CANDIDATES: 'providers:getCatalogCandidates',
+  PROVIDERS_ADOPT_CATALOG_FIELD: 'providers:adoptCatalogField',
+  PROVIDERS_REVOKE_CATALOG_ADOPTION: 'providers:revokeCatalogAdoption',
 
   AGGREGATE_LIST: 'aggregate:list',
   AGGREGATE_DETAIL: 'aggregate:detail',

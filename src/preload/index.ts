@@ -40,6 +40,14 @@ import type { AggregateCreditQueryResult } from '../shared/aggregateCredit'
 import type { ModelMetadataReport } from '../shared/modelMetadata'
 import type { ModelProbeRunResult, ProbeScope } from '../shared/modelProbe'
 import type {
+  CatalogAdoption,
+  CatalogAdoptionField,
+  CatalogCandidatesResult,
+  CatalogRefreshResult,
+  CatalogSnapshotStatus,
+  CatalogSourceId,
+} from '../shared/modelCatalog.ts'
+import type {
   AggregateDetail,
   AggregateListResult,
   AggregateModelTestResult,
@@ -218,6 +226,46 @@ const providersAPI = {
     error?: string
   }> =>
     ipcRenderer.invoke(IpcChannels.PROVIDERS_PROBE_MODEL, providerId, displayName, scope, force),
+
+  /** 标准模型库：快照元数据（不联网、不含 entries） */
+  getCatalogStatuses: (): Promise<CatalogSnapshotStatus[]> =>
+    ipcRenderer.invoke(IpcChannels.PROVIDERS_GET_CATALOG_STATUSES),
+
+  /** 用户显式刷新；失败时返回 success:false 且旧快照保留 */
+  refreshCatalog: (source: CatalogSourceId): Promise<CatalogRefreshResult> =>
+    ipcRenderer.invoke(IpcChannels.PROVIDERS_REFRESH_CATALOG, source),
+
+  getCatalogCandidates: (
+    providerId: string,
+    displayName: string,
+  ): Promise<CatalogCandidatesResult> =>
+    ipcRenderer.invoke(IpcChannels.PROVIDERS_GET_CATALOG_CANDIDATES, providerId, displayName),
+
+  adoptCatalogField: (
+    providerId: string,
+    displayName: string,
+    catalogId: string,
+    field: CatalogAdoptionField,
+  ): Promise<{ success: boolean; adoptions?: CatalogAdoption[]; error?: string }> =>
+    ipcRenderer.invoke(
+      IpcChannels.PROVIDERS_ADOPT_CATALOG_FIELD,
+      providerId,
+      displayName,
+      catalogId,
+      field,
+    ),
+
+  revokeCatalogAdoption: (
+    providerId: string,
+    displayName: string,
+    field?: CatalogAdoptionField,
+  ): Promise<{ success: boolean; adoptions?: CatalogAdoption[]; error?: string }> =>
+    ipcRenderer.invoke(
+      IpcChannels.PROVIDERS_REVOKE_CATALOG_ADOPTION,
+      providerId,
+      displayName,
+      field,
+    ),
 }
 
 const accountsAPI = {

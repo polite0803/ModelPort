@@ -30,6 +30,8 @@ import type {
 } from '../../shared/types'
 import { DEFAULT_FAIRNESS_LEAD } from '../../shared/types'
 import type { ChatCompletionRequest } from './types'
+import type { CatalogAdoption } from '../../shared/modelCatalog.ts'
+import { adoptionsForModel, catalogAdoptionHint } from '../../shared/modelCatalog.ts'
 import { accountRuntime } from './accountRuntime'
 import { getChannelDefinition } from '../providers/accountChannels/catalogue'
 import {
@@ -250,19 +252,25 @@ const LEGACY_ROUTE_NAME = AUTO_MODEL_ID
 interface CandidateHints {
   record?: ModelCapabilityHint
   official?: ModelCapabilityHint
+  catalog?: ModelCapabilityHint
   thirdParty?: ModelCapabilityHint
   manual?: ModelCapabilityHint
 }
 
 /**
- * 收集一个模型全部标注层。`marks` 是本次决策一次性读出的手工标注表 ——
+ * 收集一个模型全部标注层。`marks` / `adoptions` 是本次决策一次性读出的两张表 ——
  * 逐候选读 store 会让一次 `select` 读几十次盘上对象。
+ *
+ * 顺序与 metadata 链一致：manual > record > official > catalog >（静态/第三方在
+ * `resolveCapabilityDetail` 内按固定顺序补位）。catalog 只来自 adoption ledger，
+ * 未采用的候选不参与；价格字段永远不会出现在这里。
  */
 function capabilityHintsFor(
   provider: Provider,
   displayName: string,
   actualModelId: string,
-  marks: UserModelMarks
+  marks: UserModelMarks,
+  adoptions: readonly CatalogAdoption[]
 ): CandidateHints {
   const record = provider.modelCapabilities?.[displayName]
   const aggregateId = provider.type === 'aggregate' ? (provider.aggregateId ?? provider.id) : undefined
@@ -273,10 +281,12 @@ function capabilityHintsFor(
     ? undefined
     : aggregateThirdPartyHint(aggregateId, actualModelId)
   const manual = marks[provider.id]?.[displayName]
+  const catalog = catalogAdoptionHint(adoptionsForModel(adoptions, provider.id, displayName))
 
   return {
     ...(record === undefined ? {} : { record }),
     ...(contextWindow === undefined ? {} : { official: { contextTokens: contextWindow } }),
+    ...(catalog === undefined ? {} : { catalog }),
     ...(thirdParty === undefined ? {} : { thirdParty }),
     ...(manual === undefined ? {} : { manual }),
   }
@@ -419,6 +429,7 @@ class AutoRouter {
     const providers = storeManager.getProviders().filter(provider => provider.enabled)
     const needs = contractNeeds(request)
     const marks = storeManager.getUserModelMarks()
+    const adoptions = storeManager.getCatalogAdoptions()
     const rankInputs: PoolStrategyCandidate[] = []
     const candidatesByKey = new Map<string, AutoCandidate>()
     // 前置剔除的候选及原因（Set 去重：同一模型多账号命中同一原因只记一条）
@@ -486,7 +497,7 @@ class AutoRouter {
           // 「账号健康、但这个模型正在限流里」的那一档
           const runtime = accountRuntime.snapshot(account.id, now, model.actualModelId)
           const key = candidateKey(provider.id, account.id, model.displayName)
-          const hints = capabilityHintsFor(provider, model.displayName, model.actualModelId, marks)
+          const hints = capabilityHintsFor(provider, model.displayName, model.actualModelId, marks, adoptions)
           // 配额余量（PLAN P1-3）：只对聚合目录候选计算 —— 账号渠道的帽在渠道
           // worker 内部，本地账本没有官方帽可对照，硬算只是噪声。函数自带
           // fail-open（读不到给 0.5 中性）。
@@ -525,6 +536,7 @@ class AutoRouter {
             ...(hints.record === undefined ? {} : { capabilityHint: hints.record }),
             ...(hints.manual === undefined ? {} : { manualHint: hints.manual }),
             ...(hints.official === undefined ? {} : { officialHint: hints.official }),
+            ...(hints.catalog === undefined ? {} : { catalogHint: hints.catalog }),
             ...(hints.thirdParty === undefined ? {} : { thirdPartyHint: hints.thirdParty }),
             contractCapable,
             costBucket: costSignal.bucket,

@@ -35,12 +35,17 @@ import {
   UserModelOverrides,
   DEFAULT_USER_MODEL_MARKS,
   UserModelMarks,
+  DEFAULT_CATALOG_ADOPTIONS,
   CustomModel,
   FetchedModel,
   DEFAULT_REQUEST_LOG_CONFIG,
   normalizeModelMappingsWithDefaults,
 } from './types'
 import type { AggregateCreditSnapshot, AggregateCreditSnapshots } from './types'
+import {
+  sanitizeCatalogAdoptionLedger,
+  type CatalogAdoption,
+} from '../../shared/modelCatalog.ts'
 import { localDayKey, recentLocalDays } from '../../shared/localDay'
 import { normalizeSanHostList } from '../../shared/httpsConfig'
 import { normalizeStreamRepetitionGuard } from '../../shared/streamRepetition'
@@ -478,6 +483,8 @@ class StoreManager {
       tokenUsage: {},
       userModelOverrides: DEFAULT_USER_MODEL_OVERRIDES,
       userModelMarks: DEFAULT_USER_MODEL_MARKS,
+      // 标准库 adoption 从空开始；升级安装没有「采用过哪一格」的历史。
+      catalogAdoptions: DEFAULT_CATALOG_ADOPTIONS,
       // 实时额度快照从空开始：一次升级安装没有"上次问过谁"，闸门随之不参与（fail-open）。
       aggregateCreditSnapshots: {},
     }
@@ -2452,6 +2459,25 @@ class StoreManager {
     }
 
     this.store!.set('userModelMarks', next)
+    return next
+  }
+
+  /**
+   * 标准模型库的逐字段采用记录。读盘后先过一遍校验：外部数据只在这里被信任一次，
+   * 之后的读取都拿到同一份合法台账（未知字段/越界数值被丢掉，而不是让界面显示脏值）。
+   */
+  getCatalogAdoptions(): CatalogAdoption[] {
+    this.ensureInitialized()
+    return sanitizeCatalogAdoptionLedger(
+      this.store!.get('catalogAdoptions') || DEFAULT_CATALOG_ADOPTIONS,
+    )
+  }
+
+  /** 整表替换并返回校验后的结果；调用方（service）负责先验证 provider/model 存在。 */
+  setCatalogAdoptions(adoptions: readonly CatalogAdoption[]): CatalogAdoption[] {
+    this.ensureInitialized()
+    const next = sanitizeCatalogAdoptionLedger(adoptions)
+    this.store!.set('catalogAdoptions', next)
     return next
   }
 

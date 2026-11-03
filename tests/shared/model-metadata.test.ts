@@ -43,11 +43,12 @@ const resolve = (layers: Layer[]) =>
     layers,
   })
 
-test('优先级表固定为 manual > upstream > family-rule > probe > cost-ledger', () => {
+test('优先级表固定为 manual > upstream > catalog > probe > family-rule > cost-ledger', () => {
   const ranks = METADATA_SOURCE_PRIORITY.map((source) => metadataSourceRank(source))
-  assert.deepEqual(ranks, [0, 1, 2, 3, 4])
+  assert.deepEqual(ranks, [0, 1, 2, 3, 4, 5])
   assert.equal(metadataSourceRank('unclassified'), METADATA_SOURCE_PRIORITY.length)
   assert.equal(METADATA_SOURCE_PRIORITY[0], 'manual')
+  assert.equal(METADATA_SOURCE_PRIORITY[2], 'catalog')
   assert.equal(METADATA_SOURCE_PRIORITY[METADATA_SOURCE_PRIORITY.length - 1], 'cost-ledger')
 })
 
@@ -61,6 +62,30 @@ test('人工标记覆盖上游声明与家族规则，且来源落在 manual', (
   assert.equal(metadata.contextTokens.value, 32768)
   assert.equal(metadata.contextTokens.source, 'manual')
   assert.equal(metadata.contextTokens.confidence, 'declared')
+})
+
+test('标准库采用值不得覆盖人工标记或上游声明，只在两者缺席时补位', () => {
+  const manualWins = resolve([
+    base({ source: 'manual', hint: { contextTokens: 32768 } }),
+    base({ source: 'upstream', hint: { contextTokens: 262144 } }),
+    base({ source: 'catalog', confidence: 'inferred', hint: { contextTokens: 200000 } }),
+  ])
+  assert.equal(manualWins.contextTokens.source, 'manual')
+  assert.equal(manualWins.contextTokens.value, 32768)
+
+  const upstreamWins = resolve([
+    base({ source: 'upstream', hint: { contextTokens: 262144 } }),
+    base({ source: 'catalog', confidence: 'inferred', hint: { contextTokens: 200000 } }),
+  ])
+  assert.equal(upstreamWins.contextTokens.source, 'upstream')
+  assert.equal(upstreamWins.contextTokens.value, 262144)
+
+  const catalogWins = resolve([
+    base({ source: 'catalog', confidence: 'inferred', hint: { contextTokens: 200000 } }),
+    base({ source: 'probe', confidence: 'measured', hint: { contextTokens: 180000 } }),
+  ])
+  assert.equal(catalogWins.contextTokens.source, 'catalog')
+  assert.equal(catalogWins.contextTokens.value, 200000)
 })
 
 test('上游缺失时家族规则补位；全层缺席时保持 unclassified，绝不产出假值', () => {
@@ -82,13 +107,13 @@ test('上游缺失时家族规则补位；全层缺席时保持 unclassified，�
   }
 })
 
-test('probe 不覆盖家族规则（按给定优先级），但没有规则时可用；过期行不参与', () => {
-  const ruleWins = resolve([
+test('probe 覆盖家族规则（按给定优先级），没有实测时规则补位；过期行不参与', () => {
+  const probeWins = resolve([
     base({ source: 'probe', confidence: 'measured', hint: { tools: 'no' } }),
     base({ source: 'family-rule', confidence: 'inferred', hint: { tools: 'yes' } }),
   ])
-  assert.equal(ruleWins.tools.value, 'yes')
-  assert.equal(ruleWins.tools.source, 'family-rule')
+  assert.equal(probeWins.tools.value, 'no')
+  assert.equal(probeWins.tools.source, 'probe')
 
   const layer = probeRowToLayer({
     providerId: 'provider-a',

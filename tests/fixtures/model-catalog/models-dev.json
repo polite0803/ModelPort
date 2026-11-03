@@ -1,0 +1,21 @@
+{
+  "anthropic": {
+    "models": {
+      "claude-sonnet-4-20250514": {
+        "id": "claude-sonnet-4-20250514",
+        "limit": { "context": 200000, "output": 8192 },
+        "cost": { "input": 3, "output": 15 },
+        "modalities": { "input": ["text", "image"] },
+        "attachment": true,
+        "tool_call": true
+      }
+    }
+  },
+  "broken-provider": {
+    "models": {
+      "no-fields-model": {
+        "id": "no-fields-model"
+      }
+    }
+  }
+}

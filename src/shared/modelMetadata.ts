@@ -7,7 +7,7 @@
  *
  * 不变量：
  * - 缺席字段一律表达为 `{ state: 'unclassified' }`，不写默认值（0 / false / ['text'] 都是猜测）。
- * - `source` 只有五层 + `unclassified`；更细的出处写 `evidence`。
+ * - `source` 只有六层 + `unclassified`；更细的出处写 `evidence`。
  * - `asOf` 只在证据本身带时间时透传，从不补齐。
  */
 import type { InputModality, ModelCapabilityHint } from './types.ts'
@@ -27,12 +27,20 @@ export const METADATA_ATTRIBUTES = [
 
 export type MetadataAttribute = (typeof METADATA_ATTRIBUTES)[number]
 
-/** 五层来源（高 → 低）+ 「谁都不知道」。 */
+/**
+ * 六层来源（高 → 低）+ 「谁都不知道」。
+ *
+ * 2026-11-04 的裁定把标准库层插在「上游声明」与「实测探测」之间：
+ * 人工标记 > 上游声明 > 标准库（含已采用的 adoption）> 实测探测 > 家族规则 > 成本账本。
+ * 标准库本身是第三方数据（置信度 `inferred`），采用是用户逐字段的显式动作，
+ * 但**永远不能**盖住人工标记或上游声明。
+ */
 export const METADATA_SOURCE_PRIORITY = [
   'manual',
   'upstream',
-  'family-rule',
+  'catalog',
   'probe',
+  'family-rule',
   'cost-ledger',
 ] as const
 

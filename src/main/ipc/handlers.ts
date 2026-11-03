@@ -21,6 +21,14 @@ import { oauthManager } from '../oauth/manager'
 import { fetchProviderModels } from '../providers/modelCatalog'
 import { getModelMetadataReport } from '../providers/modelMetadataService'
 import { runModelCapabilityProbe } from '../providers/modelProbeRunner'
+import {
+  adoptCatalogField,
+  getCatalogCandidates,
+  getCatalogStatuses,
+  refreshCatalog,
+  revokeCatalogAdoption,
+} from '../providers/modelCatalogService'
+import type { CatalogAdoptionField, CatalogSourceId } from '../../shared/modelCatalog.ts'
 import type { ProbeScope } from '../../shared/modelProbe.ts'
 import { schedulerStatus, triggerModelListRefreshNow, configureModelListRefresh } from '../scheduler/modelListRefresh'
 import { proxyServer } from '../proxy/server'
@@ -762,6 +770,85 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
           success: false,
           error: error instanceof Error ? error.message : 'Failed to probe model metadata',
         }
+      }
+    }
+  )
+
+  ipcMain.handle(IpcChannels.PROVIDERS_GET_CATALOG_STATUSES, async () => {
+    try {
+      return await getCatalogStatuses()
+    } catch (error) {
+      console.error('[IPC] Failed to read catalog statuses:', error)
+      return []
+    }
+  })
+
+  ipcMain.handle(IpcChannels.PROVIDERS_REFRESH_CATALOG, async (_, source: string) => {
+    const normalized: CatalogSourceId | undefined =
+      source === 'models.dev' || source === 'litellm' || source === 'openrouter'
+        ? source
+        : undefined
+    if (normalized === undefined) {
+      return { success: false, error: '未知的标准库来源', statuses: [] }
+    }
+    try {
+      // 用户显式触发才联网；失败时 service 保留磁盘上的旧快照。
+      return await refreshCatalog(normalized)
+    } catch (error) {
+      console.error('[IPC] Failed to refresh model catalog:', error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to refresh model catalog',
+        statuses: await getCatalogStatuses(),
+      }
+    }
+  })
+
+  ipcMain.handle(
+    IpcChannels.PROVIDERS_GET_CATALOG_CANDIDATES,
+    async (_, providerId: string, displayName: string) => {
+      if (typeof providerId !== 'string' || typeof displayName !== 'string') {
+        return { statuses: [], matches: [], adoptions: [] }
+      }
+      try {
+        const actualModelId =
+          storeManager
+            .getEffectiveModels(providerId)
+            .find((model) => model.displayName === displayName)?.actualModelId ?? displayName
+        return await getCatalogCandidates({ providerId, displayName, actualModelId })
+      } catch (error) {
+        console.error('[IPC] Failed to match model catalog:', error)
+        return { statuses: [], matches: [], adoptions: [] }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IpcChannels.PROVIDERS_ADOPT_CATALOG_FIELD,
+    async (
+      _,
+      providerId: string,
+      displayName: string,
+      catalogId: string,
+      field: CatalogAdoptionField,
+    ) => {
+      try {
+        return await adoptCatalogField({ providerId, displayName, catalogId, field })
+      } catch (error) {
+        console.error('[IPC] Failed to adopt catalog field:', error)
+        return { success: false, error: error instanceof Error ? error.message : 'adopt failed' }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IpcChannels.PROVIDERS_REVOKE_CATALOG_ADOPTION,
+    async (_, providerId: string, displayName: string, field?: CatalogAdoptionField) => {
+      try {
+        return revokeCatalogAdoption({ providerId, displayName, ...(field ? { field } : {}) })
+      } catch (error) {
+        console.error('[IPC] Failed to revoke catalog adoption:', error)
+        return { success: false, error: error instanceof Error ? error.message : 'revoke failed' }
       }
     }
   )

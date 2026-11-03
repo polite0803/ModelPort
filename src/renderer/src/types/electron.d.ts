@@ -51,6 +51,14 @@ import type { AggregateCreditQueryResult } from '../../../shared/aggregateCredit
 import type { ModelMetadataReport } from '../../../shared/modelMetadata'
 import type { ModelProbeRunResult, ProbeScope } from '../../../shared/modelProbe'
 import type {
+  CatalogAdoption,
+  CatalogAdoptionField,
+  CatalogCandidatesResult,
+  CatalogRefreshResult,
+  CatalogSnapshotStatus,
+  CatalogSourceId,
+} from '../../../shared/modelCatalog.ts'
+import type {
   ChannelAutoCheckinResult,
   ChannelCredits,
   ChannelModelsResult,
@@ -220,6 +228,26 @@ interface ProvidersAPI {
     result?: ModelProbeRunResult
     error?: string
   }>
+  /** 标准模型库快照元数据（只读磁盘，不联网）。 */
+  getCatalogStatuses: () => Promise<CatalogSnapshotStatus[]>
+  /** 用户显式刷新一个来源；失败时旧快照保留。 */
+  refreshCatalog: (source: CatalogSourceId) => Promise<CatalogRefreshResult>
+  /** 三档候选（exact / alias / family）与当前已采用字段。 */
+  getCatalogCandidates: (
+    providerId: string,
+    displayName: string,
+  ) => Promise<CatalogCandidatesResult>
+  adoptCatalogField: (
+    providerId: string,
+    displayName: string,
+    catalogId: string,
+    field: CatalogAdoptionField,
+  ) => Promise<{ success: boolean; adoptions?: CatalogAdoption[]; error?: string }>
+  revokeCatalogAdoption: (
+    providerId: string,
+    displayName: string,
+    field?: CatalogAdoptionField,
+  ) => Promise<{ success: boolean; adoptions?: CatalogAdoption[]; error?: string }>
 }
 
 interface AccountsAPI {
