@@ -64,7 +64,8 @@ function compare(tags: Set<string>, documented: Set<string>): string[] {
   return problems.sort()
 }
 
-const doc = readFileSync('docs/AGENTS-full.md', 'utf8')
+// 文档按 LF 规范化：Windows 检出是 CRLF 时，`\n## ` / `\n* **` 这类锚点会失配。
+const doc = readFileSync('docs/AGENTS-full.md', 'utf8').replace(/\r\n/g, '\n')
 const tags = sourceTags()
 const documented = tableIds(doc)
 const retired = retiredIds(doc)

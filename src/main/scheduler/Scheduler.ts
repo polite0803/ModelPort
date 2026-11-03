@@ -37,6 +37,24 @@ import type { SchedulerTaskStatus } from '../../shared/types'
  */
 export const MAX_INTERVAL_MS = 2 ** 31 - 1
 
+/**
+ * 时间源与定时器的最小可注入面。
+ *
+ * 生产环境用系统时钟；单测注入假时钟，避免「真实 setTimeout + 并发线程调度」让
+ * 周期断言变成赌时序。只暴露调度器真正用到的三个能力，不把整块 Date 塞进来。
+ */
+export interface SchedulerClock {
+  now(): number
+  setTimeout(handler: () => void, delayMs: number): ReturnType<typeof setTimeout>
+  clearTimeout(handle: ReturnType<typeof setTimeout>): void
+}
+
+const systemClock: SchedulerClock = {
+  now: () => Date.now(),
+  setTimeout: (handler, delayMs) => setTimeout(handler, delayMs),
+  clearTimeout: (handle) => clearTimeout(handle),
+}
+
 export interface SchedulerTask {
   name: string
   intervalMs: number
@@ -60,6 +78,11 @@ interface RegisteredTask extends SchedulerTask {
 export class Scheduler {
   private tasks = new Map<string, RegisteredTask>()
   private started = false
+  private readonly clock: SchedulerClock
+
+  constructor(clock: SchedulerClock = systemClock) {
+    this.clock = clock
+  }
 
   /**
    * 注册（或覆盖）一个命名任务。同名任务第二次注册会清掉旧的定时器再重挂，
@@ -139,7 +162,7 @@ export class Scheduler {
   private arm(task: RegisteredTask): void {
     // 首轮默认**等一个完整周期**再跑：模型清单刷新（尤其聚合/内置要真打上游）不该
     // 在启动瞬间和应用初始化抢资源。需要"启动即热"的任务自行传 `runOnStart: true`。
-    task.nextRunAt = Date.now() + task.intervalMs
+    task.nextRunAt = this.clock.now() + task.intervalMs
     if (task.runOnStart) void this.execute(task)
     else this.armTimer(task)
   }
@@ -152,12 +175,12 @@ export class Scheduler {
    */
   private armTimer(task: RegisteredTask): void {
     if (!this.started) return
-    const remaining = Math.max(0, (task.nextRunAt ?? Date.now()) - Date.now())
+    const remaining = Math.max(0, (task.nextRunAt ?? this.clock.now()) - this.clock.now())
     const delay = Math.min(remaining, MAX_INTERVAL_MS)
-    task.timer = setTimeout(() => {
+    task.timer = this.clock.setTimeout(() => {
       task.timer = null
       if (!this.started) return
-      if ((task.nextRunAt ?? 0) > Date.now()) {
+      if ((task.nextRunAt ?? 0) > this.clock.now()) {
         // 分片续订：真实触发点还没到，排下一段（周期超过 24.8 天时走这里）。
         this.armTimer(task)
         return
@@ -175,17 +198,17 @@ export class Scheduler {
       return
     }
     task.running = true
-    task.lastRunAt = Date.now()
-    task.nextRunAt = Date.now() + task.intervalMs
+    task.lastRunAt = this.clock.now()
+    task.nextRunAt = this.clock.now() + task.intervalMs
     try {
       await task.run()
-      task.lastSuccessAt = Date.now()
+      task.lastSuccessAt = this.clock.now()
       task.lastError = null
     } catch (error) {
       // fail-soft：记下来，但不清定时器、不向上抛。
       task.lastError = error instanceof Error ? error.message : String(error)
       if (task.retryBackoffMs && task.retryBackoffMs > 0) {
-        task.retryTimer = setTimeout(() => {
+        task.retryTimer = this.clock.setTimeout(() => {
           task.retryTimer = null
           void this.execute(task).finally(() => this.armTimer(task))
         }, task.retryBackoffMs)
@@ -202,11 +225,11 @@ export class Scheduler {
 
   private disposeTimers(task: RegisteredTask): void {
     if (task.timer !== null) {
-      clearTimeout(task.timer)
+      this.clock.clearTimeout(task.timer)
       task.timer = null
     }
     if (task.retryTimer !== null) {
-      clearTimeout(task.retryTimer)
+      this.clock.clearTimeout(task.retryTimer)
       task.retryTimer = null
     }
   }

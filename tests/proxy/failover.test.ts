@@ -58,11 +58,19 @@ import {
   shouldTryNextAutoCandidate,
 } from '../../src/main/proxy/failover.ts'
 
-const forwarderSource = readFileSync('src/main/proxy/forwarder.ts', 'utf-8')
-const autoRouterSource = readFileSync('src/main/proxy/autoRouter.ts', 'utf-8')
-const chatRouteSource = readFileSync('src/main/proxy/routes/chat.ts', 'utf-8')
-const completionsRouteSource = readFileSync('src/main/proxy/routes/completions.ts', 'utf-8')
-const channelsManagerSource = readFileSync('src/main/providers/accountChannels/manager.ts', 'utf-8')
+/**
+ * 源码钉点统一按 LF 读取：Windows 检出是 CRLF 时，`\n`-only 的锚点正则会在
+ * `\r\n` 上失配。规范化只影响换行符，不改变被断言的内容。
+ */
+function readSource(path: string): string {
+  return readFileSync(path, 'utf-8').replace(/\r\n/g, '\n')
+}
+
+const forwarderSource = readSource('src/main/proxy/forwarder.ts')
+const autoRouterSource = readSource('src/main/proxy/autoRouter.ts')
+const chatRouteSource = readSource('src/main/proxy/routes/chat.ts')
+const completionsRouteSource = readSource('src/main/proxy/routes/completions.ts')
+const channelsManagerSource = readSource('src/main/providers/accountChannels/manager.ts')
 
 test('工具数超限识别：命中用户报障的上游原文', () => {
   // 用户报障原文（cline / Vercel AI Gateway 400 的 error.message 片段）
@@ -314,7 +322,7 @@ test('forwarder 的流式路径必须先嗅探头部再转发（HTTP 200 流内�
 })
 
 test('autoRouter 必须按渠道 maxTools 前置跳过装不下的渠道（cline ≤ 128）', () => {
-  const source = readFileSync('src/main/proxy/autoRouter.ts', 'utf-8')
+  const source = readSource('src/main/proxy/autoRouter.ts')
   // P1-4 之后渠道定义先取一次（能力位与 maxTools 同一循环共用），再查 maxTools。
   assert.match(
     source,
@@ -331,7 +339,7 @@ test('autoRouter 必须按渠道 maxTools 前置跳过装不下的渠道（cline
 test('worker 的 model.rateLimits rpc 必须剥 provider 前缀再查限流键', () => {
   // 宿主 actualModel 形如 loomy/spark-x2.6，worker 限流键是裸名 spark-x2.6 ——
   // 不剥前缀预检永远查不到（2026-10-30 限流预检漏拦的根因）。
-  const source = readFileSync('vendor/channel-pack/src/channel-pack-rpc.ts', 'utf-8')
+  const source = readSource('vendor/channel-pack/src/channel-pack-rpc.ts')
   assert.match(
     source,
     /modelId\.startsWith\(`\$\{req\.provider\}\/`\)/,
@@ -345,7 +353,7 @@ test('forwarder 的换家判据必须接上：超限 400 参与换家，普通 4
   // + 窗口装不下 + 不接受 reasoning_effort）
   assert.match(
     forwarderSource,
-    /const capabilityMismatch = isToolOverflowError\(result\.error\)\s*\n\s*\|\| isMissingReasoningHistoryError\(result\.error\)\s*\n\s*\|\| isChannelModelUnavailableError\(result\.error\)/,
+    /const capabilityMismatch = isToolOverflowError\(result\.error\)\s*\r?\n\s*\|\| isMissingReasoningHistoryError\(result\.error\)\s*\r?\n\s*\|\| isChannelModelUnavailableError\(result\.error\)/,
     'forwardFirstReachable must consult the switch-to-next-candidate classes before rejecting failover',
   )
   // probe 错误帧映射：能力不匹配类 400 保持 400（换取「不计账号失败」的换家语义）。
@@ -671,7 +679,7 @@ test('换家取证必须落到源码：循环记录每次失败，日志写出 f
   // 否则「为什么链在这里断了」仍然无处可查。
   assert.match(
     forwarderSource,
-    /failures\.push\(describeAttemptFailure\(\{\s*\n\s*candidate: candidate\.displayName,\s*\n\s*error: result\.error,\s*\n\s*status: result\.status,\s*\n\s*providerType: candidate\.provider\.type,\s*\n\s*\}\)\)[\s\S]{0,1600}?if \(!capabilityMismatch\)/,
+    /failures\.push\(describeAttemptFailure\(\{\s*\r?\n\s*candidate: candidate\.displayName,\s*\r?\n\s*error: result\.error,\s*\r?\n\s*status: result\.status,\s*\r?\n\s*providerType: candidate\.provider\.type,\s*\r?\n\s*\}\)\)[\s\S]{0,1600}?if \(!capabilityMismatch\)/,
     'every failed attempt must be described before the failover branch decides where to go next',
   )
   // 每个出口都要带上清单（成功那轮的返回值同样含此前被跳过的家）
@@ -797,8 +805,8 @@ test('a non-positive timeout disables the watchdog instead of firing instantly',
  * 所以这四条只能按源码文本判。规则与既有那几条一致：**验语义写法而非行号**，
  * 并允许换行与参数形式变化；每条都配一条「不接线就红」的反向说明。
  */
-const bridgeSource = readFileSync('src/main/channelPack/bridge.ts', 'utf-8')
-const storeSource = readFileSync('src/main/store/store.ts', 'utf-8')
+const bridgeSource = readSource('src/main/channelPack/bridge.ts')
+const storeSource = readSource('src/main/store/store.ts')
 
 test('请求超时这一格必须被读进等待计划（否则设置又是装饰品）', () => {
   assert.match(storeSource, /configureRequestDeadlines\(\s*(rawConfig|config)\.requestTimeout\s*\)/,
@@ -825,7 +833,7 @@ test('流式首块之后的停摆必须由看门狗兜住', () => {
 
 test('凭据类与强制 tool_choice 类判据必须接进请求路径', () => {
   // 凭据类：不重试（否则同一笔等待再付一遍）+ 按人工介入档冷却。
-  assert.match(forwarderSource, /if\s*\(\s*isChannelHumanRequiredFailure\(result\.error\)\s*\)\s*\{?\s*\n?\s*break/,
+  assert.match(forwarderSource, /if\s*\(\s*isChannelHumanRequiredFailure\(result\.error\)\s*\)\s*\{?\s*\r?\n?\s*break/,
     'credential- and risk-control-class failures must not be retried by the host')
   assert.match(forwarderSource, /autoRouter\.markCredentialCooldown\(/,
     'credential-class failures must use the human-intervention cooldown tier')
