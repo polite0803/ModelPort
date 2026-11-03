@@ -48,6 +48,8 @@ import type {
   AggregateSaveInput,
 } from '../../../shared/aggregate'
 import type { AggregateCreditQueryResult } from '../../../shared/aggregateCredit'
+import type { ModelMetadataReport } from '../../../shared/modelMetadata'
+import type { ModelProbeRunResult, ProbeScope } from '../../../shared/modelProbe'
 import type {
   ChannelAutoCheckinResult,
   ChannelCredits,
@@ -203,6 +205,19 @@ interface ProvidersAPI {
   setModelMark: (providerId: string, displayName: string, mark: ModelCapabilityHint | null) => Promise<{
     success: boolean
     marks: Record<string, Record<string, ModelCapabilityHint>>
+    error?: string
+  }>
+  /** 元数据解析报表：覆盖率 + 待标注队列（按调用量排序）。 */
+  getModelMetadata: () => Promise<ModelMetadataReport | { success: false; error: string }>
+  /** 手动探测一个模型（一次点击一条阶梯；打开页面不会自动触发）。 */
+  probeModel: (
+    providerId: string,
+    displayName: string,
+    scope?: ProbeScope,
+    force?: boolean,
+  ) => Promise<{
+    success: boolean
+    result?: ModelProbeRunResult
     error?: string
   }>
 }

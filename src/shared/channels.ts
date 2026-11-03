@@ -213,6 +213,14 @@ export interface ChannelModelInfo {
    * Codex 按 64000×0.95=60800 提前摘要整轮历史，之后模型看不见任务）。
    */
   contextWindow?: number
+  /**
+   * 上游声明的输出上限（token 数），来自渠道包视图的 `max_output_tokens` /
+   * `maxOutputTokens`。缺失 = 没说，**不是**默认 4096。
+   *
+   * 与窗口同一口径：未知就既不参与路由打分，也不被当成 0；
+   * 只是 `auto` 在客户端要的输出超过已知上限时小扣一分（不淘汰）。
+   */
+  maxOutputTokens?: number
   /** 用户在渠道包内关掉了这个模型。 */
   disabled: boolean
   /** 渠道包判定该模型已失效。 */

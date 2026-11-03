@@ -96,6 +96,8 @@ export interface ModelCapabilityHint {
   /** Declared input modalities; absent means unknown (not text-only). */
   modalities?: InputModality[]
   contextTokens?: number
+  /** Declared maximum output length; absent means unknown (not a default cap) */
+  maxOutputTokens?: number
   /** Credit multiplier reported by the channel pack; absent means unreported */
   weight?: number
   free?: boolean
@@ -130,6 +132,8 @@ export interface ModelCapability {
   modalities?: InputModality[]
   /** 上下文窗口；`undefined` 表示未知（不是 0） */
   contextTokens?: number
+  /** 输出上限；`undefined` 表示未知（不是默认 4096） */
+  maxOutputTokens?: number
   sources: {
     tier: CapabilitySource
     vision: CapabilitySource
@@ -137,6 +141,7 @@ export interface ModelCapability {
     reasoning: CapabilitySource
     modalities: CapabilitySource
     contextTokens: CapabilitySource
+    maxOutputTokens: CapabilitySource
   }
 }
 
@@ -1145,6 +1150,12 @@ export interface RequestLogEntry {
   id: string
   /** Timestamp */
   timestamp: number
+  /**
+   * 行类型：客户端真实流量，还是网关自己的探测请求。
+   * 探测行照常有 `requestId`（`X-Request-Id` 口径），但**不计入**请求统计、
+   * 不参与 Bandit 评分、不触发账号冷却（见 `providers/modelProbeRunner.ts`）。
+   */
+  kind?: 'client' | 'probe'
   /** Request status */
   status: 'success' | 'error'
   /** HTTP status code */

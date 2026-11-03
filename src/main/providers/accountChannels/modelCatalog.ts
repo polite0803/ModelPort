@@ -90,6 +90,16 @@ export function readModelList(value: unknown): ChannelModelInfo[] {
       ...positiveInt(record.context_window ?? record.contextWindow) !== undefined
         ? { contextWindow: positiveInt(record.context_window ?? record.contextWindow) }
         : {},
+      // 输出上限同窗口口径：只认上游明说的数，缺失保持未知。
+      ...positiveInt(
+        record.max_output_tokens ?? record.maxOutputTokens ?? record.max_completion_tokens,
+      ) !== undefined
+        ? {
+            maxOutputTokens: positiveInt(
+              record.max_output_tokens ?? record.maxOutputTokens ?? record.max_completion_tokens,
+            ),
+          }
+        : {},
     })
   }
   return out
@@ -121,24 +131,43 @@ export function attachContextWindows(
   models: readonly ChannelModelInfo[],
   view: readonly Record<string, unknown>[],
 ): ChannelModelInfo[] {
-  const windows = new Map<string, number>()
+  const limits = new Map<string, { contextWindow?: number; maxOutputTokens?: number }>()
+  const register = (key: string, value: { contextWindow?: number; maxOutputTokens?: number }): void => {
+    const existing = limits.get(key) ?? {}
+    limits.set(key, {
+      ...(value.contextWindow === undefined ? {} : { contextWindow: value.contextWindow }),
+      ...(value.maxOutputTokens === undefined ? {} : { maxOutputTokens: value.maxOutputTokens }),
+      ...existing,
+    })
+  }
   for (const entry of view) {
     if (typeof entry !== 'object' || entry === null) continue
     const id = typeof entry.id === 'string' ? entry.id.trim() : ''
-    const value = positiveInt(entry.context_window ?? entry.contextWindow)
-    if (id.length === 0 || value === undefined) continue
-    windows.set(id, value)
+    const contextWindow = positiveInt(entry.context_window ?? entry.contextWindow)
+    const maxOutputTokens = positiveInt(
+      entry.max_output_tokens ?? entry.maxOutputTokens ?? entry.max_completion_tokens,
+    )
+    if (id.length === 0 || (contextWindow === undefined && maxOutputTokens === undefined)) continue
+    const value = {
+      ...(contextWindow === undefined ? {} : { contextWindow }),
+      ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+    }
+    register(id, value)
     const slash = id.indexOf('/')
-    if (slash > 0) windows.set(id.slice(slash + 1), value)
+    if (slash > 0) register(id.slice(slash + 1), value)
   }
-  if (windows.size === 0) return [...models]
+  if (limits.size === 0) return [...models]
 
   // `model.list` 给的是**裸 id**，而视图建表时同时登记了「完整 id」与「剥掉
   // `<channel>/` 的裸 id」，所以这里一次查得到；若目录条目本身已带前缀也能命中。
   return models.map(model => {
-    const found = windows.get(model.id)
+    const found = limits.get(model.id)
     if (found === undefined) return { ...model }
-    return { ...model, contextWindow: found }
+    return {
+      ...model,
+      ...(found.contextWindow === undefined ? {} : { contextWindow: found.contextWindow }),
+      ...(found.maxOutputTokens === undefined ? {} : { maxOutputTokens: found.maxOutputTokens }),
+    }
   })
 }
 
@@ -157,6 +186,8 @@ export function capabilityHintOf(model: ChannelModelInfo): ModelCapabilityHint |
   // 窗口只在渠道包明确说了时才写。写成 0 或猜一个值，会让 `auto` 在长上下文请求上
   // 把这条渠道直接判成「装不下」而排除掉（`autoRouting.ts` 拿 `contextTokens` 硬过滤）。
   if (model.contextWindow !== undefined) hint.contextTokens = model.contextWindow
+  // 输出上限同一个口径：只写明说的数。缺失不写，路由据此不罚。
+  if (model.maxOutputTokens !== undefined) hint.maxOutputTokens = model.maxOutputTokens
   return Object.keys(hint).length > 0 ? hint : undefined
 }
 

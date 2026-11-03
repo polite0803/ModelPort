@@ -34,6 +34,7 @@ import { accountRuntime } from './accountRuntime'
 import { getChannelDefinition } from '../providers/accountChannels/catalogue'
 import {
   advertisedContextFloorOf,
+  advertisedContextTokens,
   applyContractFilter,
   applyManualModelSelection,
   applyModelNamePin,
@@ -360,7 +361,7 @@ class AutoRouter {
   /** 一条路由在给定池上的窗口下界 */
   private floorOfPool(pool: readonly PoolStrategyCandidate[], route?: ModelRoute): number | undefined {
     return advertisedContextFloorOf(
-      this.keptOfPool(pool, route).map(candidate => capabilityOfCandidate(candidate).contextTokens)
+      this.keptOfPool(pool, route).map(candidate => advertisedContextTokens(capabilityOfCandidate(candidate)))
     )
   }
 

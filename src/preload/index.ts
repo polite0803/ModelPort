@@ -37,6 +37,8 @@ import type {
   AnthropicRouteApplyResult,
 } from '../shared/anthropicDiscovery'
 import type { AggregateCreditQueryResult } from '../shared/aggregateCredit'
+import type { ModelMetadataReport } from '../shared/modelMetadata'
+import type { ModelProbeRunResult, ProbeScope } from '../shared/modelProbe'
 import type {
   AggregateDetail,
   AggregateListResult,
@@ -201,6 +203,21 @@ const providersAPI = {
     error?: string
   }> =>
     ipcRenderer.invoke(IpcChannels.PROVIDERS_SET_MODEL_MARK, providerId, displayName, mark),
+
+  getModelMetadata: (): Promise<ModelMetadataReport | { success: false; error: string }> =>
+    ipcRenderer.invoke(IpcChannels.PROVIDERS_GET_MODEL_METADATA),
+
+  probeModel: (
+    providerId: string,
+    displayName: string,
+    scope?: ProbeScope,
+    force?: boolean,
+  ): Promise<{
+    success: boolean
+    result?: ModelProbeRunResult
+    error?: string
+  }> =>
+    ipcRenderer.invoke(IpcChannels.PROVIDERS_PROBE_MODEL, providerId, displayName, scope, force),
 }
 
 const accountsAPI = {

@@ -57,6 +57,19 @@ test('上下文必须是正整数的有限值，0/负数/小数/超上界都不�
   assert.deepEqual(normalizeModelMark({ contextTokens: 64000 }), { contextTokens: 64000 })
 })
 
+test('输出上限：留空不写 0，只存正整数，非法值一律不存', () => {
+  // 留空 = 未标注：既不产生字段，也不会被当成 0 写入
+  assert.equal(normalizeModelMark({ maxOutputTokens: undefined }), undefined)
+  assert.equal(normalizeModelMark({ maxOutputTokens: '' }), undefined)
+  assert.equal(normalizeModelMark({ maxOutputTokens: 0 }), undefined)
+  assert.equal(normalizeModelMark({ maxOutputTokens: -1 }), undefined)
+  assert.equal(normalizeModelMark({ maxOutputTokens: 1.5 }), undefined)
+  assert.equal(normalizeModelMark({ maxOutputTokens: '8192' }), undefined)
+  assert.equal(normalizeModelMark({ maxOutputTokens: 1_000_001 }), undefined)
+  assert.deepEqual(normalizeModelMark({ maxOutputTokens: 1_000_000 }), { maxOutputTokens: 1_000_000 })
+  assert.deepEqual(normalizeModelMark({ maxOutputTokens: 8192 }), { maxOutputTokens: 8192 })
+})
+
 test('倍率允许 0（免费）但不接受负数或非数值', () => {
   assert.deepEqual(normalizeModelMark({ weight: 0 }), { weight: 0 })
   assert.equal(normalizeModelMark({ weight: -1 }), undefined)

@@ -148,12 +148,14 @@ export class RequestLogManager {
   getRequestLogStats(): RequestLogStats {
     this.ensureInitialized()
     const today = currentLocalDay()
-    const todayLogs = this.requestLogs.filter((entry) => entry.timestamp >= today.start && entry.timestamp < today.end)
+    // 探测行只用于诊断展示；把它们算进成功率会让一次手动探测改变仪表盘读数。
+    const clientLogs = this.requestLogs.filter((entry) => entry.kind !== 'probe')
+    const todayLogs = clientLogs.filter((entry) => entry.timestamp >= today.start && entry.timestamp < today.end)
 
     return {
-      total: this.requestLogs.length,
-      success: this.requestLogs.filter((entry) => entry.status === 'success').length,
-      error: this.requestLogs.filter((entry) => entry.status === 'error').length,
+      total: clientLogs.length,
+      success: clientLogs.filter((entry) => entry.status === 'success').length,
+      error: clientLogs.filter((entry) => entry.status === 'error').length,
       todayTotal: todayLogs.length,
       todaySuccess: todayLogs.filter((entry) => entry.status === 'success').length,
       todayError: todayLogs.filter((entry) => entry.status === 'error').length,

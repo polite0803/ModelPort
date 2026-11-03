@@ -259,8 +259,11 @@ class StoreManager {
   /**
    * Get Storage Path
    * Storage path: ~/.modelport/
+   *
+   * 公开是为了让衍生 sidecar（探测结果等）与 `data.json` 落在同一个目录，
+   * 避免第二个模块自己拼 `homedir()` 后与用户自定义路径分叉。
    */
-  private getStoragePath(): string {
+  getStoragePath(): string {
     return join(homedir(), '.modelport')
   }
 

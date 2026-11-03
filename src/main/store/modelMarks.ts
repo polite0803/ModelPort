@@ -18,6 +18,12 @@ const MODALITIES = new Set<InputModality>(['text', 'image', 'audio', 'video', 'p
 
 /** 上下文窗口的合理上界：防止手滑输入 1e12 让「长上下文」策略永远命中 */
 const MAX_CONTEXT_TOKENS = 100_000_000
+/**
+ * 输出上限的合理上界。比上下文窗口低两个量级：没有任何模型能一次产出百万级
+ * token，写成 1e12 会让「请求的 max_tokens 是否超过能力」的硬过滤永远判为够用。
+ * UI（`RoutePoolEditor`）用同一个数做前置校验并给出人读提示。
+ */
+const MAX_OUTPUT_TOKENS = 1_000_000
 
 function positiveInt(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value > 0
@@ -55,6 +61,10 @@ export function normalizeModelMark(input: unknown): ModelCapabilityHint | undefi
   const contextTokens = positiveInt(raw.contextTokens)
   if (contextTokens !== undefined && contextTokens <= MAX_CONTEXT_TOKENS) {
     mark.contextTokens = contextTokens
+  }
+  const maxOutputTokens = positiveInt(raw.maxOutputTokens)
+  if (maxOutputTokens !== undefined && maxOutputTokens <= MAX_OUTPUT_TOKENS) {
+    mark.maxOutputTokens = maxOutputTokens
   }
   if (typeof raw.weight === 'number' && Number.isFinite(raw.weight) && raw.weight >= 0) {
     mark.weight = raw.weight

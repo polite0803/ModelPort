@@ -22,6 +22,7 @@ import type {
 import type { CostBucket } from '../../shared/channels.ts'
 import type { AggregateCostClass } from '../../shared/aggregateCost.ts'
 import { providerDefaultCapability, staticCapabilityHint } from './modelCapabilities.ts'
+import { familyRuleLayer } from '../../shared/modelFamilyRules.ts'
 import { AUTO_POOL_STRATEGIES } from '../../shared/types.ts'
 import { banditAdjustment, createBanditRandom, type BanditStats } from './autoBandit.ts'
 
@@ -437,6 +438,8 @@ export interface RequestProfile {
    */
   needsReasoning: boolean
   estimatedTokens: number
+  /** 客户端要的输出上限（`max_tokens` / `max_completion_tokens`），缺席即不限 */
+  requestedMaxOutput?: number
   complexity: AutoComplexity
   stream: boolean
 }
@@ -745,11 +748,20 @@ export function profileRequest(request: ChatCompletionRequest): RequestProfile {
 
   const complexity: AutoComplexity = score >= 5 ? 'complex' : score >= 2 ? 'standard' : 'simple'
 
+  // 两种写法都认；非正数按「没给」处理，避免 0 被当成显式上限。
+  const rawMaxOutput = request.max_tokens ?? request.max_completion_tokens
+  const requestedMaxOutput = typeof rawMaxOutput === 'number'
+    && Number.isFinite(rawMaxOutput)
+    && rawMaxOutput > 0
+    ? rawMaxOutput
+    : undefined
+
   return {
     needsVision,
     needsTools,
     needsReasoning,
     estimatedTokens,
+    ...(requestedMaxOutput === undefined ? {} : { requestedMaxOutput }),
     complexity,
     stream: Boolean(request.stream),
   }
@@ -809,6 +821,13 @@ export function resolveCapabilityDetail(
 ): ModelCapability {
   const key = displayName.trim().toLowerCase()
   const staticHint = staticCapabilityHint(providerId, displayName)
+  // 家族规则是「第 3 层」的宽口径：静态表按精确模型名命中，家族规则按前缀命中。
+  // 两者同属规则层，精确条目优先；都缺席才落到供应商兜底与第三方旁表。
+  const familyHint = familyRuleLayer(displayName)?.hint
+  const ruleHint: ModelCapabilityHint | undefined =
+    staticHint === undefined && familyHint === undefined
+      ? undefined
+      : { ...(familyHint ?? {}), ...(staticHint ?? {}) }
   const providerDefaults = providerDefaultCapability(providerId)
 
   const ordered: { source: CapabilitySource; hint: ModelCapabilityHint }[] = []
@@ -817,7 +836,7 @@ export function resolveCapabilityDetail(
   if (layers.aggregateOfficial !== undefined) {
     ordered.push({ source: 'aggregate-official', hint: layers.aggregateOfficial })
   }
-  if (staticHint !== undefined) ordered.push({ source: 'static', hint: staticHint })
+  if (ruleHint !== undefined) ordered.push({ source: 'static', hint: ruleHint })
   if (providerDefaults !== undefined) ordered.push({ source: 'provider-default', hint: providerDefaults })
   if (layers.thirdParty !== undefined) ordered.push({ source: 'third-party', hint: layers.thirdParty })
 
@@ -843,6 +862,7 @@ export function resolveCapabilityDetail(
   const reasoning = pick('reasoning')
   const modalities = pick('modalities')
   const context = pick('contextTokens')
+  const maxOutput = pick('maxOutputTokens')
 
   return {
     tier,
@@ -852,6 +872,7 @@ export function resolveCapabilityDetail(
     reasoning: reasoning.value ?? 'unknown',
     ...(modalities.value === undefined ? {} : { modalities: modalities.value }),
     ...(context.value === undefined ? {} : { contextTokens: context.value }),
+    ...(maxOutput.value === undefined ? {} : { maxOutputTokens: maxOutput.value }),
     sources: {
       tier: tierSource,
       vision: vision.source,
@@ -859,6 +880,7 @@ export function resolveCapabilityDetail(
       reasoning: reasoning.source,
       modalities: modalities.source,
       contextTokens: context.source,
+      maxOutputTokens: maxOutput.source,
     },
   }
 }
@@ -944,6 +966,20 @@ export function advertisedContextFloorOf(
     typeof window === 'number' && window > 0)
   if (evidenced.length === 0) return undefined
   return Math.min(...evidenced)
+}
+
+/**
+ * 对外可广告的上下文窗口：只接受**声明级**来源。
+ *
+ * 家族规则、第三方旁表、探测读数与供应商兜底都是内部推定；把它们写进
+ * `/v1/models` 会让客户端按一个假上界安排压缩时机（设计文档 §6）。
+ */
+export function advertisedContextTokens(capability: ModelCapability): number | undefined {
+  const source = capability.sources.contextTokens
+  if (source !== 'manual' && source !== 'provider-record' && source !== 'aggregate-official') {
+    return undefined
+  }
+  return capability.contextTokens
 }
 
 /** 硬过滤的失败原因；`undefined` 表示通过 */
@@ -1128,7 +1164,14 @@ function scoreCandidate(
     && profile.estimatedTokens > UNANNOTATED_CONTEXT_FLOOR / 2
     ? 0.05
     : 0
-  const penalty = uncertainTools + uncertainReasoning + uncertainContext
+  // 输出上限：只在「客户端要的 > 候选声明」时小扣一分；未知不罚（缺数据不是罪），
+  // 也不淘汰 —— 与上下文硬筛不同，超一点输出上限的上游常常自己截断而不是 400。
+  const outputMismatch = profile.requestedMaxOutput !== undefined
+    && capability.maxOutputTokens !== undefined
+    && profile.requestedMaxOutput > capability.maxOutputTokens
+    ? 0.1
+    : 0
+  const penalty = uncertainTools + uncertainReasoning + uncertainContext + outputMismatch
 
   // 成本以"相对中性 0.5"的加减分进入总分：未知成本正好为 0，
   // 免费模型在 balanced 下得到 +0.1，在 cheap 下得到 +0.3。

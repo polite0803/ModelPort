@@ -230,10 +230,13 @@ export class RequestForwarder {
     provider: Provider,
     actualModel: string,
     context: ProxyContext,
-    options: { maxRetries?: number } = {}
+    options: { maxRetries?: number; probe?: boolean } = {}
   ): Promise<ForwardResult> {
     const startTime = Date.now()
     const config = storeManager.getConfig()
+    // 探测请求（模型元数据实测）与真实流量隔离：照常走准入与上游，但不进
+    // 派发账本、不更新 AIMD/Bandit/冷却 —— 一次手动探测不能改变路由判断。
+    const isProbe = options.probe === true
     // 重试预算按 provider 分类：账号渠道的排队/额度/换号退避都在渠道 Worker 里
     // 自己跑过了，宿主再叠一层 5s×3 只是把等待累加（详见 `retryPolicy.ts`）。
     const retryProfile = planForwardRetries(provider.type, options.maxRetries ?? config.retryCount)
@@ -313,7 +316,8 @@ export class RequestForwarder {
 
       let modifiedRequest = request
 
-      if (config.contextManagement?.enabled && modifiedRequest.messages && modifiedRequest.messages.length > 0) {
+      // 探测请求的提示词长度就是被测的档位；上下文管理会把它裁短，必须跳过。
+      if (!isProbe && config.contextManagement?.enabled && modifiedRequest.messages && modifiedRequest.messages.length > 0) {
         try {
           // 摘要压缩那条策略已于 2026-11-03 退役（它会另起一次模型调用、再把产物
           // 包成 `[Conversation Summary]` 塞进历史 —— 那是网关替用户写内容）。
@@ -387,16 +391,18 @@ export class RequestForwarder {
       // 一次失败的尝试同样占掉了这一家的当日额度与一次完整往返，只数成功会让
       // 一直失败的候选停在「没被派过」上，被公平规则一遍遍重新推上来。
       // 本地 AIMD 准入被拒（上面 break 那条）不进账：那一次根本没出网关。
-      dispatchLedger.record(provider.id, actualModel)
+      if (!isProbe) dispatchLedger.record(provider.id, actualModel)
       try {
         result = await this.doForward(modifiedRequest, account, provider, actualModel, context)
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error'
         lastError = message
-        accountRuntime.recordAttemptOutcome(account.id, actualModel, {
-          success: false,
-          clientAborted: request.signal?.aborted === true,
-        })
+        if (!isProbe) {
+          accountRuntime.recordAttemptOutcome(account.id, actualModel, {
+            success: false,
+            clientAborted: request.signal?.aborted === true,
+          })
+        }
         accountRuntime.endAttempt(account.id, actualModel)
         attempts.push({
           providerId: provider.id,
@@ -412,14 +418,16 @@ export class RequestForwarder {
       }
       accountRuntime.endAttempt(account.id, actualModel)
 
-      accountRuntime.recordAttemptOutcome(account.id, actualModel, {
-        success: result.success,
-        ...(result.status === undefined ? {} : { status: result.status }),
-        // 流式的首字/整笔由路由层在流结束时补报；这里只给非流式的整笔耗时。
-        ...(request.stream === true || result.latency === undefined ? {} : { totalMs: result.latency }),
-        clientAborted: request.signal?.aborted === true,
-        degraded: false,
-      })
+      if (!isProbe) {
+        accountRuntime.recordAttemptOutcome(account.id, actualModel, {
+          success: result.success,
+          ...(result.status === undefined ? {} : { status: result.status }),
+          // 流式的首字/整笔由路由层在流结束时补报；这里只给非流式的整笔耗时。
+          ...(request.stream === true || result.latency === undefined ? {} : { totalMs: result.latency }),
+          clientAborted: request.signal?.aborted === true,
+          degraded: false,
+        })
+      }
 
       attempts.push(attemptTraceOf({
         provider,
@@ -432,7 +440,7 @@ export class RequestForwarder {
 
       if (result.success) {
         // 带 actualModel：成功只清这个模型自己的限流档，不牵连同渠道别的模型
-        accountRuntime.recordSuccess(account.id, actualModel)
+        if (!isProbe) accountRuntime.recordSuccess(account.id, actualModel)
         return { ...result, attempts }
       }
 
@@ -468,7 +476,9 @@ export class RequestForwarder {
         const parsed = Number.parseInt(lastRetryAfter, 10)
         if (Number.isFinite(parsed)) retryAfterMs = parsed * 1000
       }
-      accountRuntime.recordFailure(account.id, 429, Date.now(), actualModel, retryAfterMs)
+      if (!isProbe) {
+        accountRuntime.recordFailure(account.id, 429, Date.now(), actualModel, retryAfterMs)
+      }
     }
 
     const error = lastError || 'Request failed after retries'

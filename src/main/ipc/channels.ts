@@ -63,6 +63,9 @@ export const IpcChannels = {
   // 手工能力标注（vision/tools/reasoning/context/...），优先级高于所有自动标注
   PROVIDERS_GET_MODEL_MARKS: 'providers:getModelMarks',
   PROVIDERS_SET_MODEL_MARK: 'providers:setModelMark',
+  // 元数据解析报表（覆盖率 + 待标注队列）与手动探测（打开页面不发起请求）
+  PROVIDERS_GET_MODEL_METADATA: 'providers:getModelMetadata',
+  PROVIDERS_PROBE_MODEL: 'providers:probeModel',
 
   AGGREGATE_LIST: 'aggregate:list',
   AGGREGATE_DETAIL: 'aggregate:detail',

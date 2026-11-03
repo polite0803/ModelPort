@@ -49,6 +49,13 @@ type StatusFilter = 'all' | 'kept' | 'dropped' | 'unavailable'
 
 const MODALITIES: InputModality[] = ['text', 'image', 'audio', 'video', 'pdf']
 
+/**
+ * 输出上限的合理上界，与主进程 `store/modelMarks.ts::MAX_OUTPUT_TOKENS` 同值。
+ * 这里先做一次人读校验：超出范围的输入必须当场拒绝并说明，不能等到保存时被
+ * `normalizeModelMark` 静默丢掉。
+ */
+const MAX_MARK_OUTPUT_TOKENS = 1_000_000
+
 /** 手动标注的原始草稿：只保留用户显式设置的字段。 */
 type MarkDraft = Record<string, unknown> & ModelCapabilityHint
 
@@ -75,6 +82,7 @@ function cleanHint(draft: MarkDraft): ModelCapabilityHint | null {
   if (draft.reasoning !== undefined) hint.reasoning = draft.reasoning
   if (draft.modalities !== undefined) hint.modalities = [...draft.modalities]
   if (draft.contextTokens !== undefined) hint.contextTokens = draft.contextTokens
+  if (draft.maxOutputTokens !== undefined) hint.maxOutputTokens = draft.maxOutputTokens
   if (draft.weight !== undefined) hint.weight = draft.weight
   if (draft.free !== undefined) hint.free = draft.free
   return Object.keys(hint).length === 0 ? null : hint
@@ -279,6 +287,10 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
     const context = formatContext(capability.contextTokens)
     if (context !== null) {
       entries.push({ key: 'context', label: `ctx ${context}`, source: capability.sources.contextTokens })
+    }
+    const maxOutput = formatContext(capability.maxOutputTokens)
+    if (maxOutput !== null) {
+      entries.push({ key: 'maxOutput', label: `out ${maxOutput}`, source: capability.sources.maxOutputTokens })
     }
     return entries.map((entry) => (
       <Badge
@@ -579,11 +591,16 @@ function ModelMarkDialog({ open, target, mark, onClose, onSaved }: ModelMarkDial
   const [draft, setDraft] = useState<MarkDraft>({})
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // 输出上限用文本草稿：非法输入要留在框里并给出提示，不能一按保存就被归一函数静默丢掉。
+  const [outputDraft, setOutputDraft] = useState('')
+  const [outputError, setOutputError] = useState<string | null>(null)
 
   // 只在这个模型变化时重置草稿：保存失败时用户输入不会被清掉。
   useEffect(() => {
     if (!open) return
     setDraft(mark ? { ...mark, modalities: mark.modalities ? [...mark.modalities] : undefined } : {})
+    setOutputDraft(mark?.maxOutputTokens !== undefined ? String(mark.maxOutputTokens) : '')
+    setOutputError(null)
     setError(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, target.providerId, target.displayName])
@@ -613,7 +630,44 @@ function ModelMarkDialog({ open, target, mark, onClose, onSaved }: ModelMarkDial
     patch({ modalities: next.length === 0 ? undefined : next })
   }
 
+  /**
+   * 输出上限只接受正整数：留空 = 未标注（不写 0），非数字 / 0 / 小数 / 超上界都
+   * 即时拒绝。非法输入保留在输入框里并显示原因，同时清掉草稿里的旧值，避免用户
+   * 改了非法内容却把上一次的合法值悄悄存进去。
+   */
+  const changeMaxOutput = (raw: string) => {
+    setOutputDraft(raw)
+    const trimmed = raw.trim()
+    if (trimmed === '') {
+      setOutputError(null)
+      patch({ maxOutputTokens: undefined })
+      return
+    }
+    if (/^\d+$/.test(trimmed)) {
+      const value = Number(trimmed)
+      if (value > 0 && value <= MAX_MARK_OUTPUT_TOKENS) {
+        setOutputError(null)
+        patch({ maxOutputTokens: value })
+        return
+      }
+      if (value > MAX_MARK_OUTPUT_TOKENS) {
+        setOutputError(t('proxy.routePoolMarkMaxOutputTooLarge', {
+          max: MAX_MARK_OUTPUT_TOKENS.toLocaleString('en-US'),
+        }))
+      } else {
+        setOutputError(t('proxy.routePoolMarkMaxOutputInvalid'))
+      }
+    } else {
+      setOutputError(t('proxy.routePoolMarkMaxOutputInvalid'))
+    }
+    patch({ maxOutputTokens: undefined })
+  }
+
   const handleSave = async () => {
+    if (outputError !== null) {
+      setError(outputError)
+      return
+    }
     const api = window.electronAPI?.providers
     if (!api?.setModelMark) {
       setError(t('proxy.routesUnavailable'))
@@ -641,6 +695,7 @@ function ModelMarkDialog({ open, target, mark, onClose, onSaved }: ModelMarkDial
     { label: t('proxy.routePoolMarkTools'), source: target.capability.sources.tools },
     { label: t('proxy.routePoolMarkReasoning'), source: target.capability.sources.reasoning },
     { label: t('proxy.routePoolMarkContext'), source: target.capability.sources.contextTokens },
+    { label: t('proxy.routePoolMarkMaxOutput'), source: target.capability.sources.maxOutputTokens },
   ]
 
   return (
@@ -703,6 +758,27 @@ function ModelMarkDialog({ open, target, mark, onClose, onSaved }: ModelMarkDial
               }}
               placeholder={t('proxy.routePoolMarkInherit')}
             />
+          </div>
+
+          <div className="space-y-1">
+            <Label className="text-xs">{t('proxy.routePoolMarkMaxOutput')}</Label>
+            <Input
+              type="text"
+              inputMode="numeric"
+              className="h-8 text-xs"
+              value={outputDraft}
+              onChange={(event) => changeMaxOutput(event.target.value)}
+              placeholder={t('proxy.routePoolMarkMaxOutputPlaceholder')}
+              aria-invalid={outputError !== null}
+            />
+            <p className="text-[10px] text-muted-foreground">
+              {t('proxy.routePoolMarkMaxOutputHelp', {
+                max: MAX_MARK_OUTPUT_TOKENS.toLocaleString('en-US'),
+              })}
+            </p>
+            {outputError !== null && (
+              <p className="text-[10px] text-destructive break-words">{outputError}</p>
+            )}
           </div>
 
           <div className="space-y-1">

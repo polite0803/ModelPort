@@ -19,6 +19,9 @@ import type { AggregateSaveInput } from '../../shared/aggregate'
 import { getBuiltinProviders, getBuiltinProvider } from '../providers/builtin'
 import { oauthManager } from '../oauth/manager'
 import { fetchProviderModels } from '../providers/modelCatalog'
+import { getModelMetadataReport } from '../providers/modelMetadataService'
+import { runModelCapabilityProbe } from '../providers/modelProbeRunner'
+import type { ProbeScope } from '../../shared/modelProbe.ts'
 import { schedulerStatus, triggerModelListRefreshNow, configureModelListRefresh } from '../scheduler/modelListRefresh'
 import { proxyServer } from '../proxy/server'
 import {
@@ -718,6 +721,46 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
           success: false,
           error: error instanceof Error ? error.message : 'Failed to set model mark',
           marks: storeManager.getUserModelMarks(),
+        }
+      }
+    }
+  )
+
+  ipcMain.handle(IpcChannels.PROVIDERS_GET_MODEL_METADATA, async () => {
+    try {
+      return await getModelMetadataReport()
+    } catch (error) {
+      console.error('[IPC] Failed to build model metadata report:', error)
+      return { success: false, error: 'Failed to build model metadata report' }
+    }
+  })
+
+  ipcMain.handle(
+    IpcChannels.PROVIDERS_PROBE_MODEL,
+    async (_, providerId: string, displayName: string, scope?: string, force?: boolean) => {
+      if (typeof providerId !== 'string' || typeof displayName !== 'string') {
+        return { success: false, error: 'providerId and displayName are required' }
+      }
+      const normalizedScope: ProbeScope | undefined =
+        scope === 'context' || scope === 'output' || scope === 'capability'
+          ? scope
+          : undefined
+      try {
+        // 一次点击 → 一条阶梯；不会在打开页面时自动触发。
+        return {
+          success: true,
+          result: await runModelCapabilityProbe({
+            providerId,
+            displayName,
+            ...(normalizedScope === undefined ? {} : { scope: normalizedScope }),
+            force: force === true,
+          }),
+        }
+      } catch (error) {
+        console.error('[IPC] Failed to probe model metadata:', error)
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to probe model metadata',
         }
       }
     }

@@ -54,6 +54,7 @@
 | [`design/PLAN-model-list-scheduler.md`](design/PLAN-model-list-scheduler.md) | 三类供应商模型清单的周期刷新调度器与周期拍板，已落地于 `src/main/scheduler/` | v1.6.1 | 现行 | 2026-11-03 |
 | [`design/2026-05-26-in-app-update-design.md`](design/2026-05-26-in-app-update-design.md) | 应用内更新（electron-updater 检查、下载、重启安装）设计方案 | v1.3.0 | 历史记录 | 2026-05-26 |
 | [`design/2026-05-27-modelport-tool-testing-skills-design.md`](design/2026-05-27-modelport-tool-testing-skills-design.md) | 工具调用测试技能集（管理 API、HAR、客户端回放、模型矩阵）设计 | v1.3.0 | 历史记录 | 2026-05-27 |
+| [`design/2026-11-04-model-metadata-resolution.md`](design/2026-11-04-model-metadata-resolution.md) | 《模型元数据自动标注的分层解析链》：五层来源优先级（人工标记 > 上游声明 > 规则推导 > 实测探测 > 成本权重）、`ModelFact` 结构与分库、探测档位与 TTL、覆盖率与对外暴露门槛 | v1.7.0 | 现行 | 2026-11-04 |
 
 ## 计划（plan/）
 
