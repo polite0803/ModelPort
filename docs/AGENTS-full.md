@@ -482,8 +482,24 @@ Bare model names across entries:
 The aggregate page renders one quota cell per entry with five mutually exclusive states
 (`needs-key`, `exhausted`, `documented`, `undocumented`, `absent`) plus a separate free-pool badge;
 the numbers always carry their window, and "exhausted" means the documented cap against **this
-app's** metering, not a live balance. Displaying a live balance would need a vendor quota endpoint,
-which this project deliberately does not call on its own.
+app's** metering, not a live balance. The two are separate rows on purpose - see the live-credit layer below.
+
+**Live account credit exists, but it is a gate, never a number.** Two catalogue entries declare an account-level
+credit endpoint through `AggregateEntry.quotaProbe` (`open_router` → `/key`, `siliconflow` → `/user/info`); the
+path is resolved against the **provider record's own `apiEndpoint`** and authenticated through
+`buildProbeHeaders`, so the query follows the same host and key that chat traffic already uses instead of
+inventing a second credential path. Nothing is polled and opening the page never asks: the aggregate detail
+panel sends exactly one GET per stored key per click, capped at `CREDIT_QUERY_KEY_CAP` with the un-queried
+remainder stated out loud. The single authority for "does this affect routing" is
+`shared/aggregateCredit.ts::creditSnapshotExhausted` - the row must be complete, explicitly not `unlimited`,
+carry an actual number, be `<= 0`, and be inside `CREDIT_SNAPSHOT_TTL_MS` (15 min, because a hand-clicked
+reading must not steer routing for a day). A hit folds `aggregateHeadroom` to the existing `-1` and adds the
+`'no-credit'` reason; everything else returns the token-window computation untouched. USD credit, CNY balance
+and this app's token ledger are three incomparable count domains, so `QuotaBlockReason` is split into
+`QuotaWindowBlockReason | 'no-credit'` and the metric/reason tables only cover the window half - turning a
+balance into a token ratio is not just discouraged, it does not typecheck. A response whose field names are not
+recognised is reported as `unexpected-shape` in the UI rather than guessed into a number: both endpoint shapes
+came from a transcribed record, not from a captured payload, so the first real click is what confirms them.
 
 ### Aggregate Per-Model Cost Classification
 
@@ -887,6 +903,18 @@ mid-session. One remote `prompt_cache_key` covering 79 turns was served by four 
 because the client rewrote the history" and "we switched because scoring reordered the pool" are two
 different readable states instead of one guess. The identifier's value never reaches a log row - only
 its hash and the source label.
+
+**Stickiness is a hard priority, per route.** The conversation's last succeeded model is moved to the head of
+the ranked list inside `autoRouter::select` (`promoteSticky`), which is stronger than the `+0.12` / `+0.06`
+bonus computed in `rankCandidates` - the bonus alone could not hold a Codex session on one model (measured: 21
+requests jumping across 7 models before it). `ModelRoute.stickyHardPin` makes this per-route and **absent means
+enabled** (the read is `!== false`), so records written before the field existed keep the behaviour they were
+observed to need; `basedOnRoute` inherits it from the pool source like every other selection field, and preset
+seeding copies it from the `auto` route so a user's deliberate "off" is never silently re-enabled by an upgrade.
+Turning it off returns to pure-bonus semantics where scoring alone decides the head, which is why the two
+settings are tested as a pair (same pool, a 0.3 cost gap, opposite winners). Note the layering trap: an
+assertion over `rankCandidates` cannot see a regression in the promotion, so the sticky test that used to read
+"never hard-pins it" is scoped to the layer it actually covers.
 
 Response headers on every `auto` response: `X-ModelPort-Route` (winner), `X-ModelPort-Auto-Prefer`,
 `X-ModelPort-Auto-Reason` (`only` / `sticky` / `score`), `X-ModelPort-Auto-Attempts` (set after

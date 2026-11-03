@@ -181,6 +181,17 @@ penalty. A client-requested cap is an explicit truncation and is never penalized
 multiplicatively (5s cooldown), 5 clean successes grow it by one (30s quiet period). Short-window
 EWMA first-token latency plus 429/timeout/degraded rates feed candidate scoring. A locally rejected
 admission is a 429 `local_concurrency_limit` that fails over without penalising the account.
+* Live account credit is a **gate, never a number**: `shared/aggregateCredit.ts::creditSnapshotExhausted` is
+the only judgement (row complete, explicitly not `unlimited`, a number returned, `remaining <= 0`, `asOf`
+inside `CREDIT_SNAPSHOT_TTL_MS` = 15 min) and a hit folds `aggregateHeadroom` to the existing `-1`. USD credit,
+CNY balance and this app's token ledger are three incomparable count domains - the
+`QuotaWindowBlockReason | 'no-credit'` split makes converting one into a token ratio a type error. One click on
+the aggregate panel sends one GET per stored key (capped, remainder stated); nothing is polled and opening a
+page never asks by itself.
+* Stickiness is a **hard priority by default** (`ModelRoute.stickyHardPin`, absent = enabled, read as
+`!== false` so records predating the field keep it). Turning it off per route leaves only the `+0.12` / `+0.06`
+score bonus - and because the promotion happens in `autoRouter::select`, an assertion over `rankCandidates`
+alone cannot catch a regression in it; the two settings must be tested as a pair (same pool, opposite winners).
 * `LoadBalanceStrategy` is declared twice (`src/shared/types.ts`, `src/main/store/types.ts`) plus the
 UI maps and both locales - add a value in all of them or it silently cannot be selected.
 
