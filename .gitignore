@@ -7,6 +7,8 @@ node_modules/
 # Build outputs
 out/
 dist/
+dist-nsis-try/
+output/
 build/entitlements.mac.plist
 
 # Channel pack worker bundle (built by scripts/build-channel-pack.mjs;
@@ -70,6 +72,7 @@ backup/
 
 # Local reference material dropped in by tooling (not part of the app)
 .uploads/
+.tmp_img/
 
 # npx artifact cache created in the repo root by the local npm config
 .npm-cache/

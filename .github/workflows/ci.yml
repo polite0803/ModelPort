@@ -30,9 +30,10 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          # 门禁必须跑在 Node 22.6+；CI 上固定用 24（原生 type stripping，
-          # 否则 `node --test tests/**/*.test.ts` 会整片 ERR_UNKNOWN_FILE_EXTENSION）。
-          node-version: '24'
+          # .nvmrc 固定 24，与 AGENTS.md 的门禁口径一致；本地最低版本见 package.json
+          # 的 engines（>= 22.18）。门禁依赖 Node 原生 type stripping，否则
+          # `node --test tests/**/*.test.ts` 会整片 ERR_UNKNOWN_FILE_EXTENSION。
+          node-version-file: '.nvmrc'
           cache: 'npm'
 
       - name: Install dependencies

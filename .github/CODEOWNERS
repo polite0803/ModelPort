@@ -1,0 +1,4 @@
+# Default owner. CODEOWNERS only enforces review when the default branch protection rule
+# enables "Require review from Code Owners"; the repository currently has no such rule.
+# Additional path owners should only be added after they explicitly accept ownership.
+* @polite0803

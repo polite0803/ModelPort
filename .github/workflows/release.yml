@@ -22,9 +22,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          # 与 ci.yml 同版本。构建侧原来固定 Node 20，而门禁要求 22.6+ 的原生
-          # type stripping：版本不一致会把「门禁能发现的失败」留到发布产物里。
-          node-version: '24'
+          # 与 ci.yml 同源（.nvmrc）。构建侧原来固定 Node 20，而门禁要求 22.6+
+          # 的原生 type stripping：版本不一致会把「门禁能发现的失败」留到发布产物里。
+          node-version-file: '.nvmrc'
           cache: 'npm'
 
       - name: Install dependencies
@@ -40,6 +40,9 @@ jobs:
         env:
           ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
 
+  # 说明：产物均未签名、未公证；macOS 只发布 dmg（没有 zip 更新源，electron-updater
+  # 在 macOS 上不可用），Windows/Linux 产物也未做代码签名。平台矩阵改动前请先核对
+  # package.json 的 build 目标与 README 的产物表。
   release:
     needs: gate
     runs-on: ${{ matrix.os }}
@@ -69,7 +72,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version-file: '.nvmrc'
           cache: 'npm'
 
       - name: Install dependencies
