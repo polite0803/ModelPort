@@ -9,9 +9,12 @@ import { readFileSync } from 'node:fs'
  * 判据写成吃文本的纯函数，负控用内存里改过的源文喂进去 —— 不落盘、不碰共享工作树。
  */
 
-const chat = readFileSync('src/main/proxy/routes/chat.ts', 'utf8')
-const router = readFileSync('src/main/proxy/autoRouter.ts', 'utf8')
-const panel = readFileSync('src/renderer/src/components/proxy/LoadBalanceConfig.tsx', 'utf8')
+/** Windows 检出是 CRLF，多行锚点必须先在归一化后的文本上匹配。 */
+const readSource = (path) => readFileSync(path, 'utf8').replace(/\r\n/g, '\n')
+
+const chat = readSource('src/main/proxy/routes/chat.ts')
+const router = readSource('src/main/proxy/autoRouter.ts')
+const panel = readSource('src/renderer/src/components/proxy/LoadBalanceConfig.tsx')
 const locales = ['src/renderer/src/i18n/locales/en-US.json', 'src/renderer/src/i18n/locales/zh-CN.json']
   .map((path) => ({ path, json: JSON.parse(readFileSync(path, 'utf8')) }))
 
