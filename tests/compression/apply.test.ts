@@ -173,3 +173,62 @@ test('a wrapped tool result is compressed through the live zone', () => {
   // The error row nested inside the wrapper survives.
   assert.ok((next[2].content as string).includes('FATAL: unexpected token'))
 })
+
+// P0 acceptance (PLAN-token-compression §P0), pinned 2026-11-03.
+
+test('a compressor that throws forwards verbatim and only logs a warn', () => {
+  const boom = (): never => {
+    throw new Error('synthetic compressor explosion')
+  }
+  const logged: unknown[][] = []
+  const realError = console.error
+  console.error = (...args: unknown[]) => logged.push(args)
+  try {
+    const messages = messagesWithToolOutput()
+    const outcome = applyCompression({
+      messages,
+      config: { enabled: true, aggressiveness: 'moderate' },
+      stash: boom as unknown as (original: string, idLength: number) => string | null,
+    })
+    // The fail-open contract: the request survives with its original bytes,
+    // reported as an error skip, and the only side effect is a warn.
+    assert.equal(outcome.messages, messages)
+    assert.equal((outcome.messages as ChatMessage[])[3].content, messages[3].content)
+    assert.equal(outcome.report?.skipped, 'error')
+    assert.equal(outcome.report?.applied.length, 0)
+  } finally {
+    console.error = realError
+  }
+  assert.ok(logged.length > 0, 'the swallowed failure must leave a warn on the log')
+  assert.match(JSON.stringify(logged), /compressor failed, forwarding verbatim/)
+})
+
+test('an empty messages list is skipped, not crashed', () => {
+  const outcome = applyCompression({
+    messages: [] as unknown as ChatMessage[],
+    config: { enabled: true, aggressiveness: 'moderate' },
+    stash,
+  })
+
+  assert.equal(outcome.report?.skipped, 'no_messages')
+  assert.equal(outcome.report?.applied.length, 0)
+})
+
+test('a prose payload is skipped as below the type threshold', () => {
+  const prose =
+    'The quick brown fox jumps over the lazy dog. '.repeat(80) +
+    'It is a truth universally acknowledged, that a single man in possession of a good fortune, ' +
+    'must be in want of a wife. '.repeat(40)
+
+  const messages: ChatMessage[] = [
+    { role: 'system', content: 'You are a coding agent.' },
+    { role: 'user', content: 'summarise' },
+    { role: 'assistant', content: 'here' },
+    { role: 'tool', content: prose },
+  ]
+
+  const outcome = apply(messages)
+
+  assert.equal(outcome.messages, messages)
+  assert.equal(outcome.report?.skipped, 'below_threshold')
+})

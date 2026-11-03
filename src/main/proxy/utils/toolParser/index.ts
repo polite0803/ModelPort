@@ -1,6 +1,7 @@
 import type { ToolCall } from '../../types.ts'
-import type { ToolCallFormat } from '../../constants/signatures.ts'
 import { debugContent } from '../debugContent.ts'
+
+export type ToolCallFormat = 'bracket' | 'xml' | 'anthropic' | 'json' | 'native'
 
 /**
  * 工具调用解析结果

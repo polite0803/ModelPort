@@ -15,8 +15,11 @@ export {
 export {
   ROW_SENTINEL_KEY,
   JSON_HASH_LENGTH,
+  BLOCK_HASH_LENGTH,
   makeRowSentinel,
   makeItemSentinel,
+  makeLogMarker,
+  makeSearchMarker,
   isCcrSentinel,
   stripCcrSentinels,
   isAlreadyCompressed,
@@ -25,6 +28,8 @@ export {
   crushJsonArray,
   analyzeCrushability,
 } from '../../src/main/proxy/compression/compressors/smartCrusher.ts'
+export { compressLog } from '../../src/main/proxy/compression/compressors/logCompressor.ts'
+export { compressSearch } from '../../src/main/proxy/compression/compressors/searchCompressor.ts'
 export { acceptCompression } from '../../src/main/proxy/compression/policy.ts'
 export { detectContentType } from '../../src/main/proxy/compression/detector.ts'
 export {

@@ -451,6 +451,12 @@
     "smartDesc": "Prefer the account whose quota renews soonest, so allowance about to reset gets used instead of wasted",
     "paceDesc": "Prefer the account with the most allowance left per hour until its window resets",
     "accountWeightConfig": "Account Weight Configuration",
+    "repetitionGuardTitle": "Degenerate stream detection",
+    "repetitionGuardDesc": "Marks a streamed answer whose trailing lines collapsed into duplicates as a degraded success: the scorer stops treating it as a clean win and the conversation is not pinned to that model. The shipped default is calibrated on 99 real reasoning blocks (healthy median 1.000; 0.80 flags 9 of them).",
+    "repetitionGuardMinLines": "Minimum lines judged",
+    "repetitionGuardMaxRatio": "Duplicate-line ratio threshold",
+    "repetitionGuardMaxRatioHelp": "Unique lines / total lines over the trailing window, at or below this counts as degenerate. The client-side guard aborted at 0.35, so the gateway stays deliberately looser and never condemns a stream the client accepted.",
+    "repetitionGuardNonStreamNote": "Streaming responses only. A non-streaming response has no per-chunk signal and its body is kept only when body logging is on, so that path is deliberately not judged.",
     "weightHelp": "Higher weight means higher probability of selection. Only effective in round-robin strategy.",
     "autoRouting": "Automatic Model Routing",
     "autoRoutingDesc": "When enabled, requests may use the model \"auto\" and the server picks the provider and account from the request profile, model capabilities and rate-limit health",
@@ -481,8 +487,6 @@
     "retryCountHelp": "Automatic retry count after request failure (0-10 times)",
     "outputCapFallback": "Fallback output cap",
     "outputCapFallbackHelp": "The Anthropic protocol requires max_tokens: when the client sends neither spelling and no per-model parameter is set, this value is used. Leave empty for the built-in default of 4096.",
-    "trailingUserGuard": "Trailing tool-result guard",
-    "trailingUserGuardHelp": "When an agent turn ends with a tool result, append one minimal user message so the model keeps working instead of answering \"I don't see a request\". Turn 1 is never rewritten. Turn this off only if a model starts repeating a step it already did.",
     "outputCapMustBeInteger": "Output cap must be an integer",
     "outputCapRangeError": "Output cap must be between 1 and 1000000",
     "logConfig": "Log Configuration",
@@ -1019,49 +1023,19 @@
     "startProxy": "Start Proxy",
     "stopProxy": "Stop Proxy",
     "addAccount": "Add Account",
-    "toolCalling": "Tool Calling",
     "viewLogs": "View Logs"
   },
   "statsCard": {
     "vsYesterday": "vs yesterday"
   },
   "oauth": {
-    "loginTo": "Login to {{provider}}",
-    "selectLoginMethod": "Select login method to get access credentials",
-    "manualInput": "Manual Input",
-    "browserLogin": "Browser Login",
-    "tokenStoredLocally": "Token is stored locally only, not uploaded to server",
-    "clickToOpenBrowser": "Click the button below to open browser for login, after successful login please follow the instructions to get Token",
-    "openLoginPage": "Open {{provider}} Login Page",
-    "getTokenSteps": "Steps to get Token:",
-    "step1": "Complete login in browser",
-    "step2": "Open Developer Tools (F12)",
-    "step3": "Switch to Application or Storage tab",
-    "step4": "Find the corresponding Token or Cookie",
-    "step5": "Copy and paste to Manual Input tab",
-    "confirmLogin": "Confirm Login",
-    "validating": "Validating...",
-    "cannotOpenBrowser": "Cannot open browser",
-    "enterToken": "Please enter Token",
-    "enterAllTokens": "Please fill in all required tokens",
-    "validatingToken": "Validating Token...",
-    "loginSuccess": "Login Successful",
-    "loginFailed": "Login Failed",
-    "unknownError": "Unknown error",
-    "pending": "Pending",
-    "inProgress": "In Progress",
-    "success": "Success",
-    "failed": "Failed",
-    "cancelled": "Cancelled",
-    "loginTimeout": "Login timeout, please try again",
-    "help": "Help"
+    "validating": "Validating..."
   },
   "models": {
     "title": "Model Management",
     "description": "Turn each model or alias in and out of the routing pools; /v1/models advertises routes only",
     "modelList": "Model List",
     "modelMapping": "Model Mapping",
-    "toolCalling": "Tool Calling",
     "modelName": "Model Name",
     "provider": "Provider",
     "account": "Account",
@@ -1156,82 +1130,6 @@
     "credits": "Made with ❤️ by the Open Source Community",
     "builtWith": "Built with Electron, React, TypeScript, Tailwind CSS, Zustand, Koa and other amazing open source projects."
   },
-  "toolCalling": {
-    "title": "Tool Calling",
-    "description": "Translates OpenAI tool calling onto every upstream wire: the default chat wire is fully managed (prompt injection plus response parsing), OpenCode speaks its envelope protocol, and the remaining wires pass tools natively.",
-    "statusEnabled": "Managed tool calling is enabled",
-    "statusDisabled": "Managed tool calling is disabled",
-    "clientType": "Client type",
-    "mode": "Mode",
-    "modes": {
-      "off": "Off",
-      "auto": "Auto-managed",
-      "force": "Forced managed"
-    },
-    "modeHints": {
-      "off": "No prompt injection, no response parsing. The default chat wire never forwards native tools upstream, so client tool requests have no effect in this mode.",
-      "auto": "The managed protocol runs automatically whenever a request carries tools and the wire does not handle tools itself.",
-      "force": "Force the managed flow even when a provider profile does not declare managed support (self-managed wires such as OpenCode are unaffected)."
-    },
-    "clients": {
-      "standardOpenAiToolsDesc": "Use this for generic OpenAI-compatible clients and SDKs.",
-      "cherryStudioMcpDesc": "Use this for Cherry Studio MCP tools. Exact MCP tool names are preserved.",
-      "unknown": "Unknown client adapter."
-    },
-    "how": {
-      "title": "How it works",
-      "steps": {
-        "1": "The client sends tools / tool_choice in OpenAI format.",
-        "2": "The engine strips the native fields and injects the tool catalogue as ModelPort XML into the system prompt; required or a forced tool adds a directive, and parallel_tool_calls: false limits the turn to a single call.",
-        "3": "The model answers with XML markup; streaming and non-streaming responses are parsed back into OpenAI tool_calls with ids like call_<requestId>-<n>.",
-        "4": "When tool_choice: required was declared but the model did not call, the response carries X-ModelPort-Tool-Violation: required; unparseable markup is stripped while the surrounding text is preserved."
-      }
-    },
-    "wireMatrix": {
-      "title": "Wire coverage",
-      "columnWire": "Wire",
-      "columnMode": "Tool calling mode",
-      "rows": {
-        "chatManaged": "Default chat wire (aggregate openai-chat entries, custom providers)",
-        "opencode": "OpenCode (local runtime)",
-        "accountChannels": "Account channels (12 login channels)",
-        "anthropic": "Aggregate anthropic-messages wire",
-        "responses": "Aggregate openai-responses wire"
-      },
-      "details": {
-        "chatManaged": "Managed XML: prompt injection plus response parsing; native tools are never forwarded upstream",
-        "opencode": "The envelope protocol is translated by the runtime itself; the managed layer only decides tool_choice / parallel limits",
-        "accountChannels": "Native tools round-trip through the gateway with inbound history pre-validation",
-        "anthropic": "Native mapping between tool_use and OpenAI tool_calls",
-        "responses": "Native Responses tools; no injection, so the tool description is never doubled"
-      },
-      "badges": {
-        "managed": "Managed",
-        "envelope": "Envelope",
-        "native": "Native"
-      }
-    },
-    "smoke": {
-      "title": "Smoke test",
-      "description": "Generate a minimal weather tool-call fixture for the selected client adapter.",
-      "run": "Run test",
-      "not_run": "Not run",
-      "running": "Generating",
-      "pass": "Generated",
-      "failed": "Failed",
-      "failedHint": "The smoke test could not complete. Check the application logs for details.",
-      "fixture": "Generated fixture",
-      "copy": "Copy",
-      "copied": "Copied",
-      "hint": "Send the fixture through any client pointed at this proxy to /v1/chat/completions (pick any mapped model) to verify the full loop."
-    },
-    "advanced": {
-      "title": "Prompt template",
-      "description": "Override the managed tool-calling prompt injected into model requests. Leave empty to use the built-in ModelPort XML format; applies in managed modes only.",
-      "customTemplate": "Custom prompt template",
-      "customTemplatePlaceholder": "Use {{tools}}, {{tool_names}}, and {{format}}."
-    }
-  },
   "session": {
     "title": "Session Management",
     "description": "Configure conversation session management strategy",
@@ -1255,20 +1153,6 @@
     },
     "configSaved": "Compression settings saved",
     "configSaveFailed": "Failed to save compression settings"
-  },
-  "outputSteering": {
-    "title": "Output verbosity",
-    "enable": "Enable output verbosity control",
-    "enableHint": "Affects the model's output only: appends a fixed instruction block to the tail of the system prompt to skip preambles and postambles and stop restating code or tool output. The block text is fixed per level, so it never breaks the upstream prompt cache; with it off, requests are byte-for-byte unchanged.",
-    "level": "Strength",
-    "levelHint": "Higher levels are stricter. No level ever drops what the task needs to be correct (negations, conditions, constraints) — it only shortens how it is said.",
-    "levels": {
-      "1": "Light",
-      "2": "Standard",
-      "3": "Max"
-    },
-    "configSaved": "Output verbosity settings saved",
-    "configSaveFailed": "Failed to save output verbosity settings"
   },
   "anthropicInbound": {
     "title": "Anthropic clients (Claude Desktop / Claude Code)",
@@ -1336,8 +1220,7 @@
     "configSaveFailed": "Failed to save context management configuration",
     "strategies": {
       "slidingWindow": "Context Count",
-      "tokenLimit": "Max Tokens",
-      "summary": "Summary Compression"
+      "tokenLimit": "Max Tokens"
     },
     "slidingWindow": {
       "title": "Context Count",
@@ -1350,15 +1233,6 @@
       "description": "Truncate history by token count, always preserve system messages",
       "maxTokens": "Max Tokens",
       "maxTokensHint": "Maximum number of tokens to keep (100-100000)"
-    },
-    "summary": {
-      "title": "Summary Compression",
-      "description": "Generate summary for early conversation, keep recent messages and summary",
-      "keepRecentMessages": "Keep Recent Messages",
-      "keepRecentMessagesHint": "Number of recent messages not included in summary",
-      "customPrompt": "Custom Summary Prompt (Optional)",
-      "customPromptPlaceholder": "Enter custom summary prompt...",
-      "customPromptHint": "Leave empty to use default prompt"
     }
   },
   "aggregate": {
@@ -1713,53 +1587,5 @@
       "failed": "Could not add the account",
       "misconfigured": "This channel declares no add-account method, so the UI cannot add one."
     }
-  },
-  "statusReasons": {},
-  "managementApi": {},
-  "modes": {},
-  "clients": {},
-  "smoke": {},
-  "advanced": {},
-  "strategies": {},
-  "slidingWindow": {},
-  "tokenLimit": {},
-  "summary": {},
-  "category": {},
-  "dialog": {},
-  "result": {},
-  "reasons": {},
-  "autoCheckin": {},
-  "loginKind": {},
-  "login": {},
-  "hint": {},
-  "loginGuide": {
-    "openWebsite": "Open the {{provider}} website",
-    "paste": "Paste",
-    "openBrowserFailedDesc": "Could not open the browser; open this URL manually: {{url}}",
-    "pasteFailedDesc": "Could not read the clipboard; paste it manually",
-    "fillRequiredFields": "Please fill in all required fields",
-    "addFailed": "Failed to add",
-    "addSuccess": "Added successfully",
-    "accountAddedDesc": "{{provider}} account added",
-    "done": "Done",
-    "getToken": "How to get your {{provider}} token",
-    "getTokenDesc": "Follow the steps to copy the token, paste it into the field below, then confirm.",
-    "steps": "Steps",
-    "confirmAdd": "Confirm add"
-  },
-  "qwen": {
-    "name": "Qwen"
-  },
-  "qwen-ai": {
-    "name": "Qwen (International)"
-  },
-  "glm": {
-    "name": "GLM (Zhipu)"
-  },
-  "minimax": {
-    "name": "MiniMax"
-  },
-  "zai": {
-    "name": "Z.ai"
   }
 }

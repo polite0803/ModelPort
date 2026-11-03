@@ -2,8 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { normalizeCompressionConfig } from '../../src/main/store/compressionConfig.ts'
-import { normalizeOutputSteeringConfig } from '../../src/main/store/outputSteeringConfig.ts'
-import { DEFAULT_COMPRESSION_CONFIG, DEFAULT_OUTPUT_STEERING_CONFIG } from '../../src/shared/types.ts'
+import { DEFAULT_COMPRESSION_CONFIG } from '../../src/shared/types.ts'
 
 test('an install from before the feature inherits the shipped default', () => {
   // `data.json` written by a release that had no `compression` key at all.
@@ -35,23 +34,4 @@ test('normalisation returns a fresh object and never mutates the input', () => {
   assert.notEqual(normalized, input)
   normalized.enabled = false
   assert.equal(input.enabled, true)
-})
-
-test('output steering reads as disabled on an install from before it', () => {
-  assert.deepEqual(normalizeOutputSteeringConfig(undefined), { ...DEFAULT_OUTPUT_STEERING_CONFIG })
-  assert.equal(normalizeOutputSteeringConfig(null).enabled, false)
-})
-
-test('only an explicit true enables output steering', () => {
-  assert.equal(normalizeOutputSteeringConfig({ enabled: true, level: 2 }).enabled, true)
-  assert.equal(normalizeOutputSteeringConfig({ enabled: 'yes' as never, level: 2 }).enabled, false)
-})
-
-test('the steering level is clamped to a level that has text', () => {
-  // A stored 0 or 99 must never reach the applier: level 0 means "off" and an
-  // unknown level has no text, so both collapse to the default.
-  assert.equal(normalizeOutputSteeringConfig({ enabled: true, level: 0 }).level, DEFAULT_OUTPUT_STEERING_CONFIG.level)
-  assert.equal(normalizeOutputSteeringConfig({ enabled: true, level: 99 }).level, DEFAULT_OUTPUT_STEERING_CONFIG.level)
-  assert.equal(normalizeOutputSteeringConfig({ enabled: true, level: 3 }).level, 3)
-  assert.equal(normalizeOutputSteeringConfig({ enabled: true, level: 1 }).level, 1)
 })

@@ -1,9 +1,13 @@
 /**
  * Context Management Service
- * Manages conversation context with multiple strategies:
+ * Manages conversation context with two deletion-only strategies:
  * 1. Sliding Window - Keep recent N messages
  * 2. Token Limit - Truncate by token count
- * 3. Summary Compression - Summarize early conversation
+ *
+ * A third strategy (Summary Compression) was retired on 2026-11-03: it made its own model call with
+ * a gateway-written prompt and re-inserted the result as a `system` turn, replacing user history.
+ * Trimming is a shape transform; writing prose into the conversation is not, and the ruling in
+ * `docs/AGENTS-full.md` §Gateway-Authored Text allows only the first.
  */
 
 import type { ChatMessage } from '../types'
@@ -25,15 +29,6 @@ export interface TokenLimitConfig {
 }
 
 /**
- * Summary Compression Strategy Configuration
- */
-export interface SummaryConfig {
-  enabled: boolean
-  keepRecentMessages: number
-  summaryPrompt?: string
-}
-
-/**
  * Context Management Configuration
  */
 export interface ContextManagementConfig {
@@ -41,9 +36,8 @@ export interface ContextManagementConfig {
   strategies: {
     slidingWindow: SlidingWindowConfig
     tokenLimit: TokenLimitConfig
-    summary: SummaryConfig
   }
-  executionOrder: ('slidingWindow' | 'tokenLimit' | 'summary')[]
+  executionOrder: ('slidingWindow' | 'tokenLimit')[]
 }
 
 /**
@@ -65,7 +59,6 @@ export interface ContextProcessResult {
   originalCount: number
   finalCount: number
   strategyResults: StrategyResult[]
-  summaryGenerated?: boolean
 }
 
 /**
@@ -81,20 +74,37 @@ export const DEFAULT_TOKEN_LIMIT_CONFIG: TokenLimitConfig = {
   maxTokens: 4000,
 }
 
-export const DEFAULT_SUMMARY_CONFIG: SummaryConfig = {
-  enabled: false,
-  keepRecentMessages: 20,
-  summaryPrompt: 'Please summarize the following conversation concisely, keeping key information and context:',
-}
-
 export const DEFAULT_CONTEXT_MANAGEMENT_CONFIG: ContextManagementConfig = {
   enabled: false,
   strategies: {
     slidingWindow: DEFAULT_SLIDING_WINDOW_CONFIG,
     tokenLimit: DEFAULT_TOKEN_LIMIT_CONFIG,
-    summary: DEFAULT_SUMMARY_CONFIG,
   },
-  executionOrder: ['slidingWindow', 'tokenLimit', 'summary'],
+  executionOrder: ['slidingWindow', 'tokenLimit'],
+}
+
+/**
+ * Fold a stored (possibly older) config onto the shipped defaults.
+ *
+ * The `summary` branch is dropped on purpose: `data.json` written before 2026-11-03 carries
+ * `strategies.summary` and names `summary` in `executionOrder`, and leaving those in place would put
+ * a retired switch back in front of the management API and the settings panel.
+ */
+export function normalizeContextManagementConfig(
+  config: Partial<ContextManagementConfig> = {}
+): ContextManagementConfig {
+  const merged: ContextManagementConfig = {
+    ...DEFAULT_CONTEXT_MANAGEMENT_CONFIG,
+    ...config,
+    strategies: {
+      ...DEFAULT_CONTEXT_MANAGEMENT_CONFIG.strategies,
+      ...(config as { strategies?: Record<string, unknown> }).strategies,
+    } as ContextManagementConfig['strategies'],
+  }
+  delete (merged.strategies as unknown as Record<string, unknown>).summary
+  merged.executionOrder = (config.executionOrder ?? DEFAULT_CONTEXT_MANAGEMENT_CONFIG.executionOrder)
+    .filter((name: string) => name === 'slidingWindow' || name === 'tokenLimit') as ('slidingWindow' | 'tokenLimit')[]
+  return merged
 }
 
 /**
@@ -289,147 +299,21 @@ export class TokenLimitStrategy {
 }
 
 /**
- * Summary Generation Function Type
- */
-export type SummaryGenerator = (
-  messages: ChatMessage[],
-  prompt?: string
-) => Promise<string>
-
-/**
- * Summary Compression Strategy
- * Generates summary for early conversation, keeps recent messages + summary
- */
-export class SummaryStrategy {
-  private config: SummaryConfig
-  private summaryGenerator?: SummaryGenerator
-
-  constructor(
-    config: SummaryConfig = DEFAULT_SUMMARY_CONFIG,
-    summaryGenerator?: SummaryGenerator
-  ) {
-    this.config = { ...DEFAULT_SUMMARY_CONFIG, ...config }
-    this.summaryGenerator = summaryGenerator
-  }
-
-  async execute(messages: ChatMessage[]): Promise<StrategyResult> {
-    const originalCount = messages.length
-
-    if (!this.config.enabled) {
-      return {
-        messages,
-        originalCount,
-        processedCount: originalCount,
-        strategyName: 'summary',
-        trimmed: false,
-      }
-    }
-
-    if (originalCount <= this.config.keepRecentMessages) {
-      return {
-        messages,
-        originalCount,
-        processedCount: originalCount,
-        strategyName: 'summary',
-        trimmed: false,
-      }
-    }
-
-    if (!this.summaryGenerator) {
-      console.warn('[SummaryStrategy] No summary generator provided, falling back to sliding window')
-      const fallbackMessages = messages.slice(-this.config.keepRecentMessages)
-      return {
-        messages: fallbackMessages,
-        originalCount,
-        processedCount: fallbackMessages.length,
-        strategyName: 'summary',
-        trimmed: true,
-      }
-    }
-
-    const systemMessages = messages.filter(msg => msg.role === 'system')
-    const nonSystemMessages = messages.filter(msg => msg.role !== 'system')
-
-    const recentMessages = nonSystemMessages.slice(-this.config.keepRecentMessages)
-    const oldMessages = nonSystemMessages.slice(0, -this.config.keepRecentMessages)
-
-    if (oldMessages.length === 0) {
-      return {
-        messages,
-        originalCount,
-        processedCount: originalCount,
-        strategyName: 'summary',
-        trimmed: false,
-      }
-    }
-
-    try {
-      console.log(
-        `[SummaryStrategy] Generating summary for ${oldMessages.length} old messages`
-      )
-
-      const summary = await this.summaryGenerator(
-        oldMessages,
-        this.config.summaryPrompt
-      )
-
-      const summaryMessage: ChatMessage = {
-        role: 'system',
-        content: `[Conversation Summary]\n${summary}`,
-      }
-
-      const result = [...systemMessages, summaryMessage, ...recentMessages]
-
-      console.log(
-        `[SummaryStrategy] Compressed from ${originalCount} to ${result.length} messages ` +
-          `(summary generated for ${oldMessages.length} messages)`
-      )
-
-      return {
-        messages: result,
-        originalCount,
-        processedCount: result.length,
-        strategyName: 'summary',
-        trimmed: true,
-      }
-    } catch (error) {
-      console.error('[SummaryStrategy] Failed to generate summary:', error)
-      const fallbackMessages = [...systemMessages, ...recentMessages]
-      return {
-        messages: fallbackMessages,
-        originalCount,
-        processedCount: fallbackMessages.length,
-        strategyName: 'summary',
-        trimmed: true,
-      }
-    }
-  }
-}
-
-/**
  * Context Management Service
- * Orchestrates multiple context management strategies
+ * Orchestrates the deletion-only context strategies
  */
 export class ContextManagementService {
   private config: ContextManagementConfig
   private slidingWindowStrategy: SlidingWindowStrategy
   private tokenLimitStrategy: TokenLimitStrategy
-  private summaryStrategy: SummaryStrategy
 
-  constructor(
-    config: ContextManagementConfig = DEFAULT_CONTEXT_MANAGEMENT_CONFIG,
-    summaryGenerator?: SummaryGenerator
-  ) {
-    this.config = { ...DEFAULT_CONTEXT_MANAGEMENT_CONFIG, ...config }
+  constructor(config: ContextManagementConfig = DEFAULT_CONTEXT_MANAGEMENT_CONFIG) {
+    this.config = normalizeContextManagementConfig(config)
     this.slidingWindowStrategy = new SlidingWindowStrategy(
       this.config.strategies.slidingWindow
     )
     this.tokenLimitStrategy = new TokenLimitStrategy(
       this.config.strategies.tokenLimit
-    )
-    this.summaryStrategy = new SummaryStrategy(
-      this.config.strategies.summary,
-      summaryGenerator
     )
   }
 
@@ -437,24 +321,20 @@ export class ContextManagementService {
    * Update configuration
    */
   updateConfig(config: Partial<ContextManagementConfig>): void {
-    this.config = {
+    this.config = normalizeContextManagementConfig({
       ...this.config,
       ...config,
       strategies: {
         ...this.config.strategies,
         ...(config.strategies || {}),
       },
-    }
+    })
 
     this.slidingWindowStrategy = new SlidingWindowStrategy(
       this.config.strategies.slidingWindow
     )
     this.tokenLimitStrategy = new TokenLimitStrategy(
       this.config.strategies.tokenLimit
-    )
-    this.summaryStrategy = new SummaryStrategy(
-      this.config.strategies.summary,
-      this.summaryStrategy['summaryGenerator']
     )
   }
 
@@ -471,7 +351,6 @@ export class ContextManagementService {
         originalCount,
         finalCount: originalCount,
         strategyResults: [],
-        summaryGenerated: false,
       }
     }
 
@@ -481,7 +360,6 @@ export class ContextManagementService {
     )
 
     let currentMessages = [...messages]
-    let summaryGenerated = false
 
     for (const strategyName of this.config.executionOrder) {
       let result: StrategyResult
@@ -493,13 +371,6 @@ export class ContextManagementService {
 
         case 'tokenLimit':
           result = this.tokenLimitStrategy.execute(currentMessages)
-          break
-
-        case 'summary':
-          result = await this.summaryStrategy.execute(currentMessages)
-          if (result.trimmed) {
-            summaryGenerated = true
-          }
           break
 
         default:
@@ -527,7 +398,6 @@ export class ContextManagementService {
       originalCount,
       finalCount: currentMessages.length,
       strategyResults,
-      summaryGenerated,
     }
   }
 
@@ -550,17 +420,7 @@ export class ContextManagementService {
  * Create default context management service instance
  */
 export function createContextManagementService(
-  config?: Partial<ContextManagementConfig>,
-  summaryGenerator?: SummaryGenerator
+  config?: Partial<ContextManagementConfig>
 ): ContextManagementService {
-  const finalConfig: ContextManagementConfig = {
-    ...DEFAULT_CONTEXT_MANAGEMENT_CONFIG,
-    ...config,
-    strategies: {
-      ...DEFAULT_CONTEXT_MANAGEMENT_CONFIG.strategies,
-      ...(config?.strategies || {}),
-    },
-  }
-
-  return new ContextManagementService(finalConfig, summaryGenerator)
+  return new ContextManagementService(normalizeContextManagementConfig(config))
 }

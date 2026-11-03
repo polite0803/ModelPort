@@ -10,7 +10,7 @@ none of them covers the topic, read the code and the comments in the file you ar
 ## Project Overview
 
 ModelPort is an Electron desktop application exposing an OpenAI-compatible API proxy. Three provider
-classes ship: a 74-entry / 473-model aggregate catalogue of key-based and key-less endpoints, the
+classes ship: a 79-entry / 500-model aggregate catalogue of key-based and key-less endpoints, the
 thirteen account channels served by the vendored channel pack, and user-defined custom providers.
 Runs on macOS, Windows, Linux.
 
@@ -64,7 +64,7 @@ src/
 │   ├── ipc/         # main <-> renderer handlers
 │   ├── proxy/       # Koa proxy: server, forwarder, loadbalancer, modelMapper,
 │   │                #   adapters/, routes/ (chat, completions, models, messages, responses, management/),
-│   │                #   toolCalling/, quota/, services/, sessionManager.ts
+│   │                #   compression/, quota/, services/, sessionManager.ts
 │   ├── oauth/       # manager, inAppLogin, adapters/
 │   ├── channelPack/ # vendored pack host: worker.ts + compat shims + bridge.ts
 │   ├── providers/   # builtin/ (one file per provider), aggregate/ (registry+manager),
@@ -114,6 +114,21 @@ store entirely and need `NODE_EXTRA_CA_CERTS` - the same PEM a remote machine ca
 attempt list, so read `TlsStatus.handshakeRejections` (`GET /v1/management/tls/status`) before
 concluding the gateway saw nothing. Details in `docs/AGENTS-full.md` §HTTPS Listener and Certificate
 Trust.
+* **The gateway authors no prompt text** (裁定 2026-11-03「本网关不注入任何提示词」). Nothing ModelPort
+writes may add a system/user turn, append to the client's system prompt, or replace message content with
+prose. Retired in that batch: the managed tool-call prompt subsystem (`proxy/toolCalling/`,
+`shared/toolCalling.ts`, `config.toolCallingConfig`, `ToolCallingPanel`, `/v1/management/tool-calling/*`),
+the synthetic trailing user turn (`proxy/trailingUserGuard.ts`, `config.trailingUserGuard`), output
+verbosity steering (`config.outputSteering`) and the context Summary strategy
+(`contextManagement.strategies.summary`). Tools travel natively; "this candidate has no tools" is a
+**routing** fact (`autoRouting::buildRequestProfile.needsTools` → `hardFilterFailure` → `missing:['tools']`),
+not something to paper over with instructions. Shape transforms stay allowed - message/tool structure
+mapping, deletion-only trimming, aggregate parameter stripping. The two surviving text sites are
+`ccr-sentinel` (a self-describing retrieval pointer inside a compressed tool result) and `liveness-ping`
+(a probe that never enters a conversation), each tagged `GATEWAY-TEXT: <id>` and reconciled two-way with
+`docs/AGENTS-full.md` §Gateway-Authored Text by `tests/proxy/gateway-authored-text.test.ts`, which pins
+the exact live set. Retired config keys are stripped in `store.ts::normalizeConfig` so the management API
+can never report a switch nobody reads.
 * **Failover status policy**: 400 is terminal (capability-mismatch 400s are explicit exceptions);
 401-407, **404**, 409-499, 5xx and network errors switch to the next candidate; 408/504/524 may switch
 but are never retried against the same target. A 404 means "this channel does not supply that model",
@@ -177,6 +192,14 @@ reset cannot be computed, and an exhausted candidate is a last resort, never a f
 * The 24h Bandit score counts an HTTP-200 response with `finish_reason=length` as **degraded** when the
 client did not request `max_tokens`; two consecutive degraded responses apply an immediate score
 penalty. A client-requested cap is an explicit truncation and is never penalized.
+* **A protocol-perfect but content-degenerate stream is the second degraded class**
+(`shared/streamRepetition.ts`): the trailing-128-line dedup ratio over the re-joined
+`content`/`reasoning` deltas, with thresholds in `AppConfig.streamRepetitionGuard` (absent =
+shipped defaults, calibrated so the gateway stays looser than a client's own loop guard). The
+reading lands on `streamTrace.repetition` as aggregates only, `runChars` is evidence and not a
+judgement input, a degraded turn **revokes** the sticky anchor (`autoRouter.revokeSticky`), and
+non-streaming responses are deliberately not judged. A `client_abort` still counts as neither
+success nor failure - that skip is exactly why this second signal exists.
 * Per-`(account, model)` AIMD admission: default concurrency 4; 429/timeout/5xx shrink it
 multiplicatively (5s cooldown), 5 clean successes grow it by one (30s quiet period). Short-window
 EWMA first-token latency plus 429/timeout/degraded rates feed candidate scoring. A locally rejected

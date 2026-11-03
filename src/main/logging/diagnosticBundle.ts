@@ -24,7 +24,6 @@ function configSnapshot(): Record<string, unknown> {
     requestLogConfig: config.requestLogConfig,
     requestTimeout: config.requestTimeout,
     retryCount: config.retryCount,
-    trailingUserGuard: config.trailingUserGuard,
     defaultMaxOutputTokens: config.defaultMaxOutputTokens,
     // Names/flags only: route bodies and provider credentials stay out.
     modelMappings: Object.keys(config.modelMappings ?? {}),

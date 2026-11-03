@@ -134,6 +134,26 @@ test('限流档的翻倍只看本模型自己的连击，别的模型成功不�
   assert.equal(runtime.recordFailure('a', 429, NOW + 9000, 'm1'), 10 * 60 * 1000, '封顶 10 分钟')
 })
 
+test('429 带 providerRetryAfterMs 时冷却取「指数退避 vs 上游时刻」更晚的那个', () => {
+  const runtime = new AccountRuntime()
+
+  // 指数退避 60s，上游报解禁 120s → 取 120s
+  assert.equal(runtime.recordFailure('a', 429, NOW, 'm1', 120_000), 120_000)
+  assert.ok(runtime.isCooling('a', NOW + 90_000, 'm1'), '上游时刻更长，90s 后仍冷却')
+  assert.ok(!runtime.isCooling('a', NOW + 120_001, 'm1'), '120s+ 后解禁')
+
+  // 指数退避 60s，上游报解禁 30s → 取 60s（不回退到上游的更短时刻）
+  assert.equal(runtime.recordFailure('a', 429, NOW + 200_000, 'm2', 30_000), 60_000)
+  assert.ok(runtime.isCooling('a', NOW + 250_000, 'm2'), '自退避更长，250s 后仍冷却')
+
+  // 不带 retryAfterMs 时行为与改动前一致：纯指数退避
+  assert.equal(runtime.recordFailure('b', 429, NOW, 'm3'), 60_000)
+  assert.ok(!runtime.isCooling('b', NOW + 61_000, 'm3'), '不带上游时刻仍按 60s 退避')
+
+  // 非 429 或不带 model 时，retryAfterMs 不参与（老调用口径不变）
+  assert.equal(runtime.recordFailure('c', 500, NOW, undefined, 999_000), 15_000)
+})
+
 test('不带模型的 recordSuccess 清掉该账号全部限流档（渠道池变化 / 重新登录）', () => {
   const runtime = new AccountRuntime()
 

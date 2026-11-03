@@ -115,7 +115,7 @@ export interface AnthropicToChatOptions {
   stream: boolean
   /**
    * `document` 块要不要翻成 chat 的 `file` 块发出去。缺省即 `true`
-   * （只有显式 `false` 才关，与 `trailingUserGuard` 同一形态）。
+   * （只有显式 `false` 才关）。
    *
    * 开着时附件真的进上游报文；上游如果不吃 `file` 块会**硬报错** —— 那比「客户端以为
    * 模型读了这份 PDF、实际拿到的是空白」诚实。关掉它就回到旧行为：丢掉但记进 `dropped`。

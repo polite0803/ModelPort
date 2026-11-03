@@ -28,10 +28,19 @@ import { createIdleWatchdog, type IdleWatchdog } from '../proxy/failover.ts'
 export class ChannelBridgeError extends Error {
   /** HTTP status to surface to the OpenAI client; undefined means 500. */
   status?: number
-  constructor(message: string, status?: number) {
+  /**
+   * 渠道包（vendor/channel-pack）在 429 时算出的上游真实解禁时刻（`providerRetryAfterMs`）。
+   * 宿主侧消费路径：forwarder 渠道分支把它喂给 `accountRuntime.recordFailure`，
+   * 让冷却到期取「自己指数退避」与「上游时刻」里更晚的那个——否则渠道包只往前推
+   * 60s 的解禁时刻被丢弃，宿主在自己的模型档里记到 10 分钟也不读它，形成
+   * 「冷却到期→放一笔→又 429→再冷却」的自维持循环（PLAN-channel-auto-stability 第五批）。
+   */
+  retryAfterMs?: number
+  constructor(message: string, status?: number, retryAfterMs?: number) {
     super(message)
     this.name = 'ChannelBridgeError'
     this.status = status
+    this.retryAfterMs = retryAfterMs
   }
 }
 
@@ -282,9 +291,17 @@ export class ChannelBridge {
         const job = this.jobs.get(String(message.id))
         if (!job) return
         this.settle(String(message.id))
+        // 渠道包在 429 时上报的上游真实解禁时刻（providerRetryAfterMs）：
+        // 透传给 forwarder → accountRuntime.recordFailure，否则宿主只看自己的
+        // 指数退避，渠道包那句「再等 60s」被丢弃（PLAN-channel-auto-stability 第五批）。
+        const providerRetryAfterMs =
+          typeof message.providerRetryAfterMs === 'number' && Number.isFinite(message.providerRetryAfterMs)
+            ? message.providerRetryAfterMs
+            : undefined
         const error = new ChannelBridgeError(
           String(message.message ?? '渠道请求失败'),
           typeof message.status === 'number' ? message.status : undefined,
+          providerRetryAfterMs,
         )
         this.options.onLog?.('error', error.message, { ...job.context, jobId: String(message.id) })
         if (job.stream) {

@@ -38,6 +38,7 @@ import { accountRuntime } from '../accountRuntime'
 import { storeManager } from '../../store/store'
 import { AUTO_PREFERENCES, type AutoPreference } from '../../../shared/types'
 import { readRequestContextFit } from '../../../shared/requestContextFit.ts'
+import { DEFAULT_REPETITION_GUARD, measureStreamRepetition } from '../../../shared/streamRepetition.ts'
 import { readOrEstimateUsage, usageInputText, type UsageReading } from '../quota/usage'
 import { aggregateCostUsdOf } from '../../../shared/aggregateCost.ts'
 import { getAggregateEntry } from '../../providers/aggregate/registry.ts'
@@ -990,6 +991,10 @@ router.post('/completions', async (ctx: Context) => {
       let streamOutcomeReported = false
       wrapperStream.on('error', () => {})
 
+      // 退化判据的阈值是设置项（默认即当前标定值）；关掉时连读数都不算。
+      const repetitionGuard =
+        storeManager.getConfig().streamRepetitionGuard ?? DEFAULT_REPETITION_GUARD
+
       const reportStreamOutcome = (
         reason: RequestStreamTrace['endReason'],
         totalMs: number,
@@ -1018,7 +1023,21 @@ router.post('/completions', async (ctx: Context) => {
         ...(result.upstreamRequestId === undefined
           ? {}
           : { upstreamRequestId: result.upstreamRequestId }),
+        repetition: measureStreamRepetition(collectedContent, repetitionGuard) ?? undefined,
       })
+
+      /**
+       * 内容退化的轮次不保留粘性锚点。
+       *
+       * 粘性在响应头阶段就写了（成功路径上的 `rememberRoute`），而退化要到流结束
+       * 才算得出来。不撤的话，协议成功、内容塌掉的这一家会一直把会话钉住 —— 2026-11-03
+       * 那个会话 24 行里 23 行 `reason=sticky`，正是这个形状。
+       */
+      const revokeStickyOnRepetition = (trace: RequestStreamTrace): void => {
+        if (trace.repetition?.degraded !== true) return
+        if (!autoDecision || !chosenCandidate) return
+        autoRouter.revokeSticky(autoDecision.conversationKey, autoDecision.route)
+      }
 
       const failStream = (err: Error) => {
         if (streamSettled) return
@@ -1132,6 +1151,7 @@ router.post('/completions', async (ctx: Context) => {
             wrapperStream.write('data: [DONE]\n\n')
           }
           const trace = streamTraceOf(endReason, elapsed)
+          revokeStickyOnRepetition(trace)
           reportStreamOutcome(
             endReason,
             elapsed,
@@ -1231,6 +1251,8 @@ router.post('/completions', async (ctx: Context) => {
             sawDone = true
             wrapperStream.write('data: [DONE]\n\n')
           }
+          const trace = streamTraceOf(endReason, elapsed)
+          revokeStickyOnRepetition(trace)
           reportStreamOutcome(
             endReason,
             elapsed,
@@ -1242,7 +1264,7 @@ router.post('/completions', async (ctx: Context) => {
               responseBody: collectedContent || undefined,
               finishReason: delivered.finishReason,
               streamTruncated: !upstream.sawFinish,
-              streamTrace: streamTraceOf(endReason, elapsed),
+              streamTrace: trace,
             })
           }
           meterQuota(

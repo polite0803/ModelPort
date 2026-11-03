@@ -163,15 +163,6 @@ const responsesBody = (model: string, extra: Payload = {}): Payload => ({
 /** Codex 的 `apply_patch` 是自由文本工具：参数是一段补丁原文，不是 JSON 对象。 */
 const PATCH_TEXT = '*** Begin Patch\n*** Update File: markers.ts\n@@\n+export const X = 1\n*** End Patch'
 
-const MANAGED_TOOL_CALLING_OFF = {
-  toolCallingConfig: {
-    enabled: false,
-    mode: 'auto',
-    clientAdapterId: 'standard-openai-tools',
-    advanced: {},
-  },
-}
-
 /**
  * 成功那笔的请求日志行是在响应送达之后才落进内存表的（拒绝行才是同步写的），
  * 按「发完就读」的顺序查会偶发查不到。给它有限重试，判据本身不变。
@@ -264,24 +255,19 @@ test('流式：恰好一套 responses 骨架，正文完整，上游 usage 真�
 })
 
 test('客户端的原生 tools 出站（flat 形态嵌回 chat 的 function）', async () => {
-  sm.updateConfig(MANAGED_TOOL_CALLING_OFF as never)
-  try {
-    const response = await proxy.request('POST', '/v1/responses', {
-      body: responsesBody('Test-Model', {
-        input: 'weather?',
-        tools: [{ type: 'function', name: 'get_weather', description: 'd', parameters: { type: 'object', properties: {} } }],
-        tool_choice: 'auto',
-      }),
-    })
+  const response = await proxy.request('POST', '/v1/responses', {
+    body: responsesBody('Test-Model', {
+      input: 'weather?',
+      tools: [{ type: 'function', name: 'get_weather', description: 'd', parameters: { type: 'object', properties: {} } }],
+      tool_choice: 'auto',
+    }),
+  })
 
-    assert.equal(response.status, 200)
-    assert.deepEqual(seenBodies[0].tools, [
-      { type: 'function', function: { name: 'get_weather', description: 'd', parameters: { type: 'object', properties: {} } } },
-    ], 'flat 的工具必须嵌回 chat 形状再出站')
-    assert.equal(seenBodies[0].tool_choice, 'auto')
-  } finally {
-    sm.updateConfig({ toolCallingConfig: undefined } as never)
-  }
+  assert.equal(response.status, 200)
+  assert.deepEqual(seenBodies[0].tools, [
+    { type: 'function', function: { name: 'get_weather', description: 'd', parameters: { type: 'object', properties: {} } } },
+  ], 'flat 的工具必须嵌回 chat 形状再出站')
+  assert.equal(seenBodies[0].tool_choice, 'auto')
 })
 
 test('一轮工具往返：上游的 tool_calls 出去是 function_call 项，usage 报 null 而不是 0', async () => {
@@ -300,69 +286,59 @@ test('一轮工具往返：上游的 tool_calls 出去是 function_call 项，us
 
 test('自由文本工具的一轮写盘：声明带 input 契约、历史里的补丁到得了上游、回来的项是 custom_tool_call', async () => {
   upstreamMode = 'patch'
-  sm.updateConfig(MANAGED_TOOL_CALLING_OFF as never)
-  try {
-    const response = await proxy.request('POST', '/v1/responses', {
-      body: responsesBody('Test-Model', {
-        tools: [{ type: 'custom', name: 'apply_patch', description: 'Apply a patch', format: { type: 'text' } }],
-        input: [
-          { type: 'custom_tool_call', call_id: 'c9', name: 'apply_patch', input: PATCH_TEXT },
-          { type: 'custom_tool_call_output', call_id: 'c9', output: 'Success. updated 1 file' },
-          { role: 'user', content: [{ type: 'input_text', text: 'continue' }] },
-        ],
-      }),
-    })
+  const response = await proxy.request('POST', '/v1/responses', {
+    body: responsesBody('Test-Model', {
+      tools: [{ type: 'custom', name: 'apply_patch', description: 'Apply a patch', format: { type: 'text' } }],
+      input: [
+        { type: 'custom_tool_call', call_id: 'c9', name: 'apply_patch', input: PATCH_TEXT },
+        { type: 'custom_tool_call_output', call_id: 'c9', output: 'Success. updated 1 file' },
+        { role: 'user', content: [{ type: 'input_text', text: 'continue' }] },
+      ],
+    }),
+  })
 
-    assert.equal(response.status, 200)
-    const sent = seenBodies[0]
-    // 1) 出站声明：chat 侧唯一的参数契约位置要给出 input，否则模型只能猜（实测猜出 4 次空 `{}`）。
-    const declared = (sent.tools as Payload[]).find(tool => tool.function.name === 'apply_patch') as Payload
-    assert.deepEqual(declared.function.parameters.required, ['input'])
-    // 2) 历史：补丁原文必须出现在发给上游的消息里。丢了它，模型看不到自己已经写过，
-    //    就会一轮一轮重新宣布「我现在直接落盘」——用户读到的正是那种反复。
-    const history = JSON.stringify(sent.messages)
-    assert.ok(history.includes('Begin Patch'), '补丁原文没进发给上游的历史')
-    assert.ok(history.includes('Success. updated 1 file'), '写盘结果没进历史')
-    // 3) 回来的调用项：类型必须是客户端声明的那种，否则它根本不执行。
-    assert.deepEqual(response.json.output, [
-      { id: 'fc_9', type: 'custom_tool_call', status: 'completed', call_id: 'call_9', name: 'apply_patch', input: PATCH_TEXT },
-    ])
-  } finally {
-    sm.updateConfig({ toolCallingConfig: undefined } as never)
-  }
+  assert.equal(response.status, 200)
+  const sent = seenBodies[0]
+  // 1) 出站声明：chat 侧唯一的参数契约位置要给出 input，否则模型只能猜（实测猜出 4 次空 `{}`）。
+  const declared = (sent.tools as Payload[]).find(tool => tool.function.name === 'apply_patch') as Payload
+  assert.deepEqual(declared.function.parameters.required, ['input'])
+  // 2) 历史：补丁原文必须出现在发给上游的消息里。丢了它，模型看不到自己已经写过，
+  //    就会一轮一轮重新宣布「我现在直接落盘」——用户读到的正是那种反复。
+  const history = JSON.stringify(sent.messages)
+  assert.ok(history.includes('Begin Patch'), '补丁原文没进发给上游的历史')
+  assert.ok(history.includes('Success. updated 1 file'), '写盘结果没进历史')
+  // 3) 回来的调用项：类型必须是客户端声明的那种，否则它根本不执行。
+  assert.deepEqual(response.json.output, [
+    { id: 'fc_9', type: 'custom_tool_call', status: 'completed', call_id: 'call_9', name: 'apply_patch', input: PATCH_TEXT },
+  ])
 })
 
 test('客户端把工具结果发回来时，上游看到的仍是相邻的调用与结果', async () => {
-  sm.updateConfig(MANAGED_TOOL_CALLING_OFF as never)
-  try {
-    const response = await proxy.request('POST', '/v1/responses', {
-      body: responsesBody('Test-Model', {
-        input: [
-          { role: 'user', content: [{ type: 'input_text', text: 'weather?' }] },
-          { type: 'function_call', call_id: 'call_7', name: 'get_weather', arguments: '{"city":"SF"}' },
-          { type: 'function_call_output', call_id: 'call_7', output: 'sunny' },
-        ],
-      }),
-    })
+  const response = await proxy.request('POST', '/v1/responses', {
+    body: responsesBody('Test-Model', {
+      input: [
+        { role: 'user', content: [{ type: 'input_text', text: 'weather?' }] },
+        { type: 'function_call', call_id: 'call_7', name: 'get_weather', arguments: '{"city":"SF"}' },
+        { type: 'function_call_output', call_id: 'call_7', output: 'sunny' },
+      ],
+    }),
+  })
 
-    assert.equal(response.status, 200)
-    const sent = seenBodies[0].messages as Payload[]
-    const callIndex = sent.findIndex(m => m.role === 'assistant' && Array.isArray(m.tool_calls))
-    assert.ok(callIndex >= 0, 'function_call 必须投影成 assistant 的 tool_calls')
-    assert.equal(sent[callIndex].content, null, '只有调用时 content 是 null')
-    assert.deepEqual(sent[callIndex].tool_calls, [
-      { id: 'call_7', type: 'function', function: { name: 'get_weather', arguments: '{"city":"SF"}' } },
-    ])
-    assert.equal(sent[callIndex + 1].role, 'tool', '结果必须紧跟产生它的调用')
-    assert.equal(sent[callIndex + 1].tool_call_id, 'call_7')
+  assert.equal(response.status, 200)
+  const sent = seenBodies[0].messages as Payload[]
+  const callIndex = sent.findIndex(m => m.role === 'assistant' && Array.isArray(m.tool_calls))
+  assert.ok(callIndex >= 0, 'function_call 必须投影成 assistant 的 tool_calls')
+  assert.equal(sent[callIndex].content, null, '只有调用时 content 是 null')
+  assert.deepEqual(sent[callIndex].tool_calls, [
+    { id: 'call_7', type: 'function', function: { name: 'get_weather', arguments: '{"city":"SF"}' } },
+  ])
+  assert.equal(sent[callIndex + 1].role, 'tool', '结果必须紧跟产生它的调用')
+  assert.equal(sent[callIndex + 1].tool_call_id, 'call_7')
 
-    // 末条是 tool 的出站序列会被既有的兜底补一条极简 user（`proxy/trailingUserGuard.ts`），
-    // 那是 chat 那条链的既有裁定，本入口照旧继承 —— 要钉的是它**加在尾巴上**，
-    // 而不是插进调用与结果之间。
-    assert.equal(sent[callIndex + 2]?.role, 'user')
-  } finally {
-    sm.updateConfig({ toolCallingConfig: undefined } as never)
-  }
+  // 网关不替用户造句子（2026-11-03 裁定）：末条是工具结果的出站序列原样发出，
+  // 既不在调用与结果之间插东西，也不在尾巴上追加合成的 user。
+  assert.equal(sent.length, callIndex + 2, '尾巴上不得出现网关造的 user')
+  assert.equal(sent[sent.length - 1].role, 'tool')
 })
 
 test('prompt_cache_key 一路到上游（入向翻译 → chat → 转发白名单）', async () => {

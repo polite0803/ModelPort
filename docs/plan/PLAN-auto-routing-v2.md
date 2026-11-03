@@ -1,7 +1,9 @@
 # PLAN：auto 自动路由强化（v2）
 
 - 日期：2026-10-29
-- 状态：已拍板 D1/D2，按阶段 A → B → C → D 执行
+- 状态：**已收口（2026-11-03）**——阶段 A–D 全部落地；§7 粘性终裁已闭环（默认路由级硬钉
+  `stickyHardPin`，加分只留边际作用），§1.4 / §6 / §7 三方已同步。唯一未验项仍是
+  设置页手点（见 §6 未覆盖项）
 - 基线：main @ ac62cea
 - 范围：`auto` 虚拟模型的选择逻辑——能力元数据、契约过滤、成本、偏好、粘性、可观测
 - 不在本批：语义分类（额外发一次模型调用）、按模型的失败记忆、跨对话摘要路由、`auto` 之外的具名模型路由
@@ -81,6 +83,11 @@
 生效方式：配置里的 `prefer` 是默认值，请求头 `X-Auto-Prefer` 可按次覆盖（非法值忽略并记日志）。
 
 ### 1.4 粘性改为加分，不再硬钉
+
+> ⚠️ **本节已被 §7（2026-11-03）推翻**：现行裁定是**路由级开关、默认硬钉**
+> （`ModelRoute.stickyHardPin` 缺省按 `!== false` 解释为开），加分 `stickyBonus`
+> 只在硬钉关闭或同供应商不同账号的边际场景起作用。以下原文按当时的裁定保留存档，
+> 阅读顺序请配合 §7 与 §6 的 C-1 行。
 
 现在命中粘性就把候选 splice 到队首（`autoRouter.ts:148-162`），即使它当前分数远低于别的候选。改成把粘性作为打分输入：完全命中 +0.12，同供应商同模型不同账号 +0.06。首选冷却或配额耗尽时自然让位，而不是被硬钉在一个不可用的目标上。
 
@@ -183,7 +190,7 @@
 | A-4 | 完成 | `autoRouting.resolveCapability` 三态合并、`satisfiesCapability` 新规则、`UNANNOTATED_CONTEXT_FLOOR` |
 | A-5 | 完成 | `contractNeeds` / `providerMeetsContract` / `applyContractFilter`；chat 路由的 400 与降级头 |
 | B-1..B-4 | 完成 | `costBucket` 进打分、`AutoPreference` 配置与归一化、`X-Auto-Prefer`、设置页选择器 + 共享默认值 |
-| C-1..C-3 | 完成 | 粘性改加分、三个响应头、`details.missing`、`RequestLogEntry.auto` |
+| C-1..C-3 | 完成 | 路由级默认硬钉（`stickyHardPin` 缺省即开，`!== false`）；`stickyBonus` 保留为边际作用（同供应商不同账号 +0.06）；三个响应头、`details.missing`、`RequestLogEntry.auto` |
 
 三处与计划原文不同，均已在实现时写明理由：
 

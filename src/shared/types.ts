@@ -2,8 +2,11 @@ import type { AggregateWire } from './aggregate'
 import type { ChannelLoginKind, CostBucket } from './channels'
 import type { AggregateCostClass } from './aggregateCost'
 import type { ClientIdentity } from './clientProfile'
+import { DEFAULT_REPETITION_GUARD, type RepetitionGuardSettings, type StreamRepetitionReading } from './streamRepetition.ts'
 
 export type { AggregateWire }
+export type { RepetitionGuardSettings, StreamRepetitionReading }
+export { DEFAULT_REPETITION_GUARD }
 
 export type AccountStatus = 'active' | 'inactive' | 'expired' | 'error'
 
@@ -526,16 +529,6 @@ export const AUTO_POOL_PRESETS: readonly AutoPoolPresetMeta[] = [
 
 export type Theme = 'light' | 'dark' | 'system'
 
-export type {
-  LegacyToolPromptConfig,
-  ToolCallingConfig,
-} from './toolCalling'
-
-import type {
-  LegacyToolPromptConfig,
-  ToolCallingConfig,
-} from './toolCalling'
-
 export interface Account {
   id: string
   providerId: string
@@ -658,7 +651,7 @@ export interface AnthropicInboundConfig {
   /**
    * `document` 附件块要不要翻成 chat 的 `file` 块真的发给上游。
    *
-   * 可选且**默认开**（只有显式 `false` 才关），与 `trailingUserGuard` 同一形态：客户端
+   * 可选且**默认开**（只有显式 `false` 才关）：客户端
    * 只在用户真挂了文件时才发这个块，不像 `temperature` 那样每请求都带，所以「上游不吃
    * file 块而报错」是可接受的诚实结果，胜过「模型答非所问而没人知道附件没送出去」。
    * 关掉后回到丢弃但记入 `X-ModelPort-Anthropic-Dropped` 的行为。
@@ -679,6 +672,14 @@ export interface AppConfig {
   /** Extra IPs/hostnames the managed certificate must include in its SAN. */
   httpsSanHosts: string[]
   loadBalanceStrategy: LoadBalanceStrategy
+  /**
+   * 流内重复退化判据（Bandit 的第二类 degraded 信号）。
+   *
+   * Absent means the shipped defaults, so a config file written before this field
+   * existed neither disables the guard nor silently changes the thresholds it was
+   * tuned against.
+   */
+  streamRepetitionGuard?: RepetitionGuardSettings
   modelMappings: Record<string, ModelMapping>
   theme: Theme
   autoStart: boolean
@@ -695,22 +696,10 @@ export interface AppConfig {
    * default (`DEFAULT_MAX_OUTPUT_TOKENS`) - never a silent 4096 baked into code.
    */
   defaultMaxOutputTokens?: number
-  /**
-   * Trailing-tool guard: when the outbound history ends with a `role:"tool"`
-   * message, append one minimal user turn so "keep working" is re-anchored at the
-   * tail. Optional **and on unless explicitly `false`** — agent clients always send
-   * that shape from turn 2 on, and 2026-11-01 captures on this gateway show
-   * `I don't see a request in your message` / an `ask_user` refusal only from turn 2
-   * onward (turn 1 never). Declared twice (`store/types.ts` too), like every other
-   * config field.
-   */
-  trailingUserGuard?: boolean
   apiKeys: ApiKey[]
   enableApiKey: boolean
   oauthProxyMode: 'system' | 'none'
   sessionConfig: SessionConfig
-  toolCallingConfig: ToolCallingConfig
-  toolPromptConfig?: LegacyToolPromptConfig
   managementApi: ManagementApiConfig
   contextManagement?: unknown
   /**
@@ -740,7 +729,6 @@ export interface AppConfig {
    */
   anthropicInbound?: AnthropicInboundConfig
   compression: CompressionConfig
-  outputSteering: OutputSteeringConfig
   language: 'zh-CN' | 'en-US'
 }
 
@@ -774,30 +762,6 @@ export const COMPRESSION_AGGRESSIVENESS: CompressionAggressiveness[] = [
 export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
   enabled: true,
   aggressiveness: 'moderate',
-}
-
-/**
- * Output-side verbosity steering.
- *
- * Deliberately a SEPARATE switch from `compression`: that one rewrites request
- * bytes (and is therefore bounded by prompt-cache economics), while this one
- * changes what the model writes back. A user may reasonably want one and not the
- * other, and bundling them would make each one's risk inherit the other's.
- *
- * `level` is 1..3; 0 means "do not steer". It only takes effect when `enabled`
- * is true, so a stored non-zero level cannot steer after the switch is turned
- * off.
- */
-export interface OutputSteeringConfig {
-  enabled: boolean
-  level: number
-}
-
-export const OUTPUT_STEERING_LEVELS = [1, 2, 3]
-
-export const DEFAULT_OUTPUT_STEERING_CONFIG: OutputSteeringConfig = {
-  enabled: false,
-  level: 2,
 }
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
@@ -1030,6 +994,11 @@ export interface RequestStreamTrace {
   pingCount?: number
   /** Upstream request id when the provider exposes one (support ticket evidence). */
   upstreamRequestId?: string
+  /**
+   * 流内重复退化读数；只在流式且守卫开启时有值。
+   * Non-streaming requests carry nothing here by design - see `shared/streamRepetition.ts`.
+   */
+  repetition?: StreamRepetitionReading
 }
 
 export interface RequestLogEntry {
@@ -1410,8 +1379,6 @@ export interface ConfigUpdateRequest {
   enableApiKey?: boolean
   oauthProxyMode?: 'system' | 'none'
   sessionConfig?: SessionConfig
-  toolCallingConfig?: Partial<ToolCallingConfig>
-  toolPromptConfig?: LegacyToolPromptConfig
   managementApi?: ManagementApiConfig
   autoRouting?: Partial<AutoRoutingConfig>
   /** Route table written as a whole through `PUT /v1/management/config/routes`. */

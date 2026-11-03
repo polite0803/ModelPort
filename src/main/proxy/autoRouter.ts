@@ -815,6 +815,17 @@ class AutoRouter {
   }
 
   /**
+   * 撤掉一条会话的粘性锚点。
+   *
+   * 用于「协议成功但内容退化」的轮次：锚点是在响应头阶段写的，而退化要到流结束
+   * 才算得出来。留着它，下一轮仍然会被硬优先送到同一家，降权追不上。
+   */
+  revokeSticky(key: string | undefined, route?: ModelRoute): void {
+    if (!key) return
+    this.sticky.delete(stickyMapKey(route?.name ?? LEGACY_ROUTE_NAME, key))
+  }
+
+  /**
    * 记录本次成功的路由，让同一会话在**这条路由**的 stickyMinutes 内优先命中同
    * 一个模型。粘性时长按路由取（没传路由才回退 legacy 全局值），键带路由名前缀，
    * 所以两条路由各钉各的、互不覆盖。

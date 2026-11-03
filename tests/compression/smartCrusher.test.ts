@@ -165,3 +165,84 @@ test('aggressiveness changes how much is kept', () => {
     `aggressive (${aggressiveCount}) must not keep more rows than conservative (${conservativeCount})`
   )
 })
+
+// P1 acceptance (PLAN-token-compression §P1), pinned 2026-11-03.
+
+test('three error rows survive 100% of a 100-row crush', () => {
+  const rows = Array.from({ length: 100 }, (_, index) => ({ id: index, status: 'ok', duration: 10 }))
+  rows[10] = { id: 10, status: 'ok', duration: 10, error: 'FATAL: alpha' }
+  rows[50] = { id: 50, status: 'ok', duration: 10, exception: 'beta panic' }
+  rows[90] = { id: 90, status: 'ok', duration: 10, note: 'gamma rejected here' }
+
+  const { result, stashed } = crush(rows)
+
+  assert.equal(result.changed, true)
+  for (const marker of ['FATAL: alpha', 'beta panic', 'gamma rejected here']) {
+    assert.ok(result.text.includes(marker), `${marker} must survive`)
+  }
+  // The full original, every error row included, stays retrievable.
+  assert.deepEqual(JSON.parse(stashed.get(result.ccrHash as string) as string), rows)
+})
+
+test('100 identical rows crush to a handful, and nothing is lost', () => {
+  const rows = Array.from({ length: 100 }, () => ({ id: 7, status: 'ok', note: 'same line repeated' }))
+  const { result, stashed } = crush(rows)
+
+  assert.equal(result.changed, true)
+  assert.ok(dataRows(result.text).length < 10, 'mass redundancy must collapse hard')
+  // "不丢信息": the stash holds the byte-exact full array behind the sentinel.
+  assert.equal(stashed.get(result.ccrHash as string), JSON.stringify(rows))
+})
+
+test('three realistic JSON-array samples each save >=55% and keep their signal row', () => {
+  const fixtures: Array<{ name: string; rows: Array<Record<string, unknown>>; signal: string }> = [
+    {
+      name: 'github issues',
+      rows: Array.from({ length: 200 }, (_, index) => ({
+        number: 4000 + index,
+        title: `Flaky test in suite-${index % 12}`,
+        state: 'open',
+        labels: ['bug'],
+        comments: index % 5,
+        user: 'octocat',
+      })),
+      signal: 'FATAL: repro locked',
+    },
+    {
+      name: 'search records',
+      rows: Array.from({ length: 300 }, (_, index) => ({
+        id: index,
+        path: `src/module-${index % 7}.ts`,
+        line: index,
+        match: 'export function handler()',
+        status: 'ok',
+      })),
+      signal: 'FATAL: unexpected token',
+    },
+    {
+      name: 'jsonl log',
+      rows: Array.from({ length: 300 }, (_, index) => ({
+        ts: `2026-11-03T05:${String(index % 60).padStart(2, '0')}:00Z`,
+        level: 'info',
+        msg: `request handled in ${index % 97}ms`,
+        route: `/v1/chat/${index % 3}`,
+      })),
+      signal: 'upstream 429 rate limited',
+    },
+  ]
+
+  for (const fixture of fixtures) {
+    // One signal row carrying an error keyword the crusher must preserve.
+    const rows = fixture.rows.map(row => ({ ...row }))
+    const injected = Math.floor(rows.length / 3)
+    rows[injected] = { ...rows[injected], error: fixture.signal }
+    const source = JSON.stringify(rows)
+
+    const { result } = crush(rows)
+    const saved = 1 - result.text.length / source.length
+
+    assert.equal(result.changed, true, `${fixture.name} must compress`)
+    assert.ok(saved >= 0.55, `${fixture.name} saved only ${saved.toFixed(3)}`)
+    assert.ok(result.text.includes(fixture.signal), `${fixture.name} signal row was lost`)
+  }
+})

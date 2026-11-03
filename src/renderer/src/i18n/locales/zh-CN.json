@@ -451,6 +451,12 @@
     "smartDesc": "在可用账户里挑选额度最早恢复的那个，把快重置的额度先用掉，减少浪费",
     "paceDesc": "挑选每小时剩余额度最多的账户，把额度平摊到重置之前",
     "accountWeightConfig": "账户权重配置",
+    "repetitionGuardTitle": "退化流识别",
+    "repetitionGuardDesc": "把「尾部塌成重复行」的流式回答记为一次不可用成功：评分不再把它当干净战绩，会话也不会被钉在这家模型上。出厂阈值按 99 段真实 reasoning 标定（健康段中位去重率 1.000；0.80 命中其中 9 段）。",
+    "repetitionGuardMinLines": "参与判定的最少行数",
+    "repetitionGuardMaxRatio": "重复行比例阈值",
+    "repetitionGuardMaxRatioHelp": "尾部窗口内「不重复行 / 总行数」低于或等于该值即判为退化。客户端守卫在 0.35 中止，所以网关刻意更宽松，不抢在客户端之前定罪。",
+    "repetitionGuardNonStreamNote": "只覆盖流式响应。非流式没有逐块信号，正文又只在开启请求体日志时才保留，所以那条路明确不判。",
     "weightHelp": "权重越高，该账户被选中的概率越大。仅在轮询策略下生效。",
     "autoRouting": "自动模型路由",
     "autoRoutingDesc": "启用后可在请求中把模型设为 auto，服务端按请求画像、模型能力与限流健康度自动选择供应商和账号",
@@ -481,8 +487,6 @@
     "retryCountHelp": "请求失败后的自动重试次数 (0-10 次)",
     "outputCapFallback": "输出上限兜底值",
     "outputCapFallbackHelp": "Anthropic 协议必须携带 max_tokens：客户端两种写法都没给、模型参数也没配时，用这个值补上。留空使用内置默认 4096。",
-    "trailingUserGuard": "末条工具结果兜底",
-    "trailingUserGuardHelp": "出站历史以工具结果收尾时，追加一条极简用户消息，把「继续干活」钉回序列尾部——否则部分上游模型会回「没看到你的请求」或反过来提问。第 1 轮不会被改写。只有在发现模型重复做已完成的那一步时才需要关闭。",
     "outputCapMustBeInteger": "输出上限必须是整数",
     "outputCapRangeError": "输出上限必须在 1-1000000 范围内",
     "logConfig": "日志配置",
@@ -808,9 +812,6 @@
     "contextFitOverflow": "装不下",
     "contextFitUnknown": "窗口未公布",
     "modelContextWindow": "窗口",
-    "contextFit": "窗口匹配度",
-    "contextFitMeasured": "上游实测",
-    "inputTokensEstimate": "估算入量",
     "inputTokensEstimate": "估算入量 / 窗口",
     "contextFit": "窗口装不装得下",
     "contextFitMeasured": "上游实测",
@@ -1022,49 +1023,19 @@
     "startProxy": "启动代理",
     "stopProxy": "停止代理",
     "addAccount": "添加账户",
-    "toolCalling": "工具调用",
     "viewLogs": "查看日志"
   },
   "statsCard": {
     "vsYesterday": "较昨日"
   },
   "oauth": {
-    "loginTo": "登录 {{provider}}",
-    "selectLoginMethod": "选择登录方式以获取访问凭证",
-    "manualInput": "手动输入",
-    "browserLogin": "浏览器登录",
-    "tokenStoredLocally": "Token 仅存储在本地，不会上传到服务器",
-    "clickToOpenBrowser": "点击下方按钮打开浏览器进行登录，登录成功后请按照说明获取 Token",
-    "openLoginPage": "打开 {{provider}} 登录页面",
-    "getTokenSteps": "获取 Token 的步骤：",
-    "step1": "在浏览器中完成登录",
-    "step2": "打开开发者工具 (F12)",
-    "step3": "切换到 Application 或 Storage 标签",
-    "step4": "找到对应的 Token 或 Cookie",
-    "step5": "复制并粘贴到手动输入标签页",
-    "confirmLogin": "确认登录",
-    "validating": "验证中...",
-    "cannotOpenBrowser": "无法打开浏览器",
-    "enterToken": "请输入 Token",
-    "enterAllTokens": "请填写所有必需的 Token",
-    "validatingToken": "正在验证 Token...",
-    "loginSuccess": "登录成功",
-    "loginFailed": "登录失败",
-    "unknownError": "未知错误",
-    "pending": "等待中",
-    "inProgress": "处理中",
-    "success": "成功",
-    "failed": "失败",
-    "cancelled": "已取消",
-    "loginTimeout": "登录超时，请重试",
-    "help": "帮助"
+    "validating": "验证中..."
   },
   "models": {
     "title": "模型管理",
     "description": "逐个控制模型或别名进不进路由候选池；对外只广告路由",
     "modelList": "模型列表",
     "modelMapping": "模型映射",
-    "toolCalling": "工具调用",
     "modelName": "模型名称",
     "provider": "供应商",
     "account": "账户",
@@ -1159,82 +1130,6 @@
     "credits": "由开源社区 ❤️ 制作",
     "builtWith": "基于 Electron、React、TypeScript、Tailwind CSS、Zustand、Koa 等优秀的开源项目构建。"
   },
-  "toolCalling": {
-    "title": "工具调用",
-    "description": "把 OpenAI 工具调用协议翻译到每条上游线路：默认 chat 线路由托管引擎注入提示并解析响应，OpenCode 走信封协议，其余线路原生直通。",
-    "statusEnabled": "托管工具调用已启用",
-    "statusDisabled": "托管工具调用已关闭",
-    "clientType": "客户端类型",
-    "mode": "模式",
-    "modes": {
-      "off": "关闭",
-      "auto": "自动托管",
-      "force": "强制托管"
-    },
-    "modeHints": {
-      "off": "不注入提示、不解析响应。默认 chat 线路从不向上游转发原生 tools，此模式下客户端的工具请求不会生效。",
-      "auto": "请求携带工具清单且线路未自管工具时，自动走托管协议。",
-      "force": "强制启用托管流程，即使供应商档案未声明托管支持（OpenCode 等自管线路不受影响）。"
-    },
-    "clients": {
-      "standardOpenAiToolsDesc": "适用于通用 OpenAI 兼容客户端和 SDK。",
-      "cherryStudioMcpDesc": "适用于 Cherry Studio MCP 工具，保留精确 MCP 工具名称。",
-      "unknown": "未知客户端适配器。"
-    },
-    "how": {
-      "title": "工作方式",
-      "steps": {
-        "1": "客户端按 OpenAI 格式发送 tools / tool_choice。",
-        "2": "引擎剥离原生字段，把工具说明以 ModelPort XML 注入 system 提示；required 或强制工具会追加指令，parallel_tool_calls: false 限制单次只调用一个工具。",
-        "3": "模型以 XML 标记应答；流式与非流式响应都会解析回 OpenAI tool_calls，id 形如 call_<requestId>-<n>。",
-        "4": "声明 tool_choice: required 但模型没有调用时，响应附带 X-ModelPort-Tool-Violation: required；无法解析的标记会被剥离并保留正文。"
-      }
-    },
-    "wireMatrix": {
-      "title": "线路覆盖",
-      "columnWire": "线路",
-      "columnMode": "工具调用方式",
-      "rows": {
-        "chatManaged": "默认 chat 线路（聚合 openai-chat 条目、自定义 provider）",
-        "opencode": "OpenCode（本地运行时）",
-        "accountChannels": "账号通道（12 个登录渠道）",
-        "anthropic": "聚合 anthropic-messages 线路",
-        "responses": "聚合 openai-responses 线路"
-      },
-      "details": {
-        "chatManaged": "托管 XML：提示注入 + 响应解析；原生 tools 不向上游转发",
-        "opencode": "信封协议由运行时自行翻译，托管层仅判定 tool_choice / 并行限制",
-        "accountChannels": "原生工具经网关往返，入站历史预校验",
-        "anthropic": "tool_use 与 OpenAI tool_calls 原生映射",
-        "responses": "原生 Responses tools，不做注入以免双重描述"
-      },
-      "badges": {
-        "managed": "托管",
-        "envelope": "信封",
-        "native": "原生"
-      }
-    },
-    "smoke": {
-      "title": "冒烟测试",
-      "description": "为当前客户端适配器生成最小天气工具调用测试用例。",
-      "run": "运行测试",
-      "not_run": "未运行",
-      "running": "生成中",
-      "pass": "已生成",
-      "failed": "失败",
-      "failedHint": "冒烟测试未能完成，请查看应用日志了解详情。",
-      "fixture": "生成的测试用例",
-      "copy": "复制",
-      "copied": "已复制",
-      "hint": "将用例通过任意指向本代理的客户端发送到 /v1/chat/completions（选择一个已映射的模型），即可验证完整链路。"
-    },
-    "advanced": {
-      "title": "提示词模板",
-      "description": "自定义注入给模型的托管工具提示词。留空使用内置 ModelPort XML 格式，仅托管模式下生效。",
-      "customTemplate": "自定义提示词模板",
-      "customTemplatePlaceholder": "可使用 {{tools}}、{{tool_names}} 和 {{format}}。"
-    }
-  },
   "session": {
     "title": "会话管理",
     "description": "配置对话会话管理策略",
@@ -1258,20 +1153,6 @@
     },
     "configSaved": "压缩配置已保存",
     "configSaveFailed": "保存压缩配置失败"
-  },
-  "outputSteering": {
-    "title": "输出精简",
-    "enable": "启用输出精简",
-    "enableHint": "只影响模型的输出：在系统提示词末尾追加一段固定的精简指令，跳过开场白和收尾复述、不再重抄代码或工具结果。指令内容按档位固定不变，不会打掉上游前缀缓存；关闭后请求逐字节恢复原样。",
-    "level": "精简力度",
-    "levelHint": "档位越高要求越严格。任何档位都不会省略让任务正确的信息（否定词、条件、约束），只是把话说短。",
-    "levels": {
-      "1": "轻度",
-      "2": "标准",
-      "3": "最强"
-    },
-    "configSaved": "输出精简配置已保存",
-    "configSaveFailed": "保存输出精简配置失败"
   },
   "anthropicInbound": {
     "title": "Anthropic 客户端（Claude Desktop / Claude Code）",
@@ -1339,8 +1220,7 @@
     "configSaveFailed": "保存上下文管理配置失败",
     "strategies": {
       "slidingWindow": "上下文数",
-      "tokenLimit": "最大Token数",
-      "summary": "摘要压缩"
+      "tokenLimit": "最大Token数"
     },
     "slidingWindow": {
       "title": "上下文数",
@@ -1353,15 +1233,6 @@
       "description": "按 Token 数量截断历史，始终保留系统消息",
       "maxTokens": "最大 Token 数",
       "maxTokensHint": "保留的最大 Token 数量（100-100000）"
-    },
-    "summary": {
-      "title": "摘要压缩",
-      "description": "对早期对话生成摘要，保留最近消息和摘要",
-      "keepRecentMessages": "保留最近消息数",
-      "keepRecentMessagesHint": "不参与摘要的最近消息数量",
-      "customPrompt": "自定义摘要提示词（可选）",
-      "customPromptPlaceholder": "输入自定义摘要提示词...",
-      "customPromptHint": "留空使用默认提示词"
     }
   },
   "aggregate": {
@@ -1716,53 +1587,5 @@
       "failed": "添加失败",
       "misconfigured": "这个渠道没有声明加账号的方法，无法从界面添加。"
     }
-  },
-  "statusReasons": {},
-  "managementApi": {},
-  "modes": {},
-  "clients": {},
-  "smoke": {},
-  "advanced": {},
-  "strategies": {},
-  "slidingWindow": {},
-  "tokenLimit": {},
-  "summary": {},
-  "category": {},
-  "dialog": {},
-  "result": {},
-  "reasons": {},
-  "autoCheckin": {},
-  "loginKind": {},
-  "login": {},
-  "hint": {},
-  "loginGuide": {
-    "openWebsite": "打开 {{provider}} 官网",
-    "paste": "粘贴",
-    "openBrowserFailedDesc": "无法打开浏览器，请手动访问：{{url}}",
-    "pasteFailedDesc": "读取剪贴板失败，请手动粘贴",
-    "fillRequiredFields": "请填写所有必填项",
-    "addFailed": "添加失败",
-    "addSuccess": "添加成功",
-    "accountAddedDesc": "{{provider}} 账号已添加",
-    "done": "完成",
-    "getToken": "如何获取 {{provider}} 的令牌",
-    "getTokenDesc": "按以下步骤复制令牌，粘贴到下方输入框，然后点击确认添加。",
-    "steps": "获取步骤",
-    "confirmAdd": "确认添加"
-  },
-  "qwen": {
-    "name": "通义千问"
-  },
-  "qwen-ai": {
-    "name": "通义千问（国际版）"
-  },
-  "glm": {
-    "name": "智谱 GLM"
-  },
-  "minimax": {
-    "name": "MiniMax 海螺"
-  },
-  "zai": {
-    "name": "Z.ai"
   }
 }

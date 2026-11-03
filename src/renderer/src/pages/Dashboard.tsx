@@ -72,10 +72,6 @@ export function Dashboard() {
     navigate('/providers')
   }, [navigate])
 
-  const handleToolCalling = useCallback(() => {
-    navigate('/models?tab=tool-calling')
-  }, [navigate])
-
   const handleViewLogs = useCallback(() => {
     navigate('/logs')
   }, [navigate])
@@ -184,7 +180,6 @@ export function Dashboard() {
         <div>
           <QuickActions
             onAddAccount={handleAddAccount}
-            onToolCalling={handleToolCalling}
             onViewLogs={handleViewLogs}
             onOpenProxy={handleOpenProxy}
           />

@@ -320,6 +320,7 @@ export class ProxyServer {
         description: 'OpenAI (chat / completions / responses) + Anthropic API compatible proxy service',
         endpoints: [
           'POST /v1/chat/completions',
+          'GET /v1/api-definition/providers',
           'GET /v1/models',
           'GET /v1/models/:model',
           'POST /v1/completions',

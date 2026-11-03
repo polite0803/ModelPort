@@ -23,11 +23,10 @@
 </p>
 
 <p align="center">
-  ModelPort turns any OpenAI-compatible endpoint into a single local API. It ships the `opencode`
-  local runtime, a 73-entry catalogue of key-based and key-less aggregate channels (including
-  Kilo's free pool), ten browser/device-code account channels with their own account pools and
-  credit accounting, and user-defined custom providers — so any OpenAI-compatible client works out
-  of the box.
+  ModelPort turns any OpenAI-compatible endpoint into a single local API. It ships a 79-entry
+  catalogue of key-based and key-less aggregate channels (including Kilo's free pool), thirteen
+  account channels with their own account pools and credit accounting, and user-defined custom
+  providers — so any OpenAI-compatible client works out of the box.
 </p>
 
 ![Product Preview](docs/screenshots/preview.png)
@@ -35,7 +34,7 @@
 ## ✨ Features
 
 - OpenAI Compatible API: standard OpenAI-compatible endpoints for seamless integration
-- Multi-Provider Support: 73 aggregate channels (API-key, free-tier, local), 10 account channels and a custom provider type
+- Multi-Provider Support: 79 aggregate channels (API-key, free-tier, local), 13 account channels and a custom provider type
 - Account Channels: browser / device-code login with account pools, daily credit claim, per-model credit weights and free-model badges
 - Online Model Catalogue: refresh a channel's model list online, switch models off, restore models the pack marked dead
 - 🆕 Context Management: Intelligent conversation context management with sliding window, token limit, and summary strategies
@@ -54,16 +53,15 @@
 
 | Provider class | Auth Type | Count | Notes |
 | -------------- | --------- | ----- | ----- |
-| `opencode` (local runtime) | None | 1 | Runs a local agent runtime; the model list comes from the runtime, not an endpoint |
-| Aggregate catalogue | API key / none | 73 entries / 473 models | OpenAI-chat and Anthropic-messages wires; includes Kilo's key-less free pool |
-| Account channels | Browser / device-code login | 10 channels | Each channel keeps its own account pool, daily credit claim and model gating |
+| Aggregate catalogue | API key / none | 79 entries / 500 models | OpenAI-chat and Anthropic-messages wires; includes Kilo's key-less free pool |
+| Account channels | Browser / device-code / API-key | 13 channels | Each channel keeps its own account pool, daily credit claim and model gating |
 | Custom provider | Configured per provider | — | Any OpenAI-compatible HTTP endpoint you define yourself |
 
 The aggregate catalogue is browsable in the **Aggregate Channels** page, which lists each entry with its category (API key / free tier / local), wire protocol and model count. Saving an entry creates a provider record with namespaced model names (`provider/model`); entries you never save never appear in the provider list. Entries requiring Google ADC are listed but marked unsupported.
 
-The **Account Channels** page covers the ten login channels (`lobsterai`, `qoder`, `qodercn`, `trae`, `cline`, `loomy`, `raccoon`, `minimax`, `zcode`, `gemini`). Model names carry the upstream credit multiplier in one of three shapes (`· x4.0`, `· x0.2→x0.1`, `· 免费`), so you can see the cost of a model before picking it; free models are badged and a model the upstream no longer reports as healthy can be restored from the same panel.
+The **Account Channels** page covers the thirteen channels (`lobsterai`, `qoder`, `qodercn`, `trae`, `cline`, `loomy`, `raccoon`, `minimax`, `zcode`, `gemini`, `buddy`, `workbuddy`, `opencode`). Model names carry the upstream credit multiplier in one of three shapes (`· x4.0`, `· x0.2→x0.1`, `· 免费`), so you can see the cost of a model before picking it; free models are badged and a model the upstream no longer reports as healthy can be restored from the same panel.
 
-Provider adaptation notes are in [docs/providers](docs/providers/README.md); the `opencode` runtime guide is [docs/providers/opencode.md](docs/providers/opencode.md).
+Provider adaptation notes are in [docs/providers](docs/providers/README.md).
 
 ## 📥 Installation
 
@@ -81,7 +79,7 @@ Download the latest release from [GitHub Releases](https://github.com/polite0803
 
 **Requirements:**
 
-- Node.js 18+
+- Node.js 22.18+ (24 recommended)
 - npm
 - Git
 

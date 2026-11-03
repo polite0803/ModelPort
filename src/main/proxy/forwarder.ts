@@ -20,10 +20,7 @@ import {
   type AutoAttemptFailure,
   type RequestAttemptTrace,
 } from '../../shared/types'
-import { wrapStreamWithPlan } from './toolCalling/streamPlanWrapper'
 import { AnthropicAdapter } from './adapters/anthropic'
-import { ToolCallingEngine } from './toolCalling/ToolCallingEngine'
-import type { ToolCallingTransformResult } from './toolCalling/types'
 import { sessionManager } from './sessionManager'
 import { loadBalancer } from './loadbalancer'
 import { autoRouter, type AutoCandidate } from './autoRouter'
@@ -83,7 +80,7 @@ import { accountRuntime } from './accountRuntime'
 import { planAttemptDeadline, planForwardRetries } from './retryPolicy'
 import { stripUnsupportedForBuiltin } from './parameterPolicy'
 import { ensureAnthropicOutputCap, outputCapFallbackOf } from './utils/outputCap.ts'
-import { createContextManagementService, SummaryGenerator } from './services/contextManagementService'
+import { createContextManagementService } from './services/contextManagementService'
 import { accountChannelManager } from '../providers/accountChannels/manager'
 import { sanitizeChatToolDefinitions } from '../channelPack/toolCallValidation'
 import { getAggregateEntry } from '../providers/aggregate/registry'
@@ -95,7 +92,6 @@ import {
   type ResponsesEvent,
 } from '../../shared/responsesWire'
 import { applyCompression, recordCompressionReport } from './compression'
-import { applyVerbositySteering } from './compression/outputSteering.ts'
 import { measureCrossTurnDuplication, recordDuplication } from './compression/duplication.ts'
 import { recordConversationTurn, recordConversationTurnForRequest } from './compression/survivorship.ts'
 
@@ -124,7 +120,6 @@ import {
 export { isFailoverEligibleStatus }
 import { qualifyChannelModel } from '../providers/accountChannels/modelCatalog'
 import { requestDeadlines } from './requestBudget'
-import { injectTrailingUser, trailingUserGuardEnabled } from './trailingUserGuard'
 import { isForbiddenProviderHeader } from '../../shared/providerHeaders'
 
 function shouldDeleteSession(): boolean {
@@ -218,111 +213,6 @@ export class RequestForwarder {
   ]
 
   /**
-   * Transform request for prompt-based tool calling
-   * For models that don't support native function calling
-   * Delegates tool normalization, prompt injection, and parser planning to ToolCallingEngine.
-   */
-  private transformRequestForPromptToolUse(
-    request: ChatCompletionRequest,
-    provider?: Provider
-  ): ToolCallingTransformResult {
-    const config = storeManager.getConfig().toolCallingConfig
-    const engine = new ToolCallingEngine(config)
-
-    return engine.transformRequest({
-      request,
-      provider: provider ?? {
-        id: 'custom',
-        name: 'Custom',
-        type: 'custom',
-        authType: 'token',
-        apiEndpoint: '',
-        headers: {},
-        enabled: true,
-        createdAt: 0,
-        updatedAt: 0,
-      },
-      actualModel: request.model,
-      requestId: request.requestId,
-    })
-  }
-
-  private applyToolCallsToResponse(result: any, transformed: ToolCallingTransformResult): void {
-    const engine = new ToolCallingEngine(storeManager.getConfig().toolCallingConfig)
-    engine.applyNonStreamResponse(result, transformed.plan)
-  }
-
-  /**
-   * Create summary generator function for context management
-   * Uses the current provider and account to generate summaries
-   */
-  private createSummaryGenerator(
-    account: Account,
-    provider: Provider,
-    actualModel: string,
-    context: ProxyContext
-  ): SummaryGenerator {
-    return async (messages: ContextChatMessage[], prompt?: string): Promise<string> => {
-      try {
-        console.log('[SummaryGenerator] Generating summary for', messages.length, 'messages')
-
-        const summaryPrompt = prompt || 'Please summarize the following conversation concisely, keeping key information and context:'
-
-        const conversationText = messages
-          .map(msg => {
-            const role = msg.role.toUpperCase()
-            const content = typeof msg.content === 'string'
-              ? msg.content
-              : Array.isArray(msg.content)
-                ? msg.content
-                    .filter(part => part.type === 'text' && part.text)
-                    .map(part => part.text)
-                    .join('\n')
-                : ''
-            return `${role}: ${content}`
-          })
-          .join('\n\n')
-
-        const summaryRequest: ChatCompletionRequest = {
-          model: actualModel,
-          messages: [
-            {
-              role: 'system',
-              content: summaryPrompt,
-            },
-            {
-              role: 'user',
-              content: conversationText,
-            },
-          ],
-          stream: false,
-          temperature: 0.3,
-        }
-
-        const result = await this.doForward(
-          summaryRequest,
-          account,
-          provider,
-          actualModel,
-          context
-        )
-
-        if (result.success && result.body) {
-          const summaryContent = result.body.choices?.[0]?.message?.content || ''
-          console.log('[SummaryGenerator] Summary generated successfully, length:', summaryContent.length)
-          return summaryContent
-        }
-
-        console.warn('[SummaryGenerator] Failed to generate summary:', result.error)
-        return 'Failed to generate conversation summary.'
-      } catch (error) {
-        console.error('[SummaryGenerator] Error generating summary:', error)
-        return 'Failed to generate conversation summary due to an error.'
-      }
-    }
-  }
-
-  /**
    * Forward Chat Completions Request
    */
   async forwardChatCompletion(
@@ -396,19 +286,8 @@ export class RequestForwarder {
       recordCompressionReport(request.requestId, compression.report)
     }
 
-    // 输出侧 verbosity：只往 system 消息尾部追加一段定长指令，省的是 completion
-    // token。与压缩是两个独立开关 —— 那个改请求字节、受缓存经济学约束，这个改
-    // 模型写回来的量。放在压缩之后、托管工具层之前：托管层稍后会把工具协议追加到
-    // 同一条 system 消息尾部，那是硬契约，必须排在我们的风格提示之后。
-    if (config.outputSteering?.enabled) {
-      const steering = applyVerbositySteering(
-        request.messages,
-        config.outputSteering.level
-      )
-      if (steering.changed) {
-        request = { ...request, messages: steering.messages }
-      }
-    }
+    // 输出侧的 verbosity 提示（往 system 尾部追加一段定长风格指令）已于 2026-11-03 退役：
+    // 网关不替用户写提示词。省 completion token 的手段回到「少发过去」那一侧（压缩）。
 
     let lastError: string | undefined
     let lastStatus: number | undefined
@@ -427,17 +306,10 @@ export class RequestForwarder {
 
       if (config.contextManagement?.enabled && modifiedRequest.messages && modifiedRequest.messages.length > 0) {
         try {
-          const summaryGenerator = this.createSummaryGenerator(
-            account,
-            provider,
-            actualModel,
-            context
-          )
-
-          const contextService = createContextManagementService(
-            config.contextManagement || {},
-            summaryGenerator
-          )
+          // 摘要压缩那条策略已于 2026-11-03 退役（它会另起一次模型调用、再把产物
+          // 包成 `[Conversation Summary]` 塞进历史 —— 那是网关替用户写内容）。
+          // 留下的 slidingWindow / tokenLimit 只做删除，不做改写。
+          const contextService = createContextManagementService(config.contextManagement || {})
 
           const originalCount = modifiedRequest.messages.length
           const contextMessages: ContextChatMessage[] = modifiedRequest.messages.map(msg => ({
@@ -573,9 +445,16 @@ export class RequestForwarder {
     // 429 说明这个账号跑**这个模型**被上游限流了，按 (账号, 模型) 记指数退避，供后续
     // auto 路由避开；上游的限流窗本来就是按模型计的，整账号清零会让同渠道别的模型
     // 一次成功就把这里的退避抹掉（见 accountRuntime.ts 头部）。
+    // 渠道包上报的 `providerRetryAfterMs` 已经在 bridge → forwardAccountChannel → ForwardResult.retryAfter
+    // 里透下来了（秒字符串），这里解析成毫秒数喂进冷却，取「自己指数退避」与「上游时刻」更晚的那个。
     // 本地准入拒绝不是上游 429，不能给它记冷却。
     if (lastStatus === 429 && !lastLocalAdmissionRejected) {
-      accountRuntime.recordFailure(account.id, 429, Date.now(), actualModel)
+      let retryAfterMs: number | undefined
+      if (typeof lastRetryAfter === 'string') {
+        const parsed = Number.parseInt(lastRetryAfter, 10)
+        if (Number.isFinite(parsed)) retryAfterMs = parsed * 1000
+      }
+      accountRuntime.recordFailure(account.id, 429, Date.now(), actualModel, retryAfterMs)
     }
 
     const error = lastError || 'Request failed after retries'
@@ -893,13 +772,20 @@ export class RequestForwarder {
         }
       }
       if (first.kind === 'error') {
-        const failure = first.error as { message?: string; status?: number }
+        const failure = first.error as { message?: string; status?: number; retryAfterMs?: number }
         const message = failure.message ?? '渠道请求失败'
+        // 首块前的流式失败（含 429）同样要透传渠道包上报的解禁时刻，否则这段
+        // 与 catch 块（非流式 / 建流阶段）两套口径，流式 429 又退回「只用自退避」。
+        const retryAfter =
+          typeof failure.retryAfterMs === 'number' && Number.isFinite(failure.retryAfterMs)
+            ? String(Math.max(1, Math.ceil(failure.retryAfterMs / 1000)))
+            : undefined
         return {
           success: false,
           status: failure.status ?? 502,
           error: message,
           errorDetails: errorDetailsOf(message),
+          ...(retryAfter === undefined ? {} : { retryAfter }),
           latency: Date.now() - startTime,
         }
       }
@@ -976,13 +862,18 @@ export class RequestForwarder {
         providerSessionId: requestId,
       }
     } catch (error) {
-      const failure = error as { message?: string; status?: number }
+      const failure = error as { message?: string; status?: number; retryAfterMs?: number }
       const message = failure.message ?? '渠道请求失败'
+      const retryAfter =
+        typeof failure.retryAfterMs === 'number' && Number.isFinite(failure.retryAfterMs)
+          ? String(Math.max(1, Math.ceil(failure.retryAfterMs / 1000)))
+          : undefined
       return {
         success: false,
         status: failure.status ?? 502,
         error: message,
         errorDetails: errorDetailsOf(message),
+        ...(retryAfter === undefined ? {} : { retryAfter }),
         latency: Date.now() - startTime,
       }
     }
@@ -1091,59 +982,26 @@ export class RequestForwarder {
   ): Promise<ForwardResult> {
     const startTime = Date.now()
 
-    // 末条是工具结果时补一条极简 user，把「继续干活」的意图钉回序列尾部。触发条件是
-    // 两条同时成立（实测数据见 `trailingUserGuard.ts` 模块头）：巨大的 system 决定易感，
-    // 末条 tool 决定发作——同请求末尾补一句 user 后 15 次 0 命中，system 削到 8K 后
-    // 末条 tool 也 0 命中。网关改不了客户端的 system，能动的是序列尾部。
-    //
-    // 位置是这条修复的全部难点，四条约束：
-    // - **必须是最后一个共用点**：账号渠道、聚合条目与自建供应商三条线路只有
-    //   `doForward` 之前不分叉，而 `worker.complete()` 只覆盖渠道那一条；
-    // - **必须晚于所有把「最后一条 user」当用户输入的内部消费者** —— 请求日志的
-    //   `userInput` 与压缩活区在路由里就算好了，上下文裁剪/摘要在 `forwardChatCompletion`
-    //   的循环里跑（在本行之前），所以我们造的这句不会被当成用户本轮的诉求，
-    //   也不会被裁剪器当成「最新 user 消息」而保住它、反而丢掉真实那句；
-    // - **晚于压缩**：这句不该再被内容压缩器改写；
-    // - **早于托管工具层注入**（在 `doForward` 内部，本行之后）：注入的是提示词。
-    //
-    // 局部变量而不是改写 `request`：本函数也被摘要生成器复用，且不可变纪律要求
-    // 不污染调用方传进来的请求对象。
-    const outbound = trailingUserGuardEnabled(storeManager.getConfig().trailingUserGuard)
-      ? injectTrailingUser(request.messages)
-      : { messages: request.messages as unknown, injected: false }
-    if (outbound.injected) {
-      console.log(`[TrailingUserGuard] 末条为 tool，已追加一条 user 兜底 (request ${request.requestId ?? '-'}, provider ${provider.id})`)
-    }
-    const guardedRequest: ChatCompletionRequest = {
-      ...request,
-      messages: outbound.messages as ChatCompletionRequest['messages'],
-    }
-
     const dedicatedForwarder = this.providerForwarders.find(forwarder => forwarder.matches(provider))
     if (dedicatedForwarder) {
-      return dedicatedForwarder.forward(guardedRequest, account, provider, actualModel, startTime)
+      return dedicatedForwarder.forward(request, account, provider, actualModel, startTime)
     }
 
     // 出向 responses：不做 chat 的请求体构建与 prompt 工具注入。
     // responses 自己就有原生 tools，把工具描述塞进 messages 会变成双重提示。
     if (provider.wire === 'openai-responses') {
-      return this.forwardResponsesWire(guardedRequest, account, provider, actualModel, startTime)
+      return this.forwardResponsesWire(request, account, provider, actualModel, startTime)
     }
 
     try {
-      const transformed = this.transformRequestForPromptToolUse(guardedRequest, provider)
       const chatPath = provider.chatPath || '/chat/completions'
       const url = this.buildUrl(provider, chatPath)
       const headers = this.buildHeaders(provider, account)
-      // `transformed.tools` 是引擎的裁决结果：走原生工具时它等于客户端带来的 tools，
-      // 走提示注入时它是 `undefined`。这里必须把它当**唯一的** tools 来源 ——
-      // 直接取 `request.tools` 会在提示已经注入之后再原生发一遍工具描述（与
-      // responses wire 当初修掉的是同一个双重提示缺陷）。
-      const body = this.buildRequestBody(
-        { ...request, messages: transformed.messages, tools: transformed.tools },
-        actualModel,
-        account,
-      )
+      // 工具三件套原生透传，`buildRequestBody` 自己按 `request.tools` 组装。
+      // 托管层（把工具描述写进 system、再把回复文本解析回 tool_calls）已于 2026-11-03
+      // 退役：网关不写提示词，不支持工具的模型由能力路由（`autoRouting::hardFilterFailure`
+      // 的 `needsTools`）在候选池阶段处理，而不是靠改写对话内容去将就。
+      const body = this.buildRequestBody(request, actualModel, account)
 
       // buildRequestBody 只挑白名单字段；每模型参数里的其余键（top_k、seed、reasoning_effort…）
       // 在这里显式补进上游请求体。保留字段 model/messages/stream 不允许被覆盖。
@@ -1217,13 +1075,10 @@ export class RequestForwarder {
           status: response.status,
           headers,
           upstreamRequestId: upstreamRequestIdOf(response.headers),
-          stream: wrapStreamWithPlan(probed.stream, transformed.plan) as any,
-          skipTransform: transformed.plan.shouldParseResponse,
+          stream: probed.stream as any,
           latency: Date.now() - startTime,
         }
       }
-
-      this.applyToolCallsToResponse(response.data, transformed)
 
       return {
         success: true,
@@ -1538,7 +1393,7 @@ export class RequestForwarder {
       body.user = request.user
     }
 
-    // 工具三件套只在**有工具**时成组发出（原生模式由 `transformed.tools` 决定）。
+    // 工具三件套只在**有工具**时成组发出。
     // 定义先清洗：Codex 的 `tool_search` 占位定义 `function.name:''` 会被严格
     // 上游整条拒绝；缺 `parameters` 的 freeform 工具同样会被 Agnes 等拒收。
     if (request.tools !== undefined && request.tools.length > 0) {

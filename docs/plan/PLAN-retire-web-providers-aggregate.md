@@ -1,7 +1,16 @@
 # PLAN：退役 web 页面接入，上线聚合供应商目录与免密免费池
 
 日期：2026-10-28
-状态：待拍板（Q1–Q7）
+状态：**已实现并收口（2026-11-03）**。P0–P5 全部落地，Q1–Q7 均已裁定（见 §6）；
+其中 Q1 的「不上线」后来被推翻，账号渠道改由渠道包通道上线 13 个，见 §6 与
+`PLAN-workbuddy-adaptation.md`。
+
+> ⚠️ 本文档 §1.1 的「76 条 / 502 模型」是**参考仓库 v2.7.2 原始快照**的读数，
+> 不是本仓落库后的读数。本仓实际为 **79 条 / 500 个模型**（剔除 3 条、增补若干、
+> 删 7 行上游已停服模型、撤 1 条），以 `tests/aggregate/registry.test.ts` 的两个
+> 断言为准。2026-11-03 发现 `AGENTS.md` 与 `docs/AGENTS-full.md` 还写着旧的
+> 「74 条 / 473 模型」，已改正；配额 sidecar 那一节里的「16 of 74」是**另一个口径**
+> （配额票据覆盖的条目数，不是目录条数），不要跟着改。
 
 ## 0. 裁定与边界
 
@@ -154,17 +163,17 @@
 3. 全量门禁：build + 两份 tsc + 全量 test 只在最后一次跑
 4. 真机冒烟：`/v1/models` 命名空间正确；Kilo 免密请求 200；启停与 Key 掩码
 
-## 4. 待拍板
+## 4. 待拍板 —— 七问全部已裁定（2026-11-03 回写）
 
-| # | 事项 | 建议 | 代价 |
-| --- | --- | --- | --- |
-| Q1 | OFM 的 10 个账号渠道是否也上线 | 不上线：与被退役的网页登录同类 | 少 10 家「登录即用」入口 |
-| Q2 | 匿名 OpenCode 免费车道是否移植（需伪造 v2 客户端指纹） | 不移植：本机实测已 429，且是对闸门的绕过；`opencode` 本机运行时提供同一批模型 | 免费模型可用性取决于该运行时额度 |
-| Q3 | 模型名是否加 `provider/` 命名空间 | 加：502 个模型重名太多，不加则路由不可预测 | 客户端模型名变长；旧名不再广播 |
-| Q4 | UI 形态 | 一个「聚合渠道」页，按需建供应商 | 新增 1 页；不动现有 ProviderCard |
-| Q5 | 退役后是否删除已存账密 | 删除，先备份 data.json | 用户需重新填 Key（本来也要换） |
-| Q6 | 聚合供应商的参数策略 | 直通，不套内置那套静默丢弃 | 少数端点会因未知字段 400，按错误如实回报 |
-| Q7 | Responses 线路 | 不做；`openai_api` 走 chat | ChatGPT 订阅 OAuth 与 FleetRelay 不上线 |
+| # | 事项 | 建议 | 代价 | 裁定结果 |
+| --- | --- | --- | --- | --- |
+| Q1 | OFM 的 10 个账号渠道是否也上线 | 不上线：与被退役的网页登录同类 | 少 10 家「登录即用」入口 | **建议被推翻**：账号渠道后来经 vendored 渠道包上线 13 个（`catalogue.ts`），见 `PLAN-workbuddy-adaptation.md`；与被退役的「宿主逆向网页接口」是两回事 |
+| Q2 | 匿名 OpenCode 免费车道是否移植（需伪造 v2 客户端指纹） | 不移植：本机实测已 429，且是对闸门的绕过；`opencode` 本机运行时提供同一批模型 | 免费模型可用性取决于该运行时额度 | **不移植，已按建议落地**；补充：`opencode` 本机运行时也已于 2026-11-01 退役（npm `opencode-ai` 线冻结 1.19.5、官方拒装 2.x，无可用分发），其模型改由渠道包 `opencode` 账号渠道提供 |
+| Q3 | 模型名是否加 `provider/` 命名空间 | 加：502 个模型重名太多，不加则路由不可预测 | 客户端模型名变长；旧名不再广播 | **加，已落地**：`manager.ts:913` 写 `preferredProviderId` 映射，README 同步 |
+| Q4 | UI 形态 | 一个「聚合渠道」页，按需建供应商 | 新增 1 页；不动现有 ProviderCard | **已落地**：`pages/Aggregate.tsx` |
+| Q5 | 退役后是否删除已存账密 | 删除，先备份 data.json | 用户需重新填 Key（本来也要换） | **已落地**：`shared/types.ts:26` `RETIRED_PROVIDER_IDS` 八家；启动时 `store/store.ts:617-627` 清无主账号与 userModelOverrides |
+| Q6 | 聚合供应商的参数策略 | 直通，不套内置那套静默丢弃 | 少数端点会因未知字段 400，按错误如实回报 | **已落地（有一处偏差，见 §6）**：默认确实直通；但注册表允许条目声明 `dropParams` 显式丢弃规则（79 条中 2 条声明），规则注册在案且有专测（`tests/proxy/aggregate-drop-params.test.ts`），不是内置那套无声明静默丢 |
+| Q7 | Responses 线路 | 不做；`openai_api` 走 chat | ChatGPT 订阅 OAuth 与 FleetRelay 不上线 | **已落地**：`registry.ts` 剔除 `openai`/`github_copilot`/`fleetrelay_t1`，`openai_api` 走 chat |
 
 ## 5. 验收口径
 
@@ -174,3 +183,30 @@
   一次真实流式请求；Kilo 免密请求必须有 200 读数
 - 退役面自证：启动后 `data.json` 不再含 8 家 provider 与其账号；
   `/v1/models` 不再广播这 8 家的任何模型
+
+## 6. 收口记录（2026-11-03）
+
+逐条对账（全部为本机源码读数）：
+
+| 计划项 | 证据 |
+| --- | --- |
+| P1.1–1.2 删 8 builtin + 8 适配器 + 8 OAuth 适配器 | `providers/builtin/` 只剩 `index.ts`（注册表空壳）；`proxy/adapters/` 只剩 `anthropic.ts` + `index.ts`；`oauth/adapters/` 只剩 `base.ts` + `index.ts`（工厂留扩展点） |
+| P1.3 删 8 forwarder 方法 | `forwarder.ts` 无任何退役供应商字样 |
+| P1.4 删 5 专属 reader | `kimi-available-models` / `qwen-cn-model-list` / `minimax-cloud-config` / `mimo-bot-config` / `qwen-double-data` 全仓零命中；`READERS` 只剩 `openai-list` + `openai-free-list`，`auto` 按序遍历 |
+| P1.5 删 promptToolUse / transcript | 两文件已不存在 |
+| P1.6 删 DEFAULT_DEEPSEEK_MODEL_MAPPINGS | 全仓零命中 |
+| P1.7 凭据迁移 | `RETIRED_PROVIDER_IDS` + 启动清账（见 Q5） |
+| P1.8 删 i18n 块 / 8 icon / docs/providers 8 篇 | 部分**漏删**，2026-11-03 本轮补刀：`LoginGuideDialog.tsx`（零引用死组件，且 import 的 6 个 SVG 早已不存在——正是死组件不进 bundle 才让绿构建掩盖了它）、两份 locale 的 `loginGuide` 块与 `qwen`/`qwen-ai`/`glm`/`minimax`/`zai` 名字块、`oauth` 块 27 个死键（保留 `validating`，4 处在册引用）。图标与 docs/providers 在退役当时已删净 |
+| P1.9 删相关测试 | `tests/providers/provider-adapter-loading.test.js` 反向断言 8 家适配器不得回归 |
+| P2 注册表 / manager / anthropic 线路 / 命名空间 | `registry.ts` 79 条 / 500 模型（`tests/aggregate/registry.test.ts:13,20`）；`manager.ts` CRUD/探测/覆盖；`anthropic-wire.test.ts` |
+| P3 免密池 | `kilo` 条目 `authKind:'none'`、baseUrl `https://api.kilo.ai/api/gateway`；`openai-free-list` reader 按 `isFree===true` 过滤（`manager.ts:1032` 对 kilo 指定该 reader） |
+| P4 UI | `pages/Aggregate.tsx` |
+| P5 文档 | `AGENTS.md` / `docs/AGENTS-full.md` / README 双语均已写入聚合目录契约；本轮修正两处陈年读数 **74 条/473 → 79 条/500**（AGENTS-full 配额章节的「16 of 74」是票据口径、不是目录条数，不动） |
+
+**与计划的偏差**（Q6 之外另记两处）：
+
+1. §2.4「默认模型保留 `kilo-auto/free`，当前 16 个免费模型」——注册表静态清单只钉了
+   4 个 id，实际免费池以实时 `GET /models` 的 `isFree:true` 为准，静态清单仅作离线兜底。
+2. `builtinProviders` 已彻底空壳（含 `opencode` 于 2026-11-01 退役，见 Q2 补充），
+   「保留 opencode 本机运行时」这条边界后来也被现实推翻——不是策略变更，是该运行时
+   失去了可用分发。

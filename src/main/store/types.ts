@@ -18,20 +18,17 @@ import type {
   AggregateWire,
   ModelCapabilityHint,
   CompressionConfig,
-  OutputSteeringConfig,
   AnthropicInboundConfig,
 } from '../../shared/types.ts'
 import type { ChannelLoginKind } from '../../shared/channels.ts'
 import {
   DEFAULT_AUTO_ROUTING_CONFIG,
   DEFAULT_COMPRESSION_CONFIG,
-  DEFAULT_OUTPUT_STEERING_CONFIG,
 } from '../../shared/types.ts'
-import type { LegacyToolPromptConfig, ToolCallingConfig } from '../../shared/toolCalling.ts'
-import { DEFAULT_TOOL_CALLING_CONFIG } from '../../shared/toolCalling.ts'
 import { RETIRED_PROVIDER_IDS } from '../../shared/types.ts'
 import type { DayTokenBucket } from '../../shared/tokenAccounting.ts'
 import type { AggregateCreditSnapshot, AggregateCreditSnapshots } from '../../shared/aggregateCredit.ts'
+import type { RepetitionGuardSettings } from '../../shared/streamRepetition.ts'
 
 /**
  * 实时额度快照的落盘键。类型只在 `shared/aggregateCredit.ts` 声明一次，这里同步
@@ -306,6 +303,11 @@ export interface AppConfig {
   httpsSanHosts: string[]
   /** Load balance strategy */
   loadBalanceStrategy: LoadBalanceStrategy
+  /**
+   * 流内重复退化判据（Bandit 的第二类 degraded 信号）。与
+   * `shared/types.ts::AppConfig` 同一字段，缺省即出厂阈值。
+   */
+  streamRepetitionGuard?: RepetitionGuardSettings
   /** Model mapping configuration */
   modelMappings: Record<string, ModelMapping>
   /** UI theme */
@@ -335,12 +337,6 @@ export interface AppConfig {
    * between them), so both copies must carry it.
    */
   defaultMaxOutputTokens?: number
-  /**
-   * 末条是工具结果时补一条极简 user，把「继续干活」的意图钉回序列尾部。
-   * 可选且**默认开**（只有显式 `false` 才关）—— 与 `src/shared/types.ts` 同一份声明，
-   * 两处都要写，缺一处 UI 就读不到。判据见 `proxy/trailingUserGuard.ts`。
-   */
-  trailingUserGuard?: boolean
   /** API Key list */
   apiKeys: ApiKey[]
   /** Whether to enable API Key authentication */
@@ -349,10 +345,6 @@ export interface AppConfig {
   oauthProxyMode: 'system' | 'none'
   /** Session management configuration */
   sessionConfig: SessionConfig
-  /** Tool calling configuration */
-  toolCallingConfig: ToolCallingConfig
-  /** Legacy migration input from pre-v2 tool prompt settings */
-  toolPromptConfig?: LegacyToolPromptConfig
   /** Management API configuration */
   managementApi: ManagementApiConfig
   /** Context management configuration */
@@ -382,8 +374,6 @@ export interface AppConfig {
   seededPresetRoutes?: string[]
   /** Live-zone context compression (shipped default: on — see DEFAULT_COMPRESSION_CONFIG) */
   compression: CompressionConfig
-  /** Output-side verbosity steering (off by default) */
-  outputSteering: OutputSteeringConfig
   /**
    * `/v1/messages` 入向的模型解析与清单申报规则。缺席即默认行为
    * （请求名能解析就原样用，否则落 `auto`）。
@@ -432,21 +422,11 @@ export interface TokenLimitConfig {
 }
 
 /**
- * Summary Configuration Interface
- * Controls context summarization strategy
- */
-export interface SummaryConfig {
-  /** Whether summary strategy is enabled */
-  enabled: boolean
-  /** Number of recent messages to keep after summarization */
-  keepRecentMessages: number
-  /** Custom summary prompt template (optional) */
-  summaryPrompt?: string
-}
-
-/**
  * Context Management Configuration Interface
  * Controls how conversation context is managed and trimmed
+ *
+ * `summary` was retired on 2026-11-03 together with the gateway-authored-text ruling; trimming is
+ * deletion-only. The runtime authority for the shape is `proxy/services/contextManagementService.ts`.
  */
 export interface ContextManagementConfig {
   /** Whether context management is enabled */
@@ -455,10 +435,9 @@ export interface ContextManagementConfig {
   strategies: {
     slidingWindow: SlidingWindowConfig
     tokenLimit: TokenLimitConfig
-    summary: SummaryConfig
   }
   /** Execution order of strategies */
-  executionOrder: ('slidingWindow' | 'tokenLimit' | 'summary')[]
+  executionOrder: ('slidingWindow' | 'tokenLimit')[]
 }
 
 /**
@@ -522,8 +501,6 @@ export interface SessionConfig {
   /** Max active sessions per account, default 3 */
   maxSessionsPerAccount: number
 }
-
-export type { LegacyToolPromptConfig, ToolCallingConfig }
 
 /**
  * Management API Configuration Interface
@@ -802,8 +779,6 @@ export const DEFAULT_STATISTICS: PersistentStatistics = {
  */
 export const DEFAULT_USER_MODEL_OVERRIDES: UserModelOverrides = {}
 
-export const DEFAULT_TOOL_CALLING_CONFIG_VALUE = DEFAULT_TOOL_CALLING_CONFIG
-
 /**
  * Default Management API Configuration
  */
@@ -820,9 +795,8 @@ export const DEFAULT_CONTEXT_MANAGEMENT_CONFIG: ContextManagementConfig = {
   strategies: {
     slidingWindow: { enabled: true, maxMessages: 20 },
     tokenLimit: { enabled: false, maxTokens: 4000 },
-    summary: { enabled: false, keepRecentMessages: 20 },
   },
-  executionOrder: ['slidingWindow', 'tokenLimit', 'summary'],
+  executionOrder: ['slidingWindow', 'tokenLimit'],
 }
 
 export const DEFAULT_REQUEST_LOG_CONFIG: RequestLogConfig = {
@@ -882,8 +856,6 @@ export const DEFAULT_CONFIG: AppConfig = {
   enableApiKey: false,
   oauthProxyMode: 'system',
   sessionConfig: DEFAULT_SESSION_CONFIG,
-  toolCallingConfig: DEFAULT_TOOL_CALLING_CONFIG,
-  toolPromptConfig: undefined,
   managementApi: DEFAULT_MANAGEMENT_API_CONFIG,
   contextManagement: DEFAULT_CONTEXT_MANAGEMENT_CONFIG,
   autoRouting: DEFAULT_AUTO_ROUTING_CONFIG,
@@ -894,7 +866,6 @@ export const DEFAULT_CONFIG: AppConfig = {
   // 一旦它预置了这个键，全新安装与重置都会被判成「已迁移」，谁也不会再建 auto 路由。
   // 于是新装/重置走「键不存在」分支：用 legacy `autoRouting` 生成一条名为 `auto` 的路由。
   compression: DEFAULT_COMPRESSION_CONFIG,
-  outputSteering: DEFAULT_OUTPUT_STEERING_CONFIG,
   dismissedAutoProviders: [],
 }
 

@@ -1,10 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSearchParams } from 'react-router-dom'
-import { ArrowRight, Database, Wrench } from 'lucide-react'
+import { ArrowRight, Database } from 'lucide-react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ModelList } from '@/components/models'
-import { ToolCallingPanel } from '@/components/models/ToolCallingPanel'
 import { ModelMappingConfig } from '@/components/proxy'
 import { useProxyStore } from '@/stores/proxyStore'
 
@@ -23,7 +22,7 @@ export function Models() {
   }, [fetchAppConfig])
 
   useEffect(() => {
-    if (tabFromUrl && ['list', 'mapping', 'tool-calling'].includes(tabFromUrl)) {
+    if (tabFromUrl && ['list', 'mapping'].includes(tabFromUrl)) {
       setActiveTab(tabFromUrl)
     }
   }, [tabFromUrl])
@@ -41,7 +40,7 @@ export function Models() {
       </div>
 
       <Tabs value={activeTab} onValueChange={handleTabChange} className="w-full">
-        <TabsList className="grid h-auto w-full grid-cols-3">
+        <TabsList className="grid h-auto w-full grid-cols-2">
           <TabsTrigger value="list" className="flex items-center gap-2 py-2">
             <Database className="h-4 w-4" />
             <span className="hidden sm:inline">{t('models.modelList')}</span>
@@ -49,10 +48,6 @@ export function Models() {
           <TabsTrigger value="mapping" className="flex items-center gap-2 py-2">
             <ArrowRight className="h-4 w-4" />
             <span className="hidden sm:inline">{t('models.modelMapping')}</span>
-          </TabsTrigger>
-          <TabsTrigger value="tool-calling" className="flex items-center gap-2 py-2">
-            <Wrench className="h-4 w-4" />
-            <span className="hidden sm:inline">{t('models.toolCalling')}</span>
           </TabsTrigger>
         </TabsList>
 
@@ -62,10 +57,6 @@ export function Models() {
 
         <TabsContent value="mapping" className="mt-6">
           <ModelMappingConfig />
-        </TabsContent>
-
-        <TabsContent value="tool-calling" className="mt-6">
-          <ToolCallingPanel />
         </TabsContent>
       </Tabs>
     </div>

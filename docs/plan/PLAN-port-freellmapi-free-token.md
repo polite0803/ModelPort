@@ -1,7 +1,7 @@
 # PLAN：聚合渠道的免费额度层（实测驱动版）
 
 - 日期：2026-10-29
-- 状态：待拍板（Q1–Q3）
+- 状态：已实现 + 外部端点探测（Q1–Q3 已裁定且落地；额度响应字段仍需有效 Key 验证，2026-11-03）
 - 来源参考：https://github.com/tashfeenahmed/freellmapi （MIT，已克隆逐文件核对）
 - 基线：main @ ac62cea
 - **范围：只作用于 `type === 'aggregate'` 的聚合目录供应商。** builtin / custom / 10 个账号渠道全部不动。
@@ -159,3 +159,5 @@ E 断"裸名命中 ≥2 家时第一条 429 后由第二家成功应答，且请
 - **五态未动**：`aggregateQuotaView.ts` 的五个状态一个字没改，实时余量是旁边独立一行（`tests/renderer/aggregate-credit-wiring.test.mjs` 断言它不喂 `quotaViewOf`）。
 - **判据**：`tests/aggregate/credit-readers.test.ts`（解析层，含「解析器不 import 传输/store/fs」）、`tests/aggregate/credit-query-fetch.test.ts`（本地替身，绝不打真实域）、`tests/proxy/quota-credit-gate.test.ts`（TTL 两侧 + 无快照时与改动前逐值相同 + 落盘形状）、`tests/renderer/aggregate-credit-wiring.test.mjs`（四环接线 + 双语同键）。负控：把 TTL 改成 365 天 → 2 条红（已还原复绿 21/21）。
 - **本轮做不了、必须真机点一次才知道的一件事**：两个响应形状来自 §1 第 3 行的转录记录，本轮没有任何真机报文。字段拼写（余额是不是就叫 `balance`）与 `api.siliconflow.com` 这个 host 通不通，都要在界面上点一次才知道；对不上时解析器报 `unexpected-shape` 并显示在界面上，不会伪装成一个数。
+
+**外部探测补充（2026-11-03，C 组自行查询）**：两个 host 均可达，端点均存在，未携带有效 Key 时都返回标准 JSON 401。OpenRouter `GET /key` 返回 `{"error":{"message":"No cookie auth credentials found","code":401}}`；SiliconFlow `GET /user/info` 返回 `{"code":30014,"data":null,"message":"Token is invalid."}`。这只能证明“host 可达、路由存在、鉴权 fail-closed”，**不能**证明成功响应里的字段拼写；`openrouter-key` / `siliconflow-user-info` 读取器暂不改，`unexpected-shape` 兜底仍然有效。

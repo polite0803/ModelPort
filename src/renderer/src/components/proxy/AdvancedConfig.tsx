@@ -28,14 +28,12 @@ export function AdvancedConfig({ onConfigChange }: AdvancedConfigProps) {
     timeout: (proxyConfig.timeout / 1000).toString(),
     retryCount: proxyConfig.retryCount.toString(),
     outputCap: proxyConfig.defaultMaxOutputTokens?.toString() ?? '',
-    trailingUserGuard: proxyConfig.trailingUserGuard !== false,
   })
 
   const [formData, setFormData] = useState({
     timeout: (proxyConfig.timeout / 1000).toString(),
     retryCount: proxyConfig.retryCount.toString(),
     outputCap: proxyConfig.defaultMaxOutputTokens?.toString() ?? '',
-    trailingUserGuard: proxyConfig.trailingUserGuard !== false,
   })
   
   const [errors, setErrors] = useState<FormErrors>({})
@@ -46,7 +44,6 @@ export function AdvancedConfig({ onConfigChange }: AdvancedConfigProps) {
       timeout: (proxyConfig.timeout / 1000).toString(),
       retryCount: proxyConfig.retryCount.toString(),
       outputCap: proxyConfig.defaultMaxOutputTokens?.toString() ?? '',
-      trailingUserGuard: proxyConfig.trailingUserGuard !== false,
     }
     setFormData(newFormData)
     initialFormDataRef.current = newFormData
@@ -100,12 +97,6 @@ export function AdvancedConfig({ onConfigChange }: AdvancedConfigProps) {
     onConfigChange?.()
   }
 
-  const handleTrailingUserGuardChange = (checked: boolean) => {
-    setFormData(prev => ({ ...prev, trailingUserGuard: checked }))
-    setHasChanges(true)
-    onConfigChange?.()
-  }
-
   const handleSave = async () => {
     const timeoutError = validateTimeout(formData.timeout)
     const retryError = validateRetryCount(formData.retryCount)
@@ -131,7 +122,6 @@ export function AdvancedConfig({ onConfigChange }: AdvancedConfigProps) {
       timeout: parseInt(formData.timeout, 10) * 1000,
       retryCount: parseInt(formData.retryCount, 10),
       defaultMaxOutputTokens: outputCap,
-      trailingUserGuard: formData.trailingUserGuard,
     }
 
     setProxyConfig(newProxyConfig)
@@ -140,7 +130,6 @@ export function AdvancedConfig({ onConfigChange }: AdvancedConfigProps) {
       requestTimeout: newProxyConfig.timeout,
       retryCount: newProxyConfig.retryCount,
       defaultMaxOutputTokens: outputCap,
-      trailingUserGuard: formData.trailingUserGuard,
     })
 
     if (success) {
@@ -262,25 +251,6 @@ export function AdvancedConfig({ onConfigChange }: AdvancedConfigProps) {
               />
               <p className="text-xs text-muted-foreground">
                 {t('proxy.outputCapFallbackHelp')}
-              </p>
-            </div>
-
-            <div className="space-y-2">
-              <Label
-                htmlFor="trailingUserGuard"
-                className="flex items-center gap-2 cursor-pointer"
-              >
-                <input
-                  id="trailingUserGuard"
-                  type="checkbox"
-                  className="h-4 w-4 rounded border-input accent-primary"
-                  checked={formData.trailingUserGuard}
-                  onChange={(e) => handleTrailingUserGuardChange(e.target.checked)}
-                />
-                {t('proxy.trailingUserGuard')}
-              </Label>
-              <p className="text-xs text-muted-foreground">
-                {t('proxy.trailingUserGuardHelp')}
               </p>
             </div>
           </div>

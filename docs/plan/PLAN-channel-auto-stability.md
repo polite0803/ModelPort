@@ -178,7 +178,14 @@ anthropic 信封（`server.ts:145`）✅、`count_tokens` ✅、块骨架/工具
 `tests/proxy/failover.test.ts` 的「人工介入类的换家分支…」与
 `tests/api/response-contract.test.ts` 的 risk-control 那条）。
 
-## 第四批：VS Code agent 第 2 轮起「装死」（末条 tool 兜底）
+## 第四批：VS Code agent 第 2 轮起「装死」（末条 tool 兜底）—— 已于 2026-11-03 退役
+
+本批的实现（`proxy/trailingUserGuard.ts`、`config.trailingUserGuard`、面板开关、请求行的
+`trailingUserGuardHits` 与那两个测试文件）已按裁定「本网关不注入任何提示词」整条删除。
+**下面的症状与消融证据仍然成立**——它记录的是「大 system × 末条 tool」这个故障形状本身，
+以及一次单点测量（一家一模型，n=10）不能被当成稳定命中率。退役后的替代物是观测不是注入：
+`streamTrace.repetition` 判退化并撤销粘性锚点。出处表见
+`docs/AGENTS-full.md` §Gateway-Authored Text Reaching the Model 的 Retired 台账。
 
 来源是另一工具给的实施指令（`Qoder-提示词-末条tool兜底修复.md`，随后被它自己发布的
 `对比证据与判定修正-给Qoder.md` 更正）。审查结论分三层：
@@ -255,10 +262,14 @@ VS Code 里跑的另一个名字）成功一次，就把这个模型的退避连
 - 负控：`同渠道别的模型成功，不得解除本模型的限流档` —— 旧实现在这条必红。接线门钉五个
   调用点，其正则已用旧写法做过去相关验证（漏 model ⇒ 红）。
 
-未闭环的一条：本批改的是「被限流后别再反复撞」，**没有**改「什么时候算限流结束」。渠道包
-报的解禁时刻仍然只往前推 60s，宿主现在会在自己的模型档里记到 10 分钟，但派单前不读渠道包
-那句时刻。真实效果要在 131 上装带本批的构建后，用同样的重放节奏（每 20s 一笔 ×10）看
-「均在限流中」的笔数与解禁时刻的推进是否停下。
+未闭环的一条：本批改的是「被限流后别再反复撞」，**没有**改「什么时候算限流结束」。
+
+✅ **已闭环（2026-11-03，本轮代码落地）**：渠道包上报的 `providerRetryAfterMs` 现已在宿主侧完整接线：
+- `src/main/channelPack/bridge.ts`：`ChannelBridgeError` 新增 `retryAfterMs` 字段，`case 'error'` 读取 `message.providerRetryAfterMs`（number 且有限）透传给构造函数第三参；
+- `src/main/proxy/accountRuntime.ts`：`recordFailure` / `recordRateLimitFailure` 新增可选尾参 `retryAfterMs`；429 且带 model 时，冷却到期取「自己指数退避」与「上游时刻（`now + retryAfterMs`）」更晚的那个；
+- `src/main/proxy/forwarder.ts`：`forwardAccountChannel` catch 块把 bridge error 的 `retryAfterMs` 写进 `ForwardResult.retryAfter`（秒字符串）；429 记冷却处把 `retryAfter` 解析成毫秒数喂进 `recordFailure`。
+
+真实效果需在 131 上装带本批的构建后，用同样的重放节奏（每 20s 一笔 ×10）看「均在限流中」的笔数与解禁时刻的推进是否停下。
 
 ## 验收
 
@@ -290,4 +301,4 @@ VS Code 里跑的另一个名字）成功一次，就把这个模型的退避连
 - **404 信封**：带头时用仓里既有的 `anthropicErrorBody(msg, anthropicErrorTypeOf(404))`（`messages.ts::failWith` 与 `server.ts` 鉴权分支同源），不带头时原 OpenAI `model_not_found` 信封一字未动。models 路由此前没有先例，这一处按「沿用既成形状」而不是新造第三种。
 - **判据**：`tests/routes/anthropic-inbound.test.ts`（真 HTTP）两条 + `tests/shared/anthropic-wire.test.ts` 一条同源 deepEqual；后者断的是「两份构造逻辑漂移」这一类，而它正是本批把字面量收成一处之后才可证伪的形态。
 - **负控**：把分派改回恒 OpenAI 形状 → 新增两条同时红（形状断言与一致性断言）；把 `anthropicModelRow` 的名字来源改成恒取路由名 → 纯函数那条红。均已还原并复跑。
-- **未做的相邻面**：`/v1/api-definition/providers` 仍没有 anthropic 分派。Claude Desktop 若走能力发现而不是 `/v1/models`，那里是下一个同源缺口——本批未动，因为不在三条线的任何一条里。
+- **相邻面（已按用户拍板实现 B-a，2026-11-03）**：新增 `GET /v1/api-definition/providers`（`src/main/proxy/routes/apiDefinition.ts`），返回 `{ object: 'list', data: [{ name, context_window? }] }`。清单同源取 `enabledModelRoutes` + `resolvePoolRoute` 成功集合，`context_window` 复用 `autoRouter.advertisedContextFloors()` 的路由下界；每个响应都带 `X-Request-Id`。这是 **ModelPort 网关自定义发现形状，不是 Claude Desktop / Anthropic 契约**：不做 `anthropic-version` 分派，也不做单查 detail，未广告名仍由 server 通用兜底返回 404。判据在 `tests/routes/api-definition.test.ts`。

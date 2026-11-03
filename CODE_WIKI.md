@@ -2,11 +2,11 @@
 
 ## 1. 项目概述
 
-ModelPort 是一个多平台 AI 服务统一管理工具，把任意 OpenAI 兼容端点汇总为一份本地 API。它内置 `opencode` 本机运行时、74 条带 Key / 免密的聚合渠道目录（含 Kilo 免费池）、12 个登录账号通道以及自定义供应商，并与 openclaw、Cline、Roo-Code 等工具无缝集成，使任何 OpenAI 兼容客户端都能开箱即用。
+ModelPort 是一个多平台 AI 服务统一管理工具，把任意 OpenAI 兼容端点汇总为一份本地 API。它内置 79 条带 Key / 免密的聚合渠道目录（含 Kilo 免费池）、13 个账号渠道（浏览器 / 设备码 / API Key）以及自定义供应商，并与 openclaw、Cline、Roo-Code 等工具无缝集成，使任何 OpenAI 兼容客户端都能开箱即用。
 
 ### 核心功能
 - OpenAI 兼容 API：提供标准的 OpenAI 兼容 API 端点，实现无缝集成
-- 多提供商支持：74 条聚合渠道（API Key / 免费额度 / 本机）、12 个登录账号通道以及自定义供应商
+- 多提供商支持：79 条聚合渠道（API Key / 免费额度 / 本机）、13 个账号渠道以及自定义供应商
 - 上下文管理：智能对话上下文管理，支持滑动窗口、令牌限制和摘要策略
 - 函数调用支持：通过提示工程实现所有模型的通用工具调用能力，兼容 Cherry Studio、Kilo Code 等客户端
 - 模型映射：灵活的模型名称映射，支持通配符和首选提供商/账户选择
@@ -39,7 +39,6 @@ ModelPort/
 │   │   ├── oauth/              # OAuth 认证
 │   │   ├── providers/          # 提供商管理
 │   │   ├── channelPack/        # 账号通道宿主（worker / bridge / compat）
-│   │   ├── opencode/           # opencode 本机运行时桥接
 │   │   ├── requestLogs/        # 请求日志
 │   │   ├── appLogs/            # 应用日志
 │   │   ├── window/             # 窗口管理
@@ -97,10 +96,6 @@ ModelPort/
 - 拉起 `vendor/channel-pack` 的 worker 进程并收发消息（`bridge.ts`）
 - 工具调用历史预校验（`toolCallValidation.ts`）与推理内容回放（`reasoningReplay.ts`）
 - `compat/` 提供上游私有包的兼容垫片，仅通过 esbuild alias 生效
-
-#### 3.1.7 opencode 运行时桥接 (src/main/opencode/)
-- 本机运行时的进程管理、会话与流式读取
-- 工具信封校验（`envelopeSchema.ts`）、并发预算（`concurrency.ts`）、能力探测（`probe.ts`）
 
 ### 3.2 渲染进程 (Renderer Process)
 
@@ -304,11 +299,10 @@ npm run start:sandbox
 
 ### 7.3 提供商配置
 
-提供商分为四类：
+提供商分为三类：
 
-- `opencode`：本机运行时，无需凭证，模型列表来自运行时
-- 聚合目录：74 条渠道（API Key / 免费额度 / 本机），每条保存后生成 `provider/model` 命名空间的供应商记录
-- 登录账号通道：12 个浏览器 / 设备码登录通道，账户池与模型目录由 `vendor/channel-pack` 提供
+- 聚合目录：79 条渠道（API Key / 免费额度 / 本机），每条保存后生成 `provider/model` 命名空间的供应商记录
+- 账号渠道：13 个浏览器 / 设备码 / API Key 账号通道，账户池与模型目录由 `vendor/channel-pack` 提供
 - 自定义供应商：自行填入任意 OpenAI 兼容端点
 
 API Key 类条目需要填入对应的密钥；Kilo 这类免密条目保存时会创建空凭据的本地账户，无需额外配置即可路由。
@@ -331,14 +325,14 @@ API Key 类条目需要填入对应的密钥；Kilo 这类免密条目保存时�
 | `tests/proxy/` | 转发与额度：重试策略、计量、流式结果、消息角色 |
 | `tests/shared/` | 主进程 / 渲染进程共享纯函数：聚合路由、成本分类、响应线格式 |
 | `tests/aggregate/` | 聚合目录转录与多 Key 行为 |
-| `tests/channels/` | 12 个登录账号通道的不变量（模型目录、上下文窗口、用量口径、推理回放等） |
-| `tests/compression/` | 上下文压缩：门禁、live zone、选行、CCR 标记、装配 |
-| `tests/providers/` | 提供商适配器、模型列表读取、端点策略、opencode 运行时 |
+| `tests/channels/` | 13 个账号渠道的不变量（模型目录、上下文窗口、用量口径、推理回放等） |
+| `tests/compression/` | 上下文压缩：门禁、live zone、选行、日志/搜索压缩器、CCR 标记、装配 |
+| `tests/providers/` | 提供商适配器、模型列表读取、端点策略 |
 | `tests/tool-calling/` | 工具调用引擎、协议适配器、策略与解析 |
 | `tests/store/`、`tests/renderer/`、`tests/ipc/`、`tests/main/`、`tests/build/`、`tests/updater/`、`tests/app-logs/`、`tests/request-logs/` | 存储、渲染层、IPC、入口、构建产物守卫与日志 |
 | `tests/skills/` | 随仓库分发的技能说明文档一致性检查 |
 
-**必须用 Node 24+ 运行。** 仓库里的 `.ts` 用例依赖 Node 原生的 TypeScript 支持，Node 22 会在
+**必须用 Node 22.18+ 运行（CI 固定 Node 24）。** 仓库里的 `.ts` 用例依赖 Node 原生的 TypeScript 支持，过旧的 Node 22 会在
 `node --test` 阶段整片报 `ERR_UNKNOWN_FILE_EXTENSION`，看起来像"测试全挂"，实际是运行时太老。
 门禁命令见 `package.json` 的 `scripts`。
 
@@ -404,7 +398,7 @@ GNU General Public License v3.0。详见 [LICENSE](LICENSE) 文件。
 
 ### v1.5.0
 - 退役 8 家 Web UI 页面接入供应商（DeepSeek / GLM / Kimi / Mimo / MiniMax / Qwen / Qwen AI / Z.ai），启动时清理其供应商、账户与模型映射
-- 新增 74 条聚合渠道目录（API Key / 免费额度 / 本机），支持 openai-chat 与 anthropic-messages 两种线路
+- 新增 79 条聚合渠道目录（API Key / 免费额度 / 本机），支持 openai-chat 与 anthropic-messages 两种线路
 - 新增 Kilo 免密免费池（`kilo-auto/free`，仅保留 `isFree` 模型）
 - 新增聚合渠道页面与 `aggregate:*` IPC 通道
 

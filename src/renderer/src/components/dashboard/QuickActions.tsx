@@ -2,11 +2,10 @@ import { useTranslation } from 'react-i18next'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
-import { Plus, FileText, Settings2, Wrench, Zap } from 'lucide-react'
+import { Plus, FileText, Settings2, Zap } from 'lucide-react'
 
 export interface QuickActionsProps {
   onAddAccount: () => void
-  onToolCalling: () => void
   onViewLogs: () => void
   onOpenProxy: () => void
   className?: string
@@ -14,7 +13,6 @@ export interface QuickActionsProps {
 
 export function QuickActions({
   onAddAccount,
-  onToolCalling,
   onViewLogs,
   onOpenProxy,
   className,
@@ -39,11 +37,6 @@ export function QuickActions({
         <Button className="w-full justify-start font-normal" variant="ghost" onClick={onOpenProxy}>
           <Settings2 className="h-4 w-4" />
           {t('nav.proxy')}
-        </Button>
-
-        <Button className="w-full justify-start font-normal" variant="ghost" onClick={onToolCalling}>
-          <Wrench className="h-4 w-4" />
-          {t('quickActions.toolCalling')}
         </Button>
 
         <Button className="w-full justify-start font-normal" variant="ghost" onClick={onViewLogs}>

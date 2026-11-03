@@ -171,8 +171,6 @@ export const IpcChannels = {
   MANAGEMENT_API_UPDATE_CONFIG: 'managementApi:updateConfig',
   MANAGEMENT_API_GENERATE_SECRET: 'managementApi:generateSecret',
 
-  TOOL_CALLING_RUN_SMOKE: 'toolCalling:runSmoke',
-
   CONTEXT_MANAGEMENT_GET_CONFIG: 'contextManagement:getConfig',
   CONTEXT_MANAGEMENT_UPDATE_CONFIG: 'contextManagement:updateConfig',
 } as const

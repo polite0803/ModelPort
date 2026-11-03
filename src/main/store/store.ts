@@ -43,6 +43,7 @@ import {
 import type { AggregateCreditSnapshot, AggregateCreditSnapshots } from './types'
 import { localDayKey, recentLocalDays } from '../../shared/localDay'
 import { normalizeSanHostList } from '../../shared/httpsConfig'
+import { normalizeStreamRepetitionGuard } from '../../shared/streamRepetition'
 import {
   accumulateDayBucket,
   normalizeDayBucket,
@@ -57,13 +58,13 @@ import { RequestLogManager } from '../requestLogs/manager'
 import { normalizeRequestLogConfig } from '../requestLogs/types'
 import { setContentLoggingEnabled } from '../proxy/utils/debugContent'
 import { configureRequestDeadlines } from '../proxy/requestBudget'
+import { normalizeContextManagementConfig } from '../proxy/services/contextManagementService'
 import {
   compareStoreSnapshot,
   legacyBackupCandidates,
   orphanedPromptPayload,
   planKeySetup,
 } from './keyMigration'
-import { normalizeToolCallingConfig } from '../../shared/toolCalling'
 import { applyServed, buildModelCatalogue, namespaceModelOverrides } from './modelServing'
 import { DEFAULT_AUTO_ROUTING_CONFIG, RETIRED_PROVIDER_IDS } from '../../shared/types'
 import { normalizeAutoRoutingConfig } from './autoRoutingConfig'
@@ -89,7 +90,6 @@ import type {
 } from '../../shared/modelRouteName'
 import { validateRouteNameInput } from '../../shared/modelRouteName'
 import { normalizeCompressionConfig } from './compressionConfig'
-import { normalizeOutputSteeringConfig } from './outputSteeringConfig'
 import type { AppLogTrendPoint, AutoRoutingConfig } from '../../shared/types'
 import { AppLogManager } from '../appLogs/manager'
 import { QuotaLedger } from '../proxy/quota/ledger'
@@ -526,7 +526,6 @@ class StoreManager {
       ...DEFAULT_CONFIG,
       ...config,
     }
-    const rawToolCallingConfig = rawConfig.toolCallingConfig ?? rawConfig.toolPromptConfig
 
     // 等待时间镜像：`requestTimeout` 此前**没有任何读取者**，而真正生效的两处各有
     // 自己的字面量（HTTP 转发的 120s、渠道非流式完成的 `0`＝永不超时）。放在这里而
@@ -534,20 +533,30 @@ class StoreManager {
     // `saveAppConfig` 走通用 `STORE_SET` 整对象 raw 写，会绕过 `updateConfig`。
     configureRequestDeadlines(rawConfig.requestTimeout)
 
-    return {
+    const normalized: AppConfig = {
       ...rawConfig,
       modelMappings: normalizeModelMappingsWithDefaults(rawConfig.modelMappings),
       requestLogConfig: normalizeRequestLogConfig(
         rawConfig.requestLogConfig || DEFAULT_REQUEST_LOG_CONFIG,
       ),
-      toolCallingConfig: normalizeToolCallingConfig(rawToolCallingConfig),
-      toolPromptConfig: undefined,
       httpsSanHosts: normalizeSanHostList(rawConfig.httpsSanHosts),
       autoRouting: normalizeAutoRoutingConfig(rawConfig.autoRouting),
+      streamRepetitionGuard: normalizeStreamRepetitionGuard(rawConfig.streamRepetitionGuard),
       routes: this.normalizeRoutes(config, rawConfig),
       compression: normalizeCompressionConfig(rawConfig.compression),
-      outputSteering: normalizeOutputSteeringConfig(rawConfig.outputSteering),
+      // 摘要策略退役后，老 `data.json` 里的 `strategies.summary` 与 `executionOrder` 里那一项
+      // 都由同一个归一摘掉 —— 面板与管理 API 读到的就是运行态真正会用的那两个策略。
+      contextManagement: normalizeContextManagementConfig(rawConfig.contextManagement),
     }
+
+    // 退役掉的注入层在老 `data.json` 里留下的键。上面是 spread，死键会原样活到
+    // `getConfig()`，而 `GET/PUT /v1/management/config/:key` 的门槛是 `key in config` ——
+    // 于是 API 会报「这一格存在」，改它却没有任何代码读。读侧摘掉。
+    for (const retiredKey of ['toolCallingConfig', 'toolPromptConfig', 'trailingUserGuard', 'outputSteering']) {
+      delete (normalized as unknown as Record<string, unknown>)[retiredKey]
+    }
+
+    return normalized
   }
 
   /**
@@ -1338,26 +1347,7 @@ class StoreManager {
       ...currentConfig,
       ...updates,
     }
-    
-    // Deep merge for nested objects
-    if (updates.toolCallingConfig || updates.toolPromptConfig) {
-      const incoming = updates.toolCallingConfig ?? updates.toolPromptConfig
-      const incomingRecord = incoming && typeof incoming === 'object' ? incoming as Record<string, unknown> : {}
-      const incomingAdvanced = incomingRecord.advanced && typeof incomingRecord.advanced === 'object'
-        ? incomingRecord.advanced as Record<string, unknown>
-        : {}
 
-      newConfig.toolCallingConfig = normalizeToolCallingConfig({
-        ...currentConfig.toolCallingConfig,
-        ...incomingRecord,
-        advanced: {
-          ...currentConfig.toolCallingConfig.advanced,
-          ...incomingAdvanced,
-        },
-      })
-      newConfig.toolPromptConfig = undefined
-    }
-    
     if (updates.sessionConfig && currentConfig.sessionConfig) {
       newConfig.sessionConfig = {
         ...currentConfig.sessionConfig,

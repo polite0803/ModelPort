@@ -53,7 +53,7 @@ test('duplication is measured BEFORE compression rewrites anything', () => {
   assert.ok(
     measure < compress,
     'the duplication measurement must run before applyCompression: it reports what the CLIENT sent, ' +
-      'so a live-zone rewrite or a verbosity append must not be able to contaminate it'
+      'so a live-zone rewrite must not be able to contaminate it'
   )
 })
 
@@ -81,40 +81,19 @@ test('survivorship cannot fail a request', () => {
   )
 })
 
-test('compression runs BEFORE the managed tool layer', () => {
+test('compression is the last thing that rewrites the outbound messages', () => {
   const compress = positionOf(/applyCompression\(\{/, 'the compression call')
-  // Match the CALL (`this.` prefix), not the method's definition earlier in the
-  // file — otherwise this test compares two line numbers that say nothing about
-  // execution order. The receiver's argument may be `request` or `guardedRequest`
-  // (the local produced by the trailing-tool guard inside `doForward`); either
-  // way it is the message array handed to the tool layer, so accept both names
-  // rather than pinning one spelling.
-  const toolLayer = positionOf(
-    /this\.transformRequestForPromptToolUse\((?:guarded)?Request, provider\)/,
-    'the managed tool layer call'
+  // 2026-11-03 两处改写退役（托管工具层、verbosity 引导）之后，压缩产出的那份消息就是
+  // 出站装配读到的那一份。这里钉的是顺序，钉的更是「后面没有第二个往消息里写字的环节」。
+  const build = positionOf(
+    /const body = this\.buildRequestBody\(request, actualModel, account\)/,
+    'the outbound body build'
   )
 
-  assert.ok(
-    compress < toolLayer,
-    'compression must precede managed tool injection: injected markup is a contract, ' +
-      'not content, and must never pass through a content compressor'
-  )
-})
-
-test('the verbosity block runs AFTER compression and BEFORE the tool layer', () => {
-  const compress = positionOf(/applyCompression\(\{/, 'the compression call')
-  const steering = positionOf(/applyVerbositySteering\(/, 'the verbosity call')
-  const toolLayer = positionOf(
-    /this\.transformRequestForPromptToolUse\((?:guarded)?Request, provider\)/,
-    'the managed tool layer call'
-  )
-
-  assert.ok(compress < steering, 'verbosity steering must not run before compression')
-  assert.ok(
-    steering < toolLayer,
-    'verbosity steering must precede managed tool injection: the tool protocol appends to the ' +
-      'same system message, and a style hint must never outrank the tool contract'
-  )
+  assert.ok(compress < build, 'compression must precede the outbound body build')
+  for (const dead of ['applyVerbositySteering', 'transformRequestForPromptToolUse']) {
+    assert.equal(forwarder.includes(dead), false, `已退役的改写环节又出现在转发器里：${dead}`)
+  }
 })
 
 test('the duplication measurement is independent of the compression switch', () => {

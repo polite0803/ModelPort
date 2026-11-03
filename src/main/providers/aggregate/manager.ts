@@ -686,6 +686,7 @@ class AggregateProviderManager {
       const startedAt = Date.now()
       try {
         const headers = this.buildChatHeaders(entry, provider, account)
+        // GATEWAY-TEXT: liveness-ping — 目录存活探测，不进任何用户对话（`ddc566a` 2026-10-30）。
         const body = entry.wire === 'anthropic-messages'
           ? { model: raw, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] }
           : { model: raw, messages: [{ role: 'user', content: 'ping' }], max_tokens: 1, stream: false }

@@ -20,11 +20,8 @@ import type {
   ProviderVendor,
   ProviderStatus,
   ApiKey,
-  ToolCallingConfig,
-  LegacyToolPromptConfig,
   CompressionConfig,
   CompressionAggressiveness,
-  OutputSteeringConfig,
   AnthropicInboundConfig,
   EffectiveModel,
   CatalogueModel,
@@ -98,11 +95,8 @@ export type {
   ProviderVendor,
   ProviderStatus,
   ApiKey,
-  ToolCallingConfig,
-  LegacyToolPromptConfig,
   CompressionConfig,
   CompressionAggressiveness,
-  OutputSteeringConfig,
   AnthropicInboundConfig,
   EffectiveModel,
   CatalogueModel,
@@ -495,15 +489,6 @@ interface RequestLogEntry {
   modelContextWindow?: number
   contextFit?: 'fits' | 'overflow' | 'unknown'
   contextFitSource?: 'measured'
-  /**
-   * 「本轮请求体量 vs 这一家窗口」的读数，与 `shared/types.ts` 同形（这个镜像声明
-   * 必须一起改，否则渲染层看不到字段）。`inputTokensEstimate` 是估算，绝不进 usage。
-   */
-  inputTokensEstimate?: number
-  modelContextWindow?: number
-  contextFit?: 'fits' | 'overflow' | 'unknown'
-  /** 该 overflow 来自上游实测报错而不是判定时才有 */
-  contextFitSource?: 'measured'
   streamTrace?: RequestStreamTrace
   /** Caller identified from User-Agent by the proxy; `other` keeps the raw product name */
   client?: { id: string; label: string; version?: string }
@@ -616,41 +601,17 @@ interface StrategyConfig {
     enabled: boolean
     maxTokens: number
   }
-  summary: {
-    enabled: boolean
-    keepRecentMessages: number
-    summaryPrompt?: string
-  }
 }
 
 interface ContextManagementConfig {
   enabled: boolean
   strategies: StrategyConfig
-  executionOrder: ('slidingWindow' | 'tokenLimit' | 'summary')[]
+  executionOrder: ('slidingWindow' | 'tokenLimit')[]
 }
 
 interface ContextManagementAPI {
   getConfig: () => Promise<ContextManagementConfig>
   updateConfig: (updates: Partial<ContextManagementConfig>) => Promise<ContextManagementConfig>
-}
-
-export interface ToolCallingSmokeFixture {
-  model: string
-  stream: boolean
-  messages: Array<{ role: string; content: string }>
-  tools: Array<{
-    type: string
-    function: { name: string; description?: string; parameters?: Record<string, unknown> }
-  }>
-  tool_choice: unknown
-}
-
-interface ToolCallingAPI {
-  runSmoke: (input: { clientAdapterId: string }) => Promise<{
-    success: boolean
-    data?: { result?: { message?: string }; fixture?: ToolCallingSmokeFixture }
-    error?: { message?: string }
-  }>
 }
 
 interface ChannelsAPI {
@@ -696,7 +657,6 @@ interface ElectronAPI {
   session: SessionAPI
   managementApi: ManagementApiAPI
   contextManagement: ContextManagementAPI
-  toolCalling: ToolCallingAPI
   tray: TrayAPI
 }
 

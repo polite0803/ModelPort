@@ -29,6 +29,8 @@ import { estimateTokens } from './estimator.ts'
 import { getCcrStore } from './ccr/store.ts'
 import { isAlreadyCompressed } from './ccr/markers.ts'
 import { crushJsonArray, crushJsonDocument } from './compressors/smartCrusher.ts'
+import { compressLog } from './compressors/logCompressor.ts'
+import { compressSearch } from './compressors/searchCompressor.ts'
 import {
   pickLiveZone,
   readLiveZoneText,
@@ -95,8 +97,8 @@ function skipReport(
  * Run the compressor appropriate for `contentType`, or `null` when this content
  * class has no compressor.
  *
- * Only the two JSON shapes are wired today; log and search compressors land in
- * P2.
+ * JSON handles structured tool output; the log and search paths handle the two
+ * large plain-text families most coding clients put behind tool calls.
  */
 function compressForType(
   text: string,
@@ -122,6 +124,18 @@ function compressForType(
     const result = crushJsonDocument(text, options)
     if (!result.changed) return null
     return { text: result.text, ccrHash: result.ccrHash, strategy: 'json', contentType }
+  }
+
+  if (contentType === 'build_output') {
+    const result = compressLog(text, options)
+    if (!result.changed) return null
+    return { text: result.text, ccrHash: result.ccrHash, strategy: 'log', contentType }
+  }
+
+  if (contentType === 'search_results') {
+    const result = compressSearch(text, options)
+    if (!result.changed) return null
+    return { text: result.text, ccrHash: result.ccrHash, strategy: 'search', contentType }
   }
 
   return null

@@ -290,7 +290,7 @@ export function AnthropicInboundSettings() {
                   开 → 上游报文带 `type:"file"`；关 → 缺席进响应头与 warn 日志。 */}
               <Switch
                 id="anthropic-document-pass-through"
-                // 可选且默认开：只有显式 `false` 才关（与 `trailingUserGuard` 同一形态）。
+                // 可选且默认开：只有显式 `false` 才关。
                 checked={draft.documentPassThrough !== false}
                 onCheckedChange={checked => {
                   setDraft({ ...draft, documentPassThrough: !checked })

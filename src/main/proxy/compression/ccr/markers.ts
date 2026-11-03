@@ -24,14 +24,32 @@ export const ROW_SENTINEL_KEY = '_ccr_dropped'
 /** Hash id length used by JSON markers (48 bits — collisions are negligible). */
 export const JSON_HASH_LENGTH = 12
 
+/** Hash id length used by whole-line and whole-file compressors. */
+export const BLOCK_HASH_LENGTH = 24
+
 /** Build the sentinel object appended after dropped rows. */
 export function makeRowSentinel(hash: string, dropped: number): Record<string, string> {
   return { [ROW_SENTINEL_KEY]: `<<ccr:${hash} ${dropped}_rows_offloaded>>` }
 }
 
-/** Build the sentinel string appended after dropped scalar items. */
+/**
+ * Build the sentinel string appended after dropped scalar items.
+ *
+ * GATEWAY-TEXT: ccr-sentinel — 有损压缩必须留下可取回的指针（`9d07417` 2026-10-30）。
+ * 它进的是工具结果正文，不是提示词；带哨兵的载荷绝不二次压缩。
+ */
 export function makeItemSentinel(hash: string, dropped: number): string {
   return `… ${dropped} more items <<ccr:${hash} ${dropped}_items_offloaded>>`
+}
+
+/** Marker appended to a compressed block of log lines. */
+export function makeLogMarker(before: number, after: number, hash: string): string {
+  return `[${before} lines compressed to ${after}. Retrieve more: hash=${hash}]`
+}
+
+/** Marker appended to a compressed set of search matches. */
+export function makeSearchMarker(before: number, after: number, hash: string): string {
+  return `[${before} matches compressed to ${after}. Retrieve more: hash=${hash}]`
 }
 
 /**

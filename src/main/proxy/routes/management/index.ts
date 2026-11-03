@@ -11,7 +11,6 @@ import modelMappingsRouter from './modelMappings'
 import sessionsRouter from './sessions'
 import statisticsRouter from './statistics'
 import proxyRouter from './proxy'
-import toolCallingRouter from './toolCalling'
 import compressionRouter from './compression'
 import tlsRouter from './tls'
 
@@ -24,7 +23,6 @@ export {
   sessionsRouter,
   statisticsRouter,
   proxyRouter,
-  toolCallingRouter,
   compressionRouter,
   tlsRouter,
 }
@@ -38,7 +36,6 @@ export default [
   sessionsRouter,
   statisticsRouter,
   proxyRouter,
-  toolCallingRouter,
   compressionRouter,
   tlsRouter,
 ]

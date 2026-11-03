@@ -2,6 +2,7 @@
 
 > 基线：`Ebony-Vinyl/dsh-our-free-model` **v2.5.1**（commit `3df868aaeaf26af5bf611fc61a909fcc0139d159`，MIT）
 > 快照：`docs/upstream/workbuddy-v2.5.1/`（逐字落盘 + SHA256SUMS）
+> 状态：**已实现并收口（2026-11-03）**——§7 四问全部裁定落地，§8 各项状态见「收口记录」。
 > 结论：可移植，**不需要新依赖**；缺口只有 1 个限流判定函数、1 个余额读取函数和 5 处接线。
 > 本仓库的 `AccountPool` / 适配器契约 / `sse` 导出与这个版本几乎一一对应，这是选 v2.5.1 而不是 `master` 的原因。
 
@@ -169,18 +170,38 @@ v2.5.1 是最后一个"依赖形态与本仓库同代"的快照。
 
 ---
 
-## 7. 待你决定
+## 7. 待你决定 —— 四问全部已裁定（2026-11-03 回写）
 
-1. **范围**：只做 WorkBuddy 国际版（`workbuddy`），还是同时注册 CodeBuddy 国内版（`buddy`）？后者同协议、只多一份 product 常量与一条 catalogue 条目。
-2. **额度/选号**：M1/M2 是否先跳过 `BuddyBalanceSelector`（用 `getAvailableAccount` 的顺序即可），把选号放到 M3？
-3. **签到**：`buddy`（国内版）有签到、`workbuddy` 没有。是否两个都做，还是只做国际版并明确"不支持签到"？
-4. **vendor 维护**：接受这 9 个文件作为本地附加文件（NOTICE + 升级校验），还是借机整体升级 vendor 到 v2.5.1？我建议前者，升级面小。
+1. **范围**：**两个都做**。`buddy`（CodeBuddy 国内版）与 `workbuddy`（国际版）都注册：
+   `catalogue.ts:99/107` 两条目、`index.ts:1207-1208` 两个 `BuddyAuth`。
+   只做国际版拿不到每日签到积分，这是 index.ts 注释里点名的理由。
+2. **额度/选号**：**没有跳过**，`BuddyBalanceSelector` 随 M2 一起落地——
+   `index.ts:1223/1228` 两份独立余额缓存（账号串味防护按 A7 注释执行）。
+3. **签到**：**两个都做**：`buddy` 的 catalogue `dailyCheckin: true`，
+   `workbuddy` `false`；`credits.claimAll` 对 workbuddy 返回明确的「该产品无此能力」
+   错误而非泛化的 `unsupported provider`（rpc L2604-2609），能力表
+   `credits-capabilities.js` 是唯一权威，不维护第二份名单。
+4. **vendor 维护**：**接受 9 个文件为本地附加**（NOTICE 已写：OFM v2.5.1 commit
+   `3df868a` + MIT + 逐字拷贝清单 + 两处 import 改写 + 「升级时需重放」声明）。
+   计划里的可选项 `scripts/check-channel-pack-additions.mjs` 未单独建——
+   等价守护已由两条在册测试承担（见 §8-A5/A10）。
 
----
+## 8. 执行状态（2026-11-03 收口：全部落地）
 
-## 8. 下一步（确认后执行）
+| 项 | 状态 | 证据 |
+|---|---|---|
+| A1 源码落盘 | ✅ | `vendor/channel-pack/src/` 九件齐：buddy / product / buddy-oauth / buddy-auth / buddy-adapter / buddy-balance-rank / buddy-balance-selector / buddy-credits / openai-gateway/tencent-fingerprint；快照+SHA256SUMS 在 `docs/upstream/workbuddy-v2.5.1/` |
+| A2 `isModelSaturationError` | ✅ | `rate-limit.ts:37` 导出，`buddy-adapter.ts:25` import、L1610/1627 两处消费 |
+| A3 `buddy-credits.ts` | ✅ | 独立成文件；`buddy-balance-selector.ts:41` 已改指 `./buddy-credits.js`；通用 `credits.ts` 未污染 |
+| A4 types | ✅（一处偏差） | `BuddyCredential` 在 `buddy.ts:109` 导出，`index.ts:85` 以 `import type … from './buddy.js'` 直用——计划写的「types.ts 末尾 re-export」没做，也不需要做；`RpcBuddyGrowth*` 确认未引入；`windowDays` 在 types.ts:465/527/1335 原位 |
+| A5 前缀表 | ✅ | `channel-pack-store.ts:363-364` `['BUDDY','buddy']` `['WORKBUDDY','workbuddy']`，注释点名「同款坑第四次」。上游那条 spec 测试在本仓不存在（vendor 无 tests 目录），等价守护 = `tests/channels/catalogue.test.ts` 的「目录与渠道包的 provider 全集双向对齐」（直接读 REF_PREFIX_TO_PROVIDER 表比对 13 渠道） |
+| A6 rpc 接线 | ✅ | `registerChannelPackRpc(..., workbuddy, buddy, modelAdapters, …)`（index.ts:1976，追加在参数表尾部）；account.create 走 `runBuddyLoginFlow`（rpc:1346）+ `scheduleRefresh`（1348）；account.refresh 两分支（1952/1957）；`credits.balances` 回传 `buddyExpiringWindowDays()`（2765）；签到 guard 见 §7-3 |
+| A7 index 接线 | ✅ | 两个 `BuddyAuth`（1207-1208）、`resolveBuddyCredentialByRef`（1211）、双 selector（1223/1228）、`pickBuddyCredential`（1243）、`registerBuddyLlm` ×2（1308 起，含 `product`/`isFreeModel`/`createPoolRefresh`）、`modelAdapters` 含 buddy+workbuddy（1967-1968）、关闭 `stop()` ×2（1740-1741/1765-1766） |
+| A8 fetcher 注入 | ✅ | `network = createChannelFetch({ outlet })`（index.ts:266），buddy 全系 auth/adapter/selector 均传 `network.fetch`；适配器处有原样注释「必须注入宿主的 channelFetch」 |
+| A9 宿主侧 | ✅ | catalogue 两条目（见 §7-1）、`catalogue.test.ts` 断言 `length===13` 且双向对齐；AGENTS 双语已写「thirteen account channels」 |
+| A10 文档 | ✅（可选项以测试替代） | `vendor/channel-pack/NOTICE.md` L51-61 含来源/改写点/重放声明；独立的 additions 校验脚本未建，接线防回归由 `tests/channels/workbuddy-port.test.ts`「WorkBuddy is wired into the pack (store prefix, auth, adapter, login, check-in guard)」+ `catalogue.test.ts` 双向对齐承担 |
 
-1. 落 A1–A5（源码 + 两个小函数 + 前缀 + 类型），先让 `tsc` 通过。
-2. 接 A6 的登录两分支，M1 验收。
-3. 再接 A7/A8，M2 验收。
-4. 最后 A9/A10 与测试。
+**验收状态**：M1/M2/M3 的自动化面全部有测试覆盖；`workbuddy-port.test.ts` 用 esbuild
+打真实 vendor 源码驱动（零依赖文件直测）。**真机面**（真实账号登录、流式/工具/图片/
+思考档、重启后凭据仍在）按里程碑表属人工冒烟，本轮未重跑——收口只声明代码与测试事实，
+不冒充实测读数。

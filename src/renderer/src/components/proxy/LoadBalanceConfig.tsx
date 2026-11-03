@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input'
 import { useProxyStore, type AccountWeight } from '@/stores/proxyStore'
 import { useToast } from '@/hooks/use-toast'
 import type { LoadBalanceStrategy, Account, Provider, ModelRoute } from '@/types/electron'
+import { DEFAULT_REPETITION_GUARD, type RepetitionGuardSettings } from '@shared/streamRepetition'
 import { DEFAULT_AUTO_ROUTING_CONFIG } from '../../../../shared/types'
 import {
   ModelRouteFields,
@@ -53,6 +54,7 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
     setAccountWeights,
     saveAppConfig,
     isLoading,
+    appConfig,
   } = useProxyStore()
   const { toast } = useToast()
   
@@ -111,6 +113,20 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
     initialStrategyRef.current = loadBalanceStrategy
     initialWeightsRef.current = accountWeights
   }, [])
+
+  // 退化判据的阈值。**读到持久化配置之前不渲染控件**（与 ProxyConfigForm 同一条纪律）：
+  // 否则默认值会在用户没碰过的情况下被保存回盘，把出厂阈值伪装成用户的选择。
+  const [guard, setGuard] = useState<RepetitionGuardSettings | null>(null)
+  useEffect(() => {
+    if (isLoading || !appConfig) return
+    setGuard(appConfig.streamRepetitionGuard ?? DEFAULT_REPETITION_GUARD)
+  }, [isLoading, appConfig])
+
+  const handleGuardPatch = (patch: Partial<RepetitionGuardSettings>) => {
+    setGuard((prev) => (prev ? { ...prev, ...patch } : prev))
+    setHasChanges(true)
+    onConfigChange?.()
+  }
 
   const fetchAccounts = async () => {
     try {
@@ -370,6 +386,7 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
     // UI 的写入项（它是主进程的一次性迁移源），回写它只会覆盖迁移结果。
     const success = await saveAppConfig({
       loadBalanceStrategy: selectedStrategy,
+      ...(guard ? { streamRepetitionGuard: guard } : {}),
     })
 
     if (success) {
@@ -390,6 +407,7 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
   const handleReset = () => {
     setSelectedStrategy(initialStrategyRef.current)
     setWeights(initialWeightsRef.current)
+    if (appConfig) setGuard(appConfig.streamRepetitionGuard ?? DEFAULT_REPETITION_GUARD)
     setHasChanges(false)
   }
 
@@ -465,6 +483,57 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
             </p>
           </div>
         </div>
+
+        {guard && (
+          <div className="space-y-3 pt-4 border-t">
+            <div className="flex items-center justify-between gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="repetition-guard-enabled">{t('proxy.repetitionGuardTitle')}</Label>
+                <p className="text-xs text-muted-foreground">{t('proxy.repetitionGuardDesc')}</p>
+              </div>
+              <Switch
+                id="repetition-guard-enabled"
+                checked={guard.enabled}
+                onCheckedChange={(checked) => handleGuardPatch({ enabled: checked })}
+              />
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="repetition-guard-min-lines">{t('proxy.repetitionGuardMinLines')}</Label>
+                <Input
+                  id="repetition-guard-min-lines"
+                  type="number"
+                  min={1}
+                  max={500}
+                  disabled={!guard.enabled}
+                  value={guard.minLines}
+                  onChange={(e) => handleGuardPatch({ minLines: Math.max(1, Number(e.target.value) || 0) })}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="repetition-guard-max-ratio">{t('proxy.repetitionGuardMaxRatio')}</Label>
+                <Input
+                  id="repetition-guard-max-ratio"
+                  type="number"
+                  step={0.01}
+                  min={0}
+                  max={1}
+                  disabled={!guard.enabled}
+                  value={guard.maxDedupRatio}
+                  onChange={(e) => {
+                    const raw = Number(e.target.value)
+                    const clamped = Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 0
+                    handleGuardPatch({ maxDedupRatio: clamped })
+                  }}
+                />
+                <p className="text-xs text-muted-foreground">{t('proxy.repetitionGuardMaxRatioHelp')}</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-muted-foreground">{t('proxy.repetitionGuardNonStreamNote')}</p>
+          </div>
+        )}
 
         {activeAccounts.length > 0 && (
           <div className="space-y-4 pt-4 border-t">

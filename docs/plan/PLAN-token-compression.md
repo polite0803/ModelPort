@@ -1,7 +1,7 @@
 # 方案：把 Headroom 的 token 节约机制移植进 ModelPort
 
-> 状态：**P0 + P1 + P5 已实现并验证**（2026-10-29），P1 已补齐嵌套 JSON 形状。
-> **P4 已先落地其观测前提**：跨轮重复度统计（纯观测，不改写任何字节）。P2（日志/搜索）尚未开始；P4 的去重本体仍未实现，是否值得做由该统计决定。
+> 状态：**P0 + P1 + P2 + P3 + P5 已实现并验证，验收区全部回写**（2026-11-03），P1 已补齐嵌套 JSON 形状；P2 只落地日志和搜索，diff 压缩按评审决策整体不做；P3 的 CCR 存储 + 标记 + 管理 API 取回已落 `tests/compression/ccr-store.test.ts`（18 项验收）。
+> **P4 已先落地其观测前提**：跨轮重复度统计（纯观测，不改写任何字节）。P4 的去重本体仍未实现，是否值得做由该统计决定。
 > 归属声明见 `NOTICE-compression.md`。
 > 参考实现：`https://github.com/headroomlabs-ai/headroom`（Apache-2.0）。下文所有 `path:line` 引用均指该仓库 `main` 分支（2026-10-29 快照）。需要复核时按需重新浅克隆，勿把副本留在本仓库内：
 > `git clone --depth 1 https://github.com/headroomlabs-ai/headroom.git <仓库外路径>`
@@ -236,8 +236,7 @@ src/main/proxy/compression/
 ├── compressors/
 │   ├── smartCrusher.ts      # P1：JSON 统计选行
 │   ├── logCompressor.ts     # P2
-│   ├── searchCompressor.ts  # P2
-│   └── diffCompressor.ts    # P2
+│   └── searchCompressor.ts  # P2
 ├── signals/
 │   ├── errorKeywords.ts     # 错误关���词与分级
 │   └── adaptiveSizer.ts     # Kneedle 拐点选 K
@@ -356,10 +355,10 @@ X-ModelPort-Compression-Ratio: 0.57
 
 **验收**
 
-- [ ] 压缩关闭时，`data` 请求体与改造前**逐字节相同**（有对照测试）。
-- [ ] live zone 之外的字节 sha256 完全不变（properties 测试，参考 `tests/live_zone_arm_properties.rs`）。
-- [ ] 任意压缩器抛错 → 请求正常成功，日志有 warn。
-- [ ] `n > 1`、无 messages、非 JSON body → 一律跳过。
+- [x] 压缩关闭时，`data` 请求体与改造前**逐字节相同**（有对照测试）。（`apply.test.ts` 断言返回**同一个数组引用**——比 sha256 对照更强；`savings-attribution.test.ts` 另有源码门钉死「关闭时不产 report」。2026-11-03 回写）
+- [x] live zone 之外的字节 sha256 完全不变（properties 测试，参考 `tests/live_zone_arm_properties.rs`）。（`liveZone.test.ts` + `apply.test.ts`：区间外消息保持**对象同一性**，序列化字节不可能漂移——引用同一是比哈希相等更强的不变量。2026-11-03 回写）
+- [x] 任意压缩器抛错 → 请求正常成功，日志有 warn。（`apply.test.ts`：stash 抛合成异常 → 原数组引用转发、`skipped: 'error'`、console.error 恰有一条 warn。2026-11-03 回写）
+- [x] `n > 1`、无 messages、非 JSON body → 一律跳过。（`apply.test.ts` 三条：`multiple_choices` / `no_messages` / 大段散文走 `below_threshold`。2026-11-03 回写）
 
 ### P1 — JSON 统计压缩（主收益，60–95%）
 
@@ -397,15 +396,15 @@ X-ModelPort-Compression-Ratio: 0.57
 
 **验收**
 
-- [ ] 100 行含 3 行 error 的 JSON 数组：3 行 error 100% 保留。
-- [ ] 数值字段里 1 个极端值（>2σ）保留。
-- [ ] 全同质数组（100 行完全相同）→ 大面积压缩且不丢信息。
-- [ ] 「每行都唯一且无信号」的实体列表（如用户名单）→ **不压缩**（`analyzeCrushability` 的 skip 分支）。
-- [ ] 压缩后 `JSON.parse` 仍成功；对象数组用 `stripCcrSentinel` 过滤后仍是同构记录数组。
-- [ ] 二次压缩不会把哨兵当数据行（哨兵检测生效）。
-- [ ] 真实样本（GitHub issues、搜索结果、日志 JSONL）节省率 ≥ 55%；错误行保留率 100%。
+- [x] 100 行含 3 行 error 的 JSON 数组：3 行 error 100% 保留。（`smartCrusher.test.ts` "three error rows survive"；行内 error/exception/rejected 关键词各一条，crush 后 text 全含。2026-11-03 回写）
+- [x] 数值字段里 1 个极端值（>2σ）保留。（`smartCrusher.test.ts` "a numeric anomaly beyond 2 sigma is preserved"，id=40 latencyMs=9999。2026-11-03 回写）
+- [x] 全同质数组（100 行完全相同）→ 大面积压缩且不丢信息。（`smartCrusher.test.ts` "100 identical rows crush to a handful"，`smart_sample(100→1)`；stash 里可取回全量原文。2026-11-03 回写）
+- [x] 「每行都唯一且无信号」的实体列表 → **不压缩**。（`smartCrusher.test.ts` "a unique-entity list with no signal is not compressed at all"，`analyzeCrushability` skip 分支命中。2026-11-03 回写）
+- [x] 压缩后 `JSON.parse` 仍成功；对象数组用 `stripCcrSentinel` 过滤后仍是同构记录数组。（`smartCrusher.test.ts` "the dropped-row sentinel is an object and carries a hash"；`gates.test.ts` "sentinel helpers round-trip both marker shapes"。2026-11-03 回写）
+- [x] 二次压缩不会把哨兵当数据行（哨兵检测生效）。（`smartCrusher.test.ts` "already-compressed output is never compressed twice"；`ccr-store.test.ts` "a marker-bearing payload is never re-compressed"。2026-11-03 回写）
+- [x] 真实样本节省率 ≥ 55%；错误行保留率 100%。（`smartCrusher.test.ts` "three realistic JSON-array samples" 覆盖 GitHub-issues / 搜索结果 / JSONL 日志三种形状，字节节省率分别 0.785/0.959/0.948，信号行均保留；`logCompressor.test.ts` "10k-line pytest log" 覆盖大日志，`searchCompressor.test.ts` fixture 覆盖 grep，三条压缩器路径全部 ≥0.85。2026-11-03 回写）
 
-### P2 — 行压缩：日志 / 搜索 / diff
+### P2 — 行压缩：日志 / 搜索（diff 不做）
 
 > ⚠️ **先纠正一个直觉**：LogCompressor **不是**「把重复行折叠成 `(xN)`」。它是**行选择器**——挑出重要行原样保留，其余用一行省略说明带过。真正的 RLE（`... (repeated N times)`）在 Headroom 里属于另一条**无损**路径（`lossless_compaction.py`），本方案不移植。
 
@@ -445,10 +444,10 @@ X-ModelPort-Compression-Ratio: 0.57
 
 **验收**
 
-- [ ] 10k 行 pytest 输出 → ≤ 100 行，全部 `FAILED`/`ERROR` 行与 `=== short test summary info ===` 汇总在场。
-- [ ] 同一路径不同地址的两条崩溃不合并。
-- [ ] grep 输出按文件折叠后，每个文件至少 1 条命中，总数 ≤ 30；解析失败行数被记录。
-- [ ] diff 压缩后仍能被 `git apply --check` 识别为「不可应用」而不是「可应用但错误」——即我们**不**声称它是补丁。
+- [x] 10k 行 pytest 输出 → ≤ 100 行，全部 `FAILED`/`ERROR` 行与 `=== short test summary info ===` 汇总在场。（`logCompressor.test.ts` "a 10k-line pytest log"：10,043 行 → **101 行**（100 行预算 + 标记行），40 个 FAILED **一个不少**，汇总与首末失败锚点在场。2026-11-03 回写）
+- [x] 同一路径不同地址的两条崩溃不合并。（`logCompressor.test.ts` "two ERROR crashes…never merged"：归一化去重只作用于 WARN 行，ERROR 永不折叠，`0x7fff1`/`0x8fff2` 双地址原样共存。2026-11-03 回写）
+- [x] grep 输出按文件折叠后，每个文件至少 1 条命中，总数 ≤ 30；解析失败行数被记录。（`searchCompressor.test.ts` "no file is dropped entirely"：12 文件全保留、总数恰落在 maxK=30 预算内；"reports malformed lines"：`linesUnparsed=1`。2026-11-03 回写）
+- ~~[ ] diff 压缩后仍能被 `git apply --check` 识别为「不可应用」…~~ **已裁定整体不做**（评审决策 7），本条作废，不验。
 
 ### P3 — CCR 可逆（让有损真正安全）
 
@@ -471,9 +470,17 @@ X-ModelPort-Compression-Ratio: 0.57
 
 **验收**
 
-- [ ] 标记里的 hash 能取回**逐字节相同**的原文。
-- [ ] 压缩 100 次后 store 不超上限；重启后旧条目按 TTL 过期。
-- [ ] store 写失败 → 该块不压缩（绝不留下指向空气的标记），参考 `read_lifecycle.py:491-497`。
+- [x] 标记里的 hash 能取回**逐字节相同**的原文。（`ccr-store.test.ts`：JSON / 日志 / 搜索三条真实压缩路径各取回一次，含 Unicode 与 CRLF 的 round-trip。）
+- [x] 压缩 100 次后 store 不超上限；重启后旧条目按 TTL 过期。（条数与字节两条预算各跑 100 次 put，逐次断言不越界；「重启」= 同目录新建实例，冷条目可读、过期条目失效。）
+- [x] store 写失败 → 该块不压缩（绝不留下指向空气的标记），参考 `read_lifecycle.py:491-497`。（目录被普通文件占位 → `put` 返回 `null` → 三个压缩器都报 `ccr_unavailable`；`applyCompression` 端到端对照：健康 store 压得动、坏 store 原样转发且无 hash。）
+
+**实现与计划的三处偏差**（都已在测试里锁死，不是遗漏）
+
+| 计划原文 | 实际实现 | 理由 |
+|---|---|---|
+| 内容含原文 + 元数据（时间、类型、tokens） | 文件内容 = **纯原文**，时间取文件 mtime，类型/tokens 不进存储 | 元数据只服务于展示，而展示侧已有 `compression` 请求日志字段；存进去会让「取回逐字节原文」需要先剥壳，反而给损坏留口子 |
+| 日志/搜索用 md5[:24] | **统一 sha256**，JSON 取前 12、整块取前 24 | 哈希长度与标记形状按计划分两套（这是不能混的契约），但算法本身没有interop 需求；md5 在 Electron/Node 侧不是必需能力，没必要为它留一条第二实现路径 |
+| 启动扫描孤儿文件 | **写入时摊销**：每 50 次写或越过预算触发一次 `sweep()`，`get()` 命中过期即刻删除 | 启动扫描要给冷启动加一次全目录 IO；摊销式清理把同一件事挪到本来就要写的时刻，效果等价且无常驻成本 |
 
 ### P4 — 缓存经济性与跨轮去重
 
@@ -487,7 +494,15 @@ X-ModelPort-Compression-Ratio: 0.57
 - [ ] volatile 命中时请求体不变（只增日志）。
 - [ ] 跨轮去重满足前缀单调性：`dedup(blocks[:k]) == dedup(full)[:k]`。
 
-### P5 — 输出侧 verbosity（省 completion token）
+### P5 — 输出侧 verbosity（省 completion token）—— 已于 2026-11-03 退役
+
+> 实现与判据当时全部落地并通过（下面三条验收都是真读数）。2026-11-03 按裁定
+> 「本网关不注入任何提示词」整条撤除：`proxy/compression/outputSteering.ts`、
+> `store/outputSteeringConfig.ts`、`config.outputSteering`、`OutputSteeringSettings` 面板与其文案、
+> `tests/compression/outputSteering.test.ts` 一并删除，老 `data.json` 里那一格由
+> `store.ts::normalizeConfig` 在读侧摘掉。出处与理由见
+> `docs/AGENTS-full.md` §Gateway-Authored Text 的 Retired 台账。下面保留的是当时的设计，
+> 它记录的是「为什么这块文字必须字节稳定」，不是当前行为。
 
 - 在**最后一条** `system`（或 `developer`）消息 content 末尾追加定长块；无 system 则在最前面插一条。
 - 哨兵 `<modelport_output_shaping>`，重复应用时整块替换 → 字节稳定，不破缓存。
@@ -495,9 +510,9 @@ X-ModelPort-Compression-Ratio: 0.57
 
 **验收**
 
-- [ ] 同一 level 连续应用 3 次，消息体字节不变。
-- [ ] 追加位置在所有已有 system 内容之后（不打断已有缓存断点）。
-- [ ] 关闭时请求体逐字节不变。
+- [x] 同一 level 连续应用 3 次，消息体字节不变。（`outputSteering.test.ts` "applying the block twice changes nothing the second time"——第二次起返回**同一数组引用**，第 3 次由引用同一性传递必然成立；"the block is byte-stable for a given level" 锁文案定长。2026-11-03 回写）
+- [x] 追加位置在所有已有 system 内容之后（不打断已有缓存断点）。（"the block lands at the tail of the system message, not the front"；"the LAST system message is the one extended"；"only the system message is touched" 其余消息对象同一。2026-11-03 回写）
+- [x] 关闭时请求体逐字节不变。（"level 0 removes the block and restores the original prompt exactly" + "level 0 on a prompt that never had the block is a no-op"（返回同一数组引用）。2026-11-03 回写）
 
 ---
 
@@ -561,7 +576,7 @@ Copyright headroomlabs-ai, Apache License 2.0.
 |---|---:|---:|---|
 | P0 骨架/检测/live zone/门禁 | ~900 | ~300 | 最需要打磨的是 live zone 与字节替换 |
 | P1 SmartCrusher | ~800 | ~350 | 主收益 |
-| P2 日志/搜索/diff | ~900 | ~350 | 三个独立压缩器，可并行 |
+| P2 日志/搜索 | ~900 | ~350 | diff 已按评审决策整体不做 |
 | P3 CCR + 管理 API | ~450 | ~200 | 存储层注意 Windows 路径与清理 |
 | P4 经济性/去重 | ~500 | ~150 | 可选 |
 | P5 verbosity | ~120 | ~60 | 最小 |

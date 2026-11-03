@@ -1,6 +1,11 @@
 # 对外 API 缺陷修复 PLAN（两轮核查合并）
 
-- 状态：待批准（按编号拍板后执行）
+- 状态：**已实施并收尾**（D1–D4 于 2026-10-27 全部按推荐值拍板，P1–P6 落地；执行明细与
+  门禁读数见 `PLAN-api-defects-status.md`，其「仍未做」= 无）。两条与本文原稿不同的现行事实：
+  ① P3-1 ~ P3-4 的「现状证据」已被后续裁定推翻——裁定「本网关不注入任何提示词」后，
+  托管工具层连同配置/面板/管理端点删除、工具改原生透传，本节保留只记录判据来源；
+  ② 验收总表写的 `tests/api/auth-matrix.test.ts` 现为 `tests/api/auth-policy.test.ts`
+  （D1 回环半边另由 `tests/proxy/inbound-loopback-session.test.ts` 覆盖）。
 - 基线：main @ 59f03ab
 - 范围：`/v1/*` 的鉴权、契约、失败语义、工具调用；`/v0/management/*` 的可达性与校验
 - 不在本批：原生 function calling 透传、`/v1/responses` 路由、账号与会话粘性重构（单列观察项，不在本计划内）
@@ -35,6 +40,11 @@
 | P2-6 | `stop()` 依赖 `server.close()`，全仓无 `closeAllConnections`（grep 零命中），有流在跑时 `restart()` 永不返回 | `stop()` 先 `closeIdleConnections()`，再对存活连接设 5s 宽限后 `closeAllConnections()`；`restart()` 复用同一路径 | 测试：起一个长连接后调用 `stop()`，断言 6s 内 resolve 且 `isRunning()===false`；负控：去掉强制关闭该用例超时红 | 强行断开长对话，属预期 |
 
 ## P3 工具调用结构性断路
+
+> 2026-11-03 更新：本节 P3-1 ~ P3-4 修的是**托管工具层**（把工具描述写进 system、再把回复文本解析回
+> `tool_calls`），该子系统已按裁定「本网关不注入任何提示词」整条删除，工具改为原生透传。下面的
+> 「现状证据 / 改法 / 验收」只对当时的代码成立，保留作判据来源；`docs/plan/PLAN-api-defects-status.md`
+> 里同批的落点清单已加同名说明。
 
 | 编号 | 现状证据 | 改法 | 验收（可执行） | 代价 / 回退 |
 |---|---|---|---|---|

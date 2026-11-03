@@ -790,7 +790,7 @@ test('限流退避的键必须带到模型粒度（接线门）', () => {
   // 语义判据本身在 tests/proxy/accountRuntime.test.ts，这里只管接线。
   assert.match(
     forwarderSource,
-    /recordFailure\(\s*account\.id\s*,\s*429\s*,\s*Date\.now\(\)\s*,\s*actualModel\s*\)/,
+    /recordFailure\(\s*account\.id\s*,\s*429\s*,\s*Date\.now\(\)\s*,\s*actualModel\s*(?:,\s*retryAfterMs\s*)?\)/,
     'the 429 record must be keyed by the model actually sent upstream',
   )
   assert.match(
@@ -824,6 +824,45 @@ test('限流退避的键必须带到模型粒度（接线门）', () => {
     channelsManagerSource,
     /recordSuccess\(\s*account\.id\s*,/,
     'the pool-change call must not be narrowed to one model',
+  )
+})
+
+test('渠道包上报的解禁时刻必须透传到冷却（bridge → forwarder → accountRuntime）', () => {
+  // 渠道包 429 时算出上游真实解禁时刻（providerRetryAfterMs）上报；宿主侧曾丢弃它，
+  // 只看自己的指数退避 → 「冷却到期→放一笔→又 429→再冷却」的自维持循环。
+  // 语义判据在 tests/proxy/accountRuntime.test.ts（取更晚），这里只管三段接线都真的读到它。
+  // bridge：从 worker 消息里读 providerRetryAfterMs，喂进 ChannelBridgeError 第三参。
+  assert.match(
+    bridgeSource,
+    /message\.providerRetryAfterMs/,
+    'the bridge must read the pack-reported unblock time from the worker error message',
+  )
+  assert.match(
+    bridgeSource,
+    /new ChannelBridgeError\(\s*[\s\S]*?providerRetryAfterMs\s*,?\s*\)/,
+    'the bridge must hand providerRetryAfterMs to ChannelBridgeError',
+  )
+  // forwarder：forwardAccountChannel 捕获后把 error.retryAfterMs 转成 ForwardResult.retryAfter（秒）。
+  assert.match(
+    forwarderSource,
+    /failure\.retryAfterMs/,
+    'the account-channel forward must read retryAfterMs off the bridge error',
+  )
+  assert.match(
+    forwarderSource,
+    /Math\.ceil\(\s*failure\.retryAfterMs\s*\/\s*1000\s*\)/,
+    'the channel error retryAfterMs must be surfaced as an integer-seconds Retry-After',
+  )
+  // forwarder：429 记冷却处把 retryAfter 解析回毫秒，随可选尾参喂进 recordFailure。
+  assert.match(
+    forwarderSource,
+    /Number\.parseInt\(\s*lastRetryAfter\s*,\s*10\s*\)/,
+    'the 429 cooldown must parse the surfaced Retry-After back into milliseconds',
+  )
+  assert.match(
+    forwarderSource,
+    /recordFailure\(\s*account\.id\s*,\s*429\s*,\s*Date\.now\(\)\s*,\s*actualModel\s*,\s*retryAfterMs\s*\)/,
+    'the parsed retryAfterMs must be the fifth argument to recordFailure',
   )
 })
 

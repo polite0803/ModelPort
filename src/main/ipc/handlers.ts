@@ -35,13 +35,13 @@ import { sessionManager } from '../proxy/sessionManager'
 import { TrayManager } from '../tray/TrayManager'
 import { ConfigManager } from '../store/config'
 import { generateManagementSecret } from '../proxy/middleware/managementAuth'
-import { runToolCallingSmoke } from '../proxy/toolCalling/diagnostics'
 import { UpdaterManager } from '../updater'
 import { buildRequestDiagnosticBundle } from '../logging/diagnosticBundle'
 import { setTitleBarTheme } from '../window/manager'
 import type { Provider, Account, ProxyStatus, ProviderCheckResult, OAuthResult, AuthType, CredentialField, LogLevel, LogEntry, ProviderVendor, ModelRoute, ModelCapabilityHint } from '../../shared/types'
 import type { RouteListResult, RouteMutationResult, RouteRemovalResult, RoutePoolSizesResult } from '../../shared/modelRouteName'
 import type { SessionConfig, SessionRecord, ManagementApiConfig, AppConfig } from '../store/types'
+import { DEFAULT_CONTEXT_MANAGEMENT_CONFIG } from '../store/types'
 import type { TlsStatus, TlsTrustResult } from '../../shared/types'
 import type { ProviderType } from '../oauth/types'
 import type { ModelsFetchFailure } from '../store/types'
@@ -1362,41 +1362,18 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     return newSecret
   })
 
-  // ==================== Tool Calling Handlers ====================
-
-  ipcMain.handle(IpcChannels.TOOL_CALLING_RUN_SMOKE, async (_, input?: { clientAdapterId?: string }) => {
-    const config = ConfigManager.get()
-    const clientAdapterId = input?.clientAdapterId ?? config.toolCallingConfig.clientAdapterId
-    return { success: true, data: runToolCallingSmoke(clientAdapterId) }
-  })
-
   // ==================== Context Management Handlers ====================
 
   ipcMain.handle(IpcChannels.CONTEXT_MANAGEMENT_GET_CONFIG, async () => {
     const config = ConfigManager.get()
-    return config.contextManagement || {
-      enabled: true,
-      strategies: {
-        slidingWindow: { enabled: true, maxMessages: 20 },
-        tokenLimit: { enabled: false, maxTokens: 4000 },
-        summary: { enabled: false, keepRecentMessages: 20 },
-      },
-      executionOrder: ['slidingWindow', 'tokenLimit', 'summary'],
-    }
+    // 缺省值只有一处权威（`store/types.ts`）。这里以前抄了一份，而且抄错了：
+    // 那份写 `enabled: true`，出厂默认是 `false` —— 兜底一旦生效就等于面板报一个和运行态相反的开关。
+    return config.contextManagement || DEFAULT_CONTEXT_MANAGEMENT_CONFIG
   })
 
   ipcMain.handle(IpcChannels.CONTEXT_MANAGEMENT_UPDATE_CONFIG, async (_, updates: Partial<any>) => {
     const config = ConfigManager.get()
-    const defaultContextConfig = {
-      enabled: true,
-      strategies: {
-        slidingWindow: { enabled: true, maxMessages: 20 },
-        tokenLimit: { enabled: false, maxTokens: 4000 },
-        summary: { enabled: false, keepRecentMessages: 20 },
-      },
-      executionOrder: ['slidingWindow', 'tokenLimit', 'summary'],
-    }
-    const currentContextConfig = config.contextManagement || defaultContextConfig
+    const currentContextConfig = config.contextManagement || DEFAULT_CONTEXT_MANAGEMENT_CONFIG
     const newContextConfig = {
       ...currentContextConfig,
       ...updates,

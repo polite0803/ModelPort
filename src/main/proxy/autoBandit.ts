@@ -13,7 +13,13 @@
  *   不会被统计空窗永远压住，轮不到就没有数据、没数据就永远轮不到；
  * - **口径诚实**：日志里没有 TTFT 字段，速度用整笔 latency 的 p50 近似
  *   （流式请求含生成时长，噪声大，所以只对显著慢的候选轻惩罚）。
+ * - **两类不可用成功**：`finish_reason=length` 且客户端未请求上限，以及流内重复
+ *   退化读数命中（`shared/streamRepetition.ts`）。后者是 2026-11-03 补的：那一类
+ *   流 HTTP 200、`finish_reason=tool_calls`，被客户端掐掉后在我们这边只是
+ *   `client_abort`，评分上等于没发生。
  */
+
+import type { StreamRepetitionReading } from '../../shared/streamRepetition.ts'
 
 /** One upstream attempt as it appears in a request log row. */
 export interface BanditAttemptLogEntry {
@@ -39,6 +45,15 @@ export interface BanditLogEntry {
   finishReason?: string
   /** Client-requested output cap. Absent when the client sent neither spelling. */
   maxTokens?: number
+  /**
+   * 流内重复退化读数（`shared/streamRepetition.ts`）。
+   *
+   * 这是第二类 degraded：协议上一切正常（`finish_reason=tool_calls`、HTTP 200），
+   * 但输出内容在尾部窗口里塌成重复行。2026-11-03 的 WorkBuddy 会话就是这一类：
+   * 客户端用自己的 REASONING_LOOP 守卫掐掉流 ⇒ 我们这边记成 `client_abort` 并被
+   * 评分跳过，粘性于是继续把会话锚在同一家。
+   */
+  repetition?: StreamRepetitionReading
   /**
    * Per-candidate attempts. A successful row only names the winner at the top
    * level, so without this a candidate that failed earlier in the chain looks
@@ -103,7 +118,9 @@ export function latencyP50(latenciesMs: number[]): number | undefined {
  * 4/5 samples "successful").
  */
 export function isDegradedSuccess(entry: BanditLogEntry): boolean {
-  if (entry.status !== 'success' || entry.finishReason !== 'length') return false
+  if (entry.status !== 'success') return false
+  if (entry.repetition?.degraded === true) return true
+  if (entry.finishReason !== 'length') return false
   return entry.maxTokens === undefined || entry.maxTokens <= 0
 }
 

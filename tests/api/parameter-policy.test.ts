@@ -86,18 +86,19 @@ test('request correlation id is returned and context trimming keeps tool fields'
   assert.match(forwarder, /\.\.\.msg,\s*\n\s*role: msg\.role/)
 })
 
-test('custom providers go through the same tool pipeline', () => {
+test('chat 线路原生透传工具（托管提示词层已退役）', () => {
   const forwarder = readFileSync(fileURLToPath(new URL('../../src/main/proxy/forwarder.ts', import.meta.url)), 'utf8')
-  // 语义而不是排版：默认分支的 messages 与 tools 都必须来自工具引擎的裁决结果
-  // （2026-11-01 修复：`transformed.tools` 此前被整个丢掉，`buildRequestBody` 的
-  // 白名单里也没有 `tools`，于是「关掉工具托管」等于把客户端的工具静默删掉）。
-  // 断言允许换行与加参，不再锁某一种写法。
-  assert.match(
-    forwarder,
-    /buildRequestBody\(\s*\{[\s\S]{0,400}?messages: transformed\.messages[\s\S]{0,200}?tools: transformed\.tools/,
-  )
-  assert.match(forwarder, /stream: wrapStreamWithPlan\(probed\.stream, transformed\.plan\)/)
-  assert.match(forwarder, /this\.applyToolCallsToResponse\(response\.data, transformed\)/)
+  // 2026-11-03 退役裁定：网关不写提示词，默认分支不再经过任何工具改写引擎。
+  // 正向门钉「请求原样进 buildRequestBody」与「工具三件套真的在白名单里」
+  // （2026-11-01 那次修的缺陷正是白名单缺 `tools`，关掉托管＝把客户端工具静默删掉）。
+  assert.match(forwarder, /const body = this\.buildRequestBody\(request, actualModel, account\)/)
+  assert.match(forwarder, /body\.tools = sanitizedTools/)
+  assert.match(forwarder, /body\.tool_choice = request\.tool_choice/)
+  assert.match(forwarder, /body\.parallel_tool_calls = request\.parallel_tool_calls/)
+  // 反向门：退役掉的引擎符号不得被重新接回来。
+  for (const dead of ['ToolCallingEngine', 'transformRequestForPromptToolUse', 'wrapStreamWithPlan', 'applyToolCallsToResponse']) {
+    assert.equal(forwarder.includes(dead), false, `已退役的托管层符号又出现在转发器里：${dead}`)
+  }
 })
 
 test('新增的可选参数：自定义/聚合透传，内置按能力剥离', () => {

@@ -11,9 +11,8 @@
  * 3. 流式端到端恰好一套块骨架，正文不被帧边界吃掉，上游报到的 usage 真的能
  *    到达客户端（这条同时钉住本批修掉的两个通路缺陷：`stream_options` 与
  *    `StreamHandler.transformChunk` 把 usage 帧丢弃）；
- * 4. `toolCallingConfig` 关掉托管时，客户端的原生 tools 必须真的出站
- *    （此前 `buildRequestBody` 的白名单里根本没有 `tools` 这一格，那个开关
- *    等于「把工具静默丢掉」）；
+ * 4. 客户端的原生 tools 必须真的出站（此前 `buildRequestBody` 的白名单里根本没有
+ *    `tools` 这一格；工具现在也只有原生这一条通路 —— 托管提示词层已退役）；
  * 5. 带 `anthropic-version` 来列模型时返回 anthropic 形状；不带时保持 OpenAI 形状；
  *    单条检索 `/v1/models/:model` 同一分派（含 `modelMap` 键必须答话、档位沿用列表同一
  *    判据、单查那一行与列表那一行逐字段同源 —— 两处共用一个构造处）；
@@ -131,15 +130,6 @@ const messagesBody = (model: string, extra: Payload = {}): Payload => ({
   messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
   ...extra,
 })
-
-const MANAGED_TOOL_CALLING_OFF = {
-  toolCallingConfig: {
-    enabled: false,
-    mode: 'auto',
-    clientAdapterId: 'standard-openai-tools',
-    advanced: {},
-  },
-}
 
 beforeEach(() => {
   seenBodies = []
@@ -357,31 +347,25 @@ test('回环的 chat 流式响应自己也带 usage（本批修掉的 transformC
     `上游报了数就必须转出去，实际流：\n${response.text}`)
 })
 
-test('关掉工具托管时，客户端的原生 tools 必须出站（开关不再是「静默丢掉工具」）', async () => {
-  sm.updateConfig(MANAGED_TOOL_CALLING_OFF as never)
-  try {
-    const tools = [{ type: 'function', function: { name: 'get_weather', description: 'd', parameters: { type: 'object', properties: {} } } }]
-    const response = await proxy.request('POST', '/v1/chat/completions', {
-      body: { model: 'Test-Model', messages: [{ role: 'user', content: 'weather?' }], tools, tool_choice: 'auto' },
-    })
-
-    assert.equal(response.status, 200)
-    assert.deepEqual(seenBodies[0].tools, tools, '原生 tools 必须原样到达上游')
-    assert.equal(seenBodies[0].tool_choice, 'auto')
-  } finally {
-    sm.updateConfig({ toolCallingConfig: undefined } as never)
-  }
-})
-
-test('开着工具托管时不把原生 tools 再发一遍（否则工具描述被解释两次）', async () => {
+test('工具只走原生字段：上游收到 tools 与 tool_choice，消息里没有网关写的工具描述', async () => {
   const tools = [{ type: 'function', function: { name: 'get_weather', description: 'd', parameters: { type: 'object', properties: {} } } }]
-  await proxy.request('POST', '/v1/chat/completions', {
-    body: { model: 'Test-Model', messages: [{ role: 'user', content: 'weather?' }], tools },
+  const response = await proxy.request('POST', '/v1/chat/completions', {
+    body: { model: 'Test-Model', messages: [{ role: 'user', content: 'weather?' }], tools, tool_choice: 'auto' },
   })
 
-  assert.equal(seenBodies[0].tools, undefined, '托管模式下工具走提示注入，不再原生发一遍')
-  const injected = JSON.stringify(seenBodies[0].messages)
-  assert.match(injected, /get_weather/, '提示里必须带上工具描述')
+  assert.equal(response.status, 200)
+  assert.deepEqual(seenBodies[0].tools, tools, '原生 tools 必须原样到达上游')
+  assert.equal(seenBodies[0].tool_choice, 'auto')
+  // 托管层（把工具描述写进 system、再把回复文本解析回 tool_calls）已于 2026-11-03 退役，
+  // 原生透传是唯一通路。下面两句是那条裁定的门：工具名不得再出现在消息里，
+  // 也不得多出一个网关造的 system 块。
+  assert.equal(
+    JSON.stringify(seenBodies[0].messages).includes('get_weather'),
+    false,
+    '消息里出现工具名 = 网关又在替客户端描述工具',
+  )
+  assert.equal(seenBodies[0].messages.filter((message: Payload) => message.role === 'system').length, 0,
+    '这条请求没有 system，出站就不该有')
 })
 
 test('带 anthropic-version 列模型返回 anthropic 形状；不带时保持 OpenAI 形状', async () => {

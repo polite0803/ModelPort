@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project Overview
 
-ModelPort is an Electron desktop application that provides an OpenAI-compatible API proxy for standard HTTP model endpoints. It ships three provider classes: a 74-entry aggregate catalogue of key-based / key-less endpoints (see "Aggregate Provider Catalogue"), the thirteen account channels served by the vendored channel pack (see "Account Channels"), and user-defined custom providers. It runs on macOS, Windows, and Linux.
+ModelPort is an Electron desktop application that provides an OpenAI-compatible API proxy for standard HTTP model endpoints. It ships three provider classes: a 79-entry aggregate catalogue of key-based / key-less endpoints (see "Aggregate Provider Catalogue"), the thirteen account channels served by the vendored channel pack (see "Account Channels"), and user-defined custom providers. It runs on macOS, Windows, and Linux.
 
 ## Build Commands
 
@@ -67,8 +67,8 @@ not for the esbuild ones.) Counting these as regressions costs real time - re-ru
 a normal environment before touching source. Before attributing a red to your own change, check
 whether the failing file mentions `esbuild` or `child_process` at all, and whether the file it reads
 is one you edited: this checkout carries a large body of uncommitted work, so a red in
-`tests/tool-calling/tool-settings-ui.test.ts` (which asserts on strings inside
-`src/renderer/src/components/models/ToolCallingPanel.tsx`) or a `tsconfig.node.json` error coming
+`tests/api/parameter-policy.test.ts` (which asserts on strings inside
+`src/main/proxy/forwarder.ts`) or a `tsconfig.node.json` error coming
 from `src/main/index.ts` can be somebody else's pending edit rather than your regression.
 
 Two further `tests/skills/` cases fail on a Windows checkout for environmental reasons independent
@@ -103,7 +103,6 @@ src/
 │   │   ├── routes/         # chat.ts, completions.ts, models.ts
 │   │   │   └── management/ # /v1/management/* HTTP API
 │   │   ├── middleware/     # managementAuth
-│   │   ├── toolCalling/    # Tool-calling engine + client protocol adapters
 │   │   ├── services/       # contextManagementService (history trimming)
 │   │   └── sessionManager.ts # Session table + delete-after-chat flag
 │   ├── oauth/              # OAuth authentication
@@ -219,7 +218,7 @@ message in the UI.
 ### Aggregate Provider Catalogue
 
 `src/main/providers/aggregate/registry.ts` is data transcribed from the reference registry:
-74 entries / 473 models. Beyond dropping `openai` and `github_copilot` (browser-login account
+79 entries / 500 models. Beyond dropping `openai` and `github_copilot` (browser-login account
 channels - the class that was retired) and `fleetrelay_t1` (responses-only relay), seven model rows
 were removed on 2026-10-29 because upstream no longer serves them (3 anthropic ids the API answers
 with an error, 4 xai ids retired 2026-05-15 whose slugs still resolve and silently redirect), and
@@ -1000,6 +999,42 @@ exactly this result, so "which model gets routed, and by which step was it dropp
 reading. `RoutePreviewResult` lives in `shared/types.ts` because the renderer cannot import from
 `main/proxy`; `autoRouter.ts` re-exports it.
 
+### Degenerate Stream Detection (the second degraded class)
+
+`isDegradedSuccess` used to recognise exactly one shape: HTTP 200 with
+`finish_reason=length` while the client asked for no cap. The 2026-11-03 WorkBuddy agent
+session exposed the other shape - **a stream that is protocol-perfect and content-degenerate**:
+every turn returned 200 with `finish_reason=tool_calls`, and the client aborted it with its own
+`REASONING_LOOP` guard. On our side that lands as `client_abort`, which the scorer skips
+(`autoBandit.ts`), so the model that produced it was never penalised and stickiness kept
+re-anchoring the conversation to it.
+
+* **The measurement is a pure function over the SSE body** (`shared/streamRepetition.ts`):
+  `content` / `reasoning` / `reasoning_content` deltas are re-joined, the verdict is taken over
+  the **trailing 128 lines** (a late collapse must not be diluted by a clean opening), and the
+  reading (`lines / uniqueLines / dedupRatio / runChars / degraded`) is stored on
+  `streamTrace.repetition`. Only aggregates go into the row - never the text.
+* **Thresholds are a setting**, `AppConfig.streamRepetitionGuard` (absent = shipped defaults, so
+  an old config file neither disables the guard nor silently changes them). The defaults are
+  calibrated on 99 real reasoning blocks from that session: healthy median is **1.000**, p10 sits
+  between 0.648 and 0.982, and `maxDedupRatio: 0.8` flags 9 of the 99 blocks while never touching
+  the cleanest model in the pool (`raccoon`, min 0.982). The client aborted at 0.35, so the gateway
+  stays deliberately looser - it must not condemn a stream the client accepted.
+* **`runChars` is evidence, not a judgement input.** The first draft required a long consecutive
+  run alongside the ratio; the calibration showed long runs appear mostly in *healthy* blocks, so
+  the AND rule would have flagged almost nothing. A knob with no consumer is worse than no knob, so
+  `minRunChars` was dropped from the settings entirely rather than left decorative.
+* **Stickiness is revoked, not merely un-promoted**: `autoRouter.revokeSticky()` is called at both
+  stream settle paths when the verdict is degraded. The anchor is written at response-header time,
+  so the correction has to happen after the stream ends.
+* **Non-streaming responses are not judged, and the panel says so.** There is no per-chunk signal
+  and the body only exists when body logging is on; claiming coverage there would be a fabricated
+  reading.
+* Tests: `tests/shared/stream-repetition.test.ts` (verdict, tail window, short-answer exemption,
+  threshold-is-a-real-knob), `tests/proxy/bandit-repetition.test.ts` (streak + no regression on the
+  length rule), `tests/renderer/repetition-guard-wiring.test.mjs` (wiring, with six in-memory
+  mutations as negative controls).
+
 ### OpenCode: three lanes, one shipped
 
 "OpenCode" names three unrelated things in this repo; only the third is live.
@@ -1008,8 +1043,9 @@ reading. `RoutePreviewResult` lives in `shared/types.ts` because the renderer ca
   `opencode-ai@1.19.4` (npx fallback) and drove its loopback HTTP/SSE server. The subsystem is
   gone: `src/main/opencode/`, `providers/builtin/opencode.ts`, `proxy/adapters/opencode.ts`, the
   `providerForwarders` entry, the `runtimeModels` flag, the `runtime` branch of
-  `modelListSource`, the endpoint-policy runtime exemption, the `opencode` entry in
-  `toolCalling/providerProfiles`, and the `opencode:*` capability-probe IPC slice. Why: the free
+  `modelListSource`, the endpoint-policy runtime exemption, the `opencode` entry in the tool-profile
+  registry (that whole subsystem went on 2026-11-03 - see §Tool Calling), and the `opencode:*`
+  capability-probe IPC slice. Why: the free
   lane validates the **client shape** (`User-Agent: opencode/<channel>/<version>/<client>` with
   major >= 2; a 1.x client is rejected with `403 FreeTierError`), while the npm `opencode-ai`
   line is frozen at 1.19.5 (zero 2.x versions) and `opencode.ai/install` refuses to install 2.x
@@ -1037,12 +1073,22 @@ request path consults is `shouldDeleteAfterChat()`, which returns `SessionConfig
 - "drop the session after this reply" versus keep it for reuse. There is no `single`/`multi` mode
 field and no `parentMessageId` handling in `SessionConfig`.
 
-### Tool Prompt Injection
-Tool calling for clients without native support is handled by `src/main/proxy/toolCalling/`
-(the engine plus per-client protocol adapters under `protocols/`). The `providerProfiles`
-registry has been empty since the OpenCode runtime retirement (its `opencode` profile was the only
-member), so every shipped provider goes through the default profile.
-`services/promptInjectionService.ts` and `proxy/prompt/` are not wired into the live request path.
+### Tool Calling (native passthrough only)
+
+`tools` / `tool_choice` / `parallel_tool_calls` travel as the client sent them: `buildRequestBody`
+whitelists all three (after `sanitizeChatToolDefinitions` drops unusable definitions, e.g. Codex's
+empty-name placeholders), and the reply is forwarded as-is - upstream produces the `tool_calls`, the
+client executes them and sends the results back. Nothing in the gateway rewrites either side.
+
+The managed layer that used to render tool descriptions into a `system` turn and parse text replies
+back into `tool_calls` (`src/main/proxy/toolCalling/`, `src/shared/toolCalling.ts`,
+`config.toolCallingConfig`, `ToolCallingPanel`, `POST /v1/management/tool-calling/smoke`) was retired
+on 2026-11-03 together with the ruling in §Gateway-Authored Text Reaching the Model. What covered the
+"model behind this channel has no tools" case was never the prompt: `autoRouting::buildRequestProfile`
+sets `needsTools` from the inbound `tools` array and `hardFilterFailure` drops candidates whose
+capability says `tools: 'no'`; when every candidate says `no`, the 503 states `missing: ['tools']`.
+`services/promptInjectionService.ts` and `proxy/prompt/` mentioned by older revisions of this
+document no longer exist.
 
 ### Session Management Flow
 Context continuity travels in the request itself: the forwarder hands the client's message history
@@ -1198,6 +1244,87 @@ missing from its SAN (`proxy/tls.ts::loadTlsMaterial`).
   because the fix is different.
 * Never report a client as working on the strength of the trust flag; the honest evidence is a handshake
   that turned into a request row.
+
+## Gateway-Authored Text Reaching the Model
+
+Ruling (2026-11-03, 用户拍板): the gateway writes **no** prompt text into a user's conversation. What is
+left below is the residue that survives that ruling because it is not a claim about the user's intent -
+a self-describing compression marker and a probe that never enters a conversation. Anything else must be
+retired, not documented.
+
+Anything the gateway writes into an outbound request is a claim on the user's behalf, and it is
+also text the model can echo back into the conversation. Every such site carries a
+`GATEWAY-TEXT: <id>` tag at the point of injection, and `tests/proxy/gateway-authored-text.test.ts`
+fails if a tagged site is missing from this table or a table row has no tag. Provenance below is
+`git log -S` on the literal, not recollection.
+
+| id | what it writes | provenance | why it exists |
+| --- | --- | --- | --- |
+| `ccr-sentinel` | appends `… N more items <<ccr:hash …_items_offloaded>>` / `[N lines compressed to M. Retrieve more: hash=…]` inside tool results | `9d07417` 2026-10-30, 刘小平 | compression that stays honest about itself: the marker is the retrieval pointer, and re-compressing a payload that already carries one is never correct. |
+| `liveness-ping` | `messages:[{role:'user',content:'ping'}]` with `max_tokens:1` | `ddc566a` 2026-10-30, 刘小平 | catalogue liveness probe; never part of a user conversation. |
+
+### Retired, with the evidence that retired it
+
+A retired site keeps its id here — never in the table above, which the gate reconciles against the
+live `GATEWAY-TEXT:` tags — so the provenance survives without pretending the code still does it.
+
+* **`trailing-user-guard`** — retired 2026-11-03 under the ruling 本网关不注入任何提示词. It appended a
+  **user** turn 「继续执行上一条消息中的任务，直接开始，不要向我确认。」 whenever the outbound sequence ended
+  with `role:"tool"`. Provenance: `fb720f9` 2026-11-01, written while chasing the report named in its
+  own commit subject ("VS Code agent 第 2 轮装死"), moved into `doForward` by `cb49a5c`, trigger narrowed
+  by `c28c6c4` — all 刘小平. It is the reason this section exists: it was the only site added during
+  troubleshooting and the only one whose text came back at us. In the 2026-11-03 WorkBuddy session 36 of
+  267 reasoning blocks contain the sentence verbatim and 32 open with 「用户要求继续执行…」 — the model
+  restates our imperative as its own opening line, the client stores that line, and the next turn opens
+  the same way, which lowers the trailing-window dedup ratio the same session was later aborted on.
+  Two things to keep straight about the removal:
+  * The cost is the shape it papered over — large `system` × trailing tool result → an empty or
+    asking-back reply. `7/10` was a **single-point measurement** (one provider, one model, n=10 on
+    2026-11-01) against a `0/15` control on the same body with the line appended; it is not a settled
+    rate, so do not re-cite it as one. What replaces injection is observation: `streamTrace.repetition`
+    degrades and unpins the sticky anchor instead of the gateway speaking for the user.
+  * Attribution lesson (still true for any synthetic turn anyone is tempted to add again): a turn the
+    gateway writes exists only in the outbound request, so the client cannot show it and grepping
+    `requestBody` counts **history**, not injections — once the sentence entered history it appeared in
+    every later body, which is how 146 rows were misread as 146 injections. Per-request counters
+    (`record`/`take`, the `compression/duplication.ts` shape) are the only honest form.
+
+* **`managed-tool-prompt`** — retired 2026-11-03, the same ruling. It prepended a **system** turn
+  (`## Available Tools … you can invoke the following tools …`) and **removed `tools` from the request**,
+  then parsed the reply text back into `tool_calls` on both the non-stream and the stream path.
+  Provenance: `aee98eb` 2026-03-02 (upstream `xiaoY233`, "Function Calling simulation for non-native
+  models"), redesigned as the protocol set by `04e7ad2` 2026-05-08 — an upstream feature, not
+  incident-driven. Whole subsystem gone: `src/main/proxy/toolCalling/`, `src/shared/toolCalling.ts`,
+  `config.toolCallingConfig` (plus the pre-v2 `toolPromptConfig` migration), `ToolCallingPanel`,
+  `POST /v1/management/tool-calling/*` and `tests/tool-calling/`. Tools now travel natively on every
+  lane and the only "this model has no tools" handling is routing (`needsTools` → `hardFilterFailure` →
+  `missing: ['tools']`), which is what the retired prompt was imitating.
+  **Registry-scope lesson, kept because it generalises:** this prompt became far broader than its author
+  intended without any commit touching its own text. `70ec39b` 2026-11-01 retired the OpenCode runtime,
+  which deleted the only member of `providerProfiles`, so the fallback profile (`managedSupport: true`,
+  `handlesToolsItself` unset) silently came to cover **every** provider — from then on the March-2026
+  prompt was injected on every chat lane except account channels, Anthropic adapters and the Responses
+  wire. Retiring one entry from a registry that has a default can flip the scope of a whole subsystem;
+  read the fallback, not just the registry, before assuming a mode is narrow.
+* **`output-steering`** — retired 2026-11-03, same ruling. It appended a sentinel-wrapped
+  (`<modelport_output_shaping>…</modelport_output_shaping>`) **system** block of style instructions in
+  three levels, to spend fewer completion tokens. Provenance: `9d07417` 2026-10-30, 刘小平 — ported from
+  the compression work's headroom analysis, opt-in and `enabled:false` in the field, so retiring it costs
+  no behaviour anyone was getting. The savings it chased are still available on the input side
+  (`compression`, live-zone only); what it could not avoid is being a sentence the gateway wrote on the
+  user's behalf, in every system prompt, cache-pinned for every install. Whole surface gone:
+  `proxy/compression/outputSteering.ts`, `store/outputSteeringConfig.ts`, `config.outputSteering`,
+  `OutputSteeringSettings` and its i18n block.
+* **`context-summary-prompt`** and **`context-summary-marker`** — retired 2026-11-03 as one feature (the
+  Summary Compression strategy). Provenance: `8e744ec` 2026-03-31 (upstream). The prompt was the system
+  turn of a **second, gateway-initiated model call** on the user's own history; the marker was
+  `[Conversation Summary]\n…` pasted back as a `system` message replacing the summarised turns — i.e.
+  the gateway both authored prose and made it look like the conversation's own system prompt. `enabled`
+  defaulted to false in the field, and the `summaryPrompt` setting let a user type arbitrary text into
+  that turn. What survives is deletion-only trimming: `slidingWindow` and `tokenLimit` keep their
+  behaviour (including the invariant that trimming never empties history). `normalizeContextManagementConfig`
+  drops a stored `strategies.summary` and filters `summary` out of `executionOrder`, so an upgraded
+  `data.json` cannot resurrect it; the gate is `tests/proxy/context-summary-retired.test.ts`.
 
 ## Data Storage
 

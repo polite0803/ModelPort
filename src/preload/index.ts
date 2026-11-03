@@ -666,13 +666,8 @@ interface ContextManagementConfig {
       enabled: boolean
       maxTokens: number
     }
-    summary: {
-      enabled: boolean
-      keepRecentMessages: number
-      summaryPrompt?: string
-    }
   }
-  executionOrder: ('slidingWindow' | 'tokenLimit' | 'summary')[]
+  executionOrder: ('slidingWindow' | 'tokenLimit')[]
 }
 
 const managementApiAPI = {
@@ -692,11 +687,6 @@ const contextManagementAPI = {
   
   updateConfig: (updates: Partial<ContextManagementConfig>): Promise<ContextManagementConfig> => 
     ipcRenderer.invoke(IpcChannels.CONTEXT_MANAGEMENT_UPDATE_CONFIG, updates),
-}
-
-const toolCallingAPI = {
-  runSmoke: (input: { clientAdapterId: string }): Promise<{ success: boolean; data?: unknown; error?: { message?: string } }> =>
-    ipcRenderer.invoke(IpcChannels.TOOL_CALLING_RUN_SMOKE, input),
 }
 
 const trayAPI = {
@@ -836,7 +826,6 @@ const electronAPI = {
   session: sessionAPI,
   managementApi: managementApiAPI,
   contextManagement: contextManagementAPI,
-  toolCalling: toolCallingAPI,
   tray: trayAPI,
 
   // 这里刻意**没有**通用的 `invoke` / `send` / `on`。曾经有，等于把整个 `ipcRenderer`

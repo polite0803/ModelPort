@@ -35,6 +35,15 @@ P1-1 ~ P1-5、P2-1 ~ P2-3、P2-5、P2-6、P3-1 ~ P3-5、P4-1 ~ P4-4、P5-1 ~ P5-
 `tests/tool-calling/{stream-plan-wrapper,history-and-choice}.test.ts`、`tests/providers/transcript.test.ts`。
 按裁定更新旧期望 3 处（parser 的文本释放与 id 规则、provider-profiles 与 mimo-query 的历史格式）。
 
+> **P3 一族已于 2026-11-03 整条退役。** 上面这些落点（`toolCalling/streamPlanWrapper.ts`、
+> `ToolStreamParser.ts`、`tests/tool-calling/*`、provider-profiles 的历史格式）当时修的是**托管工具层**
+> ——把工具描述写进 system、再把回复文本解析回 `tool_calls`。裁定「本网关不注入任何提示词」之后，
+> 该子系统连同其配置、面板与管理端点一并删除，工具改为原生透传，「这家没有工具能力」回到路由层
+> （`needsTools → hardFilterFailure → 503 details.missing:['tools']`）。因此 P3-1 ~ P3-4 的
+> 「现状证据」与「改法」现在都不成立，保留只为记录当时的判据来源；仍活着的是
+> `proxy/utils/toolViolationTap.ts`（只观察原生 `tool_calls`，不写字）与 P3-5 里非工具层的部分。
+> 出处见 `docs/AGENTS-full.md` §Gateway-Authored Text 的 Retired 台账与 §Tool Calling。
+
 ## 仍未做
 
 无。流式强制调用违反已改为在终结 chunk 上增加 `x_modelport_tool_violation:"required"` 字段
