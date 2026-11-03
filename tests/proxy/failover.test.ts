@@ -52,6 +52,7 @@ import {
   isRecoverableChannelFailure,
   isSameTargetRetryableStatus,
   isContextOverflowError,
+  isReasoningEffortUnsupportedError,
   isToolOverflowError,
   probeSseHead,
   shouldTryNextAutoCandidate,
@@ -339,8 +340,9 @@ test('worker 的 model.rateLimits rpc 必须剥 provider 前缀再查限流键',
 })
 
 test('forwarder 的换家判据必须接上：超限 400 参与换家，普通 400 仍然直接失败', () => {
-  // 钉调用点：forwardFirstReachable 在 4xx 判定之前先查「换一家就能成」的三类
-  // （工具数超限 + 历史缺 reasoning_content + 渠道目录不认这个模型）
+  // 钉调用点：forwardFirstReachable 在 4xx 判定之前先查「换一家就能成」的那几类
+  // （工具数超限 + 历史缺 reasoning_content + 渠道目录不认这个模型 + 强制 tool_choice
+  // + 窗口装不下 + 不接受 reasoning_effort）
   assert.match(
     forwarderSource,
     /const capabilityMismatch = isToolOverflowError\(result\.error\)\s*\n\s*\|\| isMissingReasoningHistoryError\(result\.error\)\s*\n\s*\|\| isChannelModelUnavailableError\(result\.error\)/,
@@ -349,7 +351,7 @@ test('forwarder 的换家判据必须接上：超限 400 参与换家，普通 4
   // probe 错误帧映射：能力不匹配类 400 保持 400（换取「不计账号失败」的换家语义）
   assert.match(
     forwarderSource,
-    /isToolOverflowError\(probe\.message\)[\s\S]{0,160}isContextOverflowError\(probe\.message\)[\s\S]{0,60}\? 400\s*\n\s*: 502/,
+    /isToolOverflowError\(probe\.message\)[\s\S]{0,200}isContextOverflowError\(probe\.message\)[\s\S]{0,120}isReasoningEffortUnsupportedError\(probe\.message\)[\s\S]{0,60}\? 400\s*\n\s*: 502/,
     'probe error frames must keep capability-mismatch 400s at 400 so they fail over without account-failure penalty',
   )
   // 2026-11-02 对齐 new-api：400 仍终止（能力类例外由文案判据放行）；
@@ -862,4 +864,24 @@ test('风控类 400 在日志里记成 failover，而不是 fatal', () => {
   })
   assert.equal(failure.kind, 'failover')
   assert.equal(failure.status, 400)
+})
+
+test('「这一家不接受 reasoning_effort」识别：命中用户报障原文，且不吞掉别的 400', () => {
+  // 2026-11-03 用户报障原文（OVH 的 Meta-Llama-3_3-70B-Instruct，daily 路由，att=1 整轮终止）
+  assert.ok(isReasoningEffortUnsupportedError(
+    "feature 'reasoning_effort for this model' is not currently supported [request_id: chatcmpl-mw00pl8g-2po1fv]",
+  ))
+  assert.ok(isReasoningEffortUnsupportedError('The model does not support reasoning_effort.'))
+  assert.ok(isReasoningEffortUnsupportedError('unsupported reasoning effort value'))
+  // 窄口径：只有字段名不构成换家理由
+  assert.equal(isReasoningEffortUnsupportedError('reasoning_effort must be one of low, medium, high'), false)
+  assert.equal(isReasoningEffortUnsupportedError("Invalid value for 'tools': maximum number of items is 128."), false)
+  assert.equal(isReasoningEffortUnsupportedError('messages: must be a non-empty array'), false)
+  assert.equal(isReasoningEffortUnsupportedError(undefined), false)
+
+  // 接线：四个调用点都要接上（import + auto 换家分支 + probe 错误帧 + 最终状态映射）
+  assert.equal(forwarderSource.split('isReasoningEffortUnsupportedError').length - 1, 4)
+  assert.match(forwarderSource, /\|\| isReasoningEffortUnsupportedError\(result\.error\)/)
+  assert.match(forwarderSource, /\|\| isReasoningEffortUnsupportedError\(probe\.message\)/)
+  assert.match(forwarderSource, /\|\| isReasoningEffortUnsupportedError\(message\)/)
 })

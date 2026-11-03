@@ -148,10 +148,11 @@ export interface RouteModelRef {
   displayName: string
 }
 
-/** 空池原因。前三个是请求画像缺能力，后两个是路由配置把池筛光。 */
+/** 空池原因。前四个是请求画像缺能力，后两个是路由配置把池筛光。 */
 export type RoutePoolMissingReason =
   | 'vision'
   | 'tools'
+  | 'reasoning'
   | 'context'
   | 'pool_strategy'
   | 'manual_filter'
@@ -160,6 +161,7 @@ export type RoutePoolMissingReason =
 export interface RoutePreviewSample {
   needsVision?: boolean
   needsTools?: boolean
+  needsReasoning?: boolean
   estimatedTokens?: number
 }
 
@@ -179,7 +181,7 @@ export interface RoutePreviewModel {
   /** status='filtered'：第一条把它筛掉的池策略 */
   filteredBy?: AutoPoolStrategyId
   /** status='unavailable'：请求画像会把它硬过滤掉的原因 */
-  unavailableReason?: 'vision' | 'tools' | 'context'
+  unavailableReason?: 'vision' | 'tools' | 'reasoning' | 'context'
   capability: ModelCapability
   costBucket?: CostBucket
   costClass?: AggregateCostClass
@@ -207,6 +209,7 @@ export interface RoutePreviewResult {
   profile: {
     needsVision: boolean
     needsTools: boolean
+    needsReasoning: boolean
     estimatedTokens: number
     complexity: 'simple' | 'standard' | 'complex'
     stream: boolean

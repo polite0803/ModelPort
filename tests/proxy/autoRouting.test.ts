@@ -886,3 +886,53 @@ test('normalizeAutoRoutingConfig returns empty poolStrategies when none are supp
     poolStrategies: [],
   })
 })
+
+/* ------------------------------------------- reasoning_effort 的能力口径 */
+
+// WorkBuddy 带 `reasoning_effort` 打 `daily`，落到 OVH 的 Llama 3.3 70B（不推理）上
+// 被 400 打死（`att=1`，400 默认终止）。这一族钉的是「点了推理档位之后，路由怎么
+// 对待候选的推理能力」：有证据的先淘汰，没标注的放行但少排，全池都没证据时才说缺。
+test('profileRequest：reasoning_effort 点名推理档位，`none` 与「没给」不是一回事', () => {
+  assert.equal(profileRequest(textRequest('hi', { reasoning_effort: 'high' })).needsReasoning, true)
+  assert.equal(profileRequest(textRequest('hi', { reasoning_effort: 'low' })).needsReasoning, true)
+  assert.equal(profileRequest(textRequest('hi', { reasoningEffort: 'medium' })).needsReasoning, true)
+  assert.equal(profileRequest(textRequest('hi', { reasoning_effort: 'none' })).needsReasoning, false)
+  assert.equal(profileRequest(textRequest('hi')).needsReasoning, false)
+})
+
+test('明确标了不推理的候选装不下这种请求；没标注的仍放行', () => {
+  const profile = profileRequest(textRequest('hi', { reasoning_effort: 'high' }))
+  const ranked = rankCandidates(profile, [
+    candidate({ accountId: 'no-reasoning', displayName: 'llama-not-reasoning', capabilityHint: { reasoning: 'no' } }),
+    candidate({ accountId: 'yes-reasoning', displayName: 'deepseek-reasoning', capabilityHint: { reasoning: 'yes' } }),
+  ], { now: NOW })
+  assert.deepEqual(ranked.map(item => item.accountId), ['yes-reasoning'])
+
+  // 没标注不是证据：它参与候选，只是排序上让位于已标注的
+  const unknownOnly = rankCandidates(profile, [
+    candidate({ accountId: 'unmarked', displayName: 'some-model', capabilityHint: { reasoning: 'unknown' } }),
+  ], { now: NOW })
+  assert.deepEqual(unknownOnly.map(item => item.accountId), ['unmarked'])
+
+  // 没点推理档位时，不推理的候选照旧能用（不能把非推理模型从普通请求里筛光）
+  const plain = rankCandidates(profileRequest(textRequest('hi')), [
+    candidate({ accountId: 'no-reasoning', capabilityHint: { reasoning: 'no' } }),
+  ], { now: NOW })
+  assert.deepEqual(plain.map(item => item.accountId), ['no-reasoning'])
+})
+
+test('explainMissing：只有每个候选都明确标了不推理，才说缺这项能力', () => {
+  const profile = profileRequest(textRequest('hi', { reasoning_effort: 'high' }))
+  assert.deepEqual(
+    explainMissing(profile, [candidate({ capabilityHint: { reasoning: 'no' } })]),
+    ['reasoning'],
+  )
+  // 有一个没标注 ⇒ 没有证据说整池都不推理，不报这一项
+  assert.deepEqual(
+    explainMissing(profile, [
+      candidate({ accountId: 'a', capabilityHint: { reasoning: 'no' } }),
+      candidate({ accountId: 'b', capabilityHint: { reasoning: 'unknown' } }),
+    ]),
+    [],
+  )
+})

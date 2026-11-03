@@ -859,7 +859,11 @@ published ceiling" is not evidence of overflow, so the request goes out and, whe
 cannot fit it, its context-class 400 switches to the next candidate
 (`failover.ts::isContextOverflowError`). `UNANNOTATED_CONTEXT_FLOOR` (64000) is therefore *not* an
 admission threshold any more; it survives only as a scoring one - an un-annotated window costs 0.05
-once the estimate passes half of it, because unknown should yield to evidenced.
+once the estimate passes half of it, because unknown should yield to evidenced. A request that names a
+reasoning tier (`reasoning_effort` / `reasoningEffort`, anything but `none` - `none` means "explicitly
+do not think" and must not filter non-reasoning models out) carries `profile.needsReasoning`: candidates
+annotated `reasoning: 'no'` are dropped for that request, unannotated ones stay eligible with a 0.05
+penalty, and `details.missing` may say `reasoning` only when **every** candidate is explicitly `no`.
 
 **Contract filtering.** `contractNeeds()` derives what the response shape depends on - `n > 1` and
 `response_format: json_object | json_schema`. Only builtin providers fail those (see
@@ -935,7 +939,11 @@ the account is healthy: tool-count overflow (`isToolOverflowError`), missing `re
 history (`isMissingReasoningHistoryError`), the channel worker's own `模型不存在或已停用`
 (`isChannelModelUnavailableError`, `src/main/channelPack/worker.ts::complete`), a forced
 `tool_choice` the target refuses (`isForcedToolChoiceUnsupported`), a context window too small for the
-request (`isContextOverflowError`, `failover.ts`), and **any plain `404`** - a renamed or
+request (`isContextOverflowError`, `failover.ts`), a model that rejects the client's
+`reasoning_effort` (`isReasoningEffortUnsupportedError` - OVH's `Meta-Llama-3_3-70B-Instruct` answers
+`feature 'reasoning_effort for this model' is not currently supported`, and because that catalogue
+entry carries no reasoning annotation the route-side hard filter cannot catch it in advance), and
+**any plain `404`** - a renamed or
 capability-divergent model is "this channel does not supply it", not an account fault, so since
 2026-11-02 (new-api parity) it switches too; previously 400/404 were terminal and one such answer ended
 the whole chain (`attempts: 1`) while four other candidates went untried, which the client read as

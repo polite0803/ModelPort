@@ -181,6 +181,25 @@ export function isForcedToolChoiceUnsupported(message: string | undefined): bool
 }
 
 /**
+ * 「这一家不接受 `reasoning_effort`」类 400 的识别（2026-11-03 实测：`daily` 路由把
+ * WorkBuddy 的请求派给 OVH 的 `Meta-Llama-3_3-70B-Instruct`，上游回
+ * `feature 'reasoning_effort for this model' is not currently supported`，`att=1`
+ * 整轮终止）。
+ *
+ * 与强制 `tool_choice`、工具数超限同一类：**换一个候选就能成**，请求死在生成之前，
+ * 账号健康。而这类模型常常**没有推理标注**（OVH 那条就是 `reasoning:'unknown'`），
+ * 所以路由侧的硬筛拦不住它 —— 只有认这条文案才能把整轮救回来。
+ *
+ * ⚠️ 识别口径必须**窄**：要求文案同时出现 `reasoning_effort` 与「不支持」短语。
+ * 单模型路径仍按原样把 400 交回客户端：用户点名了这一家，换家等于替他改需求。
+ */
+export function isReasoningEffortUnsupportedError(message: string | undefined): boolean {
+  if (!message) return false
+  return /reasoning[_ ]effort/i.test(message)
+    && /(not\s+currently\s+supported|not\s+supported|unsupported|does\s+not\s+support)/i.test(message)
+}
+
+/**
  * 哪些状态码值得**换下一家**。
  *
  * 对齐 new-api 的 `AutomaticRetryStatusCodeRanges`（`1xx/3xx/401-407/409-499/
@@ -402,6 +421,10 @@ export function describeAttemptFailure(input: {
     || isMissingReasoningHistoryError(input.error)
     || isChannelModelUnavailableError(input.error)
     || isForcedToolChoiceUnsupported(input.error)
+    // 这两条漏在这里就会让日志说谎：换家循环实际往下试了，`kind` 却记成 `fatal`
+    // （本函数的口径就是「kind 必须与当时实际走的分支一致」）。
+    || isContextOverflowError(input.error)
+    || isReasoningEffortUnsupportedError(input.error)
     ? 'capability'
     : isChannelHumanRequiredFailure(input.error)
       // 风控类落的是 400，按纯状态码会被记成 `fatal`，而换家循环实际是**继续往下试**

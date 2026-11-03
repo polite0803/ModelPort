@@ -707,6 +707,7 @@ class AutoRouter {
     const profile: RequestProfile = {
       needsVision: sample.needsVision === true,
       needsTools: sample.needsTools === true,
+      needsReasoning: sample.needsReasoning === true,
       estimatedTokens: Math.max(0, Math.round(sample.estimatedTokens ?? 0)),
       complexity: 'standard',
       stream: false,

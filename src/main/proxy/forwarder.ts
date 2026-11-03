@@ -113,6 +113,7 @@ import {
   isFailoverEligibleStatus,
   isForcedToolChoiceUnsupported,
   isMissingReasoningHistoryError,
+  isReasoningEffortUnsupportedError,
   isOpaqueAggregateBadRequest,
   isRecoverableChannelFailure,
   isSameTargetRetryableStatus,
@@ -745,6 +746,9 @@ export class RequestForwarder {
         // 窗口不够是「这一家装不下这次请求」，池里窗口更大的候选能成：原先 400 一律
         // 终止，第一个候选超长就把整场打死（客户端读成「这条路由不可用」）。
         || isContextOverflowError(result.error)
+        // 这一家不接受 `reasoning_effort`（OVH 的 Llama 3.3 70B 实测 400）：换一个
+        // 候选就能成，账号健康。这类模型常常没有推理标注，路由侧硬筛拦不住。
+        || isReasoningEffortUnsupportedError(result.error)
         // 普通 404 同样是「这一家供不了这个模型」（目录漂移/能力差异），不是账号
         // 故障：换下一家，但不给账号记冷却 —— 否则一次模型改名会连坐整个账号。
         || result.status === 404
@@ -927,6 +931,7 @@ export class RequestForwarder {
           status: isToolOverflowError(probe.message)
             || isMissingReasoningHistoryError(probe.message)
             || isContextOverflowError(probe.message)
+            || isReasoningEffortUnsupportedError(probe.message)
             ? 400
             : 502,
           error: probe.message,
@@ -1015,7 +1020,7 @@ export class RequestForwarder {
       const message = probe.details?.message ?? probe.message
       const status = probe.details?.status
         ?? (isToolOverflowError(message) || isMissingReasoningHistoryError(message)
-          || isContextOverflowError(message) ? 400 : 502)
+          || isContextOverflowError(message) || isReasoningEffortUnsupportedError(message) ? 400 : 502)
       const details: UpstreamErrorDetails = probe.details
         ? {
             message,

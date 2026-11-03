@@ -23,7 +23,7 @@ import { bootstrapStore, loadModule, startProxy } from './harness.mjs'
 const PORT = 18991
 const UPSTREAM_PORT = 18992
 
-type UpstreamMode = 'ok' | 'overflow' | 'generic400'
+type UpstreamMode = 'ok' | 'overflow' | 'generic400' | 'reasoning400'
 let mode: UpstreamMode = 'ok'
 const seenModels: string[] = []
 
@@ -41,7 +41,9 @@ const server = createServer((req, res) => {
         error: {
           message: mode === 'overflow'
             ? "This model's maximum context length is 8192 tokens, however you requested 30000 tokens"
-            : "Invalid request: unsupported parameter 'temperature' for this model",
+            : mode === 'reasoning400'
+              ? "feature 'reasoning_effort for this model' is not currently supported"
+              : "Invalid request: unsupported parameter 'temperature' for this model",
           type: 'invalid_request_error',
           ...(mode === 'overflow' ? { code: 'context_length_exceeded' } : { code: 'unsupported_parameter' }),
         },
@@ -191,4 +193,24 @@ test('窗口不够不记账号故障：下一轮同一家仍然排第一并成�
   assert.equal(second.status, 200)
   assert.equal(second.headers['x-modelport-auto-attempts'], '1')
   assert.deepEqual(seenModels, ['badp-upstream'], '被换家过一次的候选不该进冷却')
+})
+
+// 2026-11-03 用户报障：WorkBuddy 带 `reasoning_effort` 打 `daily`，落到 OVH 的
+// `Meta-Llama-3_3-70B-Instruct`（没标注推理能力 ⇒ 硬筛拦不住），上游 400 把整轮打死。
+test('不接受 reasoning_effort 的 400：换成下一家并成功，日志按能力类记账', async () => {
+  mode = 'reasoning400'
+
+  const response = await proxy.request('POST', '/v1/chat/completions', {
+    body: { model: 'auto', messages: [{ role: 'user', content: 'ping' }], reasoning_effort: 'high' },
+  })
+
+  assert.equal(response.status, 200, '这一家不认这个参数 ≠ 这条路由不可用')
+  assert.match(response.headers['x-modelport-route'], /Ctx Provider goodp/)
+  assert.equal(response.headers['x-modelport-auto-attempts'], '2')
+  assert.deepEqual(seenModels, ['badp-upstream', 'goodp-upstream'])
+
+  const row = rowOf(response.headers['x-request-id'])
+  assert.ok(row, '请求日志里要能找到这一行')
+  assert.deepEqual((row.auto.failures as Array<Record<string, unknown>>).map(f => f.kind), ['capability'],
+    'kind 必须与换家循环实际走的分支一致：记成 fatal 就等于说「这一家之后没再试」')
 })

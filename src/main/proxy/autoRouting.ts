@@ -429,6 +429,13 @@ export function applyManualModelSelection<T extends RankCandidate>(
 export interface RequestProfile {
   needsVision: boolean
   needsTools: boolean
+  /**
+   * 客户端点名了推理档位（`reasoning_effort` / `reasoningEffort`，且不是 `none`）。
+   * 这不是复杂度打分用的，是**能力口径**：明确标了 `reasoning:'no'` 的候选装不下这种
+   * 请求（OVH 的 `Meta-Llama-3_3-70B-Instruct` 直接 400 `feature 'reasoning_effort for
+   * this model' is not currently supported`），而 400 默认是终止的 —— 第一家就把整轮打死。
+   */
+  needsReasoning: boolean
   estimatedTokens: number
   complexity: AutoComplexity
   stream: boolean
@@ -684,6 +691,12 @@ export function profileRequest(request: ChatCompletionRequest): RequestProfile {
   }
   // 两种写法都认：OpenAI 的 snake_case 与 AI SDK 的 camelCase。
   const reasoningEffort = request.reasoning_effort ?? request.reasoningEffort
+  // 值来自客户端，按字符串现推：`none` 是「明确不要思考」，与「没给」不是一回事，
+  // 前者不该把非推理模型筛掉。
+  const reasoningEffortValue = reasoningEffort === undefined || reasoningEffort === null
+    ? ''
+    : String(reasoningEffort).trim()
+  const needsReasoning = reasoningEffortValue !== '' && reasoningEffortValue !== 'none'
   if (reasoningEffort === 'high') {
     score += 2
   } else if (reasoningEffort) {
@@ -707,6 +720,7 @@ export function profileRequest(request: ChatCompletionRequest): RequestProfile {
   return {
     needsVision,
     needsTools,
+    needsReasoning,
     estimatedTokens,
     complexity,
     stream: Boolean(request.stream),
@@ -905,7 +919,7 @@ export function advertisedContextFloorOf(
 }
 
 /** 硬过滤的失败原因；`undefined` 表示通过 */
-export type HardFilterFailure = 'vision' | 'tools' | 'context'
+export type HardFilterFailure = 'vision' | 'tools' | 'reasoning' | 'context'
 
 /**
  * 请求画像对模型能力的硬过滤。`enforceContext=false` 只放宽上下文 —— 那是
@@ -920,6 +934,8 @@ export function hardFilterFailure(
 ): HardFilterFailure | undefined {
   if (profile.needsVision && capability.vision !== 'yes') return 'vision'
   if (profile.needsTools && capability.tools === 'no') return 'tools'
+  // 与 tools 同口径：明确标了不支持推理的候选淘汰，`unknown` 放行（没标注不是证据）。
+  if (profile.needsReasoning && capability.reasoning === 'no') return 'reasoning'
   // 窗口未知的候选不因上下文被淘汰（见 `effectiveContextLimit`）：没有公布上限
   // 不是超限的证据。已标注且确实装不下的，仍然在这里就换掉，省一次上游往返。
   if (!enforceContext) return undefined
@@ -944,6 +960,7 @@ function satisfiesCapability(
 export type MissingRequirement =
   | 'vision'
   | 'tools'
+  | 'reasoning'
   | 'context'
   | 'pool_strategy'
   | 'manual_filter'
@@ -965,6 +982,10 @@ export function explainMissing(
   }
   if (profile.needsTools && candidates.length > 0 && candidates.every(c => capabilityOf(c).tools === 'no')) {
     missing.push('tools')
+  }
+  // 与 tools 同一条证据口径：只有**每个候选都明确标了不支持推理**才说缺这项能力。
+  if (profile.needsReasoning && candidates.length > 0 && candidates.every(c => capabilityOf(c).reasoning === 'no')) {
+    missing.push('reasoning')
   }
   // 「装不下」只在**每个候选都公布过窗口且都小于本次请求**时才算缺的能力：只要有
   // 一个候选没公布上限，我们就没有证据说它装不下（那条请求真发过去会拿到上游的
@@ -1072,11 +1093,14 @@ function scoreCandidate(
   // 工具型请求扣 0.15（猜错一次就是整轮 agent 的 tool call 序列崩掉），
   // 上下文未知且请求已接近上界的再扣 0.05。
   const uncertainTools = profile.needsTools && capability.tools === 'unknown' ? 0.15 : 0
+  // 点了推理档位而候选没标注：小扣一分，让已标注能推理的那家先上（这次 400 的
+  // OVH Llama 就是 `unknown`，硬筛拦不住它，只能靠排序少踩）。
+  const uncertainReasoning = profile.needsReasoning && capability.reasoning === 'unknown' ? 0.05 : 0
   const uncertainContext = capability.contextTokens === undefined
     && profile.estimatedTokens > UNANNOTATED_CONTEXT_FLOOR / 2
     ? 0.05
     : 0
-  const penalty = uncertainTools + uncertainContext
+  const penalty = uncertainTools + uncertainReasoning + uncertainContext
 
   // 成本以"相对中性 0.5"的加减分进入总分：未知成本正好为 0，
   // 免费模型在 balanced 下得到 +0.1，在 cheap 下得到 +0.3。
