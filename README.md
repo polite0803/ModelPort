@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.4.1-blue?style=flat-square&logo=github" alt="Release">
+  <img src="https://img.shields.io/github/v/release/polite0803/ModelPort?style=flat-square" alt="Release">
   <img src="https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square" alt="License">
   <br>
   <a href="https://www.electronjs.org/"><img src="https://img.shields.io/badge/Electron-33+-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron"></a>
@@ -23,248 +23,217 @@
 </p>
 
 <p align="center">
-  ModelPort turns any OpenAI-compatible endpoint into a single local API. It ships a 89-entry
-  catalogue of key-based and key-less aggregate channels (including Kilo's free pool), thirteen
-  account channels with their own account pools and credit accounting, and user-defined custom
-  providers — so any OpenAI-compatible client works out of the box.
+  ModelPort is an Electron desktop application that runs an OpenAI-compatible API gateway on your
+  machine. It ships an aggregate catalogue of 89 endpoints / 570 models, thirteen account channels
+  managed by a vendored channel pack, and user-defined custom providers, so one base URL serves any
+  OpenAI-compatible SDK or agent client.
 </p>
 
 ![Product Preview](docs/screenshots/preview.png)
 
-## ✨ Features
+## Core capabilities
 
-- OpenAI Compatible API: standard OpenAI-compatible endpoints for seamless integration
-- Multi-Provider Support: 79 aggregate channels (API-key, free-tier, local), 13 account channels and a custom provider type
-- Account Channels: browser / device-code login with account pools, daily credit claim, per-model credit weights and free-model badges
-- Online Model Catalogue: refresh a channel's model list online, switch models off, restore models the pack marked dead
-- 🆕 Context Management: Intelligent conversation context management with sliding window, token limit, and summary strategies
-- 🆕 Function Calling Support: Universal tool calling capability for all models via prompt engineering, compatible with Cherry Studio, Kilo Code, and other clients
-- 🆕 Model Mapping: Flexible model name mapping with wildcard support and preferred provider/account selection
-- 🆕 Custom Parameters: Support for custom HTTP headers to enable web search, thinking mode, and deep research features
-- Dashboard Monitoring: Real-time request traffic, token usage, and success rates
-- API Key Management: Generate and manage keys for your local proxy
-- Request Logs: Detailed request logging for debugging and analysis
-- Proxy Configuration: Flexible proxy settings and routing strategies
-- System Tray Integration: Quick access to status from menu bar
-- Multilingual: English and Simplified Chinese support
-- Modern UI: Clean, responsive interface with dark/light theme support
+- **OpenAI-compatible API.** `POST /v1/chat/completions`, `POST /v1/completions`, `GET /v1/models`
+  and `GET /v1/models/:model`. Inbound Anthropic `/v1/messages` and Codex Responses `/v1/responses`
+  are translated onto the same routing, failover, quota and logging path. A management HTTP API
+  lives under `/v1/management/*`.
+- **Three provider classes.** 89 aggregate entries (key-based, key-less, and `unsupported` entries
+  that need Google ADC), thirteen account channels with their own account pools and credit
+  accounting, and custom providers pointing at any OpenAI-compatible endpoint.
+- **Failover and routing.** Round-robin, fill-first, failover, smart and pace strategies, plus a
+  virtual `auto` model that picks a candidate by capability, context size and live health. Client
+  errors are terminal; 401/403/404/5xx and network failures move to the next candidate, and a 404
+  switches without cooling down the account.
+- **Quota awareness.** A generated aggregate free-quota ledger, a live per-account credit gate,
+  per-`(account, model)` AIMD concurrency admission, a 24-hour bandit score, and a second
+  content-degenerate stream detector. Exhausted candidates are a last resort, never a forced pick.
+  Missing upstream `usage` stays `null`; the gateway does not invent token counts.
+- **Context handling without prompt injection.** History trimming is deletion-only (sliding window
+  or token limit) and never empties the conversation. Optional live-zone compression saves tokens
+  without adding a system or user turn. Tool definitions and replies travel natively; the gateway
+  does not render tool descriptions into a prompt or parse prose back into `tool_calls`.
+- **HTTPS and certificate trust.** An optional TLS listener (default `8443`) uses a managed
+  self-signed certificate or a custom PEM pair. The app can install the certificate into the OS
+  trust store for Chromium/Schannel clients, print the `NODE_EXTRA_CA_CERTS` line that Node clients
+  need, and serve the same PEM from `GET /v1/management/tls/ca`. Handshake rejections are counted in
+  `TlsStatus` because a refused handshake produces no request row.
+- **Diagnostics.** Every `/v1/*` response carries `X-Request-Id`; request logs record each attempt,
+  stream trace, upstream status and request id. `X-ModelPort-Trace: 1` captures bodies for one
+  request even when global body logging is off, and the Logs detail dialog can export a diagnostic
+  bundle.
+- **Desktop UI.** Dashboard, provider and account-channel pages, model catalogue, API keys, request
+  logs, proxy settings, tray integration, and English / Simplified Chinese locales.
 
-## 🤖 Supported Providers
+## Supported providers
 
-| Provider class | Auth Type | Count | Notes |
-| -------------- | --------- | ----- | ----- |
-| Aggregate catalogue | API key / none | 89 entries / 570 models | OpenAI-chat and Anthropic-messages wires; includes Kilo's key-less free pool |
-| Account channels | Browser / device-code / API-key | 13 channels | Each channel keeps its own account pool, daily credit claim and model gating |
+| Provider class | Auth types | Count | Notes |
+| -------------- | ---------- | ----- | ----- |
+| Aggregate catalogue | API key / none / unsupported | 89 entries / 570 models | `openai-chat` and `anthropic-messages` wires; includes Kilo's key-less free pool |
+| Account channels | Browser / device-code / OAuth / API key | 13 channels | Each channel keeps its own account pool, daily credit claim and model gating |
 | Custom provider | Configured per provider | — | Any OpenAI-compatible HTTP endpoint you define yourself |
 
-The aggregate catalogue is browsable in the **Aggregate Channels** page, which lists each entry with its category (API key / free tier / local), wire protocol and model count. Saving an entry creates a provider record with namespaced model names (`provider/model`); entries you never save never appear in the provider list. Entries requiring Google ADC are listed but marked unsupported.
+The aggregate catalogue is browsable in the **Aggregate Channels** page, which lists each entry with
+its category, wire protocol and model count. Saving an entry creates a provider record with
+namespaced model names (`provider/model`); entries you never save never appear in the provider
+list. Entries whose base URL contains `{placeholders}` (Azure, Vertex) must be overridden before
+they can be saved.
 
-The **Account Channels** page covers the thirteen channels (`lobsterai`, `qoder`, `qodercn`, `trae`, `cline`, `loomy`, `raccoon`, `minimax`, `zcode`, `gemini`, `buddy`, `workbuddy`, `opencode`). Model names carry the upstream credit multiplier in one of three shapes (`· x4.0`, `· x0.2→x0.1`, `· 免费`), so you can see the cost of a model before picking it; free models are badged and a model the upstream no longer reports as healthy can be restored from the same panel.
+The **Account Channels** page covers `lobsterai`, `qoder`, `qodercn`, `trae`, `cline`, `loomy`,
+`raccoon`, `minimax`, `zcode`, `gemini`, `workbuddy`, `buddy` and `opencode`. Model names carry the
+upstream credit multiplier in one of three shapes (`· x4.0`, `· x0.2→x0.1`, `· 免费`), free models
+are badged, and a model the upstream no longer reports as healthy can be restored from the same
+panel. The `opencode` channel is the API-key exception: it accepts an anonymous slot or a pasted
+`sk-` key and opens no browser.
 
 Provider adaptation notes are in [docs/providers](docs/providers/README.md).
 
-## 📥 Installation
+## Quick start
 
 ### Download
 
 Download the latest release from [GitHub Releases](https://github.com/polite0803/ModelPort/releases):
 
-| Platform              | Download                                 |
-| --------------------- | ---------------------------------------- |
-| macOS (Apple Silicon) | `ModelPort-x.x.x-arm64.dmg`              |
-| Windows               | `ModelPort-x.x.x-x64-setup.exe`          |
-| Linux                 | `ModelPort-x.x.x-x64.AppImage` or `.deb` |
+| Platform | Artifact |
+| -------- | -------- |
+| macOS (Apple Silicon) | `ModelPort-<version>-mac-arm64.dmg` |
+| Windows (x64) | `ModelPort-<version>-x64-setup.exe`, or the portable `.exe` |
+| Linux (x64) | `ModelPort-<version>-x64.AppImage`, `.deb`, or `.tar.gz` |
+| Linux (arm64) | `ModelPort-<version>-arm64.AppImage` |
 
-### Build from Source
+Release builds are not code-signed and the macOS build is not notarized. On macOS the quarantine
+attribute can be cleared with the command in the [FAQ](#faq).
 
-**Requirements:**
+### Build from source
 
-- Node.js 22.18+ (24 recommended)
-- npm
-- Git
+Requirements: Node.js 22.18+ (24 recommended), npm, and Git.
 
 ```bash
-# Clone the repository
 git clone https://github.com/polite0803/ModelPort.git
 cd ModelPort
-
-# Install dependencies
 npm install
 
-# Start development server
-npm run dev
+npm run dev      # macOS / Linux
+npm run dev:win  # Windows (sets the console code page, builds the channel pack)
 ```
 
-### Build for Production
+## Run the gateway
 
-```bash
-npm run build              # Build the application
-npm run build:mac          # Build for macOS (dmg only)
-npm run build:win          # Build for Windows (nsis)
-npm run build:linux        # Build for Linux (AppImage, deb)
-npm run build:all          # Build for all platforms
-```
-
-## 📖 Usage
-
-### Step 1: Launch the App
-
-After installation, launch ModelPort. You'll see the main dashboard.
-
-### Step 2: Add a Provider
-
-1. Navigate to **Aggregate Channels** from the sidebar
-2. Find a channel (e.g. `kilo` for the key-less free pool, or any API-key entry)
-3. Click **Configure**, paste the API key when the entry requires one, and optionally override the base URL or model list
-4. Save — the provider appears under **Providers** with models named `<provider>/<model>`
-
-Key-less entries such as Kilo need no credentials: saving them creates an empty local account, so
-they route immediately. Entries that use `{placeholders}` in their base URL (Azure, Vertex) must be
-overridden with your own endpoint before they can be saved.
-
-For a login channel, open **Account Channels**, pick a channel, sign in through the built-in browser
-flow, then enable the models you want to expose. The model list can be refreshed online at any time.
-
-### Step 3: Configure Proxy
-
-1. Navigate to **Proxy Settings** from the sidebar
-2. Set the port (default: 8080)
-3. Choose a load balancing strategy:
-   - **Round Robin**: Distributes requests evenly across accounts
-   - **Fill First**: Uses one account until limit is reached
-   - **Failover**: Automatically switches on failure
-4. Click **Start Proxy**
-
-### Step 4: Test the API
-
-Using Python (OpenAI SDK):
+1. Add a provider. Use **Aggregate Channels** for a catalogue entry, **Account Channels** for a
+   login channel, or **Providers** to define a custom OpenAI-compatible endpoint.
+2. Open **Proxy Settings**. The default listener is `127.0.0.1:8080`; HTTPS is off by default and
+   uses port `8443` when enabled.
+3. Optionally create an API key under **API Keys**. Once any enabled key exists, every `/v1/*`
+   request needs `Authorization: Bearer <key>` or `X-API-Key: <key>`. With no key configured the
+   server binds loopback only and refuses a non-loopback host.
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
-    api_key="your-api-key",
-    base_url="http://localhost:8080/v1"
+    api_key="your-api-key",          # any non-empty value when no key is configured
+    base_url="http://127.0.0.1:8080/v1",
 )
 
 response = client.chat.completions.create(
     model="kilo/kilo-auto/free",
-    messages=[
-        {"role": "user", "content": "Hello, who are you?"}
-    ]
+    messages=[{"role": "user", "content": "Hello, who are you?"}],
 )
 
 print(response.choices[0].message.content)
 ```
 
-### Step 5: Manage API Keys (Optional)
+## Configuration and data
 
-For security, you can enable API Key authentication:
+Application data lives in `~/.modelport/`. The Electron profile directory is pinned to
+`<appData>/modelport`, because `safeStorage` seals `store.key` and credentials against that path;
+moving it would make an existing install unreadable.
 
-1. Go to **API Keys** page
-2. Click **New API Key**
-3. Enter a name and description
-4. Copy the generated key
-
-## 📸 Screenshots
-
-| Dashboard | Providers |
-|-----------|-----------|
-| ![Dashboard](docs/screenshots/dashboard.png) | ![Providers](docs/screenshots/providers.png) |
-
-| Proxy Settings | API Keys |
-|----------------|----------|
-| ![Proxy](docs/screenshots/proxy.png) | ![API Keys](docs/screenshots/api-keys.png) |
-
-| Models | Session |
-|--------|---------|
-| ![Models](docs/screenshots/models.png) | ![Session](docs/screenshots/Session.png) |
-
-## ⚙️ Settings
-
-- **Port**: Change the proxy listening port (default: 8080)
-- **Routing Strategy**: Round Robin or Fill First
-- **Auto-start**: Launch proxy automatically on app startup
-- **Theme**: Light, Dark, or System preference
-- **Language**: English or Simplified Chinese
-
-## 🏗️ Architecture
-
-```
-ModelPort/
-├── src/
-│   ├── main/                    # Electron main process
-│   │   ├── index.ts             # App entry point
-│   │   ├── proxy/               # Proxy server (Koa)
-│   │   ├── ipc/                 # IPC handlers
-│   │   ├── providers/           # Builtin / aggregate / account-channel configs
-│   │   ├── channelPack/         # Channel-pack host (worker + compat shims)
-│   │   ├── store/               # Persistent storage
-│   │   └── tray/                # System tray integration
-│   ├── preload/                 # Context bridge
-│   ├── renderer/                # React frontend
-│   │   ├── components/          # UI components
-│   │   ├── pages/               # Page components
-│   │   ├── stores/              # Zustand state
-│   │   └── i18n/                # Internationalization
-│   └── shared/                  # Types shared by main and renderer
-├── build/                       # Build resources
-├── resources/                   # Bundled runtime assets
-├── scripts/                     # Build scripts
-└── tests/                       # Node test-runner suite
-```
-
-## 🔧 Tech Stack
-
-| Component | Technology            |
-| --------- | --------------------- |
-| Framework | Electron 33+          |
-| Frontend  | React 18 + TypeScript |
-| Styling   | Tailwind CSS          |
-| State     | Zustand               |
-| Build     | Vite + electron-vite  |
-| Packaging | electron-builder      |
-| Server    | Koa                   |
-
-## 📁 Data Storage
-
-Application data is stored in `~/.modelport/` directory (kept unchanged on purpose so existing installs keep their accounts and keys):
-
-- `data.json` - configuration, providers, accounts and app logs (one electron-store file)
+- `data.json` - one electron-store file holding config, providers, accounts, sessions, statistics
+  and app logs (there is no separate `providers.json` or `accounts.json`)
 - `store.key` - this install's data key, sealed by the OS keystore
 - `request-logs/` - detailed request logs
-- `channel-pack/` - the channel pack's own state and encrypted channel credentials
+- `quota-ledger.json` - aggregate free-quota counters and the caps learned from upstream
+- `channel-pack/` - the channel pack's own state plus encrypted channel credentials
+- `tls/` - the managed self-signed certificate and key
 
-Account credentials are additionally encrypted with the OS keychain when it is available; if it is
-not, they are stored in `data.json` unencrypted.
+Credentials use `safeStorage` when it is available. If it is not, the data file is written
+unencrypted and a warning is logged, so restrict access to `~/.modelport/` in that case.
 
-## ❓ FAQ
+## Platform support
 
-### macOS: "App is damaged and can't be opened"
+| Platform | Architectures | Packages |
+| -------- | ------------- | -------- |
+| macOS | Apple Silicon (arm64) | DMG only |
+| Windows | x64 | NSIS installer, portable executable |
+| Linux | x64, arm64 | AppImage; x64 also `.deb` and `.tar.gz` |
 
-Due to macOS security mechanisms, apps downloaded outside the App Store may trigger this warning. Run the following command to fix it:
+## Development and verification
+
+```bash
+npm run build              # source-artifact guard + channel pack + electron-vite build
+npm run gate               # what CI runs: build + both tsc programs + full test suite
+npm run build:mac          # dmg only
+npm run build:win          # NSIS + portable
+npm run build:linux        # AppImage, deb, tar.gz
+```
+
+`npm run gate` runs `tsc --noEmit` against both `tsconfig.json` (renderer + shared) and
+`tsconfig.node.json` (main + preload + shared), then the Node test suite under `tests/`.
+`electron-vite build` transpiles without type checking, so a green build alone is not evidence that
+the types are clean. The test runner needs a Node that strips TypeScript natively (22.18+, 23.6+,
+or 24); older 22.x releases fail with `ERR_UNKNOWN_FILE_EXTENSION`.
+
+## Documentation
+
+| Document | Contents |
+| -------- | -------- |
+| [docs/README.md](docs/README.md) | Documentation index organized by reader scenario |
+| [AGENTS.md](AGENTS.md) | Short rulebook: build gate, architecture, invariants |
+| [docs/AGENTS-full.md](docs/AGENTS-full.md) | Full subsystem reference and the failure behind each rule |
+| [docs/providers/README.md](docs/providers/README.md) | Provider classes, aggregate flow, account channels |
+| [docs/plan/](docs/plan/) | Dated plans and decision records (historical, not current requirements) |
+| [CODE_WIKI.md](CODE_WIKI.md) | Legacy overview; `AGENTS.md` and `AGENTS-full.md` take precedence |
+
+## Screenshots
+
+| Dashboard | Providers |
+| --------- | --------- |
+| ![Dashboard](docs/screenshots/dashboard.png) | ![Providers](docs/screenshots/providers.png) |
+
+| Proxy Settings | Request Logs |
+| -------------- | ------------ |
+| ![Proxy](docs/screenshots/proxy.png) | ![Logs](docs/screenshots/logs.png) |
+
+| Models | Settings |
+| ------ | -------- |
+| ![Models](docs/screenshots/models.png) | ![Settings](docs/screenshots/settings.png) |
+
+## FAQ
+
+### macOS says the app is damaged and cannot be opened
+
+Apps downloaded outside the App Store can trigger this warning. Clear the quarantine attribute:
 
 ```bash
 sudo xattr -rd com.apple.quarantine "/Applications/ModelPort.app"
 ```
 
-### How to update?
+### How do I update?
 
-Check for updates in the **About** page, or download the latest version from [GitHub Releases](https://github.com/polite0803/ModelPort/releases).
+Check for updates on the **About** page, or download the latest release from
+[GitHub Releases](https://github.com/polite0803/ModelPort/releases).
 
-## 🤝 Contributing
+## Contributing
 
-1. Fork the project
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit changes (`git commit -m 'Add amazing feature'`)
-4. Push to branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+1. Fork the project and create a feature branch.
+2. Make the change and run `npm run gate`.
+3. Open a pull request with the gate output.
 
-## 📄 License
+## License
 
 GNU General Public License v3.0. See [LICENSE](LICENSE).
 
-## 🙏 Acknowledgements
+## Acknowledgements
 
 - [Electron](https://www.electronjs.org/) - cross-platform framework
 - [React](https://react.dev/) - UI framework

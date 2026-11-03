@@ -2,7 +2,7 @@
 
 Provenance: `Ebony-Vinyl/dsh-our-free-model` tag `v2.5.1`, commit `3df868aaeaf26af5bf611fc61a909fcc0139d159`, MIT.
 Staged verbatim from `vendor/channel-pack/src/` for adaptation planning
-(`docs/PLAN-workbuddy-adaptation.md`); not imported by the build.
+(`docs/plan/PLAN-workbuddy-adaptation.md`); not imported by the build.
 
 Why this tag rather than `master`: `master`'s `buddy-adapter.ts` is ~291 KB and
 depends on `model-catalog.ts` / `catalog-broadcast.ts` / `session-title.ts` /

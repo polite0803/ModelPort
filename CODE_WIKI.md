@@ -1,14 +1,18 @@
 # ModelPort 项目代码文档
 
+> 这是一份较早的概览文档，保留用于快速定位模块。规则与现状以根目录 [`AGENTS.md`](AGENTS.md) 和
+> [`docs/AGENTS-full.md`](docs/AGENTS-full.md) 为准；两者与本文不一致时，以它们为准。文档索引见
+> [`docs/README.md`](docs/README.md)。
+
 ## 1. 项目概述
 
-ModelPort 是一个多平台 AI 服务统一管理工具，把任意 OpenAI 兼容端点汇总为一份本地 API。它内置 79 条带 Key / 免密的聚合渠道目录（含 Kilo 免费池）、13 个账号渠道（浏览器 / 设备码 / API Key）以及自定义供应商，并与 openclaw、Cline、Roo-Code 等工具无缝集成，使任何 OpenAI 兼容客户端都能开箱即用。
+ModelPort 是一个多平台 AI 服务统一管理工具，把任意 OpenAI 兼容端点汇总为一份本地 API。它内置 89 条带 Key / 免密的聚合渠道目录（含 Kilo 免费池，共 570 个模型）、13 个账号渠道（浏览器 / 设备码 / API Key）以及自定义供应商，并与 openclaw、Cline、Roo-Code 等工具无缝集成，使任何 OpenAI 兼容客户端都能开箱即用。
 
 ### 核心功能
 - OpenAI 兼容 API：提供标准的 OpenAI 兼容 API 端点，实现无缝集成
-- 多提供商支持：79 条聚合渠道（API Key / 免费额度 / 本机）、13 个账号渠道以及自定义供应商
-- 上下文管理：智能对话上下文管理，支持滑动窗口、令牌限制和摘要策略
-- 函数调用支持：通过提示工程实现所有模型的通用工具调用能力，兼容 Cherry Studio、Kilo Code 等客户端
+- 多提供商支持：89 条聚合渠道（API Key / 免费额度 / 本机，共 570 个模型）、13 个账号渠道以及自定义供应商
+- 上下文管理：滑动窗口 / 令牌限制的删除式裁剪，永不清空对话；可选的实时区压缩不注入提示词
+- 函数调用：`tools` / `tool_choice` / `parallel_tool_calls` 原生透传，网关不改写工具定义或文本回复
 - 模型映射：灵活的模型名称映射，支持通配符和首选提供商/账户选择
 - 自定义参数：支持自定义 HTTP 头，启用网络搜索、思考模式和深度研究功能
 - 仪表板监控：实时请求流量、令牌使用和成功率
@@ -87,14 +91,14 @@ ModelPort/
 - 令牌提取和管理
 
 #### 3.1.5 提供商管理 (src/main/providers/)
-- 内置提供商支持
+- 内置提供商通路（当前 `builtinProviders` 为空）
 - 自定义提供商配置
 - 提供商状态检查
 - 聚合目录（`aggregate/`：registry 数据 + manager）与登录账号通道（`accountChannels/`）
 
 #### 3.1.6 账号通道宿主 (src/main/channelPack/)
 - 拉起 `vendor/channel-pack` 的 worker 进程并收发消息（`bridge.ts`）
-- 工具调用历史预校验（`toolCallValidation.ts`）与推理内容回放（`reasoningReplay.ts`）
+- 推理内容回放（`reasoningReplay.ts`）与工具违规观测（`proxy/utils/toolViolationTap.ts`，只读原生 `tool_calls`）
 - `compat/` 提供上游私有包的兼容垫片，仅通过 esbuild alias 生效
 
 ### 3.2 渲染进程 (Renderer Process)
@@ -286,10 +290,13 @@ npm run start:sandbox
 ### 7.1 配置文件
 
 应用数据存储在 `~/.modelport/` 目录：
-- `data.json` - 单一 electron-store 文件，包含配置、提供商、账户、会话、系统提示词、统计与应用日志（并不存在单独的 `providers.json` / `accounts.json`）
+- `data.json` - 单一 electron-store 文件，包含配置、提供商、账户、会话、统计与应用日志（并不存在单独的 `providers.json` / `accounts.json`）
+- `store.key` - 本机数据密钥
 - `request-logs/` - 请求明细日志
+- `channel-pack/` - 渠道包自身状态与加密后的渠道凭证
+- `tls/` - 托管的自签名证书与私钥
 
-凭证保护有两层：整份 `data.json` 使用编译进程序的固定密钥；单个凭证在有系统 `safeStorage` 时再加密一层。系统加密不可用时会以明文写入，仅在控制台告警。
+凭证保护有两层：`store.key` 由系统 `safeStorage` 封装，单个凭证再用 `safeStorage` 加密一层。系统加密不可用时没有可绑定的密钥，数据文件会以明文写入，仅在控制台告警。
 
 ### 7.2 代理配置
 
@@ -301,7 +308,7 @@ npm run start:sandbox
 
 提供商分为三类：
 
-- 聚合目录：79 条渠道（API Key / 免费额度 / 本机），每条保存后生成 `provider/model` 命名空间的供应商记录
+- 聚合目录：89 条渠道 / 570 个模型（API Key / 免费额度 / 本机），每条保存后生成 `provider/model` 命名空间的供应商记录
 - 账号渠道：13 个浏览器 / 设备码 / API Key 账号通道，账户池与模型目录由 `vendor/channel-pack` 提供
 - 自定义供应商：自行填入任意 OpenAI 兼容端点
 
@@ -328,7 +335,7 @@ API Key 类条目需要填入对应的密钥；Kilo 这类免密条目保存时�
 | `tests/channels/` | 13 个账号渠道的不变量（模型目录、上下文窗口、用量口径、推理回放等） |
 | `tests/compression/` | 上下文压缩：门禁、live zone、选行、日志/搜索压缩器、CCR 标记、装配 |
 | `tests/providers/` | 提供商适配器、模型列表读取、端点策略 |
-| `tests/tool-calling/` | 工具调用引擎、协议适配器、策略与解析 |
+| `tests/routes/`、`tests/http/` | 路由表、消息 / 响应线转换与 HTTP 层契约 |
 | `tests/store/`、`tests/renderer/`、`tests/ipc/`、`tests/main/`、`tests/build/`、`tests/updater/`、`tests/app-logs/`、`tests/request-logs/` | 存储、渲染层、IPC、入口、构建产物守卫与日志 |
 | `tests/skills/` | 随仓库分发的技能说明文档一致性检查 |
 

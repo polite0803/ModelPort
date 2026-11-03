@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Release-v1.4.1-blue?style=flat-square&logo=github" alt="Release">
+  <img src="https://img.shields.io/github/v/release/polite0803/ModelPort?style=flat-square" alt="Release">
   <img src="https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square" alt="License">
   <br>
   <a href="https://www.electronjs.org/"><img src="https://img.shields.io/badge/Electron-33+-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron"></a>
@@ -36,8 +36,8 @@
 - 多服务商支持：89 条聚合渠道（API Key / 免费额度 / 本机）、13 个账号渠道以及自定义供应商
 - 账号渠道：浏览器 / 设备码 / API Key 接入，自带账号池、每日积分领取、模型积分权重与免费模型标注
 - 模型在线刷新：在线重新拉取渠道模型，可关闭单个模型，也可恢复被上游标记失效的模型
-- 🆕 上下文管理：智能对话上下文管理，支持滑动窗口、Token 限制和总结压缩策略
-- 🆕 工具调用支持：通过提示词工程为所有模型提供通用工具调用能力，兼容 Cherry Studio、Kilo Code 等客户端
+- 上下文管理：滑动窗口 / Token 限制的删除式裁剪，永不清空对话；可选的实时区压缩不注入任何提示词
+- 工具调用：`tools`、`tool_choice`、`parallel_tool_calls` 原生透传，网关不改写工具定义、不把文本回复解析成 `tool_calls`
 - 🆕 模型映射：灵活的模型名称映射，支持通配符和首选服务商/账户选择
 - 🆕 自定义参数：支持自定义 HTTP Header 开启联网搜索、深度思考、深度研究等功能
 - 仪表盘监控：实时请求流量、Token 使用量和成功率统计
@@ -126,10 +126,7 @@ Kilo 这类免密条目无需凭证：保存时会创建一个空的本地账户
 
 1. 从侧边栏导航到**代理设置**页面
 2. 设置端口（默认：8080）
-3. 选择负载均衡策略：
-   - **轮询**：在账户间均匀分配请求
-   - **填充优先**：使用一个账户直到达到限制
-   - **故障转移**：失败时自动切换
+3. 选择负载均衡策略（轮询 / 填充优先 / 故障转移 / 智能 / 匀速），或使用虚拟 `auto` 模型按能力、上下文与实时健康度选路
 4. 点击**启动代理**
 
 ### 步骤 4：测试 API
@@ -173,14 +170,14 @@ print(response.choices[0].message.content)
 |----------|---------|
 | ![Proxy](docs/screenshots/proxy.png) | ![API Keys](docs/screenshots/api-keys.png) |
 
-| 模型管理 | 会话管理 |
-|----------|----------|
-| ![Models](docs/screenshots/models.png) | ![Session](docs/screenshots/Session.png) |
+| 模型管理 | 设置 |
+|----------|------|
+| ![Models](docs/screenshots/models.png) | ![Settings](docs/screenshots/settings.png) |
 
 ## ⚙️ 设置选项
 
 - **端口**：更改代理监听端口（默认：8080）
-- **路由策略**：轮询（Round Robin）或填充优先（Fill First）
+- **路由策略**：轮询、填充优先、故障转移、智能、匀速，以及虚拟 `auto` 模型
 - **自动启动**：应用启动时自动启动代理
 - **主题**：浅色、深色或跟随系统
 - **语言**：英文或简体中文

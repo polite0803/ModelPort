@@ -1,0 +1,506 @@
+# Changelog
+
+本文件记录 ModelPort（早期名为 Chat2API / Chat2API Manager）对用户可见的变更。
+格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
+
+条目按"为什么改、影响什么"描述；每条末尾括号里的短哈希指向产生该变更的提交，可在 `git show <哈希>` 中核对。
+版本边界与溯源说明见文末。
+
+## [Unreleased]（未发布）
+
+- 截至 2026-11-04，`main` 的 HEAD 就是 `v1.7.0`（`326f734`），没有尚未归版的提交。后续变更请追加在本节。
+- 工作树中另有未提交的改动（CI、README、CODE_WIKI、部分文档等），因无法确认其归属版本与用户影响，未写入任何版本。
+
+## [1.7.0] - 2026-11-04
+
+版本边界：tag `v1.7.0`（`326f734`）。
+
+### Added（新增）
+
+- 供应商模型清单定时刷新：账号渠道、聚合目录、内置三类来源收进统一调度器，按天/周/月周期在内存中预热，设置页可选周期；同时修掉 Node `setInterval` 的 2^31-1 毫秒上限问题——1/3/6 月档位此前会退化成每毫秒打上游。(`78c3f13`)
+- 路由"份额轮转"：auto 候选链改为整池展开，按 30 分钟滚动窗口内每个（供应商, 模型）的派发次数排序，手动添加的模型不再在第一轮就被同账号的高分模型挤掉；新增 `ModelRoute.fairnessLead`（默认 2、上限 20）可调份额领先档；请求日志新增 `chainLength`/`skipped`，日志里的 10 个候选名不再被误读成"池子就这么大"。(`7d9cd47`)
+
+### Changed（变更）
+
+- 换家循环不再把候选链裁到 `maxAttempts + 3` 家，整条排序结果交给换家：可恢复失败由墙钟预算收口，账号故障由账号上限收口；单次请求最多记录的失败尝试数 8→20。(`7d9cd47`)
+- 补齐 BazaarLink 402（credits）的说明文案，并把某渠道"所有通道对该模型均受限"从普通 502 中摘出，避免一家渠道受限就吃掉整个账号故障预算。(`7d9cd47`)
+- 客户端识别补充 DSH UA 的 `deepseek-harness` 标识。(`7d9cd47`)
+
+### Fixed（修复）
+
+- 注销定时任务后不再续订 `setTimeout` 链（此前注销后仍会再跑一轮）。(`7d9cd47`)
+
+## [1.6.1] - 2026-11-03
+
+版本边界：tag `v1.6.1`（`42c1697`）。
+
+### Fixed（修复）
+
+- 主进程"选号卡顿"：加密 `electron-store` 每次 `get` 都要整份读盘 + PBKDF2 + AES 解密，选号闸门按候选逐条查询，一次请求约 750 次整库解密并卡住主线程；改为一次选号复用余额快照与账号表，并新增成本门测试。(`3a19a71`)
+- 上游目录不认模型（ModelScope / BazaarLink 的文案）时按能力类 400 换下一家，不记账号失败；probe 的错误帧同样保持 400。(`3a19a71`)
+- SiliconFlow 官方 `/user/info` 已下线（HTTP 410），撤下其额度探测声明。(`3a19a71`)
+
+## [1.6.0] - 2026-11-03
+
+版本边界：tag `v1.6.0`（`5fe993e`）。
+
+### Removed（移除）
+
+- 网关不再向模型注入任何提示词（裁定：本网关不注入任何提示词）。退役四条通路：托管工具提示词、尾随 user 守卫、输出风格转向、上下文摘要，连同 UI、配置键与测试一并删除；不支持工具的模型改由能力路由（`needsTools`）处理；退役配置键在 `normalizeConfig` 中剥离，管理 API 不再报告没人读取的开关。(`f6b7f1b`)
+
+### Added（新增）
+
+- 协议正确但内容退化的流成为第二类 degraded：对拼接后的 `content`/`reasoning` 增量做尾部 128 行去重比，命中即撤销粘性锚点；读数只以聚合形式落到 `streamTrace.repetition`，非流式响应不参与判定。(`f6b7f1b`)
+- 新增日志/搜索压缩器与 CCR 存储接线，压缩节省可被真实计量。(`f6b7f1b`)
+- 新增 `GET /v1/api-definition/providers`：以网关自定义形状列出可用路由名与保守的 `context_window` 下界，口径与 `/v1/models` 同源。(`f6b7f1b`)
+- Bandit 成功率改 Beta 后验采样（Thompson sampling）：强候选大概率得高分，弱候选保留探索概率；连续退化、尝试连败与显著慢仍走确定性罚项，避免随机性稀释事故证据。(`de41a61`)
+- 聚合目录新增国内主站与套餐端点：百炼按量 / Token Plan、火山方舟按量 / Agent Plan、阶跃星辰 / Step Plan、讯飞星火、零一万物、百川、硅基流动中国站共 10 条；套餐与按量严格分条，避免 Key 混用走错计费域，四类订阅端点标为 included。(`e3fe5c1`)
+
+### Changed（变更）
+
+- 客户端显式选择推理档位（`reasoning_effort`）的请求按能力对待：候选明确不接受该参数时，400 改判为"换一家"，不再整单失败。(`7b2c82c`)
+
+### Fixed（修复）
+
+- 聚合额度查询失败改为保留上游原话并先脱敏，界面能区分"Key 无效"与"端点异常"；401 正文反射的 Key 不会随 IPC 到界面。(`194419c`)
+- 补 en/zh 叶子键一致性门并清理孤儿文案，避免新增文案只落一种语言。(`5fe993e`)
+
+## [1.5.5] - 2026-11-03
+
+版本边界：tag `v1.5.5`（`dfde837`）。
+
+### Added（新增）
+
+- 粘性改为路由级开关 `ModelRoute.stickyHardPin`（缺省即开，`!== false` 判据，老 `data.json` 不需迁移）；关掉后只剩 `+0.12`/`+0.06` 的分数加成，预设播种继承该格，避免用户关掉的硬钉被下次播种悄悄打开。(`9c1115d`)
+- 聚合实时额度接通：聚合详情页点一次问一次（无轮询、开页不自动发）。实时余量只当闸门不当数字——美元额度、人民币余额与本应用 token 是三个不可比的计数域；命中条件严格（整行成立、非 unlimited、问到数、`<=0`、`asOf` 在 15 分钟内），命中只把 `aggregateHeadroom` 折成既有的 `-1`，`QuotaWindowBlockReason` 增加 `no-credit`。(`9c1115d`)
+- `GET /v1/models/:model` 按 `anthropic-version` 返回 anthropic 形状，且与清单行同源，避免"列表承认、单查否认"。(`9c1115d`)
+- 粘性键升级为客户端会话标识（`prompt_cache_key` → `user` → `metadata.user_id` → `session_id` 头），优先于内容指纹：agent 客户端自行压缩历史后不再把会话换到别家；来源写入日志 `auto.sessionKeySource`，标识值本身不入日志。(`69a0686`)
+
+### Fixed（修复）
+
+- Codex 的 `apply_patch`（自由文本工具）两端按 `custom` 形状处理：入向补必填字符串 `input` 契约，出向回 `custom_tool_call` + 原文，历史里的 `custom_tool_call`/`custom_tool_call_output` 也读回；修掉"总说完成、文件没变"的静默失败。(`213ddb5`)
+- HTTPS 的系统信任库不等于"客户端能连"：补齐 `NODE_EXTRA_CA_CERTS` 通路、`GET /v1/management/tls/ca`（只回 PEM，不带私钥）与 `/v1/management/tls/status`（握手被拒计数），Node 系客户端（Codex CLI、WorkBuddy 等）不再静默连不上。(`fda4d81`)
+
+## [1.5.4] - 2026-11-03
+
+版本边界：tag `v1.5.4`（`3ee88f6`）。
+
+### Added（新增）
+
+- 上下文窗口读数：只让已公布窗口参与 `/v1/models` 下界，一家都没公布就省略 `context_window`；"没公布上限"也不再作为淘汰候选的依据，避免长上下文请求被整池误杀成 503。(`ef51ee0`)
+- 每轮读数：`shared/requestContextFit.ts` 估算入量、窗口与 fits/overflow，写进请求日志并在详情页分三档显示；估算值绝不进 `usage`。(`ef51ee0`)
+- "装不下就换家"：`isContextOverflowError` 认 OpenAI、Anthropic 与中文的超限文案，接进能力不匹配的四个调用点，换下一家且不给账号记冷却；无关 400 仍然终止。(`ef51ee0`)
+- 池策略预览透出 `conflicts`：哪条策略、新纳入多少、各自不满足前面的哪几条，便于解释"怎么又落到免费弱模型"。(`76c440a`)
+
+### Fixed（修复）
+
+- 池策略"或"的提示只报跨类作废：成本/档位/渠道类的 `or` 作废能力筛选时才提示；同类并集是 low-cost、vision-first 等预设的本意，不再狼来了。(`64b3630`)
+
+## [1.5.3] - 2026-11-03
+
+版本边界：tag `v1.5.3`（`d18cd7e`）。
+
+### Added（新增）
+
+- 质量感知降权与按模型 AIMD 并发：`finish_reason=length` 且客户端未请求 `max_tokens` 记为 degraded，连续两次即时降权；每（账号, 模型）默认并发 4，拥塞 ×0.7（5s 冷却），5 次干净成功 +1（30s 静默期）；本地准入拒绝返回可重试 429 `local_concurrency_limit` 且不惩罚账号；短窗口 EWMA 首包延迟与 429/超时/degraded 率进入候选打分。(`bf25f02`)
+
+### Changed（变更）
+
+- Codex 会话粘性改为路由层硬优先：同一会话上一轮成功的模型排到候选队首，避免 agent 每轮换模型导致上下文与工具协议漂移；模型停服/冷却时自然让位。(`dd7adf4`)
+- 账号渠道默认工具能力改为 yes。(`33e3aa2`)
+
+### Fixed（修复）
+
+- 工具定义清洗：清掉 Codex 空名 `tool_search` 占位与缺 `parameters` 的定义，修 Raccoon 502 与 Agnes 400；WorkBuddy 11140 的 HTTP 400 按账号风控换号并冷却；OpenCode 匿名槽全部限流时报 429 而不是伪装成"重新登录"；Qoder 池内账号全不可用时不回退默认凭据；Bandit 将失败尝试计入候选健康分。(`63a1543`)
+- 余额门控渠道统一在池耗尽时抛出：全部限流保持 429，池内有账号但全不可用直接 403 并说明余额/停用/凭据原因；只有池内完全没有账号条目时才允许历史单凭据回退。(`b46fd4c`)
+- 校正 Codex `exec_command` 的 shell/workdir，Windows 客户端一律改用 `pwsh`。(`5f9880d`, `d18cd7e`)
+
+## [1.5.2] - 2026-11-02
+
+版本边界：tag `v1.5.2`（`fff1380`）。
+
+### Changed（变更）
+
+- 对齐 new-api 的错误/换家/协议语义：保留上游 `status`/`type`/`code`/`param`，403 不再改写 401；流内错误帧收尾并支持 200 首帧探测；客户端错误不再误伤账号；流式增加心跳与静默看门狗；Anthropic/Responses 补齐 thinking、工具结果附件、cache usage 与 reasoning。(`0e0cc6b`)
+- 请求日志补尝试链、流生命周期、错误栈、诊断包与单请求 trace；崩溃与 worker 日志落盘；代理设置页等持久化配置加载后再渲染，修掉"重启后被默认 127.0.0.1 / HTTPS 关闭覆盖"的问题。(`0e0cc6b`)
+
+### Fixed（修复）
+
+- Anthropic 连续 user 轮按官方语义合并：Claude Desktop 3P 先发"上下文 + 问题"再发环境说明，原样转 chat 会被多数上游只读最后一条，导致每轮都答"你想做什么"。(`8adc746`)
+- OVH 拒收 `prompt_cache_key`，该聚合条目用 `dropParams` 剥离。(`fff1380`)
+
+## [1.5.1] - 2026-11-02
+
+版本边界：tag `v1.5.1`（`cf3f94a`）。
+
+### Added（新增）
+
+- 路由可被 Anthropic 客户端按档位发现：`routeTiers` 发 `anthropic_family_tier`，`routeDisplayNames` 控制清单行显示名；非法档位宁可不发，避免客户端整行丢弃。(`16914c5`)
+- 新增只允许一跳的池引用 `basedOnRoute`：一条路由可整体借用另一条的选择行为（池策略、钉名、手动增删、打分档、尝试数、粘性），但名字与日志仍是自己的；写入侧拒绝自引用、未知目标与二级引用，引用断掉时返回 404 `route_reference_broken` 并点名，不静默回落全目录。(`16914c5`)
+
+### Changed（变更）
+
+- Anthropic 配置卡片只保留一张名字表，每行直接给"在 Claude 里点不点得到"；补客户端名改为随保存自动完成；档位表补三列表头；"全 0"时明确说"无事可做"而不是报失败。(`b81f89b`, `1aa6a24`, `ffe0966`, `dacc29d`)
+
+### Fixed（修复）
+
+- 聚合条目返回空错误体（Unknown error）的 400 继续换家且不计账号故障；自动路由试过多家仍 404 时返回 503 `no_available_model`，避免 Claude 误判模型被删；Anthropic 兜底只解析 routable 路由；客户端断开产生的 ECONNRESET/EPIPE 记 debug；滑动窗口裁掉全部非 system 消息时保留最新一条。(`cf3f94a`)
+- 流式 4xx 交出上游原文，不再把"序列化失败"当原因；Anthropic 入向不再透传客户端的 `device_id`/`session_id`（OVH 会以 extra arguments 整笔拒绝）。(`03ac9f0`)
+
+## [1.5.0] - 2026-11-02
+
+版本边界：tag `v1.5.0`（`dd6d273`）。
+
+### Added（新增）
+
+- HTTPS 监听（默认 8443，与 HTTP 共用同一套 Koa 中间件与路由）：首次启用自动生成本机证书（SAN localhost/127.0.0.1/::1，397 天，到期前 7 天重签，落 `~/.modelport/tls/`），也支持成对填写自有 PEM；设置页提供开关、端口、证书状态与"安装到系统信任"（Windows certutil、macOS `security`、Linux 给命令），只在用户点击时改动信任库。(`571e673`)
+- 证书可加入远程地址（`httpsSanHosts`，IP 走 SAN type 7、域名走 type 2）；重签判据从"快过期"改为"是否覆盖当前名单"，名单不变时指纹稳定，不会每次启动作废已装好的信任；新增"从系统信任移除"。(`dd6d273`)
+- 渠道按上游能力决定签到按钮：`ChannelDefinition.dailyCheckin` 必填，判据是渠道包 `credits.claimAll` 有无该家分支，没有接道的渠道不再点出 `unsupported provider`。(`dd6d273`)
+
+### Changed（变更）
+
+- 凭据加封 `v1:` 前缀；解不开的密文按"凭据不可用"返回并留错误日志，不再把一串 base64 当明文发给上游；编辑账号不再把已存凭据下发渲染层；Anthropic 路由播种带 `skipNames`，用户删掉的名字不复活；全新安装且无 Key 时生成一把。(`571e673`)
+- 新增依赖 `selfsigned`，并按 `electron-store` 同一理由打进主进程 bundle（安装包内没有 `node_modules`）。(`571e673`)
+
+### Fixed（修复）
+
+- Windows 撤销信任不能直接用 `certutil -delstore`：实测序列号不匹配时仍返回 0 并删掉库中第 0 条；改用按 SHA-1 精确过滤的 PowerShell 删除。(`dd6d273`)
+
+## [1.4.11] - 2026-11-02
+
+版本边界：tag `v1.4.11`（`201a3bd`）。
+
+### Added（新增）
+
+- 新增 `/v1/responses` 入向：翻成 chat 请求回环到本进程，`usage` 缺失保持 `null`，`response.completed/incomplete/failed` 三选一，`previous_response_id`/`background`/`item_reference` 显式 400。(`74ec217`)
+- Anthropic 模型发现改为生成 pinned 路由而非别名；`/v1/models` 只剩路由后，Claude Desktop 仍能按真实模型名选中。(`74ec217`)
+
+### Security（安全）
+
+- 渲染进程开启 sandbox；导航只认建窗时登记的应用自身文档（原 `file://` 前缀判据允许磁盘上任意 HTML 带着本应用 preload 被加载）；IPC 经 `trustedSender` 校验 senderFrame；`openExternal` 只认 http(s)；拒绝 attach webview。(`74ec217`)
+- CORS 撤掉"没配 Key 就回 `*`"（出厂默认无 Key 时任何网页都能读走完整响应），`/stats` 不再免鉴权；管理 API 密钥改常量时间比较；自定义厂商头共用禁头清单；导出件脱敏自定义头里的凭据（Key 常被写进 `x-api-key`）。(`74ec217`)
+- localStorage 与配置导出只保留界面偏好，含 `apiKeys`/`managementApiSecret` 的 config 不再落浏览器存储；请求/应用日志改为"先脱敏、再截断"，补 Bearer、裸 `sk-`、URL 查询串三类。(`74ec217`)
+- dev server 默认只绑 127.0.0.1（`MODELPORT_DEV_HOST` 显式放开）；不再替 root 自动加 `--no-sandbox`；同时在途请求封顶 100。(`74ec217`)
+
+### Changed（变更）
+
+- `/v1/models` 与单查只广告启用中的路由；别名停用位落到 `ModelMapping.disabled`，所有读路径收口到 `modelServing.isMappingActive`；路由卡片显示候选数并对空池给警示。(`74ec217`)
+- 发布流程：`release.yml` 先跑 gate（build + 两个 tsc + 全量测试）再 publish，Node 统一 24。(`74ec217`)
+
+### Fixed（修复）
+
+- 限流退避改按（账号, 模型）记档：同一渠道别的模型成功一次，不再抹掉本模型的 429 冷却与连击计数（此前解禁时间每分钟只后移约 60 秒，反复付整段 system 的 prefill 去撞墙）；每账号限流档上限 64，并先摘到期/最久未碰的。(`9bbb0e7`)
+
+## [1.4.10] - 2026-11-01
+
+版本边界：tag `v1.4.10`（`025fa8a`）。
+
+### Added（新增）
+
+- Gemini 线路可诊断：`lane_retired`、出口地区、产品线三类确定性 4xx 从"一律归 SERVER"中摘出并直接给可读原因；客户身份头里的 antigravity 版本与 changelist 改为从自动更新站现取；模型目录改为按当前凭据的 `fetchAvailableModels`，静态一行退为兜底。(`70ec39b`)
+
+### Removed（移除）
+
+- OpenCode 本机运行时退役：删除 `src/main/opencode/*`、`builtin/opencode.ts`、`proxy/adapters/opencode.ts`、`oauth/adapters/opencode.ts` 及 7 个测试，`modelListSource` 去掉 runtime 分支（分发前提"npm 上有可用 2.x 客户端"不成立，留着的分支永远走不到）。(`70ec39b`)
+
+### Fixed（修复）
+
+- 等待全部改为有界：`planRequestDeadlines` 由请求超时算出非流式截止、流式首事件、块间停摆与渠道排队预算，换家循环把剩余墙钟折算成单次截止；修掉实测"一笔 525 秒才报当日额度用尽、两笔 214/245 秒才报凭据不可用"。(`f607710`)
+- 旧别名留下的裸模型 id 补回渠道前缀（此前 8 笔 100% 400）；凭据/匿名槽这类要人处理的故障不再重试，改走 5 分钟起的冷却档且渠道池一变即解除，错误带 `channel_relogin_required` 但状态仍 502，避免指挥客户端轮换它自己的 Key。(`f607710`)
+- 强制 `tool_choice` 撞到不支持的候选归入"换一家就能成"；上游上报的 `usage` 不再被 `transformChunk` 当空帧丢掉（这条同时修掉所有客户端流式 `usage` 恒为 null）。(`f607710`)
+- Anthropic 入站五处缺口：清单按 `anthropic-version` 分派、回环主动要 usage、补 `X-Request-Id` 不变量、点名模型落到 auto 时用响应头声明、把工具引擎裁决出的 `transformed.tools` 接进出站体。(`f607710`)
+- 两类只在高频真实流量里出现的失败单独归类：渠道包发请求前的 `QUOTA_EXCEEDED`（定时限流，换一家就能成）不再计入账号故障上限；上游安全策略拦截按账号生效，不再"第一个候选就 return"，客户端 `code` 的风控判据排在 401/403 之前。(`a32f957`)
+- `/v1/completions` 空 prompt 本地返回 400，不再投影成网关的空 messages 报错；历史 `tool_calls.arguments` 非法 JSON 先修再发；末条工具结果的出站序列补一条极简 user（修 VS Code agent 第 2 轮装死）；末条 tool 兜底挂到 `doForward`，造的这句不再被当成用户本轮输入。(`20aab4d`, `025fa8a`, `fb720f9`, `cb49a5c`)
+- "这一家不认这个模型"类 404 改为换下一家。(`a3e3406`)
+
+## [1.4.9] - 2026-11-01
+
+版本边界：tag `v1.4.9`（`9f6a7c6`）。
+
+### Added（新增）
+
+- 仪表盘按供应商显示请求数、成功率、平均延迟、token 与美元费用；拿不到就显示 `-`，绝不折算成 0；成功率只除以"已覆盖请求"，旧构建起始的整天保持"未覆盖"。(`d06dbbe`)
+- 逐请求费用：仅在上游上报用量且端点有定价时计价，free/included 记 0 且算已定价，unknown 不写数字；日桶新增 `byProvider` 分表。(`d06dbbe`)
+- 最新活动显示从 UA 解析出的客户端标识。(`964fe53`)
+
+### Removed（移除）
+
+- 移除没有消费方的 `SecuritySettings` 开关（`credentialEncryption` / `logDesensitization`），管理面不再展示不生效的选项。(`d06dbbe`)
+
+### Fixed（修复）
+
+- lobsterai 积分查询区分"上游确实说 0 分"与"字段缺失/未登录"，查询前对临期/失效凭据先续期；逐账号 `enabled` 一路带到界面，停用账号读数显示但不计入渠道总额；API Key 页掩码示例与真实长度一致。(`d06dbbe`)
+
+## [1.4.8] - 2026-10-31
+
+版本边界：tag `v1.4.8`（`e331342`）。
+
+### Added（新增）
+
+- 上下文压缩默认开启，仪表盘"压缩节省"随之生效；显式关过的用户保持关闭（归一仅认 `enabled === true`），升级安装继承新的出厂默认。(`4c26f92`)
+- 活跃账户卡片可点击并与今日 token 同排；活动列表补充实际模型与账号。(`02eb832`)
+
+### Fixed（修复）
+
+- raccoon 频率超限改判 429 走短冷却换号；补全 `outputSteering` 等缺失文案的 i18n。(`1da4b3d`)
+
+## [1.4.7] - 2026-10-31
+
+版本边界：tag `v1.4.7`（`c0eafa4`）。
+
+### Added（新增）
+
+- auto 路由升级为可增删改的普通路由，策略按路由生效：`AppConfig.routes` 每条自带 strategy / prefer / maxAttempts / stickyMinutes / poolStrategies，粘性键变为 `${route.name}|${conversationKey}`；旧 `config.autoRouting` 在首次启动迁移为唯一一条 `auto` 路由（以 `routes` 键是否存在为判据，幂等）；删掉 `auto` 后 `/v1/models` 不再广告它；改配置不需要重启代理。(`f77cda7`)
+- `/v1/models` 为每条启用路由合成条目，`context_window` 取该路由候选池的下界，空池省略该键。(`f77cda7`)
+- 手工能力标注独立成 `modelMarks` 表，模型同步不会抹掉用户纠正；聚合能力旁车与生成脚本；`outputCap` 别名折叠；客户端画像 `clientProfile`。(`f77cda7`)
+
+### Fixed（修复）
+
+- 历史缺 `reasoning_content` 的 400 参与换家（渠道能力不匹配），不再整单失败。(`c0eafa4`)
+- store 归一 overrides 记录，写入口不再因缺键抛 TypeError。(`663a357`)
+
+## [1.4.6] - 2026-10-30
+
+版本边界：tag `v1.4.6`（`b0c4788`）。
+
+### Fixed（修复）
+
+- 修复 1.4.5 引入的"打包安装后存储不可用"：`electron-store` 被移出 externalize 列表，而 asar 不含 `node_modules`，`await import` 抛 `ERR_MODULE_NOT_FOUND`，且该 import 在 `initialize()` 的 try 之外，初始化错误保持 null，所有依赖存储的 IPC 都报 "Storage not initialized"；重新打进 bundle，把 import 移进 try，模块加载失败时跳过损坏恢复，并用 `tests/build/main-bundle-deps.test.ts` 守住这条。(`d4839e9`)
+
+## [1.4.5] - 2026-10-30
+
+版本边界：tag `v1.4.5`（`cda3f58`）。
+
+### Changed（变更）
+
+- 完成品牌更名 Chat2API → ModelPort（**BREAKING**）：响应头改 `X-ModelPort-*`，opencode agents 改名；启动时在 store/runtime/缓存初始化之前迁移两处持久化根（`<appData>/chat2api → <appData>/modelport` 同卷重命名以保住 `store.key` 解密，`~/.chat2api → ~/.modelport`），目标已存在则跳过、失败只告警不半迁移；`localStorage` 键一次性迁移到 `modelport-settings`。(`85286a3`)
+- vite 配置路径改为从 cwd 解析（支持映射盘），`electron-store` 保持 external（1.4.6 撤回该决定）。(`f7bd2ee`)
+
+### Fixed（修复）
+
+- 渠道装不下工具清单时换下一个 auto 候选：工具数超过上游上限（如 128）属渠道能力不匹配，换家且不记冷却/账号失败；`forwarder` 等首个流事件再判定成功，客户端断开即中止上游。(`74b1ca9`)
+
+## [1.4.4] - 2026-10-30
+
+版本边界：tag `v1.4.4`（`8566ea1`）。
+
+### Added（新增）
+
+- 余额门控选号：8 个渠道选号前探测账户额度（fail-open，60s/5s TTL，in-flight 去重，`DSH_ACCOUNT_BALANCE_GATE` 可关）；确认余额为 0 的账号被跳过，避免池首的"烧干账号"吃掉所有请求；loomy/buddy 保持自己的选号器。minimax 补 402 处理：标记该模型到 UTC+8 日边界并轮转到下一账号。(`9de5790`)
+
+### Changed（变更）
+
+- 新增跨平台 CI gate workflow 与 Node 运行版本自检，`npm run gate` 成为唯一验收口径。(`62ee5d1`, `0307fec`)
+
+### Fixed（修复）
+
+- 渠道额度只统计启用账号，开关账号会改变用户看到的渠道总额；渠道页与模型页不再每次 revalidate 都闪回 loading。(`8566ea1`)
+- 非拉丁供应商名导致自动路由 500：`X-Chat2API-Route` 原样拼中文名（如 "TRAE (字节)"）触发 `ERR_INVALID_CHAR`，改走 `routeHeaderValue`，非 ASCII 按 UTF-8 百分号编码；`Aggregate-Chain` 同口径。(`d9078ea`)
+
+## [1.4.3] - 2026-10-30
+
+版本边界：tag `v1.4.3`（`98ef5df`）。
+
+### Fixed（修复）
+
+- OpenCode 运行时把非法工具上报当成原生工具活动展示的问题。(`ee1ffe5`)
+
+## [1.4.2] - 2026-10-30
+
+版本边界：tag `v1.4.2`（`2e2ae10`）。
+
+### Added（新增）
+
+- auto 路由 v2：按供应商的重试预算（账号渠道一次短重试）、路由错误策略与拒绝日志、`/v1/models` 上下文窗口服务、能力表、聚合参数丢弃、上下文压缩管线、账号渠道目录同步（成本分桶、停用/死模型处理）。(`9d07417`)
+- 免费额度账本与成本分级：`docs/data` 下的额度凭证生成 `aggregateQuota`/`aggregatePricing` 旁车，账本与限额器逐请求计量，`smart`/`pace` 按派生重置时间路由，`aggregateCost` 对每个模型回答 free/included/priced/unknown。(`ddc566a`)
+- WorkBuddy 登录渠道族（按 v2.5.1 upstream 快照适配，出处见 `docs/upstream`）；Qoder 会话复用、plan-gate 112、切片队列等待、usage 缓存约定、MiniMax 增量 tool-call 名；宿主侧 reasoning replay 与工具调用预校验。(`55a6540`)
+- 开机自启；日志广播 IPC 与请求日志趋势保留策略。(`a805cf4`)
+- 聚合页额度/费用徽标与筛选、代理设置压缩面板、仪表盘 token 用量卡与趋势图修复、账号数、供应商认证标签，全部新文案支持 en/zh。(`018306b`)
+
+### Fixed（修复）
+
+- 仪表盘趋势改用日滚存，不再受被截断的请求日志影响。(`2e2ae10`)
+
+## [1.4.1] - 2026-10-29
+
+版本边界：tag `v1.4.1`（`ac62cea`）。
+
+### Added（新增）
+
+- 聚合渠道目录：API Key / 免费额度 / 本机三类条目，支持 openai-chat 与 anthropic-messages 两种线路。(`ac62cea`)
+- 十个登录账号渠道（vendored channel pack），账号渠道提供在线模型目录、额度权重、免费模型徽标、逐模型开关与死模型恢复。(`ac62cea`)
+- OpenCode 作为运行时内置供应商：本地 runtime bridge、延迟流（响应头先于 30–60 秒的一轮结束发出）、免费池额度错误转 429、死亡进程下次请求替换；provider 状态不启动 runtime，`opencode://local` 豁免 http(s) 规则。(`5075873`)
+- 解码层强制 OpenCode 工具契约：`tool_choice: required`、强制函数、`parallel_tool_calls: false` 由 JSON envelope（`anyOf` + `minItems`/`maxItems`）约束；非文本内容开流前 400；`usage` 映射上游计数、缺失保持 `null`。(`3e96b9b`)
+
+### Changed（变更）
+
+- 应用更名为 ModelPort（包名、产品名、界面）；Electron profile 固定，已有安装保留加密 store key 与凭据可读。(`ac62cea`)
+- 代理 API 契约加固：fail-closed 鉴权（有 Key 时 `/v1/*` 恒需 Bearer 或 `X-API-Key` 且常量时间比较，无 Key 只绑 loopback）；流式/非流式统一 OpenAI 形错误帧，每流恰好一个 `[DONE]`，`usage` 只用上游真实值，响应带 `X-Request-Id`；内置供应商静默丢弃不支持的采样参数，仅 `n > 1` 返回 400；在线模型清单同步存 `userModelOverrides` 并并入 `/v1/models`。(`e48c3e5`)
+
+### Removed（移除）
+
+- 移除提示词注入管线、Perplexity 供应商、服务端 session 表与旧 logs/session 界面。(`e48c3e5`)
+- 退役 8 家基于网页会话（Web UI）接入的供应商，启动时清理其供应商、账户与模型映射（DeepSeek / GLM / Kimi / Mimo / MiniMax / Qwen / Qwen AI / Z.ai）。(`ac62cea`；名单另见 CODE_WIKI §13)
+
+### Fixed（修复）
+
+- 修正供应商默认值与 Z.ai 认证头；Z.ai 验证码受限在文档标注。(`d71d304`, `59f03ab`)
+
+## [1.4.0] - 2026-05-27
+
+版本边界：无 tag；以 `package.json` 升至 1.4.0 的提交 `c81dfe1`（"prepare v1.4.0 release"）为准。
+
+### Added（新增）
+
+- 重设计托管工具调用流程。(`04e7ad2`, `9854357`)
+- 独立应用日志存储（与请求日志分离）。(`99d7663`)
+- 应用内更新检查与更新管理器接线（状态透出渲染层、按事件驱动 UI）。(`2a2e290`, `a88241b`, `35d931a`, `c5bcfe4`)
+- Chat2API 工具测试 skills 与工具配置恢复命令文档。(`95a6d47`, `1fa0244`, `c0bed31`)
+
+### Changed（变更）
+
+- 供应商模型清单刷新（Z.ai 新模型、Qwen AI 模型表、代理徽标）。(`82a63a4`, `2de8b88`, `09349ca`)
+- 清理源码产物并简化 provider 分发。(`318a8ef`)
+
+### Fixed（修复）
+
+- DeepSeek web2 模式保留搜索文本；选择映射模型时同步供应商；内置模型映射与持久化模型迁移；模型映射表单控件易用性。(`be83a68`, `20d56a0`, `d0d363a`, `ab4c7d5`, `306e573`, `98ba370`)
+
+## [1.3.0] - 2026-05-07
+
+版本边界：无 tag；以 `package.json` 升至 1.3.0 的提交 `d22e4f6` 为准。
+
+### Changed（变更）
+
+- 请求日志持久化重设计，降低日志 I/O 并修复会话清理。(`fea5f12`, `7215512`)
+- 供应商模型流程更新。(`8c6d7b2`)
+
+### Added（新增）
+
+- DeepSeek Expert 模型可通过模型映射接入。(`d969bd8`)
+
+### Fixed（修复）
+
+- 语言设置在应用重启后丢失。(`e22b202`)
+- 生产构建找不到 `electron-updater`：先补 `asarUnpack`，再改为 external 策略。(`280a1f6`, `23da35d`)
+
+## [1.2.0] - 2026-04-07
+
+版本边界：无 tag；以 `b0f3255`（"implement automatic application update system ... Update version to 1.2.0"）为准。
+
+### Changed（变更）
+
+- **BREAKING**：会话管理改为无状态单轮，移除多轮模式；新增上下文管理服务（滑动窗口、token 上限、摘要策略）。(`8e744ec`)
+- 移除会话设置与上下文管理字幕，界面不再展示已删除的能力。(`449bf51`)
+
+### Added（新增）
+
+- Mimo 供应商，并做了一轮架构优化。(`a9edc38`)
+- 多供应商聊天记录批量删除；Kimi 思考模式增强。(`a224a83`)
+- 应用内更新检查：主进程请求 GitHub Release 对比版本，规避渲染层 CORS；Qwen AI 与 Z.ai 适配器随之改进（思考模式自动判定、`reasoning_content` 实时下发）。(`e2549f1`)
+- 自动更新：`electron-updater` 接线、实时下载进度、一键安装重启、错误重试与双语界面。(`b0f3255`)
+- 自定义模型管理（新增/删除/重置）。(`4ffb09c`)
+- 供应商动态模型更新；MiniMax 流式处理修复。(`2463120`)
+
+### Fixed（修复）
+
+- Mimo 思考模式解析；forwarder 工具调用处理重构。(`953118a`)
+
+## [1.1.4] - 2026-03-26
+
+版本边界：无 tag；以 `package.json` 升至 1.1.4 的提交 `38abf6b` 为准。
+
+### Added（新增）
+
+- 新增 Perplexity 供应商（OAuth、流式适配与界面资源）。(`5754074`)
+- 管理 API（远程管理）：账号、API Key、配置、模型映射、供应商、代理、会话、统计，带密钥鉴权与设置界面。(`3576813`)
+- Qwen AI 与 MiniMax 的"清空聊天记录"（含确认弹窗）；Qwen AI 模型名后缀 `-thinking` / `-fast` 控制思考模式；MiniMax 积分改用会员端点并显示到期时间。(`8ef30c2`)
+- 请求日志记录响应体、`web_search` 与 `reasoning_effort`，日志详情新增"响应"页。(`08e8982`)
+
+### Changed（变更）
+
+- 模型映射配置增加未保存更改保护。(`6b60637`)
+- 多供应商适配器改进：Kimi 思考阶段跟踪、Qwen/Qwen-AI `parent_id`、MiniMax 工具调用、DeepSeek fold/search 流式。(`08e8982`)
+- 清理 store 中未使用的方法与属性。(`506493b`)
+
+### Fixed（修复）
+
+- Qwen AI 非流式空内容与重复 resolve；Perplexity 错误处理；Z.ai 与 MiniMax 的 `handleNonStream` 参数处理；Z.ai 非流式响应。(`a013849`, `2595230`, `255e915`, `1190304`)
+- 多轮对话 `parent_id` 更新与 DeepSeek web search 模型处理。(`b2170c1`)
+
+## [1.1.3] - 2026-03-11
+
+版本边界：无 tag；以 `package.json` 升至 1.1.3 的提交 `39d1f62` 为准。
+
+### Changed（变更）
+
+- 日志详情弹窗重设计，并修复文本溢出。(`1d2c51d`, `4c80743`)
+- 发布工作流支持带后缀的版本 tag，并为产物上传补 actions write 权限。(`1903981`, `2709c43`)
+
+### Fixed（修复）
+
+- 固定加密密钥：原实现用 `safeStorage.encryptString()` 生成密钥，每次结果不同，导致 `electron-store` 读不回旧数据、配置每次重启被重置。(`a300b94`)
+- 补齐缺失的日志组件并修正 `.gitignore`。(`403ed1e`)
+
+## [1.1.2] - 2026-03-11
+
+版本边界：无 tag；以 `3784b78` 同时修复问题并升至 1.1.2 为准。
+
+### Added（新增）
+
+- 持久化请求日志与统计系统：`RequestLogEntry`、`PersistentStatistics`/`DailyStatistics`、日志与统计 IPC，仪表盘改用持久数据。(`81800b8`)
+- 托盘窗口与紧凑仪表盘（`/tray` 路由与托盘 API）。(`14a49e3`)
+- 代理重启对话框与配置处理改进。(`6f44c3c`)
+
+### Changed（变更）
+
+- 更新 macOS 图标。(`0f7d1a5`)
+
+### Fixed（修复）
+
+- `data.json` 损坏时的启动崩溃（"Storage not initialized"）：备份损坏文件、以默认值重建，并新增 `STORE_INIT_ERROR`/`STORE_RETRY_INIT` 前端错误处理。(`3784b78`)
+
+## [1.1.0] - 2026-03-09
+
+版本边界：无 tag；以 `3f08369` 升至 1.1.0 为准（初始版本见 1.0.0）。
+
+### Added（新增）
+
+- Function Calling 模拟：面向不原生支持工具的模型，用文本协议模拟工具调用，并新增 SystemPrompt 管理。(`aee98eb`)
+- 多轮会话管理：`SessionConfig`/`SessionRecord`、单/多轮模式、设置页会话标签。(`2a100b1`)
+- 工具提示词注入：三种模式（always/smart/never），smart 按消息长度阈值决定是否注入；识别 Cline、KiloCode、RooCode、VS Code Copilot、Cherry Studio 等客户端并按配置跳过；按模型提供多套提示词变体。(`9e81c23`, `1d3d6db`)
+- DeepSeek 网页搜索与推理：支持 `web_search`、`reasoning_effort`，新增 `DeepSeek-Search`、`DeepSeek-R1`、`DeepSeek-R1-Search` 模型变体，并支持通过请求头传递特性参数。(`d85e274`)
+
+### Changed（变更）
+
+- 统一工具调用处理：GLM、MiniMax、Qwen、Z.ai 等适配器改为"内容即时下发、刷新时解析工具调用"，统一按 `[function_calls]` 检测，并补全 `finish_reason`（`tool_calls` 与 `stop`）。(`10416c7`)
+- 统一各适配器的会话上下文处理。(`94d8c9b`)
+- 发布流水线修复：Actions 权限、产物上传与图标步骤；国内网络改用 npmmirror 的 Electron 镜像。(`754f036`, `17502f8`, `cde52cd`, `bf93807`, `89f5aec`)
+
+### Fixed（修复）
+
+- 流重复结束：Qwen/Z.ai 增加 `safeEnd` 与 `streamEnded` 守卫，避免流结束后继续处理数据。(`ef2d8e1`)
+- 代理绑定地址在重启后回落 127.0.0.1，改为持久化 `proxyHost`。(`8db3e11`)
+
+## [1.0.0] - 2026-02-26
+
+版本边界：初始提交 `c55dae2`（"initial commit - Chat2API v1.0.0"）。
+
+### Added（新增）
+
+- 首次发布（Chat2API）：Electron + React 桌面应用，为 DeepSeek、GLM、Kimi、MiniMax、Qwen、Z.ai 等服务商提供 OpenAI 兼容 API；含仪表盘、API Key 管理、模型管理、请求日志、代理设置、托盘与中英双语界面。(`c55dae2`)
+
+---
+
+## 版本边界与溯源说明
+
+- **有 tag 的版本**：`v1.4.1` – `v1.7.0` 共 20 个 tag，边界即 tag 指向的提交；每个 tag 内 `package.json` 的 `version` 与 tag 名一致（已逐一核对）。
+- **无 tag 的早期版本**：以 `package.json` 的版本号变更提交为边界：
+  - `1.0.0` = `c55dae2`；`1.1.0` = `3f08369`；`1.1.2` = `3784b78`；`1.1.3` = `39d1f62`；`1.1.4` = `38abf6b`；`1.2.0` = `b0f3255`；`1.3.0` = `d22e4f6`；`1.4.0` = `c81dfe1`；`1.4.1` = `ac62cea`。
+  - `1.0.0` 与 `1.1.0` 之间、`1.2.0` 与 `1.3.0` 之间的提交在 `package.json` 中仍沿用旧版本号，按"提交在下一个版本号提交之前即归入下一版本"处理。
+- **仓库中没有 `v1.1.1`**：`git log -- package.json` 的版本序列为 1.0.0 → 1.1.0 → 1.1.2 → 1.1.3，不存在 1.1.1 的版本提交；CODE_WIKI §13 中"v1.1.1"一条缺乏证据，本文件未收录。
+- **`CODE_WIKI.md` §13 的归属错误已在此纠正，但未改动该文件**：
+  - 其 "v1.5.0" 条目描述的是退役 8 家 Web UI 供应商与聚合渠道目录，实际发生于 `1.4.1`（`ac62cea`，2026-10-29）；`1.5.0` 的真实内容是 HTTPS 监听、证书与凭据 `v1:` 封装。
+  - 其 "v1.1.3" 条目称"新增函数调用支持"，函数调用模拟实际落在 `1.1.0`（`aee98eb`，2026-03-02）。
+- **条目取舍**：只写能从提交、tag 或仓库文档核对到的用户可见变更；纯内部测试、注释与文档整理一般不单列，除非它改变了运行方式（例如 CI gate、Node 版本、发布流程）。提交历史中无法确认归属的零散改动不写入任何版本。
+</content>
