@@ -54,6 +54,7 @@ import {
   isContextOverflowError,
   isReasoningEffortUnsupportedError,
   isToolOverflowError,
+  isUpstreamCatalogMissError,
   probeSseHead,
   shouldTryNextAutoCandidate,
 } from '../../src/main/proxy/failover.ts'
@@ -348,12 +349,29 @@ test('forwarder 的换家判据必须接上：超限 400 参与换家，普通 4
     /const capabilityMismatch = isToolOverflowError\(result\.error\)\s*\n\s*\|\| isMissingReasoningHistoryError\(result\.error\)\s*\n\s*\|\| isChannelModelUnavailableError\(result\.error\)/,
     'forwardFirstReachable must consult the switch-to-next-candidate classes before rejecting failover',
   )
-  // probe 错误帧映射：能力不匹配类 400 保持 400（换取「不计账号失败」的换家语义）
-  assert.match(
-    forwarderSource,
-    /isToolOverflowError\(probe\.message\)[\s\S]{0,200}isContextOverflowError\(probe\.message\)[\s\S]{0,120}isReasoningEffortUnsupportedError\(probe\.message\)[\s\S]{0,120}\? 400\s*\n\s*: 502/,
-    'probe error frames must keep capability-mismatch 400s at 400 so they fail over without account-failure penalty',
-  )
+  // probe 错误帧映射：能力不匹配类 400 保持 400（换取「不计账号失败」的换家语义）。
+  // 逐谓词钉死两处出口，而不是给一个宽容差：新增一类能力失败（例如 2026-11-03 的
+  // 「上游目录不认这个模型」）时，两个出口都必须显式接上，否则一处漏接就会把
+  // 400 记成 fatal、连带记账。
+  const probeStatusBlocks = [...forwarderSource.matchAll(/(isToolOverflowError\([^;]*?)\?\s*400\s*:\s*502/g)]
+  assert.equal(probeStatusBlocks.length, 2, 'both probe exits must map capability 400s')
+  for (const [index, block] of probeStatusBlocks.entries()) {
+    for (const predicate of [
+      'isToolOverflowError',
+      'isMissingReasoningHistoryError',
+      'isContextOverflowError',
+      'isReasoningEffortUnsupportedError',
+      'isUpstreamCatalogMissError',
+    ]) {
+      assert.ok(
+        block[1].includes(predicate),
+        `probe exit #${index + 1} must keep ${predicate} on the 400 side`,
+      )
+    }
+  }
+  // 换家循环必须把这类失败认成「换一家就能成」：不记冷却、不计账号失败
+  assert.match(forwarderSource, /\|\| isUpstreamCatalogMissError\(result\.error\)/,
+    'catalog-miss failures must take the capability-mismatch branch (fail over without account penalty)')
   // 2026-11-02 对齐 new-api：400 仍终止（能力类例外由文案判据放行）；
   // 401-407 / 409-499 / 5xx / 网络错误都可以换下一家。
   assert.equal(isFailoverEligibleStatus(400), false)
@@ -923,4 +941,28 @@ test('「这一家不接受 reasoning_effort」识别：命中用户报障原文
   assert.match(forwarderSource, /\|\| isReasoningEffortUnsupportedError\(result\.error\)/)
   assert.match(forwarderSource, /\|\| isReasoningEffortUnsupportedError\(probe\.message\)/)
   assert.match(forwarderSource, /\|\| isReasoningEffortUnsupportedError\(message\)/)
+})
+
+test('「上游目录不认这个模型」识别：按目录缺失语义判 capability，客户端写错的名字不在此列', () => {
+  // 2026-11-03 真机两笔（daily 路由，第一个候选 400 就整轮终止）
+  assert.ok(isUpstreamCatalogMissError(
+    'Model id : Tencent-Hunyuan/Hy3 , has no provider supported',
+  ))
+  assert.ok(isUpstreamCatalogMissError(
+    'Unknown model: mimo-v2.5-pro. This model is not in our catalog.',
+  ))
+
+  // 客户端自己的请求错误不构成「换一家就能成」：换家不会改变写错的名字
+  assert.equal(isUpstreamCatalogMissError('model not found'), false)
+  assert.equal(isUpstreamCatalogMissError("Invalid value for 'tools': maximum number of items is 128."), false)
+  assert.equal(isUpstreamCatalogMissError('messages: must be a non-empty array'), false)
+  assert.equal(isUpstreamCatalogMissError(undefined), false)
+
+  // 日志分类必须与换家分支同一口径：目录缺失是 capability，不是账号故障
+  assert.equal(describeAttemptFailure({
+    candidate: 'bazaarlink/mimo-v2.5-pro',
+    error: 'Unknown model: mimo-v2.5-pro. This model is not in our catalog.',
+    status: 400,
+    providerType: 'aggregate',
+  }).kind, 'capability')
 })
