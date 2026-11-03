@@ -166,3 +166,9 @@ E 断"裸名命中 ≥2 家时第一条 429 后由第二家成功应答，且请
 - **OpenRouter：正常出数**。`openrouter-key` 读取器期望的 `data.limit` / `data.limit_remaining` 形状由此得到真机证实，无代码改动。
 - **SiliconFlow：HTTP 401**（`code 30014 / Token is invalid.`）。判定：① 端点与请求形态都是对的——假 Key 直测 `.com` 与 `.cn` 两个 host 均返回同款 JSON 401，说明上游正常解析了 `Authorization: Bearer`；② 401 发生在 `readCreditAt` 的 HTTP 状态分支，早于解析层，所以这**不是**「`balance` 字段名猜错」，读取器不需要也不应该改（成功形状至今无真机报文，`unexpected-shape` 兜底继续生效）。用户侧动作：核对重填该条目 Key（Key 入库不做事前校验，401 是第一现场）。
 - **本次暴露并修复的真实缺陷**：`readCreditAt`（`manager.ts:824-826`）把上游原话吞了——detail 只留 `HTTP 401`，界面只能说「上游拒绝了这次查询」，用户分不清 Key 无效还是端点异常；而同文件 `testModel`（`:708`）早已用 `errorMessageOf` 保留原话。修复 = 失败分支拼上 `errorMessageOf(response.data)` 并先过 `redactSecrets`（401 正文可能反射请求 Key）。判据：`credit-query-fetch.test.ts` 原 401 条断言改钉 `HTTP 401 - nope`，新增「401 正文反射 Key 时 detail 已脱敏且 vendor 句子存活」一条（用 SiliconFlow 真实报文形状）。解析层零改动。
+
+**第二轮探测（2026-11-03 晚，用户换 Key 后重测）：HTTP 410 — 端点已被官方下线**：
+- `GET /user/info` 返回 `410 This endpoint is deprecated and is no longer available.`——410 与 401 性质完全不同：401 是「这把 Key 无效」（换 Key 能解决），410 是「这个端点本身不存在了」（**任何 Key 都不会成功**）。
+- 官方更新公告（https://docs.siliconflow.cn/cn/release-notes/overview）原文：「由于系统更新迭代，/user/info 接口已无法适配平台用户账户体系，该 API 将正式停止服务……若您仍在使用 /user/info 接口，请尽快移除相关调用」；第三方佐证（ApiMonitor / DSH 余额查询插件 / MeteorNOX 组件）一致记录该接口 **2026-08-14 起停止服务**，替代接口「截至发版仍未见」，这些组件均已改用「无余额接口 + 探活验证 Key」策略。
+- 处置（同轮落地）：registry 撤下 `siliconflow` 的 `quotaProbe` 声明（保留声明等于假装能查），`queryCredits` 走既有 `no_probe` 路径、界面显示「该条目没有声明额度端点」；`credit-readers.test.ts` 声明断言改钉 `declared === ['open_router']` 并断言 siliconflow 无 `quotaProbe`（注明官方 2026-08-14 下线与公告出处）；`readSiliconFlowUserInfo` reader 保留不删（纯函数、零调用方，官方替代端点上线时字段名要按真机报文重写整个 reader，现在删只制造无意义 diff），仅在注释里写明去向。`aggregateQuota.ts` 的 siliconflow 段是模型限速票据（quota 全 null），与本功能无关，不动。
+- 判据出处：本轮所有结论以用户实点报错 + 官方公告 + 第三方 CHANGELOG 为准，`credit-readers.test.ts:212` 起是回归钉。

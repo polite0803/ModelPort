@@ -130,6 +130,50 @@ export function isChannelModelUnavailableError(message: string | undefined): boo
 }
 
 /**
+ * 「这一家的上游目录里没有这个模型」类 400 的识别（用户报障 2026-11-03，
+ * 192.168.85.131 的 `daily` 路由实测两笔）。
+ *
+ * ## 为什么这一类必须「换下一家」
+ *
+ * 与 {@link isChannelModelUnavailableError} 同一性质，但**文案来自上游本身**，
+ * 不是渠道 worker 抛的：聚合条目（ModelScope / BazaarLink 这类多厂商网关）的
+ * 静态目录是编译期快照，上游下架或改名模型后它不会自己跟着变，于是宿主把
+ * 「目录说有、请求时不认」的模型广告成候选并给了高分。真机实测两笔：
+ *
+ * - `modelscope/Tencent-Hunyuan/Hy3` → `Model id : Tencent-Hunyuan/Hy3 , has no
+ *   provider supported`（上游 2026-11-03 的 `/v1/models` 只有 37 个模型，
+ *   `Tencent-Hunyuan/*` 一条都没有）；
+ * - `bazaarlink/mimo-v2.5-pro` → `Unknown model: mimo-v2.5-pro. This model is
+ *   not in our catalog.`（上游已改成 `mimo-v2.6-pro` / `mimo-v2.6-flash`）。
+ *
+ * 后果原先是致命的而不是可绕的：400 不属于 `isFailoverEligibleStatus`，换家
+ * 循环在第一个候选就 `return last`，同池另外 4 家一次都没被试到（真机日志里
+ * `auto.failures` 只有一个 `kind: fatal`），客户端把「这一家供不了这个模型」
+ * 读成「整条路由不可用」。
+ *
+ * 判据与工具数超限同类：**这一家供不了这个模型，换一家就能成**，而账号本身
+ * 是健康的（请求在生成之前就被拒，零上游调用、不烧积分）—— 所以换下一家继续试，
+ * 同时不记冷却、不计账号故障。
+ *
+ * ⚠️ 识别口径必须**窄**：只认「目录里没有这个模型」这一个语义，且要求文案里
+ * **点名了模型**（否则「你传的参数不对」之类也会命中）。`model not found`
+ * 这类**客户端写错名字**的说法不在此列 —— 换家没有意义，客户端点名了一个
+ * 不存在的模型，该由客户端自己改。
+ */
+const UPSTREAM_CATALOG_MISS_PATTERNS: readonly RegExp[] = [
+  // ModelScope：`Model id : Tencent-Hunyuan/Hy3 , has no provider supported`
+  /has\s+no\s+provider\s+supported/i,
+  // BazaarLink：`Unknown model: mimo-v2.5-pro. This model is not in our catalog.`
+  /(?:unknown|invalid)\s+model\b/i,
+  /\bnot\s+in\s+(?:our|the)\s+catalog\b/i,
+]
+
+export function isUpstreamCatalogMissError(message: string | undefined): boolean {
+  if (!message) return false
+  return UPSTREAM_CATALOG_MISS_PATTERNS.some(pattern => pattern.test(message))
+}
+
+/**
  * 「这一家的凭据已经不能用，要人来处理」类失败的识别
  * （2026-11-01 192.168.85.131 实测：27 笔失败属于这一类）。
  *
@@ -420,6 +464,7 @@ export function describeAttemptFailure(input: {
   const kind: AutoAttemptFailure['kind'] = isToolOverflowError(input.error)
     || isMissingReasoningHistoryError(input.error)
     || isChannelModelUnavailableError(input.error)
+    || isUpstreamCatalogMissError(input.error)
     || isForcedToolChoiceUnsupported(input.error)
     // 这两条漏在这里就会让日志说谎：换家循环实际往下试了，`kind` 却记成 `fatal`
     // （本函数的口径就是「kind 必须与当时实际走的分支一致」）。

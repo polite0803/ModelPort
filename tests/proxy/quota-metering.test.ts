@@ -117,7 +117,7 @@ test('both exits feed the quota learner from what upstream already sent back', (
     'the success branch learns from the rate-limit headers')
 
   const autoRouter = readFileSync('src/main/proxy/autoRouter.ts', 'utf-8')
-  assert.match(autoRouter, /const quotaBlocked = quotaBlockReason\(provider, account\.id, model\.actualModelId\)\r?\n\s*if \(quotaBlocked !== undefined\) \{\r?\n\s*skipped\.add\(`\$\{provider\.id\}\/\$\{model\.displayName\}:\$\{quotaBlocked\}`\)\r?\n\s*continue/,
+  assert.match(autoRouter, /const quotaBlocked = quotaBlockReason\(provider, account\.id, model\.actualModelId, gateContext\)\r?\n\s*if \(quotaBlocked !== undefined\) \{\r?\n\s*skipped\.add\(`\$\{provider\.id\}\/\$\{model\.displayName\}:\$\{quotaBlocked\}`\)\r?\n\s*continue/,
     'exhausted aggregate candidates must not enter the ranking at all (and their skip reason must be recorded)')
 
   const gate = readFileSync('src/main/proxy/quota/gate.ts', 'utf-8')

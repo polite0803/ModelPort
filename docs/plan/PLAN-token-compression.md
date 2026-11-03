@@ -1,7 +1,7 @@
 # 方案：把 Headroom 的 token 节约机制移植进 ModelPort
 
 > 状态：**P0 + P1 + P2 + P3 + P5 已实现并验证，验收区全部回写**（2026-11-03），P1 已补齐嵌套 JSON 形状；P2 只落地日志和搜索，diff 压缩按评审决策整体不做；P3 的 CCR 存储 + 标记 + 管理 API 取回已落 `tests/compression/ccr-store.test.ts`（18 项验收）。
-> **P4 已先落地其观测前提**：跨轮重复度统计（纯观测，不改写任何字节）。P4 的去重本体仍未实现，是否值得做由该统计决定。
+> **P4 已先落地其观测前提**：跨轮重复度统计（纯观测，不改写任何字节）。P4 的去重本体经真实流量测判定为**不值得实现**（网关 `192.168.85.131` 实测 `ratio=0.57%` < 5% 阈值，`foldWorthBuilding=false`，`conclusive=false`），维持"未实现即正确结论"状态；裁定台账见 §P4 末。
 > 归属声明见 `NOTICE-compression.md`。
 > 参考实现：`https://github.com/headroomlabs-ai/headroom`（Apache-2.0）。下文所有 `path:line` 引用均指该仓库 `main` 分支（2026-10-29 快照）。需要复核时按需重新浅克隆，勿把副本留在本仓库内：
 > `git clone --depth 1 https://github.com/headroomlabs-ai/headroom.git <仓库外路径>`
@@ -493,6 +493,30 @@ X-ModelPort-Compression-Ratio: 0.57
 
 - [ ] volatile 命中时请求体不变（只增日志）。
 - [ ] 跨轮去重满足前缀单调性：`dedup(blocks[:k]) == dedup(full)[:k]`。
+
+### P4 真实流量裁定（2026-11-03，网关 `192.168.85.131`）
+
+> 在真机累积流量上读取 `GET /v1/management/compression/duplication`（管理密钥 `mgmt_...281`，HTTP `200`）。门禁全部取自 `src/main/proxy/routes/management/compression.ts` 的 `interpretation` 字段。
+
+| 指标 | 实测 | 门禁 | 结论 |
+|---|---|---|---|
+| `ratio`（重复字 / 扫描字） | `0.0057`（0.57%） | `≥ 0.20` 才 `foldWorthBuilding` | ❌ 远低于，且落入 `negligible`（< 5%） |
+| `multiBlockRequests` | `128` | `> 0` | ✅ 多轮样本充分 |
+| `sampled` / `unmeasured` | `128` / `86` | `> 0` | ✅ 窗口内有多轮可比块 |
+| `truncatedRequests` | `13` | `=== 0` 才 `conclusive` | ❌ 13 条扫描撞 `MAX_SCANNED_CHARS=256KB` 被截断 |
+| `requestsWithDuplication` | `107` | — | 107/128 检测到了重复段，但累计字节仅 122k / 扫描 21.3M |
+| `foldWorthBuilding` | `false` | `true` 才开工 | ❌ |
+| `conclusive` | `false` | `true` | ❌（叠加否决项，非主因） |
+| `negligible` | `true` | — | ✅ 即"不值得" |
+| `survivorship.meanRemainingTurns` | `15.7`（294 请求 / 3 对话 / 43 完结，`lifetimeKnown=true`） | — | 仅作日后预算输入，与 ratio 无关 |
+
+**裁定**：P4 去重本体**保持未实现**，此为正确结论而非缺口。两条独立否决：
+1. 重复字节占比 0.57%，远低于 20% 门槛——跨轮去重能省的字节量，远不足以覆盖改写成本与打破上游前缀缓存的风险（硬风险 §6.1）。
+2. `conclusive=false`（`truncatedRequests=13`）使端点自身将结论标为"非定论"；截断只会令 ratio 偏低，方向上不会把结论从"值得"扭成"不值得"，主否决已是 ratio 过低。
+
+**样本量已足够下结论**：窗口 `logRetention=200`（实测 `entriesInWindow=214`，取最新 200），`sampled=128` 多轮 + `survivorship` 累计 294 请求。这不是"数据不够"，是数据已说清——无需继续累积流量即可判定。
+
+**后续**：观测层（duplication / duplicationSummary / survivorship / 管理端点）保留并继续采集；若日后 ratio 升破 5%（尤其聚合供应商启用、长多轮编码会话变多）可重读该端点复议。`read_lifecycle` 仍受硬不变量 1 约束，仅在无前缀缓存供应商（如 opencode）时方考虑。
 
 ### P5 — 输出侧 verbosity（省 completion token）—— 已于 2026-11-03 退役
 

@@ -287,8 +287,10 @@ test('an entry without a declared probe endpoint, and an entry with no key, ask 
   const noProbe = await aggregateProviderManager.queryCredits('mistral')
   assert.equal(noProbe.failure, 'no_probe', 'the catalogue says this one has no credit endpoint')
 
-  const notConfigured = await aggregateProviderManager.queryCredits('siliconflow')
-  assert.equal(notConfigured.failure, 'not_configured')
+  // SiliconFlow 的 /user/info 已被官方下线（HTTP 410），quotaProbe 声明已撤下——
+  // 所以它现在和 mistral 同类：不发明端点、不发请求，界面如实显示「没有声明额度端点」。
+  const siliconflowNoProbe = await aggregateProviderManager.queryCredits('siliconflow')
+  assert.equal(siliconflowNoProbe.failure, 'no_probe', 'siliconflow no longer declares a probe after the provider retired /user/info')
 
   // 删掉两家已存的 Key 之后：有端点、有记录，但没有凭据 —— 不发请求，界面得给出原因。
   for (const account of harness.storeManager.getAccountsByProviderId('open_router')) {

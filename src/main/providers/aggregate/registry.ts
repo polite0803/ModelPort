@@ -1626,15 +1626,12 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     "authUrl": "https://cloud.siliconflow.com/account/ak",
     "envVar": "SILICONFLOW_API_KEY",
     "modelsUrl": "https://api.siliconflow.com/v1/models",
-    // 账号级余额端点：目录里的 baseUrl 是 `/v1`，官方路径是 `/v1/user/info`，所以相对路径是 `/user/info`。
-    // docUrl 记的是**这份端点声明的转录来源**（PLAN §1 第 3 行），本轮没有真机报文：官方文档页与字段名
-    // （余额是不是就叫 `balance`）要在界面上点一次才能确认，确认不了时解析器报 `unexpected-shape`。
-    "quotaProbe": {
-      "path": "/user/info",
-      "reader": "siliconflow-user-info",
-      "docUrl": "https://github.com/tashfeenahmed/freellmapi",
-      "asOf": "2026-10-29"
-    },
+    // 2026-11-03 撤下 quotaProbe：官方 /user/info 已于 2026-08-14 停止服务（返回 HTTP 410
+    // "This endpoint is deprecated and is no longer available"），官方公告要求移除调用
+    // （https://docs.siliconflow.cn/cn/release-notes/overview），替代端点"后续将适时提供"——
+    // 截至 2026-11-03 尚未上线。保留声明等于假装能查，每次探测必然 410；撤下后
+    // queryCredits 走 no_probe 路径，界面如实显示「没有声明额度端点」。
+    // 官方提供替代端点时再重新声明，届时 reader 的字段名以真机报文为准。
     "notes": "Chat ids from the 9router registry; listing is filtered with sub_type=chat.",
     "website": "https://siliconflow.com/"
   },

@@ -77,9 +77,13 @@ test('the fetch reuses the stored credential path and the configured base, never
 
 // —— 环 4：落盘的这一行真的被排序读到。
 test('the gate reads the stored row and turns it into the exhausted slot, not into a token ratio', () => {
-  assert.match(gate, /creditSnapshotExhausted\(storeManager\.getAggregateCreditSnapshot\(entryId\)\)/)
-  assert.match(gate, /if \(creditExhausted\(provider\.id\)\) return 'no-credit'/)
-  assert.match(gate, /if \(creditExhausted\(entryId\)\) return -1/)
+  assert.match(gate, /storeManager\.getAggregateCreditSnapshot\(entryId\)/,
+    'without a shared context the gate still reads the stored row')
+  assert.match(gate, /context\.snapshots\(\)\[entryId\]/,
+    'with a selection-scoped context the same row comes from the shared snapshot table')
+  assert.match(gate, /creditSnapshotExhausted\(snapshot\)/)
+  assert.match(gate, /if \(creditExhausted\(provider\.id, context\)\) return 'no-credit'/)
+  assert.match(gate, /if \(creditExhausted\(entryId, context\)\) return -1/)
   assert.doesNotMatch(gate, /remaining\s*[*/+-]/, 'a USD/CNY balance is never arithmetically mixed into headroom')
   assert.match(store, /set\('aggregateCreditSnapshots'/)
 })

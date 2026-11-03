@@ -434,8 +434,19 @@ test('autoRouter 必须把账本余量与 Bandit 战绩喂进打分（源码钉�
   // 余量只对聚合目录候选计算（账号渠道的帽在渠道 worker 内部）
   assert.match(
     autoRouterSource,
-    /provider\.type === 'aggregate'\r?\n\s*\? aggregateHeadroom\(provider\.id, model\.actualModelId\)/,
+    /provider\.type === 'aggregate'\r?\n\s*\? aggregateHeadroom\(provider\.id, model\.actualModelId, gateContext\)/,
     'quota headroom must come from the existing gate, only for aggregate candidates',
+  )
+  // 闸门读取按一次选号复用：加密 store 每次 get 都整份解密，逐候选问会把主进程钉在同步 I/O 上
+  assert.match(
+    autoRouterSource,
+    /const gateContext = createQuotaGateContext\(\)/,
+    'select must build one gate context per candidate pass',
+  )
+  assert.match(
+    autoRouterSource,
+    /quotaBlockReason\(provider, account\.id, model\.actualModelId, gateContext\)/,
+    'quotaBlockReason must use the shared gate context',
   )
   // 打分函数的两个新因子要进总分（钉 balanced 主路径与 fill-first）
   assert.match(autoRoutingSource, /- penalty - quotaPenalty - operationalPenalty \+ costBonus \+ stickyBonus \+ liveBonus/)

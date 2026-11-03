@@ -351,7 +351,7 @@ test('forwarder 的换家判据必须接上：超限 400 参与换家，普通 4
   // probe 错误帧映射：能力不匹配类 400 保持 400（换取「不计账号失败」的换家语义）
   assert.match(
     forwarderSource,
-    /isToolOverflowError\(probe\.message\)[\s\S]{0,200}isContextOverflowError\(probe\.message\)[\s\S]{0,120}isReasoningEffortUnsupportedError\(probe\.message\)[\s\S]{0,60}\? 400\s*\n\s*: 502/,
+    /isToolOverflowError\(probe\.message\)[\s\S]{0,200}isContextOverflowError\(probe\.message\)[\s\S]{0,120}isReasoningEffortUnsupportedError\(probe\.message\)[\s\S]{0,120}\? 400\s*\n\s*: 502/,
     'probe error frames must keep capability-mismatch 400s at 400 so they fail over without account-failure penalty',
   )
   // 2026-11-02 对齐 new-api：400 仍终止（能力类例外由文案判据放行）；

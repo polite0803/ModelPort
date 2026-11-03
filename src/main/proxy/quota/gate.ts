@@ -15,8 +15,56 @@
  */
 
 import { storeManager } from '../../store/store'
-import { creditSnapshotExhausted } from '../../../shared/aggregateCredit.ts'
+import {
+  creditSnapshotExhausted,
+  type AggregateCreditSnapshots,
+} from '../../../shared/aggregateCredit.ts'
+import type { Account } from '../../store/types'
 import { evaluateQuota, resolveCaps, type QuotaBlockReason } from './limits.ts'
+
+/**
+ * 一次选号内复用的 store 读取上下文。
+ *
+ * `electron-store` 带 encryptionKey 时没有内存缓存：每次 `get` 都要把整份
+ * `data.json` 读盘、跑一遍 PBKDF2 再 AES 解密。选号循环按 (账号, 模型) 逐条问
+ * 闸门，一次请求能把同一张余额快照读几百遍 —— 主进程因此被同步 I/O 钉住，
+ * 其它请求的首字节只能排队等它。
+ *
+ * 上下文的范围就是这一次选号：余额快照是人手点出来的读数，选号途中不会变；
+ * 账号表同理。两者各只读一次，后续都是对象/数组查找。
+ */
+export interface QuotaGateContext {
+  /** 实时余额快照；首次使用时读一次 store。 */
+  snapshots(): AggregateCreditSnapshots
+  /** `entryId → 账号`；同一上下文内同一家只查一次 store。 */
+  accountsByProvider(entryId: string): Account[]
+}
+
+export function createQuotaGateContext(): QuotaGateContext {
+  let snapshots: AggregateCreditSnapshots | undefined
+  const accounts = new Map<string, Account[]>()
+
+  return {
+    snapshots() {
+      if (snapshots !== undefined) return snapshots
+      try {
+        snapshots = storeManager.getAggregateCreditSnapshots()
+      } catch (error) {
+        // 与 creditExhausted 同一条 fail-open：读不出来 = 没有证据，按空表放行。
+        console.error('[QuotaGate] live credit snapshots unavailable:', error)
+        snapshots = {}
+      }
+      return snapshots
+    },
+    accountsByProvider(entryId) {
+      const cached = accounts.get(entryId)
+      if (cached !== undefined) return cached
+      const loaded = storeManager.getAccountsByProviderId(entryId)
+      accounts.set(entryId, loaded)
+      return loaded
+    },
+  }
+}
 
 /**
  * 实时余额快照是否构成"这家已超"。
@@ -26,9 +74,12 @@ import { evaluateQuota, resolveCaps, type QuotaBlockReason } from './limits.ts'
  * 这一行是人手点出来的，用户不再点就不该继续影响路由；超时后界面照实展示并标"已过期"，
  * 只是这里返回 false。回退成本：改那一个常量。
  */
-function creditExhausted(entryId: string): boolean {
+function creditExhausted(entryId: string, context?: QuotaGateContext): boolean {
   try {
-    return creditSnapshotExhausted(storeManager.getAggregateCreditSnapshot(entryId))
+    const snapshot = context === undefined
+      ? storeManager.getAggregateCreditSnapshot(entryId)
+      : context.snapshots()[entryId]
+    return creditSnapshotExhausted(snapshot)
   } catch (error) {
     // 读不出快照 = 没有这条证据，闸门随之不生效；它绝不能变成"这家不能服务"。
     console.error('[QuotaGate] live credit snapshot unavailable:', error)
@@ -39,12 +90,13 @@ function creditExhausted(entryId: string): boolean {
 export function quotaBlockReason(
   provider: { id: string; type: string },
   accountId: string,
-  actualModel: string
+  actualModel: string,
+  context?: QuotaGateContext
 ): QuotaBlockReason | undefined {
   if (provider.type !== 'aggregate') return undefined
 
   // 没钱比"这个窗口打满了"更难恢复：窗口自己会复位，余额要用户去充。所以先说它。
-  if (creditExhausted(provider.id)) return 'no-credit'
+  if (creditExhausted(provider.id, context)) return 'no-credit'
 
   try {
     const ledger = storeManager.getQuotaLedger()
@@ -58,16 +110,23 @@ export function quotaBlockReason(
 }
 
 /** 1 = 完全空；0 = 刚好打满；-1 = 已超（排最后）。没有官方数字的家给 0.5 的中性分。 */
-export function aggregateHeadroom(entryId: string, modelId: string): number {
+export function aggregateHeadroom(
+  entryId: string,
+  modelId: string,
+  context?: QuotaGateContext
+): number {
   try {
-    if (creditExhausted(entryId)) return -1
+    if (creditExhausted(entryId, context)) return -1
 
     const ledger = storeManager.getQuotaLedger()
     const caps = resolveCaps(entryId, modelId, ledger.learnedFor(entryId))
     if (!caps.enforceable) return 0.5
 
+    const accounts = context === undefined
+      ? storeManager.getAccountsByProviderId(entryId)
+      : context.accountsByProvider(entryId)
     let worst = 0
-    for (const account of storeManager.getAccountsByProviderId(entryId)) {
+    for (const account of accounts) {
       const usage = ledger.snapshot(entryId, account.id, modelId)
       for (const [metric, limit] of Object.entries(caps.limits) as Array<[keyof typeof usage, number]>) {
         if (limit > 0 && typeof usage[metric] === 'number') {

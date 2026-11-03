@@ -205,13 +205,15 @@ test('the parse layer imports no transport, no store and no filesystem', () => {
 })
 
 /**
- * 目录侧的声明：只有取证记录里真实存在的两家配了端点，其余一律不配。
- * 转录来的 host 照原样留着（siliconflow 的 `.com` 不是笔误，是抄来的），
- * 改它要在真机核对之后单独改，不能和这条功能混在一起。
+ * 目录侧的声明：只有取证记录里真实存在的配额端点才配。
+ * SiliconFlow 曾声明 `/user/info`（freellmapi 转录），但官方已于 2026-08-14 停止服务
+ * （真机探测返回 HTTP 410 "This endpoint is deprecated"，官方公告见
+ * https://docs.siliconflow.cn/cn/release-notes/overview），声明已撤下；
+ * 替代端点"后续将适时提供"，上线前不许发明新端点。
  */
-test('only the two entries with a recorded credit endpoint declare one', () => {
+test('only entries with a recorded credit endpoint declare one', () => {
   const declared = AGGREGATE_REGISTRY.filter(entry => entry.quotaProbe !== undefined).map(entry => entry.id).sort()
-  assert.deepEqual(declared, ['open_router', 'siliconflow'], 'no invented endpoints')
+  assert.deepEqual(declared, ['open_router'], 'no invented endpoints')
 
   const openRouter = AGGREGATE_REGISTRY.find(entry => entry.id === 'open_router')
   assert.equal(openRouter?.baseUrl, 'https://openrouter.ai/api/v1')
@@ -221,13 +223,10 @@ test('only the two entries with a recorded credit endpoint declare one', () => {
   assert.ok(openRouter?.quotaProbe?.docUrl?.startsWith('https://'), 'the declaration carries its provenance')
   assert.match(openRouter?.quotaProbe?.asOf ?? '', /^\d{4}-\d{2}-\d{2}$/, 'and the date it was checked')
 
+  // SiliconFlow 的声明撤下不是因为字段名猜错，而是官方把端点关了：
+  // 任何 Key 都不会成功（410 是服务端对端点本身的拒绝），所以不配 quotaProbe 是唯一诚实的做法。
   const siliconFlow = AGGREGATE_REGISTRY.find(entry => entry.id === 'siliconflow')
-  assert.equal(siliconFlow?.baseUrl, 'https://api.siliconflow.com/v1', 'transcribed as .com - not rewritten here')
-  assert.equal(siliconFlow?.quotaProbe?.path, '/user/info')
-  assert.equal(siliconFlow?.quotaProbe?.reader, 'siliconflow-user-info')
-  assert.equal(creditUnitOfReader(siliconFlow?.quotaProbe?.reader ?? 'openrouter-key'), 'CNY')
-
-  // 相对路径必须能直接拼在 base 后面就得到取证记录里那个绝对 URL。
-  assert.equal(`${siliconFlow?.baseUrl ?? ''}${siliconFlow?.quotaProbe?.path ?? ''}`, 'https://api.siliconflow.com/v1/user/info')
+  assert.equal(siliconFlow?.baseUrl, 'https://api.siliconflow.com/v1')
+  assert.equal(siliconFlow?.quotaProbe, undefined, '/user/info was retired by the provider on 2026-08-14; no replacement yet')
   assert.equal(`${openRouter?.baseUrl ?? ''}${openRouter?.quotaProbe?.path ?? ''}`, 'https://openrouter.ai/api/v1/key')
 })

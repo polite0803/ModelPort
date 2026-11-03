@@ -128,6 +128,10 @@ export function readOpenRouterKey(
  * 那是同一字段的嵌套差异，不是"猜一个近似字段"。`total_balance` / `recharge_amount` /
  * `gift_amount` 这些相邻名字一律不读：它们是不是同一条余额没有任何证据。
  * 真机第一次点这个按钮时要核对的就是这个名字。
+ *
+ * 2026-11-03：上游已把 `/user/info` 下线（HTTP 410），registry 不再声明该端点，
+ * 所以本 reader 当前没有调用方。函数留着：官方替代端点上线时字段名要重新取证，
+ * 那时整个 reader 都得重写，现在删掉只是制造无意义的 diff。
  */
 export function readSiliconFlowUserInfo(
   payload: unknown,

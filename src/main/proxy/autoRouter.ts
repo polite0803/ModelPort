@@ -53,7 +53,7 @@ import {
   type RequestProfile,
   type StickyHint,
 } from './autoRouting'
-import { quotaBlockReason, aggregateHeadroom } from './quota/gate.ts'
+import { createQuotaGateContext, quotaBlockReason, aggregateHeadroom } from './quota/gate.ts'
 import { aggregateBanditStats, banditKeyOf } from './autoBandit.ts'
 import { AUTO_RECOVERABLE_EXTRA_ATTEMPTS } from './failover.ts'
 import { aggregateContextWindow } from './modelCapabilities.ts'
@@ -424,6 +424,9 @@ class AutoRouter {
     // Bandit 实时战绩（PLAN P2-5 第一步）：从请求日志内存副本滚动 24h 聚合。
     // 每请求一次、单遍 O(n)，n 受 requestLogs.maxEntries 上限约束。
     const bandit = aggregateBanditStats(storeManager.getRequestLogs(), now)
+    // 闸门读取只做一次：加密 store 每次 `get` 都要整份解密，逐候选问会把
+    // 一次选号放大成几百次同步 I/O（见 `quota/gate.ts` 的上下文注释）。
+    const gateContext = createQuotaGateContext()
 
     for (const provider of providers) {
       const accounts = storeManager
@@ -468,7 +471,7 @@ class AutoRouter {
             }
 
             // 额度已打满的候选根本不进排序，失败切换才不会浪费一次上游请求
-            const quotaBlocked = quotaBlockReason(provider, account.id, model.actualModelId)
+            const quotaBlocked = quotaBlockReason(provider, account.id, model.actualModelId, gateContext)
             if (quotaBlocked !== undefined) {
               skipped.add(`${provider.id}/${model.displayName}:${quotaBlocked}`)
               continue
@@ -484,7 +487,7 @@ class AutoRouter {
           // worker 内部，本地账本没有官方帽可对照，硬算只是噪声。函数自带
           // fail-open（读不到给 0.5 中性）。
           const quotaHeadroom = provider.type === 'aggregate'
-            ? aggregateHeadroom(provider.id, model.actualModelId)
+            ? aggregateHeadroom(provider.id, model.actualModelId, gateContext)
             : undefined
           // Bandit 战绩（PLAN P2-5）：查不到 = 冷启动，不携带（乐观先验）。
           const live = bandit.get(banditKeyOf(provider.id, model.actualModelId))

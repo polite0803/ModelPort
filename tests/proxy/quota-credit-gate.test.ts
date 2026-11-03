@@ -190,3 +190,29 @@ test('the row lands in electron-store as one line per entry, with its own asOf',
   harness.storeManager.deleteAggregateCreditSnapshot('open_router')
   assert.equal(harness.dataFile().aggregateCreditSnapshots.open_router, undefined)
 })
+
+/**
+ * 选号上下文（`createQuotaGateContext`）的成本门：加密 store 的每次 `get`
+ * 都要整份读盘 + PBKDF2 + AES 解密，闸门在选号循环里被逐候选调用，不共享
+ * 上下文时一次请求会放大成几百次整库解密。
+ *
+ * 证两件事：同一上下文内快照与账号表各只读一次；下一次选号重新读盘。
+ */
+test('the selection-scoped gate context reads the store once and refreshes per selection', () => {
+  harness.storeManager.setAggregateCreditSnapshot('open_router', exhaustedRow(Date.now()))
+  const context = gate.createQuotaGateContext()
+
+  assert.equal(context.snapshots(), context.snapshots(), 'snapshots are read once per selection')
+  assert.equal(
+    context.accountsByProvider('open_router'),
+    context.accountsByProvider('open_router'),
+    'accounts are looked up once per selection'
+  )
+  assert.equal(gate.aggregateHeadroom('open_router', 'm-gate', context), -1)
+  assert.equal(gate.quotaBlockReason(ENTRY, KEY_ID, 'm-gate', context), 'no-credit')
+
+  // 用户把读数改成 16 分钟前：旧上下文仍是它选号那一刻的读数，新上下文重新读盘。
+  harness.storeManager.setAggregateCreditSnapshot('open_router', exhaustedRow(Date.now() - 16 * 60_000))
+  assert.equal(gate.aggregateHeadroom('open_router', 'm-gate', context), -1)
+  assert.equal(gate.aggregateHeadroom('open_router', 'm-gate', gate.createQuotaGateContext()), 0.5)
+})

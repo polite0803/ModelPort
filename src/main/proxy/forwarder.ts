@@ -114,6 +114,7 @@ import {
   isRecoverableChannelFailure,
   isSameTargetRetryableStatus,
   isToolOverflowError,
+  isUpstreamCatalogMissError,
   probeSseHead,
   shouldTryNextAutoCandidate,
 } from './failover.ts'
@@ -621,6 +622,12 @@ export class RequestForwarder {
       const capabilityMismatch = isToolOverflowError(result.error)
         || isMissingReasoningHistoryError(result.error)
         || isChannelModelUnavailableError(result.error)
+        // 上游目录里没有这个模型（ModelScope `has no provider supported` /
+        // BazaarLink `Unknown model: … not in our catalog`）：静态目录是编译期
+        // 快照，上游改名/下架后它不会跟着变，于是宿主把「目录说有、请求时不认」
+        // 的模型广告成候选并给了高分。请求在生成之前就被拒，账号健康 ——
+        // 换下一家，不记冷却、不计账号失败（2026-11-03 真机实测两笔）。
+        || isUpstreamCatalogMissError(result.error)
         || isForcedToolChoiceUnsupported(result.error)
         // 窗口不够是「这一家装不下这次请求」，池里窗口更大的候选能成：原先 400 一律
         // 终止，第一个候选超长就把整场打死（客户端读成「这条路由不可用」）。
@@ -818,6 +825,7 @@ export class RequestForwarder {
             || isMissingReasoningHistoryError(probe.message)
             || isContextOverflowError(probe.message)
             || isReasoningEffortUnsupportedError(probe.message)
+            || isUpstreamCatalogMissError(probe.message)
             ? 400
             : 502,
           error: probe.message,
@@ -911,7 +919,8 @@ export class RequestForwarder {
       const message = probe.details?.message ?? probe.message
       const status = probe.details?.status
         ?? (isToolOverflowError(message) || isMissingReasoningHistoryError(message)
-          || isContextOverflowError(message) || isReasoningEffortUnsupportedError(message) ? 400 : 502)
+          || isContextOverflowError(message) || isReasoningEffortUnsupportedError(message)
+          || isUpstreamCatalogMissError(message) ? 400 : 502)
       const details: UpstreamErrorDetails = probe.details
         ? {
             message,
