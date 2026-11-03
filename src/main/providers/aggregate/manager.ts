@@ -823,7 +823,14 @@ class AggregateProviderManager {
       })
       if (response.status >= 400) {
         // 状态码不是"余额为 0"：它只是上游拒绝了这一次询问。
-        return { ok: false, reason: 'http-status', detail: `HTTP ${response.status}` }
+        // 上游原话（SiliconFlow 的 `Token is invalid.`、OpenRouter 的 error.message）要一起带回去，
+        // 否则界面只能说"上游拒绝了这次查询"，用户分不清"这把 Key 无效"和"端点被墙"。
+        // 与 testModel 同一套 errorMessageOf；先脱敏再拼，401 正文可能反射请求里的 Key。
+        return {
+          ok: false,
+          reason: 'http-status',
+          detail: redactSecrets(`HTTP ${response.status}${errorMessageOf(response.data)}`, [apiKey]),
+        }
       }
       return parseQuotaProbe(probe.reader, response.data, [apiKey])
     } catch (error) {

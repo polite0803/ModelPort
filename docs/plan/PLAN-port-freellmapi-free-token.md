@@ -161,3 +161,8 @@ E 断"裸名命中 ≥2 家时第一条 429 后由第二家成功应答，且请
 - **本轮做不了、必须真机点一次才知道的一件事**：两个响应形状来自 §1 第 3 行的转录记录，本轮没有任何真机报文。字段拼写（余额是不是就叫 `balance`）与 `api.siliconflow.com` 这个 host 通不通，都要在界面上点一次才知道；对不上时解析器报 `unexpected-shape` 并显示在界面上，不会伪装成一个数。
 
 **外部探测补充（2026-11-03，C 组自行查询）**：两个 host 均可达，端点均存在，未携带有效 Key 时都返回标准 JSON 401。OpenRouter `GET /key` 返回 `{"error":{"message":"No cookie auth credentials found","code":401}}`；SiliconFlow `GET /user/info` 返回 `{"code":30014,"data":null,"message":"Token is invalid."}`。这只能证明“host 可达、路由存在、鉴权 fail-closed”，**不能**证明成功响应里的字段拼写；`openrouter-key` / `siliconflow-user-info` 读取器暂不改，`unexpected-shape` 兜底仍然有效。
+
+**真机冒烟结果（2026-11-03 18:10，用户界面实点）**：
+- **OpenRouter：正常出数**。`openrouter-key` 读取器期望的 `data.limit` / `data.limit_remaining` 形状由此得到真机证实，无代码改动。
+- **SiliconFlow：HTTP 401**（`code 30014 / Token is invalid.`）。判定：① 端点与请求形态都是对的——假 Key 直测 `.com` 与 `.cn` 两个 host 均返回同款 JSON 401，说明上游正常解析了 `Authorization: Bearer`；② 401 发生在 `readCreditAt` 的 HTTP 状态分支，早于解析层，所以这**不是**「`balance` 字段名猜错」，读取器不需要也不应该改（成功形状至今无真机报文，`unexpected-shape` 兜底继续生效）。用户侧动作：核对重填该条目 Key（Key 入库不做事前校验，401 是第一现场）。
+- **本次暴露并修复的真实缺陷**：`readCreditAt`（`manager.ts:824-826`）把上游原话吞了——detail 只留 `HTTP 401`，界面只能说「上游拒绝了这次查询」，用户分不清 Key 无效还是端点异常；而同文件 `testModel`（`:708`）早已用 `errorMessageOf` 保留原话。修复 = 失败分支拼上 `errorMessageOf(response.data)` 并先过 `redactSecrets`（401 正文可能反射请求 Key）。判据：`credit-query-fetch.test.ts` 原 401 条断言改钉 `HTTP 401 - nope`，新增「401 正文反射 Key 时 detail 已脱敏且 vendor 句子存活」一条（用 SiliconFlow 真实报文形状）。解析层零改动。

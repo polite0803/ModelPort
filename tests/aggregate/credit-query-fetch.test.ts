@@ -183,12 +183,34 @@ test('an http 401 is reported as a refused query, never as a zero balance, and k
 
   assert.equal(result.ok, false)
   assert.equal(result.reason, 'http-status')
-  assert.deepEqual(result.rows.map(row => (!row.reading.ok ? row.reading.detail : '')), ['HTTP 401', 'HTTP 401'])
+  // 上游原话必须到达界面（与 testModel 一致），否则用户只能看到光秃秃的 "HTTP 401"。
+  assert.deepEqual(result.rows.map(row => (!row.reading.ok ? row.reading.detail : '')), ['HTTP 401 - nope', 'HTTP 401 - nope'])
   assert.deepEqual(seen.map(row => row.url), ['/proxy/openrouter/key', '/proxy/openrouter/key'])
   assert.equal(result.snapshot, undefined, 'a failed query writes nothing')
   const onDisk = harness.dataFile().aggregateCreditSnapshots.open_router
   assert.equal(onDisk.remaining, 42, 'the previous row keeps its own asOf instead of being zeroed')
   assert.equal(onDisk.asOf, new Date(earlier).toISOString())
+})
+
+test('a 401 whose body echoes the key back is redacted before it reaches the panel', async () => {
+  // SiliconFlow 的真实形状：{"code":30014,"data":null,"message":"Token is invalid."}
+  // 但 401/403 正文反射请求凭据是上游的常见行为（sanitizer.ts 的同款假设），
+  // 所以 detail 在拼装点就脱敏，不指望界面记得处理。
+  seen = []
+  responder = (req) => ({
+    status: 401,
+    body: JSON.stringify({
+      code: 30014,
+      data: null,
+      message: `Token is invalid: ${req.authorization ?? ''}`,
+    }),
+  })
+  const result = await aggregateProviderManager.queryCredits('open_router')
+  assert.equal(result.reason, 'http-status')
+  const details = result.rows.map(row => (!row.reading.ok ? row.reading.detail : ''))
+  assert.ok(details.every(d => d.includes('HTTP 401') && d.includes('Token is invalid')), `the vendor sentence survives: ${details.join(' | ')}`)
+  assert.ok(!details.some(d => d.includes(KEY_A) || d.includes(KEY_B)), 'the echoed key never rides along')
+  assert.ok(!JSON.stringify(result).includes(KEY_A), 'nor anywhere in the IPC payload')
 })
 
 test('an html body is "not JSON", and a JSON body with other field names is "unexpected shape"', async () => {
