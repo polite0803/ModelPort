@@ -1,5 +1,7 @@
 # WorkBuddy / CodeBuddy 适配清单
 
+> 成文版本：v1.6.1 ｜ 最后核对：2026-11-03 ｜ 状态：历史记录
+
 > 基线：`Ebony-Vinyl/dsh-our-free-model` **v2.5.1**（commit `3df868aaeaf26af5bf611fc61a909fcc0139d159`，MIT）
 > 快照：`docs/upstream/workbuddy-v2.5.1/`（逐字落盘 + SHA256SUMS）
 > 状态：**已实现并收口（2026-11-03）**——§7 四问全部裁定落地，§8 各项状态见「收口记录」。

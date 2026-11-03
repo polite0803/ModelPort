@@ -1,5 +1,7 @@
 # ModelPort Tool Testing Skills Design
 
+> 成文版本：v1.3.0 ｜ 最后核对：2026-11-03 ｜ 状态：历史记录
+
 ## Background
 
 modelport's tool-calling behavior must be tested through real OpenAI-compatible client traffic, not only hand-written curl requests. The current local `modelport-proxy-testing` skill proved useful for live smoke tests, but its Cherry Studio matrix runner mixes several responsibilities:

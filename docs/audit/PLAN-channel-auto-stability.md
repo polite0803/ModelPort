@@ -1,5 +1,7 @@
 # PLAN: 渠道与 auto 路由的连接稳定性（192.168.85.131 实测驱动）
 
+> 成文版本：v1.4.10 ｜ 最后核对：2026-11-03 ｜ 状态：历史记录
+
 > 取证条件：服务 `http://192.168.85.131:8080/v1`（API Key 由用户提供）；SSH 走
 > `刘小平@192.168.85.131`（Windows OpenSSH，本机 `~/.ssh/id_ed25519` 已在
 > `authorized_keys`）。远程 `%USERPROFILE%\.modelport\request-logs\request-logs.ndjson`

@@ -10,7 +10,7 @@ Use this skill when model coverage must follow the live `/v1/models` surface.
 ## Rules
 
 - Use `GET /v1/models` as the primary model source.
-  Since 2026-11-01 that endpoint advertises **routes only** (`docs/plan/PLAN-routes-only-surface.md` R2):
+  Since 2026-11-01 that endpoint advertises **routes only** (`docs/design/PLAN-routes-only-surface.md` R2):
   every id returned is an enabled `AppConfig.routes` name with `owned_by: auto-router`, and no
   per-provider model or user alias appears. A matrix run against it therefore proves the routes; to
   cover individual models name them directly (a served model still answers `model: <name>`) or read

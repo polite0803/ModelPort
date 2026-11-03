@@ -1,5 +1,7 @@
 # ModelPort 项目代码文档
 
+> 适用版本：v1.7.0 ｜ 最后核对：2026-11-04 ｜ 状态：部分过期
+
 > 这是一份较早的概览文档，保留用于快速定位模块。规则与现状以根目录 [`AGENTS.md`](AGENTS.md) 和
 > [`docs/AGENTS-full.md`](docs/AGENTS-full.md) 为准；两者与本文不一致时，以它们为准。文档索引见
 > [`docs/README.md`](docs/README.md)。

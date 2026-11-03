@@ -1,5 +1,7 @@
 # Upstream WorkBuddy snapshot (v2.5.1)
 
+> 成文版本：v1.6.1 ｜ 最后核对：2026-11-04 ｜ 状态：历史记录
+
 Provenance: `Ebony-Vinyl/dsh-our-free-model` tag `v2.5.1`, commit `3df868aaeaf26af5bf611fc61a909fcc0139d159`, MIT.
 Staged verbatim from `vendor/channel-pack/src/` for adaptation planning
 (`docs/plan/PLAN-workbuddy-adaptation.md`); not imported by the build.

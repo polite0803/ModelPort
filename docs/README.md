@@ -1,108 +1,118 @@
-# ModelPort Documentation
+# ModelPort 文档索引
 
-This directory holds the reference material for ModelPort. The documents have different jobs, and
-they are not interchangeable:
+> 适用版本：v1.7.0 ｜ 最后核对：2026-11-04 ｜ 状态：现行
 
-- [`../README.md`](../README.md) and [`../README_CN.md`](../README_CN.md) are for people installing
-  and using the app.
-- [`../AGENTS.md`](../AGENTS.md) is the short rulebook for coding agents: build gate, architecture
-  map, and the invariants that must not break.
-- [`AGENTS-full.md`](AGENTS-full.md) is the full reference. Each section explains a subsystem and,
-  where relevant, the failure that produced the rule.
-- [`plan/`](plan/) holds dated decision records. They describe what was decided at that date, not
-  necessarily what the code does today; read the state column before trusting a statement in them.
-- [`data/`](data/) holds the source receipts for generated pricing, quota and capability sidecars.
+这是 `docs/` 下唯一的索引入口。所有文档按性质归入 `design/`（方案）、`plan/`（计划）、
+`audit/`（审计）三类；参考手册、供应商笔记、上游快照与数据票据保留在原有旁支目录。索引覆盖
+`docs/` 下的每一份文档，没有孤立文件。
 
-When a document and the code disagree, the code and `AGENTS-full.md` win. Please update the doc in
-the same change that moves the behaviour.
+当文档与代码冲突时，以代码和 [`AGENTS-full.md`](AGENTS-full.md) 为准。行为改变时，请在同一个
+改动里更新文档。
 
-## Where to start
+## 新增文档该放哪
 
-| If you want to… | Read |
-| --- | --- |
-| Install the app and send a first request | [`../README.md`](../README.md) (quick start), [`../README_CN.md`](../README_CN.md) |
-| Add an aggregate entry, log in to an account channel, or create a custom provider | [`providers/README.md`](providers/README.md), [`../README.md`](../README.md) |
-| Understand the request path and module layout | [`../AGENTS.md`](../AGENTS.md) (Architecture), [`AGENTS-full.md`](AGENTS-full.md) |
-| Change the public API contract | [`AGENTS-full.md`](AGENTS-full.md) §Public API Contract, [`../AGENTS.md`](../AGENTS.md) (Invariants) |
-| Extend a provider | [`../AGENTS.md`](../AGENTS.md) (Extending), [`AGENTS-full.md`](AGENTS-full.md) §Adding a New Provider, [`providers/README.md`](providers/README.md) |
-| Debug routing, quota or streaming | [`AGENTS-full.md`](AGENTS-full.md) §Auto Routing, §Aggregate Free-Quota Layer, §Degenerate Stream Detection |
-| Set up HTTPS on a LAN and make a client trust it | [`AGENTS-full.md`](AGENTS-full.md) §HTTPS Listener and Certificate Trust, [`../README.md`](../README.md) |
-| Read request logs, trace a single request, or export diagnostics | [`AGENTS-full.md`](AGENTS-full.md) §Data Storage, [`../README.md`](../README.md) |
-| Understand why the gateway does not rewrite prompts | [`AGENTS-full.md`](AGENTS-full.md) §Gateway-Authored Text Reaching the Model |
+先问这份文档要回答的问题，再决定目录：
 
-## Architecture and subsystem reference
-
-[`AGENTS-full.md`](AGENTS-full.md) is the authoritative long-form document. The sections most often
-needed:
-
-- Build and verification, including the two `tsc` programs and the sandbox-only test failures
-- Provider Adapters, Online Model List Update, Aggregate Provider Catalogue
-- Inbound Protocols (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/completions`)
-- Load Balance Strategies and Auto Routing (the virtual `auto` model)
-- Aggregate Free-Quota Layer, per-model cost classification, live credit gate
-- Account Channels and the vendored channel pack
-- Tool Calling (native passthrough only) and Gateway-Authored Text
-- Public API Contract, HTTPS Listener and Certificate Trust
-- Data Storage, Adding a New Provider
-
-[`../CODE_WIKI.md`](../CODE_WIKI.md) is an older, shorter overview. It is kept for orientation only;
-where it differs from `AGENTS.md` or `AGENTS-full.md`, the latter are correct.
-
-## Provider notes
-
-- [`providers/README.md`](providers/README.md) - how the three provider classes are stored, how
-  namespaced model names are built, and what the aggregate catalogue needs at save time.
-- [`providers/opencode.md`](providers/opencode.md) - the live `opencode` account channel, and the
-  retired local runtime that must not be confused with it.
-
-## Decision records
-
-[`plan/`](plan/) contains dated plans, field measurements and closing notes. They are useful for
-provenance ("why is this rule here?") and for the evidence behind a threshold; they are not a
-description of the current product surface.
-
-| Document | Date | State |
+| 它回答的问题 | 放哪 | 典型内容 |
 | --- | --- | --- |
-| [`plan/PLAN-api-defects.md`](plan/PLAN-api-defects.md) | 2026-10-27 | Implemented and closed; P3 entries superseded by the 2026-11-03 no-prompt ruling |
-| [`plan/PLAN-api-defects-status.md`](plan/PLAN-api-defects-status.md) | 2026-10-27 | Execution status and gate readings |
-| [`plan/PLAN-retire-web-providers-aggregate.md`](plan/PLAN-retire-web-providers-aggregate.md) | 2026-10-28 | Implemented and closed 2026-11-03 |
-| [`plan/PLAN-port-freellmapi-free-token.md`](plan/PLAN-port-freellmapi-free-token.md) | 2026-10-29 | Implemented; upstream response field spelling still needs a valid-key check |
-| [`plan/PLAN-auto-routing-v2.md`](plan/PLAN-auto-routing-v2.md) | 2026-10-29 | Closed 2026-11-03; sticky hard pin is the default |
-| [`plan/PLAN-magpie-borrowing.md`](plan/PLAN-magpie-borrowing.md) | 2026-10-29 | Closed; several phases withdrawn after review |
-| [`plan/PLAN-token-compression.md`](plan/PLAN-token-compression.md) | 2026-10-29 | P0-P3 and P5 implemented; P4 not implemented by decision |
-| [`plan/PLAN-auto-routing-freellmapi.md`](plan/PLAN-auto-routing-freellmapi.md) | 2026-10-30 | Closed 2026-11-03 |
-| [`plan/PLAN-routes-only-surface.md`](plan/PLAN-routes-only-surface.md) | 2026-11-01 | Closed 2026-11-03 |
-| [`plan/PLAN-channel-auto-stability.md`](plan/PLAN-channel-auto-stability.md) | 2026-11-01 | Field evidence and fix batches; see the task tracker for closing state |
-| [`plan/PLAN-newapi-parity.md`](plan/PLAN-newapi-parity.md) | 2026-11-02 | Implemented 2026-11-02 |
-| [`plan/PLAN-workbuddy-adaptation.md`](plan/PLAN-workbuddy-adaptation.md) | 2026-11-03 | Implemented and closed 2026-11-03 |
-| [`plan/PLAN-next-dev-code-tasks.md`](plan/PLAN-next-dev-code-tasks.md) | 2026-11-03 | Task tracker; only external-key verification was left open at closing |
-| [`plan/PLAN-model-list-scheduler.md`](plan/PLAN-model-list-scheduler.md) | 2026-11-03 | Scheduler decision record; implementation lives in `src/main/scheduler/` |
+| 为什么这样设计？当时拍板了什么？ | `design/` | 架构与子系统设计、方案评估、决策记录 |
+| 接下来按什么顺序做？怎么迁移？ | `plan/` | 分阶段实施计划、迁移/改造排期、任务拆解 |
+| 查出了什么问题？证据和结论是什么？ | `audit/` | 代码/安全/性能/文档审计、实测取证、门禁读数 |
+| 只是查阅参考、上游原文或数据来源 | 原旁支目录 | 供应商说明、上游快照、数据票据 |
 
-[`superpowers/`](superpowers/) holds the May 2026 in-app update and tool-testing skills
-plans/specs. They are historical implementation notes, not current requirements.
+命名沿用现有约定，不为了整齐改名。计划类文档用 `PLAN-<主题>.md`；方案与审计沿用
+`PLAN-` 或日期前缀都可以，保持文件原名即可。
 
-## Data receipts
+`design/`、`plan/`、`audit/` 的划分规则：
 
-[`data/`](data/) is input, not output. The files there are the receipts behind the generated
-TypeScript sidecars:
+- **design/** 记录“方案本身”——包括被否决或只实现一部分的设计，重点是判断依据与取舍。
+- **plan/** 记录“执行顺序”——任务、批次、落点、验收判据；计划完成后保留为历史记录。
+- **audit/** 记录“核查结果”——缺陷清单、实测数据、门禁读数与收口结论，不承担设计职责。
 
-| Receipt | Generated sidecar | Builder |
+## 从哪里开始
+
+| 你想做什么 | 先读 |
+| --- | --- |
+| 安装应用并发第一个请求 | [`../README.md`](../README.md)、[`../README_CN.md`](../README_CN.md) |
+| 写代码前了解硬规则 | [`../AGENTS.md`](../AGENTS.md) |
+| 查某个子系统的完整说明 | [`AGENTS-full.md`](AGENTS-full.md) |
+| 添加聚合条目、登录账号渠道或自定义供应商 | [`providers/README.md`](providers/README.md)、[`../AGENTS.md`](../AGENTS.md) |
+| 查历史设计与决策依据 | [`design/`](design/)、[`plan/`](plan/) |
+| 查缺陷证据、实测读数与审计结论 | [`audit/`](audit/) |
+| 修改生成型额度/价格/能力表 | [`data/`](data/)、[`../AGENTS.md`](../AGENTS.md) |
+
+## 方案（design/）
+
+`design/` 存放架构设计、子系统设计与决策记录。结论可能已经落地，也可能只是当时的选择。
+
+| 文档 | 说明 | 适用版本 | 状态 | 日期 |
+| --- | --- | --- | --- | --- |
+| [`design/PLAN-auto-routing-v2.md`](design/PLAN-auto-routing-v2.md) | `auto` 虚拟模型的过滤、打分、粘性与失败切换设计；粘性硬钉为默认 | v1.4.1 | 历史记录 | 2026-10-29 |
+| [`design/PLAN-magpie-borrowing.md`](design/PLAN-magpie-borrowing.md) | 从 magpie 借鉴目录数据、导入、smart/pace 路由与 responses 出向的取舍 | v1.4.1 | 历史记录 | 2026-10-29 |
+| [`design/PLAN-token-compression.md`](design/PLAN-token-compression.md) | Headroom 的 JSON/日志/live-zone 压缩与 CCR 可逆存储方案；P4 判定不做 | v1.4.1 | 部分过期 | 2026-10-29 |
+| [`design/PLAN-routes-only-surface.md`](design/PLAN-routes-only-surface.md) | `/v1/models` 只广告路由、启用位只管路由池的口径与落库设计 | v1.4.10 | 历史记录 | 2026-11-01 |
+| [`design/PLAN-model-list-scheduler.md`](design/PLAN-model-list-scheduler.md) | 三类供应商模型清单的周期刷新调度器与周期拍板，已落地于 `src/main/scheduler/` | v1.6.1 | 现行 | 2026-11-03 |
+| [`design/2026-05-26-in-app-update-design.md`](design/2026-05-26-in-app-update-design.md) | 应用内更新（electron-updater 检查、下载、重启安装）设计方案 | v1.3.0 | 历史记录 | 2026-05-26 |
+| [`design/2026-05-27-modelport-tool-testing-skills-design.md`](design/2026-05-27-modelport-tool-testing-skills-design.md) | 工具调用测试技能集（管理 API、HAR、客户端回放、模型矩阵）设计 | v1.3.0 | 历史记录 | 2026-05-27 |
+
+## 计划（plan/）
+
+`plan/` 存放分阶段实施、迁移与任务拆解。计划完成后保留，用于追溯“当时按什么顺序做”。
+
+| 文档 | 说明 | 适用版本 | 状态 | 日期 |
+| --- | --- | --- | --- | --- |
+| [`plan/PLAN-retire-web-providers-aggregate.md`](plan/PLAN-retire-web-providers-aggregate.md) | 退役 8 家 Web 页面接入，上线聚合目录与免密免费池 | v1.4.0 | 历史记录 | 2026-10-28 |
+| [`plan/PLAN-port-freellmapi-free-token.md`](plan/PLAN-port-freellmapi-free-token.md) | 聚合渠道免费额度层与实时积分门槛的取数与落地 | v1.4.1 | 历史记录 | 2026-10-29 |
+| [`plan/PLAN-auto-routing-freellmapi.md`](plan/PLAN-auto-routing-freellmapi.md) | 借鉴 FreeLLMAPI 的 auto 路由强化（预算、分级尝试、限流感知） | v1.4.6 | 历史记录 | 2026-10-30 |
+| [`plan/PLAN-newapi-parity.md`](plan/PLAN-newapi-parity.md) | 与 new-api 的入向协议、错误语义差异对照及修正计划 | v1.5.2 | 历史记录 | 2026-11-02 |
+| [`plan/PLAN-workbuddy-adaptation.md`](plan/PLAN-workbuddy-adaptation.md) | WorkBuddy/CodeBuddy 渠道（v2.5.1 快照）的适配清单与落地记录 | v1.6.1 | 历史记录 | 2026-11-03 |
+| [`plan/PLAN-next-dev-code-tasks.md`](plan/PLAN-next-dev-code-tasks.md) | 三条活跃线的剩余项拆解、落点与验收判据 | v1.6.1 | 历史记录 | 2026-11-03 |
+| [`plan/2026-05-26-in-app-update.md`](plan/2026-05-26-in-app-update.md) | 应用内更新的任务拆解与测试计划 | v1.3.0 | 历史记录 | 2026-05-26 |
+| [`plan/2026-05-27-modelport-tool-testing-skills.md`](plan/2026-05-27-modelport-tool-testing-skills.md) | 工具调用测试技能集的目录、脚本与验收计划 | v1.3.0 | 历史记录 | 2026-05-27 |
+
+## 审计（audit/）
+
+`audit/` 存放代码、安全、性能与文档审计报告，以及由实测驱动的缺陷取证与收口结论。
+
+| 文档 | 说明 | 适用版本 | 状态 | 日期 |
+| --- | --- | --- | --- | --- |
+| [`audit/PLAN-api-defects.md`](audit/PLAN-api-defects.md) | `/v1/*` 鉴权、契约、失败语义与工具调用的两轮缺陷核查与修复结论 | v1.4.0 | 历史记录 | 2026-10-27 |
+| [`audit/PLAN-api-defects-status.md`](audit/PLAN-api-defects-status.md) | 上述修复的门禁读数、完成清单与遗留项状态 | v1.4.0 | 历史记录 | 2026-10-27 |
+| [`audit/PLAN-channel-auto-stability.md`](audit/PLAN-channel-auto-stability.md) | 渠道与 auto 路由连接稳定性的实测取证（192.168.85.131）与修复批次 | v1.4.10 | 历史记录 | 2026-11-01 |
+
+## 参考与旁支目录
+
+这些内容不属于“方案/计划/审计”三类，保留在原目录，避免把参考手册硬塞进分类。
+
+| 文档或目录 | 说明 | 适用版本 | 状态 |
+| --- | --- | --- | --- |
+| [`README.md`](README.md) | 本索引：分类规则、全量清单与版本/状态维护方式 | v1.7.0 | 现行 |
+| [`AGENTS-full.md`](AGENTS-full.md) | 完整子系统参考；每条规则背后的故障与边界 | v1.7.0 | 现行 |
+| [`../AGENTS.md`](../AGENTS.md) | 编码代理的简版规则书：构建门禁、架构、不变量 | v1.7.0 | 现行 |
+| [`../CODE_WIKI.md`](../CODE_WIKI.md) | 较早的模块定位概览；与 `AGENTS.md` 冲突时以后者为准 | v1.7.0 | 部分过期 |
+| [`../README.md`](../README.md)、[`../README_CN.md`](../README_CN.md) | 面向使用者的安装、配置与运行说明 | v1.7.0 | 现行 |
+| [`providers/README.md`](providers/README.md) | 三类供应商的存储、命名空间与聚合保存流程 | v1.7.0 | 现行 |
+| [`providers/opencode.md`](providers/opencode.md) | `opencode` 账号渠道，以及已退役本机运行时的区分 | v1.7.0 | 现行 |
+| [`upstream/workbuddy-v2.5.1/README.md`](upstream/workbuddy-v2.5.1/README.md) | WorkBuddy v2.5.1 逐字快照的来源、校验和与用途 | v1.6.1 | 历史记录 |
+| [`repo-description.md`](repo-description.md) | GitHub “About” 文案：短描述与长介绍 | v1.7.0 | 现行 |
+| [`data/`](data/) | 生成型 sidecar 的源票据（`models-dev-cost.json`、`models-dev-capabilities.json`、`free-quota-research/*.json`）；只改票据再跑 builder | v1.7.0 | 现行 |
+| [`screenshots/`](screenshots/) | README 使用的截图资源；不存在的页面不应保留旧图 | v1.7.0 | 现行 |
+
+数据票据与生成物的对应关系：
+
+| 票据 | 生成物 | Builder |
 | --- | --- | --- |
 | `data/models-dev-cost.json` | `src/shared/aggregatePricing.ts` | `scripts/build-aggregate-pricing.mjs` |
 | `data/models-dev-capabilities.json` | `src/shared/aggregateCapabilities.ts` | `scripts/build-aggregate-capabilities.mjs` |
 | `data/free-quota-research/*.json` | `src/shared/aggregateQuota.ts` | `scripts/build-aggregate-quota.mjs` |
 
-Edit the receipts and re-run the builder; never hand-edit the generated sidecar.
-`free-quota-research/` is a dated probe log, so an old file records the measurement of that day,
-not a current quota.
+## 版本与状态字段怎么维护
 
-## Vendored upstream snapshots
-
-[`upstream/workbuddy-v2.5.1/README.md`](upstream/workbuddy-v2.5.1/README.md) explains the WorkBuddy
-source snapshot: provenance, checksums, and why it is staged for reading rather than imported by the
-build.
-
-## Screenshots
-
-[`screenshots/`](screenshots/) holds the images used by the README files. Images that show a page
-which no longer exists should be removed rather than left to imply a feature.
+- **适用版本**：这份文档描述的代码状态对应的版本号。现行文档统一对齐 `package.json` 的当前
+  版本（1.7.0）；历史文档写“成文版本”，按撰写时点的 CHANGELOG 版本边界判定，无法确定的写
+  “待核对”，不编造。
+- **状态**：`现行`（内容与当前代码一致）、`部分过期`（主体可用但含已退役内容）、`已退休`
+  （所述能力已整体移除，需写明“自 v某版本起退役”）、`历史记录`（成文时的计划或审计记录，
+  结论可能仍生效，但不再随代码更新）。
+- **维护方式**：文档实质改动时，同时更新文首元信息块（适用版本 / 最后核对 / 状态）和本索引
+  对应行的版本、状态与日期。

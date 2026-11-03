@@ -3,9 +3,11 @@
 Guidance for coding agents working in this repository. This file is deliberately short: it holds the
 rules that change how you work, plus pointers. The full reference (every subsystem, the failure each
 rule came from) lives in [`docs/AGENTS-full.md`](docs/AGENTS-full.md) - read the section you need from
-there instead of guessing; per-feature plans and decision records are in
-[`docs/plan/`](docs/plan/) and provider-specific notes in [`docs/providers/`](docs/providers/). When
-none of them covers the topic, read the code and the comments in the file you are changing.
+there instead of guessing. The documentation index is [`docs/README.md`](docs/README.md): design and
+decision records live in [`docs/design/`](docs/design/), implementation plans in
+[`docs/plan/`](docs/plan/), audit reports in [`docs/audit/`](docs/audit/), and provider-specific
+notes in [`docs/providers/`](docs/providers/). When none of them covers the topic, read the code and
+the comments in the file you are changing.
 
 ## Project Overview
 

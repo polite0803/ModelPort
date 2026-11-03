@@ -187,26 +187,14 @@ or 24); older 22.x releases fail with `ERR_UNKNOWN_FILE_EXTENSION`.
 
 | Document | Contents |
 | -------- | -------- |
-| [docs/README.md](docs/README.md) | Documentation index organized by reader scenario |
+| [docs/README.md](docs/README.md) | Documentation index: design, plan, audit, and references |
 | [AGENTS.md](AGENTS.md) | Short rulebook: build gate, architecture, invariants |
 | [docs/AGENTS-full.md](docs/AGENTS-full.md) | Full subsystem reference and the failure behind each rule |
 | [docs/providers/README.md](docs/providers/README.md) | Provider classes, aggregate flow, account channels |
-| [docs/plan/](docs/plan/) | Dated plans and decision records (historical, not current requirements) |
+| [docs/design/](docs/design/) | Design and decision records for subsystems |
+| [docs/plan/](docs/plan/) | Phased implementation and migration plans |
+| [docs/audit/](docs/audit/) | Audit reports, field evidence and gate readings |
 | [CODE_WIKI.md](CODE_WIKI.md) | Legacy overview; `AGENTS.md` and `AGENTS-full.md` take precedence |
-
-## Screenshots
-
-| Dashboard | Providers |
-| --------- | --------- |
-| ![Dashboard](docs/screenshots/dashboard.png) | ![Providers](docs/screenshots/providers.png) |
-
-| Proxy Settings | Request Logs |
-| -------------- | ------------ |
-| ![Proxy](docs/screenshots/proxy.png) | ![Logs](docs/screenshots/logs.png) |
-
-| Models | Settings |
-| ------ | -------- |
-| ![Models](docs/screenshots/models.png) | ![Settings](docs/screenshots/settings.png) |
 
 ## FAQ
 

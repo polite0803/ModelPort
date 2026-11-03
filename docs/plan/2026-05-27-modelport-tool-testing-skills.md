@@ -1,5 +1,7 @@
 # ModelPort Tool Testing Skills Implementation Plan
 
+> 成文版本：v1.3.0 ｜ 最后核对：2026-11-03 ｜ 状态：历史记录
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build versioned, reusable ModelPort testing skills for management API operations, HAR fixture extraction, client replay, and provider/model matrix testing.

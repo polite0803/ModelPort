@@ -1,5 +1,7 @@
 # 方案：把 Headroom 的 token 节约机制移植进 ModelPort
 
+> 成文版本：v1.4.1 ｜ 最后核对：2026-11-03 ｜ 状态：部分过期（输出侧 verbosity 抑制已于 2026-11-03 退役）
+
 > 状态：**P0 + P1 + P2 + P3 + P5 已实现并验证，验收区全部回写**（2026-11-03），P1 已补齐嵌套 JSON 形状；P2 只落地日志和搜索，diff 压缩按评审决策整体不做；P3 的 CCR 存储 + 标记 + 管理 API 取回已落 `tests/compression/ccr-store.test.ts`（18 项验收）。
 > **P4 已先落地其观测前提**：跨轮重复度统计（纯观测，不改写任何字节）。P4 的去重本体经真实流量测判定为**不值得实现**（网关 `192.168.85.131` 实测 `ratio=0.57%` < 5% 阈值，`foldWorthBuilding=false`，`conclusive=false`），维持"未实现即正确结论"状态；裁定台账见 §P4 末。
 > 归属声明见 `NOTICE-compression.md`。

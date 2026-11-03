@@ -1,5 +1,7 @@
 # PLAN：下一步开发计划代码修改任务（详细）
 
+> 成文版本：v1.6.1 ｜ 最后核对：2026-11-03 ｜ 状态：历史记录
+
 - 日期：2026-11-03
 - 基线：工作树 @ 2026-11-03（三条活跃线：auto-routing-v2 / freellmapi-free-token / channel-auto-stability）
 - 性质：把三条线的**剩余未闭环项**拆成可执行的代码修改任务，每条带落点、改法、验收判据、负控。
@@ -11,9 +13,9 @@
 
 | 线 | 计划文档 | 已落地 | 剩余未闭环 |
 |---|---|---|---|
-| auto-routing-v2 | `PLAN-auto-routing-v2.md` | 阶段 A/B/C 全部完成；粘性硬钉 `stickyHardPin` 已在代码落地（`autoRouter.ts:654`、`shared/types.ts:321`、`modelRoutes.ts:167/339`、`ModelRouteFields.tsx:277-278`）+ 判据（`routes-pool-and-sticky.test.ts:386-430` 三条正反） | ✅ 文档已同步（2026-11-03）：§6 C-1 行反映默认硬钉；§1.4 原文上方加了「已被 §7 推翻」的反向指针，线性阅读不会再停在旧裁定 |
+| auto-routing-v2 | `docs/design/PLAN-auto-routing-v2.md` | 阶段 A/B/C 全部完成；粘性硬钉 `stickyHardPin` 已在代码落地（`autoRouter.ts:654`、`shared/types.ts:321`、`modelRoutes.ts:167/339`、`ModelRouteFields.tsx:277-278`）+ 判据（`routes-pool-and-sticky.test.ts:386-430` 三条正反） | ✅ 文档已同步（2026-11-03）：§6 C-1 行反映默认硬钉；§1.4 原文上方加了「已被 §7 推翻」的反向指针，线性阅读不会再停在旧裁定 |
 | freellmapi-free-token | `PLAN-port-freellmapi-free-token.md` | A–E 五步 + §10 实时额度批全部完成（`aggregateQuota.ts`/`ledger.ts`/`aggregateCredit.ts` 等） | ✅ host 与端点已外部探测（均 401）；⚠️ 成功响应字段拼写仍需有效 Key 验证；文档已同步 |
-| channel-auto-stability | `PLAN-channel-auto-stability.md` | R1–R6 五批修复 + 第六批 A1 收尾 + B-a（`/v1/api-definition/providers` 已实现） | 第五批「何时算限流结束」✅ 已闭环（`providerRetryAfterMs` 接线）；第六批相邻面 ✅ B-a 已实现并有定向判据 |
+| channel-auto-stability | `docs/audit/PLAN-channel-auto-stability.md` | R1–R6 五批修复 + 第六批 A1 收尾 + B-a（`/v1/api-definition/providers` 已实现） | 第五批「何时算限流结束」✅ 已闭环（`providerRetryAfterMs` 接线）；第六批相邻面 ✅ B-a 已实现并有定向判据 |
 
 **结论（2026-11-03 收口后更新）**：三条线的代码缺口全部闭合——A 组四条接线已落地并配判据，
 B-a 路由已实现，D-1/D-2 文档同步完成。剩余只有**外部条件**：C-3 要等有效 Key 的真实报文
@@ -48,7 +50,7 @@ B 组真机面与 auto-routing 设置页手点属人工冒烟，不由本计划�
 | A-2 | bridge `case 'error'` 读取并透传 `providerRetryAfterMs` | `src/main/channelPack/bridge.ts:281-295` | 从 `message.providerRetryAfterMs`（number 且有限）取值，传入 `ChannelBridgeError` 第三参 | ✅ 已落地（bridge.ts 已改） | 单测：worker 上报 `{status:429, providerRetryAfterMs: 60000}` → bridge 抛出的 error 带 `retryAfterMs === 60000` | 把读取改回只读 status → 红 |
 | A-3 | 宿主把 `retryAfterMs` 喂进 accountRuntime 冷却 | `src/main/proxy/forwarder.ts`（渠道分支）+ `src/main/proxy/accountRuntime.ts:303-331` | `recordFailure` 增可选尾参 `retryAfterMs?: number`；给了 429 且给了 model 时，`coolingUntil` 取「自己指数退避」与「`now + retryAfterMs`」里**更晚**的那个（与既有 `coolingUntil` 取更晚的语义一致，`accountRuntime.ts:499-515`） | ✅ 已落地（accountRuntime.ts + forwarder.ts 已改） | 单测：`recordFailure(id, 429, now, model, 120000)` → 冷却到期 ≥ `now + 120000`；不给 retryAfterMs 时行为与改动前逐值相同 | 把「取更晚」改回「只用退避」→ 红 |
 | A-4 | forwarder 渠道分支把 bridge error 的 `retryAfterMs` 传下去 | `src/main/proxy/forwarder.ts`（`ChannelBridgeError` 消费处） | 捕获 `ChannelBridgeError` 时，若 `error.retryAfterMs !== undefined` 则随 `recordFailure` 传入 | ✅ 已落地（forwarder.ts 已改） | 单测：渠道 429 带 `providerRetryAfterMs` → accountRuntime 该模型档冷却用上游时刻 | 不传 → 红 |
-| A-5 | 判据 + 文档 | `tests/proxy/accountRuntime.test.ts`、`PLAN-channel-auto-stability.md` | 补 A-1~A-4 用例；计划文档第五批「未闭环」那条改标「已闭环」 | ✅ 测试已补；PLAN-channel-auto-stability.md 第五批已标已闭环；PLAN-next-dev-code-tasks.md A 组表格已标落地 | 全量门禁绿；文档状态与代码一致 | — |
+| A-5 | 判据 + 文档 | `tests/proxy/accountRuntime.test.ts`、`docs/audit/PLAN-channel-auto-stability.md` | 补 A-1~A-4 用例；计划文档第五批「未闭环」那条改标「已闭环」 | ✅ 测试已补；docs/audit/PLAN-channel-auto-stability.md 第五批已标已闭环；PLAN-next-dev-code-tasks.md A 组表格已标落地 | 全量门禁绿；文档状态与代码一致 | — |
 
 **不做**：不改渠道包内部退避逻辑（`vendor/channel-pack` 只 vendor，改它要重打包）；不把 `retryAfterMs` 折进 token 额度（那是 freellmapi 线的口径，本线只管冷却时刻）。
 
@@ -96,7 +98,7 @@ B 组真机面与 auto-routing 设置页手点属人工冒烟，不由本计划�
 
 | 编号 | 任务 | 落点 | 改法 | 验收 |
 |---|---|---|---|---|
-| D-1 | auto-routing-v2 §6 C-1 行同步 | `PLAN-auto-routing-v2.md:186` + §1.4 | ✅ 已完成（2026-11-03）：§6 C-1 行已写「路由级默认硬钉（`stickyHardPin` 缺省即开）」；本轮另在 §1.4 原文上方补「已被 §7 推翻」反向指针——只改 §6 不够，线性阅读 §1.4 的人仍会停在「不再硬钉」的旧裁定 | 与 §7、代码、判据三方一致 |
+| D-1 | auto-routing-v2 §6 C-1 行同步 | `docs/design/PLAN-auto-routing-v2.md:186` + §1.4 | ✅ 已完成（2026-11-03）：§6 C-1 行已写「路由级默认硬钉（`stickyHardPin` 缺省即开）」；本轮另在 §1.4 原文上方补「已被 §7 推翻」反向指针——只改 §6 不够，线性阅读 §1.4 的人仍会停在「不再硬钉」的旧裁定 | 与 §7、代码、判据三方一致 |
 | D-2 | freellmapi 文档状态 | `PLAN-port-freellmapi-free-token.md` | ✅ 已完成：状态行已是「已实现 + 外部端点探测（Q1–Q3 已裁定且落地；额度响应字段仍需有效 Key 验证，2026-11-03）」，与 C-1/C-2 探测读数一致 | 见 C-4 |
 
 ---

@@ -1,5 +1,7 @@
 # PLAN: auto 路由升级——借鉴 FreeLLMAPI
 
+> 成文版本：v1.4.6 ｜ 最后核对：2026-11-03 ｜ 状态：历史记录
+
 > 来源：[FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi)（README + architecture 文档）智能路由特性调研，2026-10-30。
 > 原则：只借对本项目（积分制账号渠道）划算的部分；每项独立可落地、可单独验收。
 > 状态：**已收口（2026-11-03）**——六项全部闭环（P2-6 的答案是「已如此」），逐项证据与偏差见文末收口表。

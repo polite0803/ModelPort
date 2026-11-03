@@ -1,5 +1,7 @@
 # AGENTS.md
 
+> 适用版本：v1.7.0 ｜ 最后核对：2026-11-04 ｜ 状态：现行
+
 This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Project Overview

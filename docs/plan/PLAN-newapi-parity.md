@@ -1,5 +1,7 @@
 # 与 new-api 的差异对照与修正 PLAN
 
+> 成文版本：v1.5.2 ｜ 最后核对：2026-11-03 ｜ 状态：历史记录
+
 - 状态：已实施（2026-11-02；A/B/C 全量落地）
 - 对照对象：`QuantumNous/new-api`（main，2026-11-02 读取）
 - 范围：网关入向 `/v1/chat/completions`、`/v1/messages`、`/v1/responses`、`/v1/completions` 的路由、协议、消息处理与错误语义

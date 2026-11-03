@@ -1,5 +1,7 @@
 # PLAN：auto 自动路由强化（v2）
 
+> 成文版本：v1.4.1 ｜ 最后核对：2026-11-03 ｜ 状态：历史记录
+
 - 日期：2026-10-29
 - 状态：**已收口（2026-11-03）**——阶段 A–D 全部落地；§7 粘性终裁已闭环（默认路由级硬钉
   `stickyHardPin`，加分只留边际作用），§1.4 / §6 / §7 三方已同步。唯一未验项仍是
@@ -65,7 +67,7 @@
 
 - `multiChoice`：内置供应商本来就会 400（`parameterPolicy.ts:27`），auto 应优先选聚合/自定义候选；全都不能时返回既有的 400 `unsupported_parameter`，与具名路径同一形状。
 - `structuredOutput`：内置供应商会丢弃它（`parameterPolicy.ts:10`），优先选聚合/自定义候选；全都不能时照常路由，但回 `X-ModelPort-Auto-Degraded: response_format` 并写进请求日志。
-- 与 `docs/plan/PLAN-api-defects.md` 的 P5-1（已拍板：不支持的参数显式 400）不冲突：那张表落地后，`parameterPolicy` 多出"拒绝级别"，auto 直接消费级别，不再自己维护名单。
+- 与 `docs/audit/PLAN-api-defects.md` 的 P5-1（已拍板：不支持的参数显式 400）不冲突：那张表落地后，`parameterPolicy` 多出"拒绝级别"，auto 直接消费级别，不再自己维护名单。
 
 ### 1.3 成本与偏好
 

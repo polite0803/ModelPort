@@ -1,5 +1,7 @@
 # GitHub repository description
 
+> 适用版本：v1.7.0 ｜ 最后核对：2026-11-04 ｜ 状态：现行
+
 ## Short description (About field, 96 characters)
 
 ```text

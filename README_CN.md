@@ -15,227 +15,180 @@
 </p>
 
 <p align="center">
-  <strong><a href="README.md">English</a> | <a href="https://github.com/polite0803/ModelPort">GitHub</a> | <a href="https://github.com/polite0803/ModelPort/releases">版本发布</a></strong>
+  <strong><a href="README.md">English</a> | <a href="https://github.com/polite0803/ModelPort">GitHub</a> | <a href="https://github.com/polite0803/ModelPort/releases">Releases</a></strong>
 </p>
 
 <p align="center">
-  <strong>把你手上的模型统一收进一个本地端口</strong>
+  <strong>一个本地端口，接上你所有的模型。</strong>
 </p>
 
 <p align="center">
-  ModelPort 将任意 OpenAI 兼容端点汇总为一份本地 API。内置 89 条带 Key / 免密的聚合渠道目录
-  （含 Kilo 免费池）、13 个带账号池与积分账本的账号渠道，以及自定义供应商，
-  让任何 OpenAI 兼容客户端即刻可用。
+  ModelPort 是一个运行在本机的 Electron 桌面应用，对外提供 OpenAI 兼容的 API 网关。它内置
+  89 条聚合渠道 / 570 个模型、13 个由随附渠道包管理的账号渠道，以及用户自定义供应商；一个
+  Base URL 即可对接任意 OpenAI 兼容 SDK 或 Agent 客户端。
 </p>
 
-![Product Preview](docs/screenshots/preview.png)
+![产品界面](docs/screenshots/preview.png)
 
-## ✨ 功能特性
+## 核心能力
 
-- OpenAI 兼容 API：提供标准 OpenAI 兼容接口，无缝对接现有工具
-- 多服务商支持：89 条聚合渠道（API Key / 免费额度 / 本机）、13 个账号渠道以及自定义供应商
-- 账号渠道：浏览器 / 设备码 / API Key 接入，自带账号池、每日积分领取、模型积分权重与免费模型标注
-- 模型在线刷新：在线重新拉取渠道模型，可关闭单个模型，也可恢复被上游标记失效的模型
-- 上下文管理：滑动窗口 / Token 限制的删除式裁剪，永不清空对话；可选的实时区压缩不注入任何提示词
-- 工具调用：`tools`、`tool_choice`、`parallel_tool_calls` 原生透传，网关不改写工具定义、不把文本回复解析成 `tool_calls`
-- 🆕 模型映射：灵活的模型名称映射，支持通配符和首选服务商/账户选择
-- 🆕 自定义参数：支持自定义 HTTP Header 开启联网搜索、深度思考、深度研究等功能
-- 仪表盘监控：实时请求流量、Token 使用量和成功率统计
-- API Key 管理：为本地代理生成和管理密钥
-- 请求日志：详细的请求日志记录，便于调试和分析
-- 代理配置：灵活的代理设置和路由策略
-- 系统托盘集成：从菜单栏快速访问状态
-- 多语言支持：支持英文和简体中文
-- 现代界面：简洁响应式界面，支持深色/浅色主题
+- **OpenAI 兼容 API。** 提供 `POST /v1/chat/completions`、`POST /v1/completions`、
+  `GET /v1/models` 和 `GET /v1/models/:model`。入站的 Anthropic `/v1/messages` 与 Codex
+  Responses `/v1/responses` 会转换到同一套路由、故障转移、配额和日志链路上。管理接口位于
+  `/v1/management/*`。
+- **三类供应商。** 89 条聚合渠道（带 Key、免密，以及需要 Google ADC 的 `unsupported` 条目）、
+  13 个拥有独立账号池与积分账本的账号渠道，以及指向任意 OpenAI 兼容端点的自定义供应商。
+- **故障转移与路由。** 支持轮询、填充优先、故障转移、智能、匀速五种策略，并提供虚拟 `auto`
+  模型按能力、上下文长度和实时健康度选路。客户端自身造成的错误不会重试；401/403/404/5xx
+  与网络错误会切到下一个候选，404 会切换但不给账号降温。
+- **配额感知。** 聚合渠道的免费额度账本、账号的实时积分门槛、按 `(账号, 模型)` 的 AIMD 并发
+  准入、24 小时 Bandit 评分，以及第二类“内容退化流”检测。额度耗尽的候选只在最后兜底，不会
+  被强行选中。上游没有返回 `usage` 时保持 `null`，网关不编造 token 数。
+- **不注入提示词的上下文处理。** 历史裁剪只做删除（滑动窗口或 Token 上限），永不清空对话；
+  可选的实时区压缩节省 token，但不新增 system 或 user 轮次。工具定义与工具回复原生透传，
+  网关不会把工具描述渲染进提示词，也不会把文本回复解析成 `tool_calls`。
+- **HTTPS 与证书信任。** 可选 TLS 监听（默认 `8443`），使用托管的自签名证书或自定义 PEM
+  证书对。应用可把证书装进操作系统信任库以服务 Chromium/Schannel 客户端，给出 Node 客户端
+  需要的 `NODE_EXTRA_CA_CERTS` 行，并通过 `GET /v1/management/tls/ca` 提供同一份 PEM。
+  握手被拒不会产生请求行，因此 `TlsStatus` 单独记录握手拒绝次数。
+- **诊断。** 每个 `/v1/*` 响应都带 `X-Request-Id`；请求日志记录每次尝试、流式轨迹、上游状态
+  与上游请求 ID。`X-ModelPort-Trace: 1` 可在全局正文日志关闭时单独抓取一次请求的正文，日志
+  详情弹窗还能导出诊断包。
+- **桌面界面。** 仪表盘、供应商与账号渠道、模型目录、API Key、请求日志、代理设置、系统托盘，
+  以及英文 / 简体中文两种界面语言。
 
-## 🤖 支持的服务商
+## 支持的供应商
 
-| 供应商类别 | 认证类型 | 数量 | 说明 |
+| 供应商类别 | 认证方式 | 数量 | 说明 |
 | ---------- | -------- | ---- | ---- |
-| 聚合目录 | API Key / 无 | 89 条 / 570 个模型 | 支持 openai-chat 与 anthropic-messages 两种线路；含 Kilo 免密免费池 |
-| 账号渠道 | 浏览器 / 设备码 / API Key | 13 个渠道 | 每个渠道维护自己的账号池、每日积分领取与模型门禁 |
-| 自定义供应商 | 自行配置 | — | 任意你定义的 OpenAI 兼容 HTTP 端点 |
+| 聚合目录 | API Key / 免密 / 不支持 | 89 条 / 570 个模型 | `openai-chat` 与 `anthropic-messages` 两种线路；含 Kilo 免密免费池 |
+| 账号渠道 | 浏览器 / 设备码 / OAuth / API Key | 13 个渠道 | 每个渠道维护自己的账号池、每日积分领取与模型门禁 |
+| 自定义供应商 | 按供应商自行配置 | — | 任意你定义的 OpenAI 兼容 HTTP 端点 |
 
-聚合目录可在**聚合渠道**页面浏览，每条列出其类别（API Key / 免费额度 / 本机）、线路协议与模型数。保存一条渠道会创建带命名空间模型名（`provider/model`）的供应商记录；未保存的条目不会出现在供应商列表里。需要 Google ADC 的条目会被列出但标记为不支持。
+聚合目录可在**聚合渠道**页面浏览，每条会列出类别、线路协议和模型数。保存一条渠道会生成带
+命名空间的模型名（`provider/model`）的供应商记录；没有保存的条目不会出现在供应商列表里。
+Base URL 含 `{placeholders}` 的条目（Azure、Vertex）必须先覆盖端点才能保存。
 
-**账号渠道**页面覆盖 13 个渠道（`lobsterai`、`qoder`、`qodercn`、`trae`、`cline`、`loomy`、`raccoon`、`minimax`、`zcode`、`gemini`、`buddy`、`workbuddy`、`opencode`）。模型名会带上游的积分倍率，共三种形态（`· x4.0`、`· x0.2→x0.1`、`· 免费`），挑选模型前即可看到消耗；免费模型会单独标注，上游不再报告健康的模型也能在同一面板里恢复。
+**账号渠道**页面覆盖 `lobsterai`、`qoder`、`qodercn`、`trae`、`cline`、`loomy`、`raccoon`、
+`minimax`、`zcode`、`gemini`、`workbuddy`、`buddy` 和 `opencode`。模型名会带上游的积分倍率，
+共三种形态（`· x4.0`、`· x0.2→x0.1`、`· 免费`），免费模型单独标注；上游不再报告健康的模型
+也可以在同一面板恢复。`opencode` 渠道是其中的 API Key 例外：它接受匿名槽位或粘贴 `sk-`
+密钥，不打开浏览器。
 
 供应商适配说明见 [docs/providers](docs/providers/README.md)。
 
-## 📥 安装
+## 快速开始
 
 ### 下载安装
 
 从 [GitHub Releases](https://github.com/polite0803/ModelPort/releases) 下载最新版本：
 
-| 平台                  | 下载文件                             |
-| --------------------- | ------------------------------------ |
-| macOS (Apple Silicon) | `ModelPort-x.x.x-arm64.dmg`          |
-| Windows               | `ModelPort-x.x.x-x64-setup.exe`      |
-| Linux                 | `ModelPort-x.x.x-x64.AppImage` 或 `.deb` |
+| 平台 | 产物 |
+| ---- | ---- |
+| macOS（Apple Silicon） | `ModelPort-<version>-mac-arm64.dmg` |
+| Windows（x64） | `ModelPort-<version>-x64-setup.exe`，或便携版 `.exe` |
+| Linux（x64） | `ModelPort-<version>-x64.AppImage`、`.deb` 或 `.tar.gz` |
+| Linux（arm64） | `ModelPort-<version>-arm64.AppImage` |
+
+发布产物没有代码签名，macOS 版本也没有公证。macOS 的隔离属性可以用
+[常见问题](#常见问题)里的命令清除。
 
 ### 从源码构建
 
-**环境要求：**
-
-- Node.js 22.18+ (推荐 24)
-- npm
-- Git
+环境要求：Node.js 22.18+（推荐 24）、npm、Git。
 
 ```bash
-# 克隆仓库
 git clone https://github.com/polite0803/ModelPort.git
 cd ModelPort
-
-# 安装依赖
 npm install
 
-# 启动开发服务器
-npm run dev
+npm run dev      # macOS / Linux
+npm run dev:win  # Windows（设置控制台代码页并构建渠道包）
 ```
 
-### 构建生产版本
+## 运行网关
 
-```bash
-npm run build              # 构建应用
-npm run build:mac          # 构建 macOS 版本（仅 dmg）
-npm run build:win          # 构建 Windows 版本 (nsis)
-npm run build:linux        # 构建 Linux 版本 (AppImage, deb)
-npm run build:all          # 构建所有平台
-```
-
-## 📖 使用方法
-
-### 步骤 1：启动应用
-
-安装完成后，启动 ModelPort。您将看到主仪表盘。
-
-### 步骤 2：添加供应商
-
-1. 从侧边栏导航到**聚合渠道**页面
-2. 找到一条渠道（例如 `kilo` 即为免密免费池，或任意 API Key 条目）
-3. 点击**配置**，条目需要 Key 时粘贴 API Key，也可覆盖 Base URL 或模型列表
-4. 保存后该供应商出现在**供应商**页，模型名为 `<provider>/<model>`
-
-Kilo 这类免密条目无需凭证：保存时会创建一个空的本地账户，可立即路由。Base URL 含
-`{placeholders}` 的条目（Azure、Vertex）必须先用你自己的端点覆盖才能保存。
-
-若是登录类渠道，打开**账号渠道**页面选择渠道，通过内置浏览器完成登录，再启用想暴露的模型。模型列表随时可以在线刷新。
-
-### 步骤 3：配置代理
-
-1. 从侧边栏导航到**代理设置**页面
-2. 设置端口（默认：8080）
-3. 选择负载均衡策略（轮询 / 填充优先 / 故障转移 / 智能 / 匀速），或使用虚拟 `auto` 模型按能力、上下文与实时健康度选路
-4. 点击**启动代理**
-
-### 步骤 4：测试 API
-
-使用 Python (OpenAI SDK)：
+1. 添加供应商。聚合渠道用**聚合渠道**页面，登录渠道用**账号渠道**页面，自定义端点用
+   **供应商**页面。
+2. 打开**代理设置**。默认监听 `127.0.0.1:8080`；HTTPS 默认关闭，开启时使用 `8443` 端口。
+3. 如需鉴权，在 **API Keys** 页面创建密钥。只要存在任何一个启用的密钥，所有 `/v1/*` 请求都
+   必须带 `Authorization: Bearer <key>` 或 `X-API-Key: <key>`。没有配置密钥时，服务只绑定
+   回环地址，并拒绝非回环主机。
 
 ```python
 from openai import OpenAI
 
 client = OpenAI(
-    api_key="your-api-key",
-    base_url="http://localhost:8080/v1"
+    api_key="your-api-key",          # 未配置密钥时，任意非空值即可
+    base_url="http://127.0.0.1:8080/v1",
 )
 
 response = client.chat.completions.create(
     model="kilo/kilo-auto/free",
-    messages=[
-        {"role": "user", "content": "你好，你是谁？"}
-    ]
+    messages=[{"role": "user", "content": "你好，你是谁？"}],
 )
 
 print(response.choices[0].message.content)
 ```
 
-### 步骤 5：管理 API Key（可选）
+## 配置与数据目录
 
-为了安全，您可以启用 API Key 认证：
+应用数据存放在 `~/.modelport/`。Electron 的 profile 目录固定为 `<appData>/modelport`，因为
+`store.key` 由 `safeStorage` 绑定在该路径上；移动目录会让已有安装无法解密。
 
-1. 转到 **API Keys** 页面
-2. 点击**新建 API Key**
-3. 输入名称和描述
-4. 复制生成的密钥
-
-## 📸 截图
-
-| 仪表盘 | 服务商 |
-|--------|--------|
-| ![Dashboard](docs/screenshots/dashboard.png) | ![Providers](docs/screenshots/providers.png) |
-
-| 代理设置 | API Key |
-|----------|---------|
-| ![Proxy](docs/screenshots/proxy.png) | ![API Keys](docs/screenshots/api-keys.png) |
-
-| 模型管理 | 设置 |
-|----------|------|
-| ![Models](docs/screenshots/models.png) | ![Settings](docs/screenshots/settings.png) |
-
-## ⚙️ 设置选项
-
-- **端口**：更改代理监听端口（默认：8080）
-- **路由策略**：轮询、填充优先、故障转移、智能、匀速，以及虚拟 `auto` 模型
-- **自动启动**：应用启动时自动启动代理
-- **主题**：浅色、深色或跟随系统
-- **语言**：英文或简体中文
-
-## 🏗️ 项目结构
-
-```
-ModelPort/
-├── src/
-│   ├── main/                    # Electron 主进程
-│   │   ├── index.ts             # 应用入口
-│   │   ├── proxy/               # 代理服务器（Koa）
-│   │   ├── ipc/                 # IPC 处理器
-│   │   ├── providers/           # 内置 / 聚合 / 账号渠道配置
-│   │   ├── channelPack/         # 渠道包宿主（worker + compat 垫片）
-│   │   ├── store/               # 持久化存储
-│   │   └── tray/                # 系统托盘集成
-│   ├── preload/                 # 上下文桥接
-│   ├── renderer/                # React 前端
-│   │   ├── components/          # UI 组件
-│   │   ├── pages/               # 页面组件
-│   │   ├── stores/              # Zustand 状态
-│   │   └── i18n/                # 国际化
-│   └── shared/                  # 主进程与渲染进程共享类型
-├── build/                       # 构建资源
-├── resources/                   # 运行时随附资源
-├── scripts/                     # 构建脚本
-└── tests/                       # Node 测试套件
-```
-
-## 🔧 技术栈
-
-| 组件   | 技术                    |
-| ---- | --------------------- |
-| 框架   | Electron 33+          |
-| 前端   | React 18 + TypeScript |
-| 样式   | Tailwind CSS          |
-| 状态管理 | Zustand               |
-| 构建工具 | Vite + electron-vite  |
-| 打包工具 | electron-builder      |
-| 服务器  | Koa                   |
-
-## 📁 数据存储
-
-应用数据存储在 `~/.modelport/` 目录下（刻意保持不变，老用户的账号与密钥可直接沿用）：
-
-- `data.json` - 配置、服务商、账户与应用日志（单一 electron-store 文件）
-- `store.key` - 本机数据密钥，由系统钥匙串封装
+- `data.json` - 单一 electron-store 文件，保存配置、供应商、账号、会话、统计与应用日志
+  （没有单独的 `providers.json` 或 `accounts.json`）
+- `store.key` - 本机数据密钥，由操作系统密钥库封装
 - `request-logs/` - 请求明细日志
-- `channel-pack/` - 渠道包自身状态与加密后的渠道凭证
+- `quota-ledger.json` - 聚合免费额度计数与从上游学到的额度上限
+- `channel-pack/` - 渠道包自身状态，以及加密后的渠道凭证
+- `tls/` - 托管的自签名证书与私钥
 
-账户凭证在系统钥匙串可用时会再加密一层；不可用时将以明文写入 `data.json`。
+系统密钥库可用时，凭证通过 `safeStorage` 加密。不可用时，数据文件会以明文写入并产生告警，
+此时应限制 `~/.modelport/` 的访问权限。
 
-## ❓ 常见问题
+## 平台支持
 
-### macOS 提示"应用已损坏，无法打开"？
+| 平台 | 架构 | 安装包 |
+| ---- | ---- | ------ |
+| macOS | Apple Silicon（arm64） | 仅 DMG |
+| Windows | x64 | NSIS 安装包、便携版可执行文件 |
+| Linux | x64、arm64 | AppImage；x64 另有 `.deb` 与 `.tar.gz` |
 
-由于 macOS 的安全机制，非 App Store 下载的应用可能会触发此提示。运行以下命令即可修复：
+## 开发与验证
+
+```bash
+npm run build              # 源码产物守卫 + 渠道包 + electron-vite 构建
+npm run gate               # CI 实际执行：构建 + 两个 tsc + 全量测试
+npm run build:mac          # 仅 dmg
+npm run build:win          # NSIS + 便携版
+npm run build:linux        # AppImage、deb、tar.gz
+```
+
+`npm run gate` 会分别对 `tsconfig.json`（渲染进程 + shared）和 `tsconfig.node.json`
+（主进程 + preload + shared）执行 `tsc --noEmit`，然后运行 `tests/` 下的 Node 测试套件。
+`electron-vite build` 只转译、不做类型检查，所以“构建通过”不能证明类型干净。测试运行器需要
+原生支持 TypeScript 剥离的 Node（22.18+、23.6+ 或 24）；更早的 22.x 会以
+`ERR_UNKNOWN_FILE_EXTENSION` 失败。
+
+## 文档
+
+| 文档 | 内容 |
+| ---- | ---- |
+| [docs/README.md](docs/README.md) | 文档索引：方案、计划、审计与参考资料 |
+| [AGENTS.md](AGENTS.md) | 简版规则：构建门禁、架构与不可破坏的约束 |
+| [docs/AGENTS-full.md](docs/AGENTS-full.md) | 完整子系统参考，以及每条规则背后的故障 |
+| [docs/providers/README.md](docs/providers/README.md) | 供应商类别、聚合流程、账号渠道 |
+| [docs/design/](docs/design/) | 子系统设计与决策记录 |
+| [docs/plan/](docs/plan/) | 分阶段实施与迁移计划 |
+| [docs/audit/](docs/audit/) | 审计报告、实测证据与门禁读数 |
+| [CODE_WIKI.md](CODE_WIKI.md) | 较早的概览；与 `AGENTS.md`、`AGENTS-full.md` 冲突时以后者为准 |
+
+## 常见问题
+
+### macOS 提示“应用已损坏，无法打开”
+
+从 App Store 之外下载的应用可能触发该提示。清除隔离属性即可：
 
 ```bash
 sudo xattr -rd com.apple.quarantine "/Applications/ModelPort.app"
@@ -243,27 +196,20 @@ sudo xattr -rd com.apple.quarantine "/Applications/ModelPort.app"
 
 ### 如何更新？
 
-在 **关于** 页面检查更新，或从 [GitHub Releases](https://github.com/polite0803/ModelPort/releases) 下载最新版本。
+在**关于**页面检查更新，或从
+[GitHub Releases](https://github.com/polite0803/ModelPort/releases) 下载最新版本。
 
-## 🤝 贡献
+## 贡献
 
-1. Fork 本项目
-2. 创建功能分支 (`git checkout -b feature/amazing-feature`)
-3. 提交更改 (`git commit -m 'Add amazing feature'`)
-4. 推送到分支 (`git push origin feature/amazing-feature`)
-5. 提交 Pull Request
+1. Fork 项目并创建功能分支。
+2. 完成改动并运行 `npm run gate`。
+3. 提交 Pull Request，并附上门禁输出。
 
-## 📄 许可证
+## 许可证
 
 GNU 通用公共许可证 v3.0。详见 [LICENSE](LICENSE)。
 
-这意味着：
-
-- ✅ 可以自由使用、修改和分发
-- ✅ 衍生作品必须以相同许可证开源
-- ✅ 必须保留原始版权声明
-
-## 🙏 致谢
+## 致谢
 
 - [Electron](https://www.electronjs.org/) - 跨平台框架
 - [React](https://react.dev/) - UI 框架
