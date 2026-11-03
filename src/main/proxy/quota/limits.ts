@@ -34,7 +34,15 @@ export interface Caps {
   docUrl?: string
 }
 
-export type QuotaBlockReason = 'rpm_exhausted' | 'rpd_exhausted' | 'tpm_exhausted' | 'tpd_exhausted' | 'monthly_exhausted'
+/** 五个 token/请求计数域里"哪个窗口满了"。 */
+export type QuotaWindowBlockReason = 'rpm_exhausted' | 'rpd_exhausted' | 'tpm_exhausted' | 'tpd_exhausted' | 'monthly_exhausted'
+
+/**
+ * 消费方看到的完整枚举。`no-credit` 不属于上面任何一个窗口：它是"问上游问回来这把 Key
+ * 一分钱不剩"，单位是钱不是 token，所以既没有对应的 `QuotaMetric`、也永不参与
+ * `evaluateQuota` 的窗口比较（把美元折进 token 比例是被禁止的）。
+ */
+export type QuotaBlockReason = QuotaWindowBlockReason | 'no-credit'
 
 export interface QuotaDecision {
   allowed: boolean
@@ -99,7 +107,7 @@ export function resolveCaps(
   }
 }
 
-const METRIC_FOR_REASON: Record<QuotaBlockReason, QuotaMetric> = {
+const METRIC_FOR_REASON: Record<QuotaWindowBlockReason, QuotaMetric> = {
   rpm_exhausted: 'rpm',
   rpd_exhausted: 'rpd',
   tpm_exhausted: 'tpm',
@@ -108,7 +116,7 @@ const METRIC_FOR_REASON: Record<QuotaBlockReason, QuotaMetric> = {
 }
 
 /** 按"先拒贵窗口"的顺序判：月度 > 日 > 分钟，越难恢复的越先说。 */
-const REASON_ORDER: QuotaBlockReason[] = [
+const REASON_ORDER: QuotaWindowBlockReason[] = [
   'monthly_exhausted',
   'rpd_exhausted',
   'tpd_exhausted',

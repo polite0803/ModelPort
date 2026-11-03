@@ -1153,6 +1153,104 @@ export function clientNamesForTieredRoutes(input: {
   return { add, blocked }
 }
 
+/** `anthropicInbound.routeTiers` → 归一后的档位索引（键为 trim+小写的名字）。 */
+function buildTierIndex(routeTiers?: Record<string, string>): Map<string, AnthropicFamilyTier> {
+  const tierByKey = new Map<string, AnthropicFamilyTier>()
+  for (const [name, tier] of Object.entries(routeTiers ?? {})) {
+    const key = name.trim().toLowerCase()
+    const normalized = normalizeFamilyTier(tier)
+    if (key !== '' && normalized !== undefined) tierByKey.set(key, normalized)
+  }
+  return tierByKey
+}
+
+/**
+ * anthropic 模型行的**唯一构造处**：清单的每一行与单查的那一行都从这一个函数出来。
+ *
+ * 分两处写字面量必然漂移（单查补了 `display_name`、清单忘了；或反过来），而客户端
+ * 对这两条路用的是同一套解析代码，字段不齐就是「列表承认、单查否认」。
+ * `name` 必须是**已 trim 的非空**名字；`display_name` 恒等于 id（见
+ * `modelsToAnthropicList` 的裁定：客户端筛的和发回来的是同一个名字）。
+ */
+function anthropicModelRow(
+  name: string,
+  entry: AnthropicListModelEntry | undefined,
+  tier: AnthropicFamilyTier | undefined,
+  fallbackCreatedAtSeconds: number,
+): Payload {
+  return {
+    type: 'model',
+    id: name,
+    display_name: name,
+    created_at: new Date((entry?.created ?? fallbackCreatedAtSeconds) * 1000).toISOString(),
+    ...(entry?.context_window === undefined ? {} : { max_input_tokens: entry.context_window }),
+    ...(tier === undefined ? {} : { anthropic_family_tier: tier }),
+  }
+}
+
+/**
+ * `anthropicInbound.modelMap` 的**精确键**折叠：客户端发回来的名字 → 路由名。
+ *
+ * 只做精确键（trim + 大小写不敏感），**不做前缀通配**：清单广告的是键的原样形，
+ * 单查若还按前缀答话就是「清单里没有的名字单查认」，名字域又裂成两套。请求期的
+ * 前缀兜底（`resolveAnthropicModel`）管的是「能不能跑」，这一格管的是「清单里有没有」。
+ *
+ * 与 `modelsToAnthropicList` 同一判据，所以两边共用这一处实现。
+ */
+export function foldAnthropicRouteName(
+  requestedName: string,
+  modelMap?: Record<string, string>,
+): string | undefined {
+  const lower = requestedName.trim().toLowerCase()
+  if (lower === '') return undefined
+  for (const [key, target] of Object.entries(modelMap ?? {})) {
+    if (key.trim().toLowerCase() !== lower) continue
+    const folded = String(target ?? '').trim()
+    return folded === '' ? undefined : folded
+  }
+  return undefined
+}
+
+/**
+ * 单条检索（`GET /v1/models/:model`）的 anthropic 形状。
+ *
+ * 与 `modelsToAnthropicList` 逐字段同源（同一个 `anthropicModelRow`、同一个档位索引、
+ * 同一条「映射键行继承目标路由档位」的判据），所以客户端拿列表里的名字来 retrieve
+ * 一定拿得到同一行，而不是字段全缺的空壳。
+ *
+ * 那一行的 `id` 用**映射键的原样形**（列表广告的就是它，客户端下一轮也发它回来），
+ * 没有键命中时就是路由名。档位与列表同一条取值顺序：目标路由的档位优先，其次行名自己的。
+ *
+ * 名字为空时返回 `undefined`（调用方按「答不了」处理成 404）—— 发一条 `id: ''` 的行
+ * 等于把「查不到」伪装成「查到了个空模型」，违反「结构性缺口不得造成歧义」。
+ */
+export function modelToAnthropicItem(input: {
+  /** 客户端发回来的名字（`ctx.params.model`，可能是 `modelMap` 的键）。 */
+  requestedName: string
+  /** `findModelRoute` 解析到的路由名。 */
+  routeName: string
+  /** 那一行的真来源（`created` / `context_window`）：与 OpenAI 形状同一个条目。 */
+  entry?: AnthropicListModelEntry
+  modelMap?: Record<string, string>
+  routeTiers?: Record<string, string>
+}): Payload | undefined {
+  const tierByKey = buildTierIndex(input.routeTiers)
+  const routeKey = input.routeName.trim().toLowerCase()
+  const mapKey = Object.keys(input.modelMap ?? {}).find(
+    (key) => key.trim().toLowerCase() === input.requestedName.trim().toLowerCase(),
+  )
+  // 映射键命中且其目标正是这条路由时，行 id 用键（列表里那一行也是这个 id）；
+  // 键指向别处（或入参本来就是路由名）时用路由名。
+  const folded = foldAnthropicRouteName(input.requestedName, input.modelMap)
+  const viaMapKey = mapKey !== undefined && folded !== undefined && folded.toLowerCase() === routeKey
+  const name = (viaMapKey ? mapKey : input.routeName).trim()
+  if (name === '') return undefined
+
+  const rowKey = name.toLowerCase()
+  const tier = (routeKey === '' ? undefined : tierByKey.get(routeKey)) ?? tierByKey.get(rowKey)
+  return anthropicModelRow(name, input.entry, tier, Math.floor(Date.now() / 1000))
+}
+
 /**
  * 网关的 OpenAI 模型清单 → anthropic `/v1/models` 形状。
  *
@@ -1191,12 +1289,7 @@ export function modelsToAnthropicList(
     if (key !== '' && !byGatewayName.has(key)) byGatewayName.set(key, model)
   }
 
-  const tierByKey = new Map<string, AnthropicFamilyTier>()
-  for (const [name, tier] of Object.entries(routeTiers ?? {})) {
-    const key = name.trim().toLowerCase()
-    const normalized = normalizeFamilyTier(tier)
-    if (key !== '' && normalized !== undefined) tierByKey.set(key, normalized)
-  }
+  const tierByKey = buildTierIndex(routeTiers)
 
   const now = Math.floor(Date.now() / 1000)
   const data: Payload[] = []
@@ -1212,14 +1305,7 @@ export function modelsToAnthropicList(
     const key = name.toLowerCase()
     if (added.has(key)) return
     added.add(key)
-    data.push({
-      type: 'model',
-      id: name,
-      display_name: name,
-      created_at: new Date((entry?.created ?? now) * 1000).toISOString(),
-      ...(entry?.context_window === undefined ? {} : { max_input_tokens: entry.context_window }),
-      ...(tier === undefined ? {} : { anthropic_family_tier: tier }),
-    })
+    data.push(anthropicModelRow(name, entry, tier, now))
   }
 
   for (const [name, target] of Object.entries(anthropicNames ?? {})) {

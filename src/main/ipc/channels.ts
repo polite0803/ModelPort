@@ -80,6 +80,8 @@ export const IpcChannels = {
   AGGREGATE_SET_MODEL_ENABLED: 'aggregate:setModelEnabled',
   AGGREGATE_SET_MODEL_PARAMS: 'aggregate:setModelParams',
   AGGREGATE_TEST_MODEL: 'aggregate:testModel',
+  // 用户在详情页点一次才发一次：没有周期轮询，也没有开页自动查。
+  AGGREGATE_QUERY_CREDITS: 'aggregate:queryCredits',
 
   CHANNELS_LIST: 'channels:list',
   CHANNELS_ACCOUNT_COUNTS: 'channels:accountCounts',

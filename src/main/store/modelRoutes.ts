@@ -164,6 +164,9 @@ function normalizeRouteFields(name: string, entry: Record<string, unknown>, opti
     includeModels: normalizeRouteModelRefs(entry.includeModels),
     excludeModels: normalizeRouteModelRefs(entry.excludeModels),
     pinModels: normalizeRouteModelRefs(entry.pinModels),
+    // 只在显式关掉时落键：缺省即硬钉（见 `ModelRoute.stickyHardPin`）。把「没配」也归一成
+    // `true` 会让盘上每条路由多出这一格，而读侧两处判断（`!== false`）本来就同形。
+    ...(entry.stickyHardPin === false ? { stickyHardPin: false } : {}),
     // 引用只认规范名，且**不许引用自己**：手坏的盘上留一个自引用就会让「取池」这一步
     // 无限递归，写入侧本来拒绝，读侧再兜一层保证不 500。
     ...(basedOn.length > 0 && basedOn !== name ? { basedOnRoute: basedOn } : {}),
@@ -331,6 +334,9 @@ export function presetRouteFields(
     prefer: seed.prefer ?? auto?.prefer ?? legacy.prefer,
     maxAttempts: auto?.maxAttempts ?? legacy.maxAttempts,
     stickyMinutes: auto?.stickyMinutes ?? legacy.stickyMinutes,
+    // 与 `stickyMinutes` 同一条继承规则：种子路由跟着 `auto` 那一条走，用户关过硬钉
+    // 就不该在下次播种时被悄悄打开。写成布尔即可 —— 归一化只保留显式 `false`。
+    stickyHardPin: auto?.stickyHardPin !== false,
     poolStrategies: seed.poolStrategies ?? auto?.poolStrategies ?? legacy.poolStrategies,
     // 不钉名：钉谁只能来自用户目录里真实存在的 (providerId, displayName)。
     pinModels: [],

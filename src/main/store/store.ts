@@ -40,6 +40,7 @@ import {
   DEFAULT_REQUEST_LOG_CONFIG,
   normalizeModelMappingsWithDefaults,
 } from './types'
+import type { AggregateCreditSnapshot, AggregateCreditSnapshots } from './types'
 import { localDayKey, recentLocalDays } from '../../shared/localDay'
 import { normalizeSanHostList } from '../../shared/httpsConfig'
 import {
@@ -474,6 +475,8 @@ class StoreManager {
       tokenUsage: {},
       userModelOverrides: DEFAULT_USER_MODEL_OVERRIDES,
       userModelMarks: DEFAULT_USER_MODEL_MARKS,
+      // 实时额度快照从空开始：一次升级安装没有"上次问过谁"，闸门随之不参与（fail-open）。
+      aggregateCreditSnapshots: {},
     }
   }
 
@@ -2719,6 +2722,44 @@ class StoreManager {
       throw new Error('Quota ledger is not initialized')
     }
     return this.quotaLedger
+  }
+
+  /**
+   * 全部条目的实时额度快照（一个条目一行）。
+   *
+   * 读不出来的一律当"没有快照"：闸门失去证据时放行，与 `undocumented` 不参与预检同一条纪律。
+   */
+  getAggregateCreditSnapshots(): AggregateCreditSnapshots {
+    this.ensureInitialized()
+    const raw = this.store!.get('aggregateCreditSnapshots')
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+    return { ...(raw as AggregateCreditSnapshots) }
+  }
+
+  getAggregateCreditSnapshot(entryId: string): AggregateCreditSnapshot | undefined {
+    return this.getAggregateCreditSnapshots()[entryId]
+  }
+
+  /**
+   * 写一次「用户手点出来的」余额读数：整表换新对象，绝不原地改（本仓的不可变约定）。
+   * 只由聚合详情页那一个按钮触发，没有周期采集。
+   */
+  setAggregateCreditSnapshot(entryId: string, snapshot: AggregateCreditSnapshot): AggregateCreditSnapshots {
+    this.ensureInitialized()
+    const next: AggregateCreditSnapshots = { ...this.getAggregateCreditSnapshots(), [entryId]: { ...snapshot } }
+    this.store!.set('aggregateCreditSnapshots', next)
+    return next
+  }
+
+  /** 条目被删除时连带丢掉它那次读数：没有记录的条目不该继续影响路由。 */
+  deleteAggregateCreditSnapshot(entryId: string): AggregateCreditSnapshots {
+    this.ensureInitialized()
+    const current = this.getAggregateCreditSnapshots()
+    if (!(entryId in current)) return current
+    const next: AggregateCreditSnapshots = { ...current }
+    delete next[entryId]
+    this.store!.set('aggregateCreditSnapshots', next)
+    return next
   }
 
   private getRequestLogManager(): RequestLogManager {

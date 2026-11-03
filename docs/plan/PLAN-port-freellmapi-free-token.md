@@ -146,3 +146,16 @@ E 断"裸名命中 ≥2 家时第一条 429 后由第二家成功应答，且请
 
 **全量门禁**：`npm run build` 0、`tsc -p tsconfig.node.json` 0、`tsc -p tsconfig.json` 0、
 `node --test "tests/**/*.test.{ts,mjs,js}"` **386/386 通过**。
+
+## 10. 实时额度批（2026-11-03，§4 那条「等授权的另一批」已落地）
+
+用户拍板：**聚合页手动点一次**（不做周期轮询、不做开页自动查）+ **问回来的余量要参与选号排序**。
+
+- **目录声明**：`AggregateEntry.quotaProbe = { path, reader, docUrl, asOf }`（`src/shared/aggregate.ts`），两家条目各一条：`open_router` → `/key` / `openrouter-key`，`siliconflow` → `/user/info` / `siliconflow-user-info`。没进 `aggregateQuota.ts`，因为那份是 `scripts/build-aggregate-quota.mjs` 从取证回执生成的产物、明令不得手改，把一个 URL 掺进数值生成器会让两边都对不上账。
+- **基址跟着用户配的那一个走**：抓取用 provider 记录里的 `apiEndpoint` 拼相对路径，聊天流量去哪个 host、额度查询就去哪个 host；转录来的 `.com` 因此不会在两处不一致。鉴权复用 `buildProbeHeaders`（与聊天同一个 header/prefix），Key 不过 IPC、不进日志（`tests/aggregate/credit-query-fetch.test.ts` 把 stdout/stderr 都接走做断言）。
+- **单位隔离（本批最关键的一条）**：美元额度、人民币余额、本应用的 token 账本是三个互不可比的计数域，所以实时余量**只当闸门、不当数字**——`shared/aggregateCredit.ts::creditSnapshotExhausted` 是唯一判据（整行成立、明确不是 `unlimited`、问到了一个数、`<= 0`、`asOf` 在 `CREDIT_SNAPSHOT_TTL_MS = 15min` 内），命中时 `aggregateHeadroom` 返回既有的 `-1`、`quotaBlockReason` 返回新增的 `'no-credit'`。`QuotaBlockReason` 因此拆成 `QuotaWindowBlockReason | 'no-credit'`，`METRIC_FOR_REASON` / `REASON_ORDER` 只对窗口那一半有定义——把美元折进 token 比例在类型层就写不出来。
+- **TTL 为什么是 15 分钟**：这一行是人手点出来的，用户不再点就没有新数据；让一个人工读数长期影响路由等于让路由表停在他上次好奇的那一刻。超期仍照实展示并标过期，只是不参与排序。回退成本是一个常量。
+- **多把 Key**：单次上限 `CREDIT_QUERY_KEY_CAP = 10`，逐把各问一次、界面按 Key 分行；超出部分显式写「其余 N 把未查询」，不静默截断。`limit: null`（OpenRouter 无上限）→ `unlimited`，既不当 0 也不当「还有很多」，且永不参与排序。
+- **五态未动**：`aggregateQuotaView.ts` 的五个状态一个字没改，实时余量是旁边独立一行（`tests/renderer/aggregate-credit-wiring.test.mjs` 断言它不喂 `quotaViewOf`）。
+- **判据**：`tests/aggregate/credit-readers.test.ts`（解析层，含「解析器不 import 传输/store/fs」）、`tests/aggregate/credit-query-fetch.test.ts`（本地替身，绝不打真实域）、`tests/proxy/quota-credit-gate.test.ts`（TTL 两侧 + 无快照时与改动前逐值相同 + 落盘形状）、`tests/renderer/aggregate-credit-wiring.test.mjs`（四环接线 + 双语同键）。负控：把 TTL 改成 365 天 → 2 条红（已还原复绿 21/21）。
+- **本轮做不了、必须真机点一次才知道的一件事**：两个响应形状来自 §1 第 3 行的转录记录，本轮没有任何真机报文。字段拼写（余额是不是就叫 `balance`）与 `api.siliconflow.com` 这个 host 通不通，都要在界面上点一次才知道；对不上时解析器报 `unexpected-shape` 并显示在界面上，不会伪装成一个数。

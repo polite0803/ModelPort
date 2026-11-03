@@ -30,6 +30,12 @@ export interface ModelRouteFieldValues {
   prefer: AutoPreference
   maxAttempts: number
   stickyMinutes: number
+  /**
+   * 粘性硬优先：把上一轮成功的模型提到队首，盖过打分差。界面用一个确定的布尔，
+   * 盘上却是可选键 —— 缺省即开，见 `routeFieldValuesOf` 那一侧的 `!== false`。
+   * 关掉它，粘性就只剩打分里的 +0.12 / +0.06，差距过大时会让位。
+   */
+  stickyHardPin: boolean
   poolStrategies: AutoPoolStrategy[]
   /** 策略之后手动加回的模型（误筛修正）。 */
   includeModels: RouteModelRef[]
@@ -87,6 +93,8 @@ export function defaultRouteFieldValues(strategy: LoadBalanceStrategy): ModelRou
     prefer: DEFAULT_AUTO_ROUTING_CONFIG.prefer,
     maxAttempts: DEFAULT_AUTO_ROUTING_CONFIG.maxAttempts,
     stickyMinutes: DEFAULT_AUTO_ROUTING_CONFIG.stickyMinutes,
+    // 与主进程同一条判据：缺键即硬钉（`!== false`），新路由的初值因此是开。
+    stickyHardPin: true,
     poolStrategies: DEFAULT_AUTO_ROUTING_CONFIG.poolStrategies.map((strategyItem) => ({ ...strategyItem })),
     includeModels: [],
     excludeModels: [],
@@ -102,6 +110,8 @@ export function routeFieldValuesOf(route: ModelRoute): ModelRouteFieldValues {
     prefer: route.prefer,
     maxAttempts: route.maxAttempts,
     stickyMinutes: route.stickyMinutes,
+    // 盘上没有这一格 = 硬钉开着，与 `autoRouter` 读侧同一条 `!== false` 判据。
+    stickyHardPin: route.stickyHardPin !== false,
     poolStrategies: route.poolStrategies.map((strategyItem) => ({ ...strategyItem })),
     includeModels: route.includeModels.map((ref) => ({ ...ref })),
     excludeModels: route.excludeModels.map((ref) => ({ ...ref })),
@@ -257,6 +267,30 @@ export function ModelRouteFields({
             onChange={(event) => onChange({ stickyMinutes: Number(event.target.value) || 0 })}
           />
           <p className="text-xs text-muted-foreground">{t('proxy.autoRoutingStickyHelp')}</p>
+        </div>
+
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <input
+              id={`auto-sticky-hard-pin-${idPrefix}`}
+              type="checkbox"
+              checked={values.stickyHardPin}
+              onChange={(event) => onChange({ stickyHardPin: event.target.checked })}
+              className="h-3.5 w-3.5 accent-[var(--primary)]"
+            />
+            <Label
+              htmlFor={`auto-sticky-hard-pin-${idPrefix}`}
+              className="text-sm font-normal cursor-pointer"
+            >
+              {t('proxy.autoRoutingStickyHardPin')}
+            </Label>
+          </div>
+          {/* 粘性时长为 0 时这一格不起作用（压根没有粘性记录可提到队首）。不说这句，
+              用户会以为是这个勾坏了，而不是上面那格填了 0。 */}
+          {values.stickyMinutes === 0 && (
+            <p className="text-xs text-muted-foreground">{t('proxy.autoRoutingStickyHardPinIdle')}</p>
+          )}
+          <p className="text-xs text-muted-foreground">{t('proxy.autoRoutingStickyHardPinHelp')}</p>
         </div>
       </div>
 

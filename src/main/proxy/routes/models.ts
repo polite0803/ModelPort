@@ -9,7 +9,14 @@ import { ModelsResponse, ModelInfo } from '../types'
 import { storeManager } from '../../store/store'
 import { autoRouter } from '../autoRouter'
 import { enabledModelRoutes, findModelRoute, resolvePoolRoute } from '../../store/modelRoutes'
-import { anthropicNameShape, modelsToAnthropicList } from '../../../shared/anthropicWire'
+import {
+  anthropicErrorBody,
+  anthropicErrorTypeOf,
+  anthropicNameShape,
+  foldAnthropicRouteName,
+  modelToAnthropicItem,
+  modelsToAnthropicList,
+} from '../../../shared/anthropicWire'
 import type { ModelRoute } from '../../../shared/types'
 
 const router = new Router({ prefix: '/v1' })
@@ -120,11 +127,23 @@ router.get('/models', async (ctx: Context) => {
  * 与列表同一个名字域：只有路由查得到。单模型名与用户别名一律 404 —— 它们不再
  * 是「客户端可以点名的名字」，单查若还答话就等于清单否认、单查承认。
  * 停用的路由不许冒充在服，被删的路由表里根本没有，两者同样是 404。
+ *
+ * 带 `anthropic-version` 时返回 anthropic 形状（与列表同一个构造处），否则 OpenAI 形状
+ * 一字不变。这一支多认一类名字：`anthropicInbound.modelMap` 的**精确键** —— 列表把它
+ * 当一行广告出去了（`modelsToAnthropicList`），客户端拿它来 retrieve 必须答话，
+ * 否则就是「列表承认、单查否认」。前缀通配不在这一格：列表没广告那个名字。
  */
 router.get('/models/:model', async (ctx: Context) => {
   const modelId = ctx.params.model
-  const routes = storeManager.getConfig().routes
+  const config = storeManager.getConfig()
+  const routes = config.routes
+  // 判别只用请求头（与列表同一格），不看 Accept —— 后者会被中间层改写。
+  const wantsAnthropic = ctx.get('anthropic-version') !== ''
+  const modelMap = config.anthropicInbound?.modelMap
+  // 路由名优先于映射键（与 `findModelRoute`「路由优先于同名模型」同一顺序）。
+  const mappedRouteName = wantsAnthropic ? foldAnthropicRouteName(modelId, modelMap) : undefined
   const route = findModelRoute(routes, modelId)
+    ?? (mappedRouteName === undefined ? undefined : findModelRoute(routes, mappedRouteName))
   // 与列表同一个判据：池来源断掉的路由不广告，单查也不答话（清单否认、单查承认就是两套名字域）。
   const pool = route === undefined || !route.enabled
     ? null
@@ -132,23 +151,48 @@ router.get('/models/:model', async (ctx: Context) => {
 
   if (pool === null || !pool.ok) {
     ctx.status = 404
-    ctx.body = {
-      error: {
-        message: `Model '${modelId}' not found`,
-        type: 'invalid_request_error',
-        param: 'model',
-        code: 'model_not_found',
-      },
-    }
+    if (wantsAnthropic) ctx.set('Content-Type', 'application/json')
+    // 沿用仓里既有那一套：anthropic 客户端的错误信封（`messages.ts` 的 `failWith`
+    // 与 `server.ts` 的鉴权分支都用它），状态码与 404 → `not_found_error` 的映射都不新造。
+    ctx.body = wantsAnthropic
+      ? anthropicErrorBody(`Model '${modelId}' not found`, anthropicErrorTypeOf(404))
+      : {
+          error: {
+            message: `Model '${modelId}' not found`,
+            type: 'invalid_request_error',
+            param: 'model',
+            code: 'model_not_found',
+          },
+        }
     return
   }
 
   ctx.set('Content-Type', 'application/json')
-  ctx.body = routeEntry(
+  const entry = routeEntry(
     pool.route.name,
     Math.floor(Date.now() / 1000),
     autoRouter.advertisedContextFloor(pool.route)
   )
+  if (!wantsAnthropic) {
+    ctx.body = entry
+    return
+  }
+
+  // 与列表逐字段同源（同一个 `anthropicModelRow`）；拿 `undefined` 就是这一行构造不出来，
+  // 按「答不了」404，而不是把 OpenAI 形状当成 anthropic 答复发出去。
+  const item = modelToAnthropicItem({
+    requestedName: modelId,
+    routeName: pool.route.name,
+    entry,
+    modelMap,
+    routeTiers: config.anthropicInbound?.routeTiers,
+  })
+  if (item === undefined) {
+    ctx.status = 404
+    ctx.body = anthropicErrorBody(`Model '${modelId}' not found`, anthropicErrorTypeOf(404))
+    return
+  }
+  ctx.body = item
 })
 
 export default router

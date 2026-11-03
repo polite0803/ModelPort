@@ -48,6 +48,7 @@ import type {
   AggregateOperationResult,
   AggregateSaveInput,
 } from '../../../shared/aggregate'
+import type { AggregateCreditQueryResult } from '../../../shared/aggregateCredit'
 import type {
   ChannelAutoCheckinResult,
   ChannelCredits,
@@ -261,6 +262,7 @@ interface AggregateAPI {
   setModelEnabled: (id: string, modelId: string, enabled: boolean) => Promise<AggregateMutationResult>
   setModelParams: (id: string, modelId: string, params: Record<string, unknown>) => Promise<AggregateMutationResult>
   testModel: (id: string, modelId: string) => Promise<AggregateModelTestResult>
+  queryCredits: (id: string) => Promise<AggregateCreditQueryResult>
 }
 
 interface OAuthAPI {

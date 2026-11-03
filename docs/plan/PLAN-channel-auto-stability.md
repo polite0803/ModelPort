@@ -280,3 +280,14 @@ VS Code 里跑的另一个名字）成功一次，就把这个模型的退避连
    基线读数见本文件开头表格；装完后用同一套矩阵重跑即可对比。
    要看的三件事：挂死笔数应归零（最坏 ≤ 请求超时那一格）、`400 模型 ID 无效` 归零、
    `auto` 撞强制 tool_choice 与凭据死渠道时 `attempts` 应 >1 而不是整场失败。
+
+## 第六批：A1 收尾（2026-11-03，执行体实现 + 主线逐行验收）
+
+上面 A1 那格的遗留半句（`GET /v1/models/:model` 仍是 OpenAI 形状）已闭合，第五批 §未做的两条 里那一条同时作废。
+
+- **落点**：`src/shared/anthropicWire.ts` 新增 `anthropicModelRow`（**清单行与单查行的唯一构造处**，`modelsToAnthropicList` 的 `pushRow` 改为调它，原字面量删除）、`buildTierIndex`、`foldAnthropicRouteName`、`modelToAnthropicItem`；`src/main/proxy/routes/models.ts` 的 `GET /v1/models/:model` 按 `anthropic-version` 头分派。
+- **名字域**：带该头时多认一类名字——`anthropicInbound.modelMap` 的**精确键**。列表把键当一行广告出去了，客户端拿它来 retrieve 必须答话，否则「列表承认、单查否认」。不做前缀通配：列表没有那个名字就不答（`resolveAnthropicModel` 的前缀兜底管「能不能跑」，这一格管「清单里有没有」）。
+- **404 信封**：带头时用仓里既有的 `anthropicErrorBody(msg, anthropicErrorTypeOf(404))`（`messages.ts::failWith` 与 `server.ts` 鉴权分支同源），不带头时原 OpenAI `model_not_found` 信封一字未动。models 路由此前没有先例，这一处按「沿用既成形状」而不是新造第三种。
+- **判据**：`tests/routes/anthropic-inbound.test.ts`（真 HTTP）两条 + `tests/shared/anthropic-wire.test.ts` 一条同源 deepEqual；后者断的是「两份构造逻辑漂移」这一类，而它正是本批把字面量收成一处之后才可证伪的形态。
+- **负控**：把分派改回恒 OpenAI 形状 → 新增两条同时红（形状断言与一致性断言）；把 `anthropicModelRow` 的名字来源改成恒取路由名 → 纯函数那条红。均已还原并复跑。
+- **未做的相邻面**：`/v1/api-definition/providers` 仍没有 anthropic 分派。Claude Desktop 若走能力发现而不是 `/v1/models`，那里是下一个同源缺口——本批未动，因为不在三条线的任何一条里。

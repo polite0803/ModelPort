@@ -8,6 +8,7 @@
  */
 
 import type { AggregateCostSignal } from './aggregateCost.ts'
+import type { AggregateCreditSnapshot } from './aggregateCredit.ts'
 
 export type AggregateCategory = 'apikey' | 'free-tier' | 'local'
 
@@ -41,6 +42,27 @@ export interface AggregateModelEntry {
   name: string
 }
 
+/**
+ * 这个条目有没有一个「能问出账号级额度」的上游端点。
+ *
+ * 目录事实，和 `modelsUrl` 同类：它回答的是"上游有这么一个接口"，不是"我们算得出余额"。
+ * 声明进目录而不是进 `aggregateQuota.ts`，因为那份是脚本从取证回执生成的产物（明令不得手改），
+ * 把一个 URL 掺进数值生成器里会让两边都对不上账。
+ *
+ * 路径是**相对**的：抓取时以用户记录里的 `apiEndpoint` 为基址拼接，所以聊天流量去哪个 host、
+ * 额度查询就去哪个 host，用户改了 baseUrl 时两件事不会分家。
+ */
+export interface AggregateQuotaProbe {
+  /** 相对条目 baseUrl 的路径，以 `/` 开头，如 `/key` */
+  path: string
+  /** 用哪个解析器读这份报文；只有目录里真实存在过的两种 */
+  reader: 'openrouter-key' | 'siliconflow-user-info'
+  /** 这个端点是从哪份官方文档记下的 */
+  docUrl: string
+  /** 核对日期 */
+  asOf: string
+}
+
 export interface AggregateEntry {
   id: string
   name: string
@@ -58,6 +80,11 @@ export interface AggregateEntry {
   models: AggregateModelEntry[]
   /** Endpoint that lists models; absent means discovery is unavailable */
   modelsUrl?: string
+  /**
+   * 账号级实时额度的查询端点；缺席 = 这家问不到，界面上的按钮也不会出现。
+   * 目录里目前只有两家真实存在（`open_router` / `siliconflow`）。
+   */
+  quotaProbe?: AggregateQuotaProbe
   headers?: Record<string, string>
   notes?: string
   website?: string
@@ -132,13 +159,18 @@ export interface AggregateModelInfo {
   cost: AggregateCostSignal
 }
 
-/** 详情面板所需的全部数据：条目状态、Key、模型目录与本应用计量。 */
+/** 详情面板所需的全部数据：条目状态、Key、模型目录、本应用计量，与上一次实时额度快照。 */
 export interface AggregateDetail {
   entryId: string
   state: AggregateEntryState
   keys: AggregateKeyInfo[]
   models: AggregateModelInfo[]
   quotaUsage?: AggregateQuotaUsage
+  /**
+   * 用户手点出来的那一次余额读数（可能已经过期，过期时界面标出来）。
+   * 它与五态徽章无关，也绝不参与 `quotaViewOf` 的判定。
+   */
+  credit?: AggregateCreditSnapshot
 }
 
 /** Key / 模型变更的结果；`detail` 是变更后重新读取的面板数据。 */

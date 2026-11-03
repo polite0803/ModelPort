@@ -123,3 +123,19 @@ test('表里查不到来源时不崩，按 missing 报', () => {
   assert.equal(resolution.ok, false)
   assert.equal((resolution as { reason?: string }).reason, 'missing')
 })
+
+test('粘性硬优先只在建键是显式 false 时落盘（缺省即开，非法值不等于关掉）', () => {
+  const table = tableOf(
+    base('plain'),
+    base('off', { stickyHardPin: false }),
+    base('on', { stickyHardPin: true }),
+    base('junk', { stickyHardPin: 'no' as unknown as boolean }),
+  )
+  // 缺省即硬钉是**读侧**那一条 `!== false` 判据给的，所以老记录不必迁移：
+  // 键根本不存在，与「键存在且为 true」在行为上必须同形。
+  assert.equal(Object.hasOwn(table.plain, 'stickyHardPin'), false, '没配就不落键，别让每条路由多写一格')
+  assert.notEqual(table.plain.stickyHardPin, false)
+  assert.equal(table.off.stickyHardPin, false, '关掉必须真的存下来，否则下次读回又是开')
+  assert.equal(Object.hasOwn(table.on, 'stickyHardPin'), false, '显式开与缺省同一形状')
+  assert.equal(Object.hasOwn(table.junk, 'stickyHardPin'), false, '非法值不得被当成关掉')
+})

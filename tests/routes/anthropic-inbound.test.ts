@@ -14,7 +14,9 @@
  * 4. `toolCallingConfig` 关掉托管时，客户端的原生 tools 必须真的出站
  *    （此前 `buildRequestBody` 的白名单里根本没有 `tools` 这一格，那个开关
  *    等于「把工具静默丢掉」）；
- * 5. 带 `anthropic-version` 来列模型时返回 anthropic 形状；
+ * 5. 带 `anthropic-version` 来列模型时返回 anthropic 形状；不带时保持 OpenAI 形状；
+ *    单条检索 `/v1/models/:model` 同一分派（含 `modelMap` 键必须答话、档位沿用列表同一
+ *    判据、单查那一行与列表那一行逐字段同源 —— 两处共用一个构造处）；
  * 6. 未翻译的入向块（`document` 附件、`thinking`）在响应头与 warn 日志里各留一条，且
  *    「丢」确实发生在翻译层（上游报文里查不到那个词）；
  * 7. anthropic 形状的清单把申报过的 claude 面向名排在最前、窗口取映射目标的池下界、
@@ -678,5 +680,154 @@ test('清单只有「能被发现在、但选不中」的行时，日志把这�
     assert.equal(warnRows(), settled, '有一行可选就不许再报「全都选不中」')
   } finally {
     sm.updateConfig({ routes: live.routes as never, anthropicInbound: undefined })
+  }
+})
+
+/* -------------------------------------------------- 单条检索 /v1/models/:model */
+
+const ANTHROPIC_HEADERS = { 'anthropic-version': '2023-06-01' }
+
+/**
+ * 一致性判据：单查那一行必须能在**同一配置**的列表响应里逐字段找到。
+ *
+ * 这条防的是「两份构造逻辑漂移」——`modelsToAnthropicList` 与 `modelToAnthropicItem`
+ * 若各写一份字面量，早晚会一边有 `display_name` 一边没有。先比键集（缺键/多键都是漂移），
+ * 再逐字段比；`created_at` 只比到秒级容差：那一格取的是各自请求的 `Date.now()`，
+ * 两次 HTTP 之间跨过一次秒边界纯属正常，不是形状问题。
+ */
+function assertRowMatchesList(listRows: Array<Record<string, any>>, item: Record<string, any>, label: string): void {
+  const match = listRows.find((row) => row.id === item.id)
+  assert.ok(match, `${label}：列表里没有 id=${String(item.id)} 的那一行`)
+  assert.deepEqual(Object.keys(match).sort(), Object.keys(item).sort(),
+    `${label}：键集与列表那一行不同\n列表=${JSON.stringify(match)}\n单查=${JSON.stringify(item)}`)
+  for (const key of Object.keys(match)) {
+    if (key === 'created_at') {
+      assert.ok(Math.abs(Date.parse(String(match.created_at)) - Date.parse(String(item.created_at))) <= 1000,
+        `${label}：created_at 相差超过一秒 ${match.created_at} vs ${item.created_at}`)
+      continue
+    }
+    assert.deepEqual(match[key], item[key], `${label}：字段 ${key} 与列表那一行不一致`)
+  }
+}
+
+test('单条检索带 anthropic-version 时回 anthropic 形状；不带时 OpenAI 形状一字不变', async () => {
+  // `auto` 的池下界走真实管线：只有 antp 那家标了窗口，llm7 未标注、不参与下界。
+  sm.updateProvider('antp', { modelCapabilities: { 'Test-Model': { contextTokens: 128000 } } } as never)
+  const created = sm.createRoute({
+    name: 'antempty',
+    enabled: true,
+    strategy: 'round-robin',
+    prefer: 'balanced',
+    maxAttempts: 2,
+    stickyMinutes: 0,
+    // 聚合池策略：本夹具里没有聚合供应商 ⇒ 空池 ⇒ 没有可承诺的窗口（与
+    // `tests/routes/route-context-floor.test.ts` 的 `emptied` 同一手法）。
+    poolStrategies: [{ id: 'aggregate-only', operator: 'and' }],
+  })
+  assert.equal(created.ok, true, JSON.stringify(created.error))
+
+  try {
+    const anthAuto = await proxy.request('GET', '/v1/models/auto', { headers: ANTHROPIC_HEADERS })
+    assert.equal(anthAuto.status, 200)
+    assert.equal(anthAuto.json.type, 'model')
+    assert.equal(anthAuto.json.id, 'auto')
+    assert.equal(anthAuto.json.display_name, 'auto', 'display_name 恒等于 id：客户端筛的和发回来的是同一个名字')
+    assert.match(anthAuto.json.created_at, /T.*Z/, 'anthropic 这一版是 ISO 字符串，不是秒数')
+    assert.equal(anthAuto.json.max_input_tokens, 128000, '有窗口才发：与列表那一行同一个数')
+    assert.equal(anthAuto.json.object, undefined, 'anthropic 形状里没有 object/owned_by')
+    assert.equal(anthAuto.json.owned_by, undefined)
+    assert.equal('anthropic_family_tier' in anthAuto.json, false, '没标档位就省略键')
+
+    // 没窗口的一侧：键整个省略，而不是编一个 0 或兜底常量。
+    const anthEmpty = await proxy.request('GET', '/v1/models/antempty', { headers: ANTHROPIC_HEADERS })
+    assert.equal(anthEmpty.status, 200)
+    assert.equal(anthEmpty.json.type, 'model')
+    assert.equal('max_input_tokens' in anthEmpty.json, false,
+      `池里没有公布的窗口就不该有这一格：${JSON.stringify(anthEmpty.json)}`)
+
+    // 不带该头：OpenAI 形状一字不变。
+    const plain = await proxy.request('GET', '/v1/models/auto')
+    assert.equal(plain.status, 200)
+    assert.equal(plain.json.object, 'model')
+    assert.equal(plain.json.owned_by, 'auto-router')
+    assert.equal(plain.json.context_window, 128000)
+    assert.equal(plain.json.type, undefined)
+    assert.equal('display_name' in plain.json, false)
+    assert.equal('created_at' in plain.json, false)
+
+    // 名字域还是只有一个：单模型名与别名带不带这个头都查不到。
+    const bareModel = await proxy.request('GET', '/v1/models/Test-Model', { headers: ANTHROPIC_HEADERS })
+    assert.equal(bareModel.status, 404)
+    assert.equal(bareModel.json.type, 'error')
+    assert.equal(bareModel.json.error.type, 'not_found_error', '沿用仓里既有的 anthropic 错误信封')
+    assert.equal(bareModel.json.error.message, "Model 'Test-Model' not found")
+  } finally {
+    sm.updateProvider('antp', { modelCapabilities: {} } as never)
+    sm.deleteRoute('antempty')
+  }
+})
+
+test('列表广告过的 modelMap 键单查必须答话，且与列表那一行逐字段同源', async () => {
+  sm.updateProvider('antp', { modelCapabilities: { 'Test-Model': { contextTokens: 128000 } } } as never)
+  const off = sm.createRoute({
+    name: 'antoff',
+    enabled: false,
+    strategy: 'round-robin',
+    prefer: 'balanced',
+    maxAttempts: 2,
+    stickyMinutes: 0,
+  })
+  assert.equal(off.ok, true, JSON.stringify(off.error))
+
+  sm.updateConfig({
+    anthropicInbound: {
+      modelMap: { 'claude-mapped': 'auto', 'claude-off': 'antoff', 'claude-ghost': 'not-a-route' },
+      routeTiers: { auto: 'sonnet' },
+    },
+  })
+  try {
+    const list = await proxy.request('GET', '/v1/models', { headers: ANTHROPIC_HEADERS })
+    assert.equal(list.status, 200)
+    const rows = list.json.data as Array<Record<string, any>>
+
+    // 1. 映射键：客户端下一轮原样发回来的名字，单查不许否认。
+    const mapped = await proxy.request('GET', '/v1/models/claude-mapped', { headers: ANTHROPIC_HEADERS })
+    assert.equal(mapped.status, 200, `列表广告了这个名字，单查不能 404：${JSON.stringify(mapped.json)}`)
+    assert.equal(mapped.json.id, 'claude-mapped')
+    assert.equal(mapped.json.max_input_tokens, 128000, '窗口取映射目标那条路由的下界')
+    assert.equal(mapped.json.anthropic_family_tier, 'sonnet', '映射键行继承目标路由的档位（与列表同一判据）')
+    assertRowMatchesList(rows, mapped.json, '映射键')
+
+    // 2. 路由名同样逐字段一致。
+    const byRoute = await proxy.request('GET', '/v1/models/auto', { headers: ANTHROPIC_HEADERS })
+    assert.equal(byRoute.status, 200)
+    assertRowMatchesList(rows, byRoute.json, '路由名')
+
+    // 3. 映射目标停用 / 不存在 ⇒ 404（发出去就是让客户端选中一条必然失败的模型）。
+    const disabledTarget = await proxy.request('GET', '/v1/models/claude-off', { headers: ANTHROPIC_HEADERS })
+    assert.equal(disabledTarget.status, 404, '停用的路由不许冒充在服')
+    assert.equal(disabledTarget.json.type, 'error')
+    assert.equal(disabledTarget.json.error.type, 'not_found_error')
+    const ghostTarget = await proxy.request('GET', '/v1/models/claude-ghost', { headers: ANTHROPIC_HEADERS })
+    assert.equal(ghostTarget.status, 404)
+    const ids = rows.map((row) => row.id)
+    assert.ok(!ids.includes('claude-off') && !ids.includes('claude-ghost'),
+      `列表也不该广告这两行：${JSON.stringify(ids)}`)
+
+    // 4. 不带该头时映射键**不算**命中：OpenAI 形状的清单里没有这个名字，
+    //    单查答话就是比列表多答话（名字域裂成两套）。
+    const noHeader = await proxy.request('GET', '/v1/models/claude-mapped')
+    assert.equal(noHeader.status, 404)
+    assert.equal(noHeader.json.error.code, 'model_not_found')
+    assert.equal(noHeader.json.type, undefined, '没有 anthropic-version 就还是 OpenAI 信封')
+
+    // 5. 前缀通配键不在这一格：列表广告的是键的原样形，没广告的名字单查也不答。
+    sm.updateConfig({ anthropicInbound: { modelMap: { 'claude-': 'auto' } } })
+    const prefixHit = await proxy.request('GET', '/v1/models/claude-anything', { headers: ANTHROPIC_HEADERS })
+    assert.equal(prefixHit.status, 404, '请求期允许前缀兜底，广告面不允许 —— 否则清单里没有的名字单查认')
+  } finally {
+    sm.updateProvider('antp', { modelCapabilities: {} } as never)
+    sm.updateConfig({ anthropicInbound: undefined })
+    sm.deleteRoute('antoff')
   }
 })

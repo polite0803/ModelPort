@@ -831,6 +831,25 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
+  // 账号级实时额度：只由详情页那一个按钮触发。返回值里只有掩码 Key 与报文摘要，
+  // 密钥本身不过 IPC；异常兜底也走同一个形状，避免界面收到一个裸 throw。
+  ipcMain.handle(IpcChannels.AGGREGATE_QUERY_CREDITS, async (_, id: string) => {
+    try {
+      return await aggregateProviderManager.queryCredits(id)
+    } catch (error) {
+      console.error('[IPC] Aggregate credit query failed:', error)
+      return {
+        entryId: id,
+        asOf: new Date().toISOString(),
+        ok: false,
+        reason: 'network',
+        rows: [],
+        accounts: 0,
+        skipped: 0,
+      }
+    }
+  })
+
   ipcMain.handle(IpcChannels.CHANNELS_LIST, async () => {
     try {
       return { success: true, channels: await accountChannelManager.list() }

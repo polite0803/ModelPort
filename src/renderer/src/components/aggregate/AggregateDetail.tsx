@@ -4,6 +4,7 @@ import {
   BarChart3,
   ChevronDown,
   ChevronRight,
+  Coins,
   KeyRound,
   Loader2,
   Plus,
@@ -24,6 +25,12 @@ import type {
   AggregateMutationResult,
   AggregateQuotaUsage,
 } from '../../../../shared/aggregate'
+import type {
+  AggregateCreditQueryResult,
+  AggregateCreditReading,
+  AggregateCreditSnapshot,
+} from '../../../../shared/aggregateCredit'
+import { CREDIT_SNAPSHOT_TTL_MS, creditSnapshotLive } from '../../../../shared/aggregateCredit'
 import type {
   AggregateCostClass,
   AggregateCostSignal as AggregateModelCostSignal,
@@ -329,7 +336,13 @@ export function AggregateDetailPanel(props: AggregateDetailProps) {
             reasonText={reasonText}
             onRefresh={onRefresh}
           />
-          <QuotaCard entry={entry} hasApiKey={state.hasApiKey} usage={quotaUsage} />
+          <QuotaCard
+            entry={entry}
+            hasApiKey={state.hasApiKey}
+            usage={quotaUsage}
+            credit={detail.credit}
+            onRefresh={onRefresh}
+          />
           <ModelsCard
             entry={entry}
             models={detail.models}
@@ -701,14 +714,79 @@ function EndpointCard(props: {
   )
 }
 
-/** 免费额度卡：官方上限 / 本应用计量 / 官方口径说明。 */
+/**
+ * 一次额度读数的界面文案。
+ *
+ * 三条硬要求都在这里落地：
+ * - 「没问出来」和「问出来是 0」是两句话：失败只显示分类（HTTP 状态 / 非 JSON / 形状不认识 /
+ *   网络），永远不显示成"额度为 0"，也不留旧数字当现值。
+ * - 无上限（`limit: null`）不折算成任何数：它既不是 0 也不是"还有很多"。
+ * - 美元与人民币各自带单位出现，绝不和本应用的 token 计量出现在同一个数字里。
+ */
+function CreditReadingLine(props: { reading: AggregateCreditReading }) {
+  const { t } = useTranslation()
+  const { reading } = props
+
+  if (!reading.ok) {
+    const labelKey =
+      reading.reason === 'http-status'
+        ? 'aggregate.manage.credit.failHttpStatus'
+        : reading.reason === 'not-json'
+          ? 'aggregate.manage.credit.failNotJson'
+          : reading.reason === 'network'
+            ? 'aggregate.manage.credit.failNetwork'
+            : 'aggregate.manage.credit.failShape'
+    return (
+      <span className="text-destructive" title={reading.detail}>
+        {t('aggregate.manage.credit.failDetail', { label: t(labelKey), detail: reading.detail })}
+      </span>
+    )
+  }
+
+  if (reading.unlimited) {
+    return <span>{t('aggregate.manage.credit.unlimited')}</span>
+  }
+
+  if (typeof reading.remaining !== 'number') {
+    // 上游给了帽却没给余额：这不足以说"还剩多少"，照实说没有余额。
+    return (
+      <span>
+        {t('aggregate.manage.credit.limitOnly', { limit: reading.limit ?? 0, unit: reading.unit })}
+      </span>
+    )
+  }
+
+  return (
+    <span className="font-mono">
+      {typeof reading.limit === 'number'
+        ? t('aggregate.manage.credit.remainingWithLimit', {
+            remaining: reading.remaining,
+            limit: reading.limit,
+            unit: reading.unit,
+          })
+        : t('aggregate.manage.credit.remaining', { remaining: reading.remaining, unit: reading.unit })}
+    </span>
+  )
+}
+
+/** 读数时刻的本地化显示；解析不了就原样给出去，不假装是"刚刚"。 */
+function creditTimeOf(asOf: string): string {
+  const at = Date.parse(asOf)
+  return Number.isNaN(at) ? asOf : new Date(at).toLocaleString()
+}
+
+/** 免费额度卡：官方上限 / 本应用计量 / 官方口径说明，加一行手点出来的实时余额。 */
 function QuotaCard(props: {
   entry: AggregateEntry
   hasApiKey: boolean
   usage?: AggregateQuotaUsage
+  credit?: AggregateCreditSnapshot
+  onRefresh: () => Promise<void>
 }) {
   const { t } = useTranslation()
-  const { entry, hasApiKey, usage } = props
+  const { entry, hasApiKey, usage, credit, onRefresh } = props
+  const [probing, setProbing] = useState(false)
+  const [probe, setProbe] = useState<AggregateCreditQueryResult | null>(null)
 
   const view = quotaViewOf(entry, { hasApiKey, usage })
   const rows = quotaRows(entry.id, usage)
@@ -721,6 +799,19 @@ function QuotaCard(props: {
         : view.state === 'undocumented'
           ? 'border-amber-300 text-amber-700 dark:border-amber-700 dark:text-amber-400'
           : 'text-muted-foreground'
+
+  const probeDeclaration = entry.quotaProbe
+  /** 只有那一个按钮会发请求：没有轮询，也没有开页自动查。 */
+  const handleQueryCredits = async () => {
+    setProbing(true)
+    try {
+      setProbe(await window.electronAPI.aggregate.queryCredits(entry.id))
+      // 问成功的这一次会落盘成快照，面板要把它带回来显示"读数时间/是否过期"。
+      await onRefresh()
+    } finally {
+      setProbing(false)
+    }
+  }
 
   return (
     <Card>
@@ -789,6 +880,101 @@ function QuotaCard(props: {
               </button>
             )}
           </p>
+        )}
+        {/*
+          实时余额是**旁边独立的一行**：上面那张五态徽章（needs-key / exhausted / documented /
+          undocumented / absent）一个字都不改写，也不把问回来的钱并进它的判定。
+        */}
+        {probeDeclaration && (
+          <div className="space-y-1.5 border-t pt-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs font-medium text-muted-foreground">
+                {t('aggregate.manage.credit.title')}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!hasApiKey || probing}
+                title={hasApiKey ? t('aggregate.manage.credit.hint', { path: probeDeclaration.path }) : t('aggregate.manage.credit.needsKey')}
+                onClick={() => void handleQueryCredits()}
+              >
+                {probing ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Coins className="mr-1.5 h-4 w-4" />}
+                {probing ? t('aggregate.manage.credit.querying') : t('aggregate.manage.credit.query')}
+              </Button>
+            </div>
+
+            {!hasApiKey && (
+              <p className="text-xs text-muted-foreground">{t('aggregate.manage.credit.needsKey')}</p>
+            )}
+
+            {/* 逐把 Key 一行：多把 Key 各自问过一次，合并成一行会把"这把没钱那把有钱"说成"这家没钱"。 */}
+            {probe?.rows.map(row => (
+              <div key={row.keyId} className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="truncate" title={row.keyName}>
+                  {t('aggregate.manage.credit.perKey', { name: row.keyName, maskedKey: row.maskedKey })}
+                </span>
+                <CreditReadingLine reading={row.reading} />
+              </div>
+            ))}
+            {probe && probe.skipped > 0 && (
+              <p className="text-xs text-amber-700 dark:text-amber-400">
+                {t('aggregate.manage.credit.skippedKeys', { n: probe.skipped })}
+              </p>
+            )}
+            {probe?.failure && (
+              <p className="text-xs text-destructive">{t(`aggregate.manage.credit.failure.${probe.failure}`)}</p>
+            )}
+
+            {/* 落盘的那一行（本次问成功 = 新读数；本次没问成 = 上一次读数的原样，带它自己的时刻与过期标记）。 */}
+            {(() => {
+              const shown = probe?.snapshot ?? credit
+              if (!shown) {
+                return probe ? null : (
+                  <p className="text-xs text-muted-foreground">{t('aggregate.manage.credit.never')}</p>
+                )
+              }
+              const fresh = creditSnapshotLive(shown)
+              if (!shown.ok) {
+                // 旧行只剩"上次也没问出来"这一种信息，别让它看起来像一个 0 余额。
+                return (
+                  <p className="text-xs text-muted-foreground">
+                    {t('aggregate.manage.credit.lastFail', {
+                      time: creditTimeOf(shown.asOf),
+                      detail: t(`aggregate.manage.credit.reason.${shown.reason ?? 'network'}`),
+                    })}
+                  </p>
+                )
+              }
+              return (
+                <div className="space-y-0.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <span className="font-mono">
+                      {shown.unlimited
+                        ? t('aggregate.manage.credit.unlimited')
+                        : typeof shown.limit === 'number'
+                          ? t('aggregate.manage.credit.remainingWithLimit', {
+                              remaining: shown.remaining ?? 0,
+                              limit: shown.limit,
+                              unit: shown.unit,
+                            })
+                          : t('aggregate.manage.credit.remaining', { remaining: shown.remaining ?? 0, unit: shown.unit })}
+                    </span>
+                    <span className="text-muted-foreground">{t('aggregate.manage.credit.at', { time: creditTimeOf(shown.asOf) })}</span>
+                  </div>
+                  <p className={fresh ? 'text-[11px] text-muted-foreground' : 'text-[11px] text-amber-700 dark:text-amber-400'}>
+                    {fresh
+                      ? t('aggregate.manage.credit.orderingOn', { minutes: Math.round(CREDIT_SNAPSHOT_TTL_MS / 60_000) })
+                      : t('aggregate.manage.credit.orderingOff', { minutes: Math.round(CREDIT_SNAPSHOT_TTL_MS / 60_000) })}
+                  </p>
+                </div>
+              )
+            })()}
+
+            <p className="text-[11px] text-muted-foreground" title={probeDeclaration.docUrl}>
+              {t('aggregate.manage.credit.endpoint', { path: probeDeclaration.path, doc: probeDeclaration.docUrl })}
+              {` ${t('aggregate.quotaSource', { date: probeDeclaration.asOf })}`}
+            </p>
+          </div>
         )}
       </CardContent>
     </Card>

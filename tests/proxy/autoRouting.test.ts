@@ -415,7 +415,7 @@ test('tool-using requests prefer a strong model even when cost is the preference
   assert.equal(ranked[0].accountId, 'paid-strong')
 })
 
-test('a sticky hint promotes the previous candidate but never hard-pins it', () => {
+test('rankCandidates 层：粘性是加分（硬钉发生在 select 层，见 routes-pool-and-sticky.test.ts）', () => {
   const profile = profileRequest(textRequest('hi'))
   const pool = [
     candidate({ accountId: 'a', displayName: 'Qwen3.6' }),

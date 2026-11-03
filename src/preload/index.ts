@@ -36,6 +36,7 @@ import type {
   AnthropicDiscoveryResult,
   AnthropicRouteApplyResult,
 } from '../shared/anthropicDiscovery'
+import type { AggregateCreditQueryResult } from '../shared/aggregateCredit'
 import type {
   AggregateDetail,
   AggregateListResult,
@@ -764,6 +765,10 @@ const aggregateAPI = {
 
   testModel: (id: string, modelId: string): Promise<AggregateModelTestResult> =>
     ipcRenderer.invoke(IpcChannels.AGGREGATE_TEST_MODEL, id, modelId),
+
+  // 账号级实时额度：点一次问一次。没有轮询通道，也没有开页自动发。
+  queryCredits: (id: string): Promise<AggregateCreditQueryResult> =>
+    ipcRenderer.invoke(IpcChannels.AGGREGATE_QUERY_CREDITS, id),
 }
 
 const channelsAPI = {

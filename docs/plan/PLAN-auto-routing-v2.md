@@ -207,3 +207,16 @@
 | 全量测试 | `node --test "tests/**/*.test.ts" "tests/**/*.test.mjs" "tests/**/*.test.js"` | 421 条全过、0 失败 |
 
 未覆盖项：设置页的选择器只经过了类型检查与源码测试（`tests/renderer/auto-routing-settings.test.mjs`），没有在运行中的 Electron 里手点；本轮没有改动布局结构，只在一个既有区块前插入了一个下拉框。
+
+## 7. 2026-11-03 复核与粘性裁定（推翻 §1.4 / C-1 的「不再硬钉队首」）
+
+本轮对账 §6 的自述，用现码与实跑读数逐条核过：A-1…A-5、B-1…B-4、C-2、C-3 与 E 的裸名跨家链都成立（定向 108 条 + `autoRouting-manual.test.ts` 18 条，0 失败）。**只有 C-1 的「不再硬钉队首」已经不成立**，且计划文档一直没跟着改。
+
+事实链：`dd7adf4`「Codex 会话粘性改为路由层硬优先」在 `autoRouter.select` 里加了 `promoteSticky`，把上一轮成功的模型提到队首。因此今天两层同时生效——打分里的 `stickyBonus`（+0.12 / 同供应商不同账号 +0.06）还在，但**首位归属由 `promoteSticky` 决定**，加分只剩「该模型在每账号去重里争到唯一槽」这一层边际作用。判据也随之分裂：`tests/proxy/autoRouting.test.ts` 那条 "never hard-pins it" 只测 `rankCandidates` 纯函数层，管不到 select 层，所以这次回归没有任何用例会红；真正钉住硬优先的是 `tests/routes/routes-pool-and-sticky.test.ts` 的「路由层粘性是硬优先」。
+
+**裁定（2026-11-03）：路由级开关，默认硬钉。** `ModelRoute.stickyHardPin?: boolean`，缺省键（含老 `data.json`）按 `!== false` 解释为开——写成 `=== true` 会让全部老装机静默失去硬钉，与 [[project-modelport-codex-agent-routing]] 记的那次故障正对着。关掉它 = 本计划 §1.4 的纯加分语义，那一层此前没有独立判据，本批要补上「关掉后免费/档位差能压过粘性」的正反两条，否则 0.12/0.06 是否还有作用无法证伪。
+
+- **依据**：agent 会话换模型比慢一点更伤（上下文理解、工具协议、缓存全部重来），且 §7 上面那条实测是 21 次请求跳 7 个模型。
+- **代价**：默认档下粘性候选即使分数远低于别家也会被选中；同一段会话第一轮选中谁，整段都跟着它的延迟走——这与 2026-11-03「速度 vs 省钱 → 省钱」那条拍板是同一个对价，不是回归。
+- **被推翻时的改法**：把默认值翻成纯加分即可（`promoteSticky` 的调用条件与 `stickyHardPin` 的缺省解释在同一处），退役面只有 `routes-pool-and-sticky.test.ts` 那两条硬优先用例。
+- **不做**：不为「关掉硬钉」另造第二条打分通路，加分项沿用既有的 `stickyBonus`。

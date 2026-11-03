@@ -308,6 +308,17 @@ export interface ModelRoute {
   maxAttempts: number
   /** How long a conversation stays pinned; 0 disables stickiness for this route. */
   stickyMinutes: number
+  /**
+   * Stickiness is a **hard priority** on this route: the model the conversation last
+   * succeeded on is moved to the head of the ranked list, whatever its score.
+   *
+   * Absent means enabled, because records written before this field existed must keep
+   * the behaviour they were observed to need - an agent session that changes model
+   * mid-conversation pays for context, tool protocol and cache all over again. Set it
+   * to `false` to let the sticky bonus (+0.12 / +0.06 in the score) be the only
+   * mechanism, which is what the routing v2 plan originally specified.
+   */
+  stickyHardPin?: boolean
   /** Static pool filters, evaluated left to right; empty means no filtering. */
   poolStrategies: AutoPoolStrategy[]
   /**

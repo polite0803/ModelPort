@@ -450,6 +450,9 @@
     "autoRoutingMaxAttemptsHelp": "How many candidates one request may try on rate limits or 5xx (1-5)",
     "autoRoutingSticky": "Conversation stickiness (minutes)",
     "autoRoutingStickyHelp": "Reuse the model that last succeeded for the same conversation within this window; set to 0 to disable",
+    "autoRoutingStickyHardPin": "Hard-pin the sticky model (route it first regardless of score)",
+    "autoRoutingStickyHardPinHelp": "On: the model this conversation last succeeded on is moved to the front of the candidate list, so an agent session does not change model mid-task. Off: stickiness is only a score bonus (+0.12, or +0.06 for another account of the same model), and a clearly better candidate wins it.",
+    "autoRoutingStickyHardPinIdle": "Stickiness is already off (the window above is 0), so this setting does nothing right now.",
     "autoRoutingPrefer": "Routing preference",
     "autoRoutingPreferHelp": "Balanced picks a tier from the request complexity, Fast prefers quick models, Strong prefers capable ones, Cheap prefers free or low-multiplier models. The X-Auto-Prefer header overrides it per request",
     "autoRoutingPrefer_balanced": "Balanced (by complexity)",
@@ -1509,6 +1512,42 @@
         "title": "Free quota",
         "none": "No published cap; usage is metered locally.",
         "notKeyed": "No key, so usage cannot be metered."
+      },
+      "credit": {
+        "title": "Live credit (asked from the vendor, not metered here)",
+        "query": "Query live credit",
+        "querying": "Querying…",
+        "needsKey": "This entry has no stored key, so there is no credential to query with.",
+        "hint": "One click sends one GET {{path}}. Nothing is polled and opening the page never asks by itself.",
+        "never": "Never queried for this entry.",
+        "unlimited": "This key reports no credit cap - neither 0 nor \"plenty left\".",
+        "remaining": "{{remaining}} {{unit}} left",
+        "remainingWithLimit": "{{remaining}} of {{limit}} {{unit}} left",
+        "limitOnly": "Cap {{limit}} {{unit}}, no balance reported",
+        "at": "read at {{time}}",
+        "orderingOn": "Fresh (within {{minutes}} min), so it counts toward candidate ordering.",
+        "orderingOff": "Expired (older than {{minutes}} min): shown verbatim, no longer used for ordering. Click once to refresh.",
+        "perKey": "{{name}} · {{maskedKey}}",
+        "skippedKeys": "{{n}} further key(s) not queried",
+        "endpoint": "Credit endpoint: {{path}} (source: {{doc}})",
+        "lastFail": "Last attempt ({{time}}) did not yield a balance: {{detail}}",
+        "failHttpStatus": "Upstream refused the query",
+        "failNotJson": "The credit endpoint did not answer with JSON",
+        "failShape": "Response shape not recognised - nothing was guessed",
+        "failNetwork": "Network error while querying",
+        "failDetail": "{{label}}: {{detail}}",
+        "failure": {
+          "unknown_entry": "Catalogue entry not found.",
+          "no_probe": "This entry has no credit endpoint declared, so nothing was asked.",
+          "not_configured": "The provider record is missing, so there is nothing to query.",
+          "missing_api_key": "No stored key to query with."
+        },
+        "reason": {
+          "http-status": "upstream status",
+          "not-json": "not JSON",
+          "unexpected-shape": "unrecognised shape",
+          "network": "network error"
+        }
       },
       "models": {
         "title": "Models",

@@ -31,6 +31,14 @@ import type { LegacyToolPromptConfig, ToolCallingConfig } from '../../shared/too
 import { DEFAULT_TOOL_CALLING_CONFIG } from '../../shared/toolCalling.ts'
 import { RETIRED_PROVIDER_IDS } from '../../shared/types.ts'
 import type { DayTokenBucket } from '../../shared/tokenAccounting.ts'
+import type { AggregateCreditSnapshot, AggregateCreditSnapshots } from '../../shared/aggregateCredit.ts'
+
+/**
+ * 实时额度快照的落盘键。类型只在 `shared/aggregateCredit.ts` 声明一次，这里同步
+ * `StoreSchema` 需要的表形态（本仓 `LoadBalanceStrategy` 那类"两处声明"的先例，
+ * 只在两边都得自己写一遍时才成立；这里走 re-export，避免出现第二个定义）。
+ */
+export type { AggregateCreditSnapshot, AggregateCreditSnapshots }
 
 /** Request names the retired DeepSeek integration used; stored mappings using them are dropped. */
 const DEEPSEEK_LEGACY_MODEL_MAPPING_NAMES = [
@@ -754,6 +762,14 @@ export interface StoreSchema {
   userModelOverrides: UserModelOverrides
   /** Manual capability corrections; merged on top of every automatic mark */
   userModelMarks: UserModelMarks
+  /**
+   * 账号级实时额度快照，一个聚合条目一行（`entryId -> 那一次问回来的余额`）。
+   *
+   * 与 `userModelMarks` 同理，它**不进** `aggregateQuota.ts`（那是脚本从取证回执生成的
+   * 静态帽）也不进额度账本（那是本应用自己计量的 token）：单位是钱、来源是上游，
+   * 混进任何一边都会把两个计数域折成一个数。
+   */
+  aggregateCreditSnapshots: AggregateCreditSnapshots
 }
 
 /**

@@ -25,6 +25,7 @@ import {
   estimateAnthropicInputTokensDetailed,
   anthropicNameShape,
   clientNamesForTieredRoutes,
+  modelToAnthropicItem,
   modelsToAnthropicList,
   routesAbsentFromClaudePicker,
   stopReasonOf,
@@ -642,6 +643,39 @@ test('档位是清单行的第二条活路：名字不被客户端认识时靠 t
   for (const row of rows) {
     assert.equal(row.display_name, row.id, `${row.id} 的显示名不许与 id 分家`)
   }
+})
+
+test('单条检索那一行与清单那一行同源：同一入参逐字段相等', () => {
+  // 这一条是「两份构造逻辑不许漂移」的确定性版本（路由层那条要跨两次 HTTP，只能比到秒）。
+  const models = [
+    { id: 'auto', created: 1700000000, context_window: 128000 },
+    { id: 'no-window', created: 1700000050 },
+  ]
+  const mappedNames = { 'claude-sonnet-4-6': 'auto', 'claude-ghost': 'not-a-model' }
+  const routeTiers = { auto: 'sonnet' }
+  const listRows = modelsToAnthropicList(models, mappedNames, routeTiers).data as any[]
+  const byId = new Map(listRows.map(row => [row.id as string, row]))
+
+  assert.deepEqual(
+    modelToAnthropicItem({
+      requestedName: 'claude-sonnet-4-6', routeName: 'auto', entry: models[0],
+      modelMap: mappedNames, routeTiers,
+    }),
+    byId.get('claude-sonnet-4-6'),
+    '映射键行：id / display_name / created_at / max_input_tokens / 档位都取列表那一格的值',
+  )
+  assert.deepEqual(
+    modelToAnthropicItem({ requestedName: 'no-window', routeName: 'no-window', entry: models[1] }),
+    byId.get('no-window'),
+    '没窗口的一侧同样逐字段：省略键而不是写个 0',
+  )
+
+  // 负控（少传映射表就是「入参名不是列表广告过的键」那一支）：id 回到路由名，而不是凭空折出一个 claude 名。
+  const unfolded = modelToAnthropicItem({ requestedName: 'claude-sonnet-4-6', routeName: 'auto', entry: models[0], routeTiers })
+  assert.deepEqual(unfolded, byId.get('auto'), '没有键命中时那一行就是路由名那一行')
+
+  // 名字为空时答不了（调用方按 404 处理），不许发一条 `id: ''` 的空壳冒充查到了模型。
+  assert.equal(modelToAnthropicItem({ requestedName: '   ', routeName: '  ' }), undefined)
 })
 
 test('错误信封用 anthropic 认识的 type，状态码决定它', () => {

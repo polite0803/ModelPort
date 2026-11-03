@@ -38,6 +38,15 @@ import type {
   AggregateSaveInput,
 } from '../../../shared/aggregate'
 import { normalizeAggregateKeys, normalizeAggregateModelParams, mergeAggregateModelIds } from '../../../shared/aggregate'
+import type { AggregateQuotaProbe } from '../../../shared/aggregate'
+import type {
+  AggregateCreditKeyRow,
+  AggregateCreditQueryFailure,
+  AggregateCreditQueryResult,
+  AggregateCreditReading,
+} from '../../../shared/aggregateCredit'
+import { CREDIT_QUERY_KEY_CAP } from '../../../shared/aggregateCredit'
+import { buildCreditSnapshot, creditUnitOfReader, parseQuotaProbe } from './quotaProbe'
 
 const PROBE_TIMEOUT_MS = 20000
 /** 单模型测试是一次真实补全，给推理型模型留出余量。 */
@@ -68,6 +77,18 @@ function errorMessageOf(data: unknown): string {
   }
   const message = (data as { message?: unknown }).message
   return typeof message === 'string' && message ? ` - ${message}` : ''
+}
+
+/**
+ * 把文本里出现过的密钥字面量换成掩码。
+ * 失败详情（HTTP 正文摘要、axios 的报错句）都要进界面和日志，所以脱敏必须在
+ * 它们被拼出来的这一刻做，而不是等调用方记得处理。
+ */
+function redactSecrets(text: string, secrets: readonly (string | undefined)[]): string {
+  return secrets.reduce<string>(
+    (acc, secret) => (secret && secret.length >= 4 ? acc.split(secret).join('••••') : acc),
+    text
+  )
 }
 
 /**
@@ -287,6 +308,8 @@ class AggregateProviderManager {
       AccountManager.delete(account.id)
     }
     storeManager.deleteProvider(id)
+    // 记录都没了，那次"问过余额"的读数也不该继续影响路由。
+    storeManager.deleteAggregateCreditSnapshot(id)
     this.writeMappings(id, {})
     // 用户显式删除的免验证条目记入黑名单：自动开通不再复活它。
     // 只对真正标了 autoProvision 的条目落盘，普通条目不因此多写一次配置。
@@ -414,8 +437,17 @@ class AggregateProviderManager {
     const state = this.getState(entry)
     const quotaUsage = this.usageOf(id) ?? undefined
     const provider = storeManager.getProviderById(id)
+    // 上一次手点出来的余额读数（可能已过期）。它只是"带过去显示"，不参与五态徽章的判定。
+    const credit = storeManager.getAggregateCreditSnapshot(id)
     if (!provider || provider.type !== 'aggregate') {
-      return { entryId: id, state, keys: [], models: [], ...(quotaUsage ? { quotaUsage } : {}) }
+      return {
+        entryId: id,
+        state,
+        keys: [],
+        models: [],
+        ...(quotaUsage ? { quotaUsage } : {}),
+        ...(credit ? { credit } : {}),
+      }
     }
 
     const models: AggregateModelInfo[] = storeManager.getModelCatalogue(id).map(row => {
@@ -441,6 +473,7 @@ class AggregateProviderManager {
       keys: this.listKeys(id),
       models,
       ...(quotaUsage ? { quotaUsage } : {}),
+      ...(credit ? { credit } : {}),
     }
   }
 
@@ -687,6 +720,118 @@ class AggregateProviderManager {
     }
 
     return lastFailure ?? { success: false, reason: 'network_error' }
+  }
+
+  /**
+   * 查询账号级实时额度（美元 / 人民币余额）。
+   *
+   * 触发方式只有一种：聚合详情页上那一个按钮。没有周期轮询、没有开页自动发，
+   * 所以这里的每一次出网都是用户此刻明确要求的。
+   *
+   * 三条实现约束：
+   * - **URL 跟着用户配的 base 走**：基址取记录里的 `apiEndpoint`，拼目录声明的相对
+   *   `quotaProbe.path`。聊天流量去哪个 host，额度查询就去哪个 host；转录来的那个
+   *   `.com` 是否成立，也只在这一处体现，不会和另写的主机名分家。
+   * - **鉴权复用既有通路**：`buildProbeHeaders`（Keyed 条目从账号表取 `credentials.apiKey`），
+   *   不新建任何凭据路径。Key 不进返回值、不进日志，报文摘要与错误详情都先脱敏。
+   * - **解析层不在这个文件里**：形状判断全部在 `./quotaProbe.ts`（纯函数，不碰网络也不写盘），
+   *   所以"猜错字段"这件事只会以 `unexpected-shape` 的形式出现在界面上。
+   */
+  async queryCredits(id: string): Promise<AggregateCreditQueryResult> {
+    const asOf = new Date().toISOString()
+    const stopped = (kind: AggregateCreditQueryFailure): AggregateCreditQueryResult => ({
+      entryId: id,
+      asOf,
+      ok: false,
+      failure: kind,
+      rows: [],
+      accounts: 0,
+      skipped: 0,
+    })
+
+    const entry = getAggregateEntry(id)
+    if (!entry) return stopped('unknown_entry')
+    const probe = entry.quotaProbe
+    if (!probe) return stopped('no_probe')
+
+    this.repairRetiredBaseUrls()
+    const provider = storeManager.getProviderById(id)
+    if (!provider || provider.type !== 'aggregate') return stopped('not_configured')
+
+    const accounts = entry.authKind === 'apiKey'
+      ? AccountManager.getByProviderId(id, true).filter(account => Boolean(account.credentials.apiKey))
+      : []
+    if (accounts.length === 0) return stopped('missing_api_key')
+
+    // 超过上限只查前 N 把，并把"其余没查"如实带回去：静默截断会让面板显示成"全部都查过了"。
+    const attempts = accounts.slice(0, CREDIT_QUERY_KEY_CAP)
+    const skipped = accounts.length - attempts.length
+    const path = probe.path.startsWith('/') ? probe.path : `/${probe.path}`
+    const url = `${trimmed(provider.apiEndpoint)}${path}`
+
+    const rows: AggregateCreditKeyRow[] = []
+    for (const account of attempts) {
+      const key = account.credentials.apiKey
+      rows.push({
+        keyId: account.id,
+        keyName: account.name,
+        maskedKey: maskKey(key),
+        reading: await this.readCreditAt(url, entry, provider, probe, key),
+      })
+    }
+
+    const snapshot = buildCreditSnapshot({
+      asOf,
+      unit: creditUnitOfReader(probe.reader),
+      rows,
+      accounts: attempts.length,
+      skipped,
+    })
+
+    // 只在"尝试过的每一把都问出了可比较的数"时落盘：问得不全时留着上一行，
+    // 面板继续按它自己的 `asOf` 显示并标过期，绝不把旧数当现值、也不把旧数抹成 0。
+    if (snapshot.ok) storeManager.setAggregateCreditSnapshot(id, snapshot)
+
+    return {
+      entryId: id,
+      asOf,
+      ok: snapshot.ok,
+      ...(snapshot.ok ? {} : { reason: snapshot.reason }),
+      rows,
+      accounts: attempts.length,
+      skipped,
+      ...(snapshot.ok ? { snapshot } : {}),
+      docUrl: probe.docUrl,
+      probeAsOf: probe.asOf,
+    }
+  }
+
+  /** 一把 Key 的一次额度查询：状态码分类与解析都在外面判，这里只管出网和脱敏。 */
+  private async readCreditAt(
+    url: string,
+    entry: AggregateEntry,
+    provider: Provider,
+    probe: AggregateQuotaProbe,
+    apiKey: string,
+  ): Promise<AggregateCreditReading> {
+    try {
+      const response = await axios.get(url, {
+        headers: this.buildProbeHeaders(entry, provider, apiKey),
+        timeout: PROBE_TIMEOUT_MS,
+        validateStatus: () => true,
+      })
+      if (response.status >= 400) {
+        // 状态码不是"余额为 0"：它只是上游拒绝了这一次询问。
+        return { ok: false, reason: 'http-status', detail: `HTTP ${response.status}` }
+      }
+      return parseQuotaProbe(probe.reader, response.data, [apiKey])
+    } catch (error) {
+      return {
+        ok: false,
+        reason: 'network',
+        detail: redactSecrets(error instanceof Error ? error.message : String(error), [apiKey]),
+      }
+    }
   }
 
   /** 从 models.dev 取某一家的聊天模型。任何失败都返回 null（不是空数组），

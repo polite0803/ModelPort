@@ -450,6 +450,9 @@
     "autoRoutingMaxAttemptsHelp": "单次请求最多尝试几个候选，遇到限流或 5xx 时自动切换（1-5）",
     "autoRoutingSticky": "会话粘性（分钟）",
     "autoRoutingStickyHelp": "同一段对话在该时长内优先复用上次成功的模型，设为 0 关闭",
+    "autoRoutingStickyHardPin": "粘性模型硬优先（无条件排到候选队首）",
+    "autoRoutingStickyHardPinHelp": "开：把这段对话上次成功的模型提到候选队首，agent 会话不会中途换模型。关：粘性只作为打分加分（+0.12，同模型的另一个账号 +0.06），明显更合适的候选可以赢过它",
+    "autoRoutingStickyHardPinIdle": "上面的粘性时长是 0，粘性本身已关闭，这一格暂时不起作用。",
     "autoRoutingPrefer": "路由偏好",
     "autoRoutingPreferHelp": "均衡按请求复杂度挑档位，速度优先选快模型，能力优先选强模型，免费优先选不计费或低倍率的模型。请求头 X-Auto-Prefer 可按次覆盖",
     "autoRoutingPrefer_balanced": "均衡（按复杂度）",
@@ -1512,6 +1515,42 @@
         "title": "免费额度",
         "none": "官方未公布额度，按实际调用计量。",
         "notKeyed": "未配 Key，无法计量。"
+      },
+      "credit": {
+        "title": "实时余额（向上游问的，不是本应用计量）",
+        "query": "查询实时额度",
+        "querying": "查询中…",
+        "needsKey": "该条目没有已存的 Key，没有可用来查询的凭据。",
+        "hint": "点一次只发一次 GET {{path}}；不做周期轮询，打开页面也不会自己发。",
+        "never": "这一家还没查询过。",
+        "unlimited": "这把 Key 报告没有花费上限 —— 既不是 0，也不当作“还剩很多”。",
+        "remaining": "剩余 {{remaining}} {{unit}}",
+        "remainingWithLimit": "剩余 {{remaining}} / 上限 {{limit}} {{unit}}",
+        "limitOnly": "只有上限 {{limit}} {{unit}}，上游没报余额",
+        "at": "读数时间 {{time}}",
+        "orderingOn": "读数新鲜（{{minutes}} 分钟内），参与选号排序。",
+        "orderingOff": "已过期（超过 {{minutes}} 分钟）：照实展示，不再参与排序，点一次可刷新。",
+        "perKey": "{{name}} · {{maskedKey}}",
+        "skippedKeys": "其余 {{n}} 把未查询",
+        "endpoint": "额度端点：{{path}}（出处：{{doc}}）",
+        "lastFail": "上一次查询（{{time}}）没问到余额：{{detail}}",
+        "failHttpStatus": "上游拒绝了这次查询",
+        "failNotJson": "额度接口没有按 JSON 回答",
+        "failShape": "报文形状不认识 —— 没有猜字段",
+        "failNetwork": "查询时网络出错",
+        "failDetail": "{{label}}：{{detail}}",
+        "failure": {
+          "unknown_entry": "目录里没有这个条目。",
+          "no_probe": "该条目没有声明额度端点，什么都没问。",
+          "not_configured": "供应商记录不存在，没有可查询的地址。",
+          "missing_api_key": "没有可用来查询的已存 Key。"
+        },
+        "reason": {
+          "http-status": "上游状态码",
+          "not-json": "不是 JSON",
+          "unexpected-shape": "形状不认识",
+          "network": "网络错误"
+        }
       },
       "models": {
         "title": "模型",

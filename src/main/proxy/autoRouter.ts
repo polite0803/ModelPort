@@ -644,12 +644,14 @@ class AutoRouter {
       missing.push(...explainMissing(profile, contractPool))
     }
 
-    // 会话粘性在路由层是**硬优先**：打分里的 0.12 只是「同分时的倾向」，
-    // 盖不过免费/档位/成本差；实测 Codex 同一段对话 21 次请求在 7 个模型之间
-    // 跳，最后被 Spark-X2.6 接成「继续上一轮」。agent 会话换模型比慢一点更
-    // 伤：上下文理解、工具协议、缓存全部重来。这里把上一轮成功的模型提到
-    // 队首；它若停服/冷却，候选池里自然没有它，仍然自动让位。
-    const ordered = promoteSticky(ranked, sticky)
+    // 会话粘性在路由层是**硬优先**（`stickyHardPin`，缺省即开）：打分里的 0.12 只是
+    // 「同分时的倾向」，盖不过免费/档位/成本差；实测 Codex 同一段对话 21 次请求在 7 个
+    // 模型之间跳，最后被 Spark-X2.6 接成「继续上一轮」。agent 会话换模型比慢一点更
+    // 伤：上下文理解、工具协议、缓存全部重来。这里把上一轮成功的模型提到队首；它若
+    // 停服/冷却，候选池里自然没有它，仍然自动让位。
+    // 关掉这一格就退回路由 v2 计划 §1.4 的纯加分语义：首位由打分决定，粘性只提供
+    // +0.12 / +0.06，差距过大时会让位给更合适的候选。
+    const ordered = route?.stickyHardPin === false ? ranked : promoteSticky(ranked, sticky)
 
     const candidates: AutoCandidate[] = []
     for (const input of ordered) {

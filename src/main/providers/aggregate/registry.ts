@@ -1618,6 +1618,15 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     "authUrl": "https://cloud.siliconflow.com/account/ak",
     "envVar": "SILICONFLOW_API_KEY",
     "modelsUrl": "https://api.siliconflow.com/v1/models",
+    // 账号级余额端点：目录里的 baseUrl 是 `/v1`，官方路径是 `/v1/user/info`，所以相对路径是 `/user/info`。
+    // docUrl 记的是**这份端点声明的转录来源**（PLAN §1 第 3 行），本轮没有真机报文：官方文档页与字段名
+    // （余额是不是就叫 `balance`）要在界面上点一次才能确认，确认不了时解析器报 `unexpected-shape`。
+    "quotaProbe": {
+      "path": "/user/info",
+      "reader": "siliconflow-user-info",
+      "docUrl": "https://github.com/tashfeenahmed/freellmapi",
+      "asOf": "2026-10-29"
+    },
     "notes": "Chat ids from the 9router registry; listing is filtered with sub_type=chat.",
     "website": "https://siliconflow.com/"
   },
@@ -2677,6 +2686,15 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     ],
     "authUrl": "https://openrouter.ai/keys",
     "envVar": "OPENROUTER_API_KEY",
+    // 账号级额度端点：baseUrl 是 `https://openrouter.ai/api/v1`，官方路径 `/api/v1/key`，
+    // 所以相对路径是 `/key`。`data.limit` 为 null 表示这把 Key 没有花费上限（不是 0，也不是"还有很多"）。
+    // docUrl 记的是**这份端点声明的转录来源**（PLAN §1 第 3 行），本轮没有真机报文核对过字段拼写。
+    "quotaProbe": {
+      "path": "/key",
+      "reader": "openrouter-key",
+      "docUrl": "https://github.com/tashfeenahmed/freellmapi",
+      "asOf": "2026-10-29"
+    },
     "notes": "Free tier: 27+ free models, no credit card, ~200 requests/day (9router registry).",
     "website": "https://openrouter.ai/",
     "freeModelsHint": [

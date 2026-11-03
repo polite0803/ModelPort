@@ -97,12 +97,23 @@ test('播种出来的字段除名字以外全部沿用 auto', () => {
     prefer: 'cheap',
     maxAttempts: 4,
     stickyMinutes: 20,
+    // 粘性硬优先与 stickyMinutes 同一条继承规则：auto 没关（缺省即开）时种子也是开。
+    stickyHardPin: true,
     poolStrategies: [{ id: 'free-only', operator: 'and' }],
     // auto 的钉名是「这一条路由只跑那几家」的语义，不能替另一套协议继承过去。
     pinModels: [],
     includeModels: [],
     excludeModels: [],
   })
+
+  // 用户在 auto 上关过硬钉 ⇒ 新种下的那条不许被悄悄打开（与上面 enabled 那一条同理）。
+  const unpinned = presetRouteFields(
+    { ...auto, stickyHardPin: false } as never,
+    legacy as never,
+    'round-robin',
+    seedNamed('codex')
+  )
+  assert.equal(unpinned.stickyHardPin, false)
 
   // auto 已被删除时回落到 legacy 那份，而不是拿一个出厂常量替用户决定。
   const fallback = presetRouteFields(undefined, legacy as never, 'smart', seedNamed('codex'))

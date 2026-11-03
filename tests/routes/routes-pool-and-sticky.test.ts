@@ -383,6 +383,51 @@ test('E：粘性只是加分不是硬钉 —— 被钉住的模型停服后自�
   assert.equal(select(route).candidates[0].displayName, 'Beta-Lite', '记录还在有效期内，恢复即命中')
 })
 
+test('E：`stickyHardPin: false` 时自然分更低的粘性候选让位（差 0.3 > 加分 0.12）', () => {
+  // `prefer: 'cheap'` 把成本权重从 0.2 抬到 0.6，Alpha-Flash 的 `free:true` 因此领先
+  // Gamma-Mini 0.3，正好大于粘性的 0.12 —— 这一格是「加分不再左右首位」的唯一可见形态。
+  const route = makeRoute({ prefer: 'cheap', stickyHardPin: false })
+  const fresh = select(route)
+  assert.equal(fresh.candidates[0].displayName, 'Alpha-Flash', '没有粘性时免费那家自然第一')
+  const gamma = fresh.candidates.find(candidate => candidate.displayName === 'Gamma-Mini')
+  assert.ok(gamma)
+  autoRouter.rememberRoute(fresh.conversationKey, gamma, route)
+
+  const again = select(route)
+  assert.equal(again.candidates[0].displayName, 'Alpha-Flash', '关掉硬钉后首位回到打分')
+  assert.equal(again.reason, 'score')
+})
+
+test('E：同一条路由把硬钉打开（缺省即开），0.3 的自然分差也被粘性盖过', () => {
+  // 与上一条只差 `stickyHardPin` 这一格：期望结果从 Alpha-Flash 变成 Gamma-Mini，
+  // 于是这两条互为对方的负控，开关没接线时必有一条红。
+  const route = makeRoute({ prefer: 'cheap' })
+  const fresh = select(route)
+  assert.equal(fresh.candidates[0].displayName, 'Alpha-Flash')
+  const gamma = fresh.candidates.find(candidate => candidate.displayName === 'Gamma-Mini')
+  assert.ok(gamma)
+  autoRouter.rememberRoute(fresh.conversationKey, gamma, route)
+
+  const again = select(route)
+  assert.equal(again.candidates[0].displayName, 'Gamma-Mini', '硬优先要盖得过 0.3 的成本差')
+  assert.equal(again.reason, 'sticky')
+})
+
+test('E：关掉硬钉后，0.12 的加分自己就能决定首位（证明加分项不是死代码）', () => {
+  // 默认 `prefer: 'fast'` 下成本权重 0.2，Alpha-Flash 只领先 Beta-Lite 0.1，小于粘性加分。
+  // 首位因此只可能由打分里的 `stickyBonus` 决定 —— 这一格在硬钉时代是看不见的。
+  const route = makeRoute({ stickyHardPin: false })
+  const fresh = select(route)
+  assert.equal(fresh.candidates[0].displayName, 'Alpha-Flash')
+  const beta = fresh.candidates.find(candidate => candidate.displayName === 'Beta-Lite')
+  assert.ok(beta)
+  autoRouter.rememberRoute(fresh.conversationKey, beta, route)
+
+  const again = select(route)
+  assert.equal(again.candidates[0].displayName, 'Beta-Lite', '加分本身就要能把 0.1 的差翻过来')
+  assert.equal(again.reason, 'sticky')
+})
+
 test('E：`stickyMinutes: 0` 的路由不写记录（同一段对话对另一条路由的行为）', () => {
   const off = makeRoute({ stickyMinutes: 0 })
   const fresh = select(off)

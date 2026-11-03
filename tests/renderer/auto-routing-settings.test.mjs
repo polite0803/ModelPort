@@ -145,3 +145,57 @@ test('route copy exists in both locales', () => {
     assert.match(messages.proxy.routeDeleteWarning_other, /\{\{name\}\}/)
   }
 })
+
+// 粘性硬优先开关（2026-11-03 裁定：路由级开关，默认硬钉）。面板加开关的同一批必须
+// 写出「哪段代码读它」，所以这里钉的是一条完整的线：控件 → 归一化落盘 → autoRouter 读取。
+test('the sticky hard-pin switch is rendered, persisted and read by the router', () => {
+  const fields = readRoutePanel('src/renderer/src/components/proxy/ModelRouteFields.tsx')
+
+  const pinInputId = fields.match(/id=\{`auto-sticky-hard-pin-\$\{([^}]+)\}`\}/)
+  const pinLabelFor = fields.match(/htmlFor=\{`auto-sticky-hard-pin-\$\{([^}]+)\}`\}/)
+  assert.ok(pinInputId, 'the control must carry a per-route id (two field groups share one card)')
+  assert.ok(pinLabelFor, 'the label must point at that control with htmlFor')
+  assert.equal(pinInputId[1], pinLabelFor[1], 'id and htmlFor come from the same per-route value')
+  assert.match(fields, /checked=\{values\.stickyHardPin\}/)
+
+  // 落盘侧只在建键为显式 false 时写这一格：缺省即开，老 data.json 不需要迁移。
+  const modelRoutes = readFileSync(join(root, 'src/main/store/modelRoutes.ts'), 'utf8')
+  assert.match(
+    modelRoutes,
+    /entry\.stickyHardPin === false \? \{ stickyHardPin: false \}/,
+    'normalisation must persist only an explicit off',
+  )
+
+  // 读取侧只有这一处，且判据是「显式 false 才不硬钉」。
+  const router = readFileSync(join(root, 'src/main/proxy/autoRouter.ts'), 'utf8')
+  assert.match(
+    router,
+    /route\?\.stickyHardPin === false \? ranked : promoteSticky/,
+    'autoRouter must skip the queue-head promotion only when the route opted out',
+  )
+  assert.equal(
+    (router.match(/promoteSticky\(ranked, sticky\)/g) ?? []).length,
+    1,
+    'one promotion call site: a second place deciding the head would split the semantics',
+  )
+})
+
+test('both locales explain what turning the hard pin off means', () => {
+  for (const locale of ['zh-CN', 'en-US']) {
+    const messages = JSON.parse(
+      readFileSync(join(root, 'src/renderer/src/i18n/locales', `${locale}.json`), 'utf8'),
+    )
+    for (const key of [
+      'autoRoutingStickyHardPin',
+      'autoRoutingStickyHardPinHelp',
+      'autoRoutingStickyHardPinIdle',
+    ]) {
+      assert.equal(typeof messages.proxy?.[key], 'string', `${locale} is missing proxy.${key}`)
+    }
+    // 关掉之后剩下的是加分，文案必须把那两个数值说出来，否则「关掉会怎样」无法预期。
+    assert.match(messages.proxy.autoRoutingStickyHardPinHelp, /0\.12/)
+    assert.match(messages.proxy.autoRoutingStickyHardPinHelp, /0\.06/)
+    // 「粘性时长为 0 时这一格不起作用」必须单独成句，不许和主说明混在一行。
+    assert.doesNotMatch(messages.proxy.autoRoutingStickyHardPinIdle, /0\.12/)
+  }
+})
