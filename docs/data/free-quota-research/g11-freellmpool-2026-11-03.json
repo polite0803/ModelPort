@@ -1,0 +1,67 @@
+[
+  {
+    "entryId": "pollinations",
+    "providerName": "Pollinations",
+    "source": "undocumented",
+    "docUrl": "https://github.com/pollinations/pollinations",
+    "asOf": "2026-11-03",
+    "scope": "free-tier",
+    "quota": { "rpm": null, "rpd": null, "tpm": null, "tpd": null, "monthlyTokens": null, "contextWindow": null },
+    "perModel": [],
+    "freeModelIds": [],
+    "evidence": "",
+    "notes": "免 Key 的匿名层（authKind=none、autoProvision），目录 baseUrl 为 https://text.pollinations.ai/openai。本次没有读到官方逐字公布的 RPM/TPM 数字，故 quota 全 null；不把社区转述的限速写进旁表。"
+  },
+  {
+    "entryId": "ovh",
+    "providerName": "OVHcloud AI Endpoints",
+    "source": "undocumented",
+    "docUrl": "https://www.ovhcloud.com/en/public-cloud/ai-endpoints/",
+    "asOf": "2026-11-03",
+    "scope": "free-tier",
+    "quota": { "rpm": null, "rpd": null, "tpm": null, "tpd": null, "monthlyTokens": null, "contextWindow": null },
+    "perModel": [],
+    "freeModelIds": [],
+    "evidence": "",
+    "notes": "OVHcloud 的 Kepler 匿名推理端点（authKind=none、autoProvision），目录 baseUrl 为 https://oai.endpoints.kepler.ai.cloud.ovh.net/v1。本次没有读到官方逐字公布的 RPM/TPM 数字，quota 全 null。上游停用或仅 pin 可用的模型行不进基线。"
+  },
+  {
+    "entryId": "requesty",
+    "providerName": "Requesty",
+    "source": "undocumented",
+    "docUrl": "https://requesty.ai/",
+    "asOf": "2026-11-03",
+    "scope": "keyed-account",
+    "quota": { "rpm": null, "rpd": null, "tpm": null, "tpd": null, "monthlyTokens": null, "contextWindow": null },
+    "perModel": [],
+    "freeModelIds": [],
+    "evidence": "",
+    "notes": "Requesty 路由端点，目录 baseUrl 为 https://router.requesty.ai/v1，需要用户 Key。本次没有读到官方逐字公布的 RPM/TPM 数字，quota 全 null。"
+  },
+  {
+    "entryId": "aion",
+    "providerName": "Aion Labs",
+    "source": "undocumented",
+    "docUrl": "https://aionlabs.ai/",
+    "asOf": "2026-11-03",
+    "scope": "free-tier",
+    "quota": { "rpm": null, "rpd": null, "tpm": null, "tpd": null, "monthlyTokens": null, "contextWindow": null },
+    "perModel": [],
+    "freeModelIds": [],
+    "evidence": "",
+    "notes": "目录 notes 记录过免卡档 15 请求/分钟、20,000 token/日，但那是 freellmpool 的转述而非本次抓到的官方正文；按本仓规则不把转述数字写进 quota，故全 null。"
+  },
+  {
+    "entryId": "modelscope",
+    "providerName": "ModelScope API-Inference",
+    "source": "undocumented",
+    "docUrl": "https://modelscope.cn/docs/model-service/API-Inference/intro",
+    "asOf": "2026-11-03",
+    "scope": "free-tier",
+    "quota": { "rpm": null, "rpd": null, "tpm": null, "tpd": null, "monthlyTokens": null, "contextWindow": null },
+    "perModel": [],
+    "freeModelIds": [],
+    "evidence": "",
+    "notes": "ModelScope API-Inference，目录 baseUrl 为 https://api-inference.modelscope.cn/v1。目录 notes 里引用的每日调用次数是 freellmpool 的转述，本次没有抓到官方逐字数字；quota 全 null，避免把转述当官方口径。"
+  }
+]

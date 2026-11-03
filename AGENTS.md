@@ -10,7 +10,7 @@ none of them covers the topic, read the code and the comments in the file you ar
 ## Project Overview
 
 ModelPort is an Electron desktop application exposing an OpenAI-compatible API proxy. Three provider
-classes ship: a 79-entry / 500-model aggregate catalogue of key-based and key-less endpoints, the
+classes ship: a 89-entry / 570-model aggregate catalogue of key-based and key-less endpoints, the
 thirteen account channels served by the vendored channel pack, and user-defined custom providers.
 Runs on macOS, Windows, Linux.
 

@@ -10,14 +10,16 @@ import {
 } from '../../src/main/providers/aggregate/registry.ts'
 
 test('the catalogue carries the entries that can actually be wired', () => {
-  assert.equal(AGGREGATE_REGISTRY.length, 79)
+  assert.equal(AGGREGATE_REGISTRY.length, 89)
   // 473 transcribed, minus 7 retired upstream on 2026-10-29 (3 anthropic + 4 xai),
   // minus the withdrawn mistral_codestral entry (its single model went with it),
   // plus the Agnes CN switch (agnes-2.0-flash -> agnes-3.0-flash + agnes-2.5-flash),
   // plus the Qiniu Conatus campaign entry (qiniu/conatus-free),
   // plus the SenseNova Token Plan entry (6 models),
   // plus the 2026-10-30 freellmpool port (1 + 11 + 5 + 4 + 6 = 27 models).
-  assert.equal(AGGREGATE_REGISTRY.reduce((sum, entry) => sum + entry.models.length, 0), 500)
+  // plus the 2026-11-03 domestic entries: Baichuan, Bailian payg/Token Plan,
+  // SiliconFlow CN, Spark, StepFun payg/Step Plan, Volcengine platform/Agent Plan, Yi.
+  assert.equal(AGGREGATE_REGISTRY.reduce((sum, entry) => sum + entry.models.length, 0), 570)
 
   // Browser-login account channels are retired; the responses-only relay is not wired.
   for (const excluded of ['openai', 'github_copilot', 'fleetrelay_t1']) {
@@ -168,6 +170,39 @@ test('models retired upstream stay out of the catalogue', () => {
     assert.ok(getAggregateEntry('xai')!.models.some(model => model.id === modelId), `xai/${modelId} still serves`)
   }
   assert.equal(getAggregateEntry('anthropic')!.models.length, 0, 'the anthropic entry is intentionally model-less')
+})
+
+test('domestic payg and subscription endpoints stay separate entries', () => {
+  // 套餐端点与按量端点的 Base URL、Key 互不相通，合并成一条会让用户把 Key 填进错误的计费域。
+  assert.equal(getAggregateEntry('bailian')!.baseUrl, 'https://dashscope.aliyuncs.com/compatible-mode/v1')
+  assert.equal(
+    getAggregateEntry('bailian_token_plan')!.baseUrl,
+    'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1'
+  )
+  assert.notEqual(getAggregateEntry('bailian')!.id, getAggregateEntry('bailian_token_plan')!.id)
+
+  assert.equal(
+    getAggregateEntry('volcengine_ark_platform')!.baseUrl,
+    'https://ark.cn-beijing.volces.com/api/v3'
+  )
+  assert.equal(
+    getAggregateEntry('volcengine-ark')!.baseUrl,
+    'https://ark.cn-beijing.volces.com/api/coding/v3'
+  )
+  assert.equal(
+    getAggregateEntry('volcengine_ark_agent_plan')!.baseUrl,
+    'https://ark.cn-beijing.volces.com/api/plan/v3'
+  )
+
+  assert.equal(getAggregateEntry('stepfun')!.baseUrl, 'https://api.stepfun.com/v1')
+  assert.equal(getAggregateEntry('stepfun_step_plan')!.baseUrl, 'https://api.stepfun.com/step_plan/v1')
+
+  for (const id of ['baichuan', 'spark', 'yi', 'siliconflow_cn']) {
+    const entry = getAggregateEntry(id)!
+    assert.equal(entry.authKind, 'apiKey', `${id} needs a key`)
+    assert.ok(entry.authUrl, `${id} must link to its key page`)
+    assert.ok(entry.models.length > 0, `${id} must ship at least one model id`)
+  }
 })
 
 test('the withdrawn codestral entry is gone, but its model stays reachable via mistral', () => {

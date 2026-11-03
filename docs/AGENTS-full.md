@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project Overview
 
-ModelPort is an Electron desktop application that provides an OpenAI-compatible API proxy for standard HTTP model endpoints. It ships three provider classes: a 79-entry aggregate catalogue of key-based / key-less endpoints (see "Aggregate Provider Catalogue"), the thirteen account channels served by the vendored channel pack (see "Account Channels"), and user-defined custom providers. It runs on macOS, Windows, and Linux.
+ModelPort is an Electron desktop application that provides an OpenAI-compatible API proxy for standard HTTP model endpoints. It ships three provider classes: a 89-entry aggregate catalogue of key-based / key-less endpoints (see "Aggregate Provider Catalogue"), the thirteen account channels served by the vendored channel pack (see "Account Channels"), and user-defined custom providers. It runs on macOS, Windows, and Linux.
 
 ## Build Commands
 
@@ -218,7 +218,7 @@ message in the UI.
 ### Aggregate Provider Catalogue
 
 `src/main/providers/aggregate/registry.ts` is data transcribed from the reference registry:
-79 entries / 500 models. Beyond dropping `openai` and `github_copilot` (browser-login account
+89 entries / 570 models. Beyond dropping `openai` and `github_copilot` (browser-login account
 channels - the class that was retired) and `fleetrelay_t1` (responses-only relay), seven model rows
 were removed on 2026-10-29 because upstream no longer serves them (3 anthropic ids the API answers
 with an error, 4 xai ids retired 2026-05-15 whose slugs still resolve and silently redirect), and
@@ -236,6 +236,23 @@ declares `dropParams` (`response_format`, `enable_thinking`, `tool_choice=auto`,
 `openai_api` stays and is served over the chat wire. `vertex` / `vertex-partner` are listed with
 `authKind: 'unsupported'` because Google ADC cannot be produced here.
 
+Ten domestic entries were added on 2026-11-03: Baichuan
+(`https://api.baichuan-ai.com/v1`), Alibaba Cloud Bailian pay-as-you-go
+(`https://dashscope.aliyuncs.com/compatible-mode/v1`) and Token Plan
+(`https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`), SiliconFlow China
+(`https://api.siliconflow.cn/v1`), iFlytek Spark (`https://spark-api-open.xf-yun.com/v1`), StepFun
+pay-as-you-go (`https://api.stepfun.com/v1`) and Step Plan
+(`https://api.stepfun.com/step_plan/v1`), Volcengine Ark platform
+(`https://ark.cn-beijing.volces.com/api/v3`) and Agent Plan
+(`https://ark.cn-beijing.volces.com/api/plan/v3`), and Yi
+(`https://api.lingyiwanwu.com/v1`). A vendor's pay-as-you-go endpoint and each subscription endpoint
+**must stay separate entries**: the vendors isolate the API key and base URL per billing channel, so
+sharing an entry either returns 401/403 or silently bills the payg account. The existing
+`volcengine-ark` entry is the Coding Plan (`/api/coding/v3`); its model list was refreshed on the
+same day (GLM-5.1 left upstream on 2026-06-30). All four subscription entries
+(`bailian_token_plan`, `stepfun_step_plan`, `volcengine-ark`, `volcengine_ark_agent_plan`) are in
+`AGGREGATE_PLAN_ENTRIES`, so their zero marginal price reads as `included`, never `free`.
+
 - `manager.ts` only writes a provider record when the user saves one, so the provider list never
   carries 70+ unusable rows. The record is `type: 'aggregate'`, `id` = registry id, and carries
   `wire`, `authHeader`/`authPrefix`, `aggregateId`, `supportedModels`, `modelMappings`.
@@ -249,7 +266,7 @@ declares `dropParams` (`response_format`, `enable_thinking`, `tool_choice=auto`,
   (displayName -> upstream id) and a global `config.modelMappings` entry with
   `preferredProviderId`, which is what makes `loadbalancer` route a name to exactly one entry.
   Removing the provider drops both.
-- Wires: `openai-chat` reuses the forwarder's default branch (70 entries).
+- Wires: `openai-chat` reuses the forwarder's default branch (86 entries).
   `anthropic-messages` (`anthropic`, `glm`'s `/api/anthropic`, `minimax-cn`) uses
   `proxy/adapters/anthropic.ts`, which converts messages/system/tool_use blocks and re-emits the
   SSE stream as OpenAI chunks with `skipTransform`.
@@ -392,12 +409,12 @@ the output. Each receipt row must carry a verbatim quote and a `docUrl`, and the
 publishes nothing is `undocumented`). Receipts may set `withdrawn: true` to keep the evidence for an
 entry that left the catalogue.
 
-Current coverage: 16 of 74 entries have at least one documented number; the rest are `undocumented`.
+Current coverage: 16 of 89 entries have at least one documented number; the rest are `undocumented`.
 Two rules follow from that and are easy to break:
 
 - **`undocumented` never blocks a candidate.** "No published cap" is not "no quota": the gate
   (`proxy/quota/gate.ts`) and `limits.resolveCaps()` only enforce when a real cap exists, otherwise
-  the entry routes as before. 58 of 74 entries depend on this.
+  the entry routes as before. 73 of 89 entries depend on this.
 - **A cap that is not in tokens is never converted.** `officialNote` carries the vendor's own unit
   and conditions (Cloudflare's Neurons/day, kilo's requests/hour/IP, concurrency limits, monthly USD
   spend, minimum-purchase thresholds). The panel displays it verbatim; it takes no part in
@@ -530,7 +547,8 @@ because the sources differ in kind:
 Four rules are load-bearing, each pinned by `tests/aggregate/aggregate-cost.test.ts`:
 
 1. **A zero price is not "free".** Subscription endpoints (`AGGREGATE_PLAN_ENTRIES`: `kimi_code`,
-   `zai`, `glm-cn`, `qwencloud`, `qwencloud_coding`, `xiaomi-tokenplan`, `sensenova`) show a zero
+   `zai`, `glm-cn`, `qwencloud`, `qwencloud_coding`, `bailian_token_plan`, `xiaomi-tokenplan`,
+   `sensenova`, `stepfun_step_plan`, `volcengine-ark`, `volcengine_ark_agent_plan`) show a zero
    *marginal* price on models.dev because the allowance was bought up front; calling that "free"
    says a user can run without paying when the plan allowance simply ends. The list is hand-written
    with a per-entry reason - **do not** regex on "plan" in the id: `sensenova`'s host is

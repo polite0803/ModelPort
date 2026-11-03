@@ -12,7 +12,8 @@
  *    只能告诉我们"有没有价、价格是不是 0"，不能当倍率用（见下）。
  *
  * ⚠️ **零价 ≠ 免费。** 订阅制端点（Kimi Code、Z.ai / 智谱的 coding plan、千问与
- * 小米的 Token Plan、商汤 Token Plan……）在 models.dev 上的边际价就是 0，因为
+ * 小米的 Token Plan、商汤 Token Plan、阿里云百炼 Token Plan、火山方舟
+ * Coding/Agent Plan、阶跃星辰 Step Plan……）在 models.dev 上的边际价就是 0，因为
  * 额度已经买断在订阅里。把它标成"免费"会让用户以为能不花钱无限跑，而实际上
  * 用完套餐额度就停。这类条目单列成 `included`（套餐内），判定依据是手写清单
  * `AGGREGATE_PLAN_ENTRIES`，每条带理由 —— 不按 id 里有没有 "plan" 去正则匹配，
@@ -64,8 +65,12 @@ export const AGGREGATE_PLAN_ENTRIES: Readonly<Record<string, string>> = {
   'glm-cn': '智谱 coding 端点，订阅制（registry notes：Zhipu open-platform coding endpoint）',
   qwencloud: '千问 Token Plan 端点（registry notes：QwenCloud Token Plan endpoint）',
   qwencloud_coding: '千问 Coding Plan 端点（registry notes：QwenCloud Coding Plan endpoint）',
+  bailian_token_plan: '阿里云百炼 Token Plan 端点，额度按订阅 Credits 扣减（sk-sp- 专属 Key）',
   'xiaomi-tokenplan': '小米 Token Plan 订阅（registry notes：keys start with tp-）',
   sensenova: '商汤日日新 Token Plan 公测积分池（registry notes 写明非 token 额度）',
+  stepfun_step_plan: '阶跃星辰 Step Plan 订阅端点，按月 Credit 额度扣减',
+  'volcengine-ark': '火山方舟 Coding Plan 订阅端点，额度和 Key 与平台按量端点隔离',
+  volcengine_ark_agent_plan: '火山方舟 Agent Plan 订阅端点，额度按订阅套餐扣减',
 }
 
 export function isPlanEntry(entryId: string): boolean {

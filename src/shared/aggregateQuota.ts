@@ -7,8 +7,8 @@
  * 不得当作 0、不得当作无限、也不得参与额度预检。
  * 单位不是 token 的官方上限保留在 officialNote 里，只供面板显示，不参与预检。
  *
- * 生成于 2026-10-29；16 家有数字，
- * 58 家官方未公布，74 家带口径备注。
+ * 生成于 2026-11-03；16 家有数字，
+ * 73 家官方未公布，89 家带口径备注。
  */
 
 export interface AggregateModelQuota {
@@ -42,6 +42,12 @@ export const AGGREGATE_QUOTA: Record<string, AggregateEntryQuota> = {
     asOf: '2026-10-29',
     officialNote: "The catalogue was switched to the vendor's China host (https://api.agnes-ai.cn/v1, declared in the CN wiki wiki.agnes-ai.cn). https://api.agnes-ai.cn/v1/models answers 401 without a key, so reachability is confirmed but no quota headers were read. The CN wiki documents model capabilities, pricing (agnes-3.0-flash: ¥0.35 / million input tokens, ¥1.00 / million output tokens, currently ¥0) and a 512K context window, but publishes NO RPM/RPD/TPM/TPD/monthly token caps. The older international notes still apply to the brand: https://agnes-ai.com/ loaded, its terms/pricing pages 404, and a 7M tokens/day cap and 15 req/min rate exist on the public web only via NaraRouter (router.bynara.id), not Agnes - so nothing is recorded. Do not assume a free quota from the \"free to get started\" wording.",
   },
+  'aion': {
+    source: 'undocumented',
+    docUrl: 'https://aionlabs.ai/',
+    asOf: '2026-11-03',
+    officialNote: "目录 notes 记录过免卡档 15 请求/分钟、20,000 token/日，但那是 freellmpool 的转述而非本次抓到的官方正文；按本仓规则不把转述数字写进 quota，故全 null。",
+  },
   'alibaba_cloud': {
     source: 'undocumented',
     docUrl: 'https://www.alibabacloud.com/help/en/model-studio/rate-limit',
@@ -63,6 +69,12 @@ export const AGGREGATE_QUOTA: Record<string, AggregateEntryQuota> = {
     asOf: '2026-10-29',
     officialNote: "主体确认：registry 里 baseUrl=null（必须用户提供 AZURE_OPENAI_BASE_URL + deployment 名），models=[]。官方配额页**正文可读且数字很多**，但口径是「模型版本 × 部署类型 × 配额层级」三维矩阵，不是单个供应商帽：页面上按 Tier 0–6 分标签、每个模型版本在每个部署类型（GlobalStandard / DataZoneStandard / Standard / Flex 等）各一行 RPM+TPM，例如 gpt-4.1 在 GlobalStandard 行是 1,000 RPM / 1,000,000 TPM，同一模型在 DataZoneStandard 行是 300 RPM / 300,000 TPM；另有换算规则句「use 10 RPM per 1,000 TPM」（部分版本 1 RPM per 1,000 TPM）。因为本 entry 既没有模型清单也没有确定的 deployment/SKU，选任何一行当 provider 帽都是猜，所以 quota 全 null、perModel 留空，source 记 undocumented（含义是「本 entry 无可登记口径」，不是「官方没写」）。要落地必须先让用户填 deployment 对应的模型与层级，再按该行写入。RPD/TPD/月度 token：Azure OpenAI 不按日/月计，配额单位只有 RPM 与 TPM，故这三列对 azure 恒为 null。contextWindow：本页不公布上下文长度，需按模型页另取。警示：该页全部数字的前提是**已付费订阅**（Azure OpenAI 无免费档），且默认配额会按订阅与区域被调整，真实值应以「Microsoft.CognitiveServices/quotaTiers」接口或门户查询为准（页内给出 GET …/quotaTiers/default 的调用方式）。",
   },
+  'baichuan': {
+    source: 'undocumented',
+    docUrl: 'https://platform.baichuan-ai.com/docs/api',
+    asOf: '2026-11-03',
+    officialNote: "入口、鉴权头与模型 id 逐字取自官方 API 文档（platform.baichuan-ai.com/docs/api，2026-11-03 抓到）。官方价格页按千 tokens 人民币计价，但没有公布 RPM/RPD/TPM/TPD 或月度 token 帽，因此 quota 全为 null、source=undocumented；不把人民币单价折算成美元或倍率。目录只收当前通用对话 id，未收 Baichuan2-Turbo 等旧版本。",
+  },
   'baidu': {
     source: 'documented',
     rpm: 60,
@@ -70,6 +82,18 @@ export const AGGREGATE_QUOTA: Record<string, AggregateEntryQuota> = {
     asOf: '2026-10-29',
     perModel: [{ modelId: 'deepseek-v4-pro', rpm: 60, tpm: 1000000, contextWindow: 1000000 }, { modelId: 'glm-5.2', rpm: 60, tpm: 1000000, contextWindow: 1000000 }, { modelId: 'glm-5.1', rpm: 60, tpm: 250000, contextWindow: 198000 }, { modelId: 'kimi-k2.6', rpm: 60, tpm: 250000, contextWindow: 256000 }, { modelId: 'qwen3.5-397b-a17b', rpm: 60, tpm: 250000, contextWindow: 256000 }, { modelId: 'qwen3.5-27b', rpm: 60, tpm: 250000, contextWindow: 256000 }, { modelId: 'deepseek-v4-flash' }],
     officialNote: "主体确认：baseUrl https://qianfan.baidubce.com/v2 = 百度千帆 v2 OpenAI 兼容端点（website qianfan.baidubce.com，docs cloud.baidu.com/doc/qianfan）。所登记的 RPM/TPM 来自官方「模型列表」表的「默认流控」列，该列是**预置服务按量后付费的默认限流**（不是免费档），故 scope=keyed-account；7 行的 RPM 全为 60，故 provider 级 rpm=60，TPM 逐模型不同（1000000 / 250000），只落在 perModel，provider 级 tpm 留 null。官方**没有**公布 RPD/TPD（每日/每小时请求与 token 帽），一律 null。免费池确实存在但口径不匹配：https://cloud.baidu.com/doc/qianfan/s/Imi2rpirg 写的是自 2025-10-24 起自动开通时**一次性**发放「100万 tokens / 有效期 3 个月」，既不是月度池也不是 RPM，因此 monthlyTokens 留 null；且发放清单（ERNIE-4.5-Turbo 系列 / ERNIE-X1-Turbo / DeepSeek-R1 / DeepSeek-V3-250324 / DeepSeek-V3.1 / Kimi-K2-Instruct / Qwen3-235B-A22B-Instruct-2507 / Qwen3-Coder / bge-*）里**没有**本目录任何一个 model 参数，故 freeModelIds 为空——不要把那 100 万算到这些模型头上。另两处与目录不符：kimi-k2.6 官方标注「即将下线」；deepseek-v4-flash 只有 deepseek-v4-flash-0731 一个接入点。TPM/RPM 配额可通过「配额管理 / QPS叠加包」付费扩容（cloud.baidu.com/doc/qianfan/s/Gmh4su5tz、Gmi5wd4fm）。",
+  },
+  'bailian': {
+    source: 'undocumented',
+    docUrl: 'https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope',
+    asOf: '2026-11-03',
+    officialNote: "主体确认：中国站百炼的 OpenAI 兼容线；目录 baseUrl 用官方长期保留的 https://dashscope.aliyuncs.com/compatible-mode/v1，控制台若给 WorkspaceId 专属域名可用 baseUrl 覆盖。官方限流/额度在控制台按账号与模型档位展示，本次可读文档页没有逐模型 RPM/TPM 数字，故 quota 全 null。与 alibaba_cloud（新加坡国际站）是两个计费域，Key 不可混用。模型 id 取自百炼模型列表与 Token Plan 支持表，按量与套餐的可用集合以控制台为准。",
+  },
+  'bailian_token_plan': {
+    source: 'undocumented',
+    docUrl: 'https://help.aliyun.com/zh/model-studio/token-plan-overview',
+    asOf: '2026-11-03',
+    officialNote: "Token Plan 的额度单位是 Credits，不是 token，按本仓规则不折算、不登记进 quota，故 source=undocumented。专属 Key 以 sk-sp- 开头，且与按量付费（sk-）、Coding Plan（sk-ws-）三套凭证完全隔离；Base URL 填错会导致 401/403 或走按量计费。官方支持表里同时列了图像/视频/语音模型，目录只收文本模型 id。",
   },
   'bazaarlink': {
     source: 'documented',
@@ -278,6 +302,12 @@ export const AGGREGATE_QUOTA: Record<string, AggregateEntryQuota> = {
     perModel: [{ modelId: 'mistral-large-latest', contextWindow: 256000 }, { modelId: 'mistral-medium-latest', contextWindow: 256000 }, { modelId: 'codestral-latest', contextWindow: 128000 }, { modelId: 'devstral-small-latest', contextWindow: 256000 }],
     officialNote: "docs.mistral.ai 带代理完全可读（先确认 https://docs.mistral.ai/ 200，再从 https://docs.mistral.ai/llms.txt 找到 .md 原文，并抓了 https://docs.mistral.ai/llms-full.txt 全文 3,239,421 字节做穷举）。结论是「页面无数字」而不是「取不到」：官方把限速的**维度**写得很清楚（Requests per second + Tokens per minute，按模型列、按 Workspace 共享），但**数值一个都没公布**，三处入口全部指向登录后的 Admin Panel（admin.mistral.ai/plateforme/limits）。在 llms-full.txt 全文里 grep rate limit|requests per second|tokens per minute|RPM|TPM 共 30 余处命中，逐条看过，没有任何一处带具体数字；Free mode 只写 \"Usage and rate limits apply\" 而不给额度；mistral.ai/pricing 抓到了 200/411,230 字节但剥标签后正文仅 913 字符（前端渲染，无计划额度表），故没有可用的每月免费额度数字，monthlyTokens 留 null。 quota 六项全 null（没有 RPM/TPM/RPD/TPD/月度 token 数字；context window 各模型不同，不能塞进条目级字段），因此按判据 source=undocumented —— 但这不代表一无所获：perModel 里四个 id 的 contextWindow 都是从官方正文逐字读到的真实数字（256k/256k/128k/256k，写成 token 数）。 两点必须提醒下游：(1) `devstral-small-latest` 在官方表里状态是 **Deprecated**，公告 2026-02-27、退役 2026-03-31，早于本次 asOf 2026-10-29，即这个 id 现在大概率已经打不通，官方给的替代是 Mistral Medium 3.5。(2) 官方 `docs.mistral.ai/models.md` 的现行模型总表里**没有任何 `-latest` 写法**（grep `-latest` 命中 0 次），表里用的是带日期的名字（`mistral-large-2512`、`codestral-2508`、`mistral-medium-3-5`、`labs-devstral-small-2512`）；`-latest` 别名只在 Vibe CLI 的模型清单页和「Model naming convention」一节出现。别名规则本身也带警告：\"Using an alias may expose you to silent updates in model behavior and pricing.\" 我们目录用 `-latest`，意味着模型会随官方换代静默漂移，上下文窗口也不能当常量用。 registry 里该条目注为「La Plateforme keys; embedding id omitted」。关于禁止转售/仅评估用途：在整份 llms-full.txt 里 grep resell|resale|prohibit|not permitted|competitive benchmark 只命中 FAQ 的错误码文（\"429: Too many requests - You have exceeded the rate limit for your subscription tier\"）和音频参数的 \"Extra inputs are not permitted\"，**没有任何禁止代理/禁止转售/仅限评估的条款**。",
   },
+  'modelscope': {
+    source: 'undocumented',
+    docUrl: 'https://modelscope.cn/docs/model-service/API-Inference/intro',
+    asOf: '2026-11-03',
+    officialNote: "ModelScope API-Inference，目录 baseUrl 为 https://api-inference.modelscope.cn/v1。目录 notes 里引用的每日调用次数是 freellmpool 的转述，本次没有抓到官方逐字数字；quota 全 null，避免把转述当官方口径。",
+  },
   'morph': {
     source: 'undocumented',
     docUrl: 'https://docs.morphllm.com/',
@@ -361,11 +391,23 @@ export const AGGREGATE_QUOTA: Record<string, AggregateEntryQuota> = {
     asOf: '2026-10-29',
     officialNote: "Site https://www.orcarouter.ai/ loaded and states only \"Zero markup on all tokens.\" for the free tier - NO rate-limit numbers on the page (explicitly reported as \"NO RATE LIMIT NUMBERS ON THIS PAGE\"). Terms pages tried but unreadable: https://www.orcarouter.ai/terms (404), https://www.orcarouter.ai/terms-of-service (404), https://www.orcarouter.ai/legal/terms (fetch failed), so the resale / competing-service position could not be established. No /pricing or docs page with RPM/RPD/TPM/TPD figures was found. The -free slug implies a free pool but no official figure exists; nothing recorded.",
   },
+  'ovh': {
+    source: 'undocumented',
+    docUrl: 'https://www.ovhcloud.com/en/public-cloud/ai-endpoints/',
+    asOf: '2026-11-03',
+    officialNote: "OVHcloud 的 Kepler 匿名推理端点（authKind=none、autoProvision），目录 baseUrl 为 https://oai.endpoints.kepler.ai.cloud.ovh.net/v1。本次没有读到官方逐字公布的 RPM/TPM 数字，quota 全 null。上游停用或仅 pin 可用的模型行不进基线。",
+  },
   'perplexity': {
     source: 'undocumented',
     docUrl: 'https://docs.perplexity.ai/docs/admin/rate-limits-usage-tiers.md',
     asOf: '2026-10-29',
     officialNote: "docs.perplexity.ai 带代理完全可读（先 200 拿到 https://docs.perplexity.ai/llms.txt 索引，再抓 rate-limits-usage-tiers.md 13,894 字节、pricing.md、faq.md、router/models.md、migrate-from-sonar/overview.md 全文）。判成 undocumented 的原因是**口径不匹配，不是没数字**：官方那张带完整数字的表全部挂在 **Agent API**（`POST /v1/agent` / `/v1/responses`）、**Search API**（50 query units/s）和 **Embeddings API**（Tier 0 85 QPS）上；而我们 registry 这个条目是 baseUrl https://api.perplexity.ai + wire openai-chat + 模型 `sonar-pro` / `sonar`，即 **Sonar Chat Completions（/v1/chat/completions）** 这条路径。限速页对 Sonar/chat completions 一个数字都没给，整页只写 \"Orchestrator API requests are rate limited\"（无数字）并把数值留给上面三个 API。把 Tier 0 的 1 QPS / 5,000,000 TPM 抄进本条目 quota 会是错标——那些限额明确只作用于 /v1/agent 的调用面，故 quota 六项全部保持 null，逐字数字留在 evidence 里供上层裁量。 Sonar 在官方文档里已被降级为 legacy：docs.perplexity.ai 现行 llms.txt 索引里 **没有任何 Sonar 模型页**，只有 \"Migrate from Sonar to the Agent API\"、\"How to migrate from Sonar\"、\"Agent API vs Sonar benchmarks\" 三篇迁移文档；FAQ 写 \"Legacy Sonar models apply SafeSearch to web results by default\"；迁移页给出替代关系 \"Sonar | `fast`\"、\"Sonar Pro | `fast`\"。router/models.md（Orchestrator 模型总表，2,805 字节）里 grep sonar 0 命中。也就是说我们这两个 id 既拿不到限速，也拿不到上下文窗口，因此 perModel 与 freeModelIds 留空、contextWindow null（官方正文里没有任何一处把 token 上限或上下文窗口写成对应 sonar 的数字，绝不臆造）。 可以确定的一点：Perplexity 没有免费档可言，Tier 0 的定义就是 \"$0 | New accounts, limited access\"，且 \"Tiers are based on **cumulative purchases** across your account lifetime, not current balance\"，要超过 Tier 5 得填 typeform 申请。禁代理/禁转售/仅评估条款：在 rate-limits、pricing、faq、migrate-from-sonar 四篇正文里 grep resell|prohibit|not permitted|benchmark|evaluat 无任何禁止性表述（唯一 benchmark 命中是官方自己的评测页标题）。",
+  },
+  'pollinations': {
+    source: 'undocumented',
+    docUrl: 'https://github.com/pollinations/pollinations',
+    asOf: '2026-11-03',
+    officialNote: "免 Key 的匿名层（authKind=none、autoProvision），目录 baseUrl 为 https://text.pollinations.ai/openai。本次没有读到官方逐字公布的 RPM/TPM 数字，故 quota 全 null；不把社区转述的限速写进旁表。",
   },
   'poolside': {
     source: 'undocumented',
@@ -393,6 +435,12 @@ export const AGGREGATE_QUOTA: Record<string, AggregateEntryQuota> = {
     docUrl: 'https://www.alibabacloud.com/help/en/model-studio/coding-plan',
     asOf: '2026-10-29',
     officialNote: "主体确认：baseUrl https://coding-intl.dashscope.aliyuncs.com/v1 = Model Studio Coding Plan 国际端点。官方页存在且读到数字，但那些数字是「每 5 小时 / 每周 / 每月请求上限」（6,000 / 45,000 / 90,000 requests），既不是 RPM、也不是 RPD/TPM/TPD/月度 token，无法在不折算的前提下填进 quota 字段 → 按规则 quota 全 null，source 记 undocumented（有页面、无可登记口径的数字），原句保留在 evidence 里供后续人工裁定。速率维度官方只写「对并发请求数与请求率做动态技术限制」，FAQ 的报错文案也是 'dynamically allocated limit'，没有任何固定 RPM。同页支持的模型列表为 qwen3.7-plus、qwen3.6-plus、kimi-k2.5、glm-5、MiniMax-M2.5、qwen3.5-plus，与本条目 models[] 部分重合（qwen3-coder-next/plus 不在官方列表内）。ToS 警示（逐字，对本仓尤其相关）：\"This plan is for interactive use in programming tools ... Do not use the plan's API key for automated scripts, application backends, or other non-interactive scenarios.\" —— 把该 Key 放进 OpenAI 兼容代理对外服务与该条直接冲突。",
+  },
+  'requesty': {
+    source: 'undocumented',
+    docUrl: 'https://requesty.ai/',
+    asOf: '2026-11-03',
+    officialNote: "Requesty 路由端点，目录 baseUrl 为 https://router.requesty.ai/v1，需要用户 Key。本次没有读到官方逐字公布的 RPM/TPM 数字，quota 全 null。",
   },
   'sambanova': {
     source: 'documented',
@@ -422,6 +470,30 @@ export const AGGREGATE_QUOTA: Record<string, AggregateEntryQuota> = {
     docUrl: 'https://docs.siliconflow.com/cn/faqs/misc_rate',
     asOf: '2026-10-29',
     officialNote: "官方限速 FAQ 明确存在免费模型且其限速为定值，但正文不列具体数字（逐模型值在'模型广场/模型详情页'动态显示）：'所有免费模型的 Rate Limits 是固定的。'（英文 docs 对应 free-model Rate Limits are fixed）；rate-limit-and-upgradation 页只定义 RPM/RPH/RPD/TPM/TPD/IPM/IPD 七种指标、不公布免费档数值。第三方整理的 'RPM=1000-10000 / TPM=50000-5000000'、'新用户 ¥16/$1 credits' 非官方正文，未采信。故全 null、undocumented。",
+  },
+  'siliconflow_cn': {
+    source: 'undocumented',
+    docUrl: 'https://docs.siliconflow.com/quickstart/models',
+    asOf: '2026-11-03',
+    officialNote: "中国站与 api.siliconflow.com 是两套站点和 Key；目录把两者分成 siliconflow / siliconflow_cn。官方模型列表实时变化，限速按账号档位在控制台展示，可读文档没有逐模型 RPM/TPM 数字，quota 全 null。基线模型 id 沿用 models.dev 已登记的同一开源模型命名，syncModels 可再并入上游返回的清单。",
+  },
+  'spark': {
+    source: 'undocumented',
+    docUrl: 'https://www.xfyun.cn/doc/spark/HTTP%E8%B0%83%E7%94%A8%E6%96%87%E6%A1%A3.html',
+    asOf: '2026-11-03',
+    officialNote: "Base URL 与 model 取值（lite / generalv3 / pro-128k / 4.0Ultra）逐字取自官方 HTTP 文档。Max 版本套餐公告将于 2026-03-10 下线、后端升级为 Ultra，故目录不再登记 generalv3.5 / max-32k。官方按版本独立计量 tokens，但没有公布可登记的 RPM/TPM 帽，quota 全 null；Lite 有免费额度，但本次没有拿到逐字免费模型清单，因而不写 freeModelIds。",
+  },
+  'stepfun': {
+    source: 'undocumented',
+    docUrl: 'https://platform.stepfun.com/docs/zh/api-reference/chat/messages-create',
+    asOf: '2026-11-03',
+    officialNote: "中国站 api.stepfun.com 与国际站 api.stepfun.ai 分开，目录只登记中国站。可读官方页没有逐模型 RPM/TPM 数字，quota 全 null。模型 id（step-5-preview / step-3.7-flash / step-3.5-flash / step-3.5-flash-2603）取自官方 Step Plan 支持模型表；按量端点可用集合以控制台为准。",
+  },
+  'stepfun_step_plan': {
+    source: 'undocumented',
+    docUrl: 'https://platform.stepfun.com/docs/zh/step-plan/overview',
+    asOf: '2026-11-03',
+    officialNote: "额度单位是 Credit，不是 token，按本仓规则不折算进 quota，故 source=undocumented。Step Plan 使用专属 /step_plan 前缀，与按量端点 /v1 分开；目录只登记 OpenAI 兼容线。支持模型表：Step 5 Preview、Step 3.7 Flash、Step 3.5 Flash、Step 3.5 Flash 2603，目录只收文本模型。",
   },
   'tencent': {
     source: 'undocumented',
@@ -466,6 +538,18 @@ export const AGGREGATE_QUOTA: Record<string, AggregateEntryQuota> = {
     asOf: '2026-10-29',
     officialNote: "本应用无法认证（authKind='unsupported'，需 Google ADC / 服务账号），数值仅供参考。主体确认：页面标题即「Gemini Enterprise Agent Platform partner models for MaaS」，与本 entry 的 MaaS 模型 id（deepseek-ai/deepseek-v3.2-maas、qwen/qwen3-next-80b-a3b-{thinking,instruct}-maas、zai-org/glm-5-maas）同源。官方只公布**配额指标名**，一个值都没给：输入/输出 tokens per minute per base model、requests per minute per project per base model，分 US / EU 多区域独立配额，数值只能在 Google Cloud 控制台查看与申请上调（evidence 原句）。所以 quota/perModel 全 null、source=undocumented。另有两条会影响未来取数：(1) global 端点与 regional 端点的配额与能力**可以不同**，本 entry 的 baseUrl 模板用的是 {location}，用户填 global 时帽就不是同一套；(2) 具体帽值按第三方模型页逐模型公布（「view the related third-party model page」），本目录的 -maas 后缀 id 与那些页的模型名不完全一致，需要逐个模型页取证——官方 MaaS 指南（/gemini-enterprise-agent-platform/models/maas/call-open-model-apis、…/models/maas/deepseek）抓到的是流程正文，同样没有数字。免费层：无（partner 模型按 token 计费，且需要 Google Cloud 计费账号）。",
   },
+  'volcengine_ark_agent_plan': {
+    source: 'undocumented',
+    docUrl: 'https://www.volcengine.com/docs/82379/2374459',
+    asOf: '2026-11-03',
+    officialNote: "Agent Plan 是订阅制，额度按套餐扣减；官方没有在可读页面给出可登记的 RPM/TPM 数字，quota 全 null。Base URL 与 Key 是 Agent Plan 专属，与平台按量 / Coding Plan 隔离。ark-code-latest 由控制台切换实际模型；Kimi K3 只在 Medium 及以上档位提供，故不进基线。",
+  },
+  'volcengine_ark_platform': {
+    source: 'undocumented',
+    docUrl: 'https://www.volcengine.com/docs/82379/1159177',
+    asOf: '2026-11-03',
+    officialNote: "平台按量端点 /api/v3 与 Coding Plan（/api/coding/v3）、Agent Plan（/api/plan/v3）是三条计费通路，Key 和 Base URL 不可混用。模型生命周期取自官方产品更新公告与 Coding Plan 功能发布公告（2026-11-03 抓到）：GLM-5.1 / DeepSeek-V3.2 已于 2026-06-30 下线，所以不登记。官方没有在可读页面公布逐模型 RPM/TPM 数字，quota 全 null；模型 id 的大小写以控制台为准，syncModels 可并入实际清单。",
+  },
   'volcengine-ark': {
     source: 'undocumented',
     docUrl: 'https://www.volcengine.com/docs/82379/1799865',
@@ -505,6 +589,12 @@ export const AGGREGATE_QUOTA: Record<string, AggregateEntryQuota> = {
     asOf: '2026-10-29',
     perModel: [{ modelId: 'qwen/qwen3.7-flash:free', tpd: 500000 }],
     officialNote: "tpd=500000 is a per-ACCOUNT daily token allowance shared by all free models, not a per-model cap; it rises to 1,000,000/day only after the user verifies on Telegram, so that higher number is conditional and was not recorded. No official RPM/RPD/TPM/monthly/context-window figure is published on xkiro.com - the site's marketing page only gives the free token allowance; https://xkiro.com/pricing returned 404, so the paid-tier figures seen on other paths were not used. The catalogue lists one :free slug, but the official page says 45 models are free, so freeModelIds is deliberately limited to what this repo actually ships. ToS note: https://xkiro.com/terms prohibits you to \"Resell or redistribute the service without written permission.\"",
+  },
+  'yi': {
+    source: 'undocumented',
+    docUrl: 'https://platform.lingyiwanwu.com/docs',
+    asOf: '2026-11-03',
+    officialNote: "Base URL、鉴权头与当前模型 id 逐字取自官方快速上手指南（2026-11-03 抓到）。官方没有公布可登记的 RPM/TPM 帽，quota 全 null。两个模型都由智能路由承载，实际后端可能落到 DeepSeek / Qwen 等模型；这一点写在 registry notes，避免用户把它当成固定后端。",
   },
   'zai': {
     source: 'undocumented',

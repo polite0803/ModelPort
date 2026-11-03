@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  ModelPort turns any OpenAI-compatible endpoint into a single local API. It ships a 79-entry
+  ModelPort turns any OpenAI-compatible endpoint into a single local API. It ships a 89-entry
   catalogue of key-based and key-less aggregate channels (including Kilo's free pool), thirteen
   account channels with their own account pools and credit accounting, and user-defined custom
   providers — so any OpenAI-compatible client works out of the box.
@@ -53,7 +53,7 @@
 
 | Provider class | Auth Type | Count | Notes |
 | -------------- | --------- | ----- | ----- |
-| Aggregate catalogue | API key / none | 79 entries / 500 models | OpenAI-chat and Anthropic-messages wires; includes Kilo's key-less free pool |
+| Aggregate catalogue | API key / none | 89 entries / 570 models | OpenAI-chat and Anthropic-messages wires; includes Kilo's key-less free pool |
 | Account channels | Browser / device-code / API-key | 13 channels | Each channel keeps its own account pool, daily credit claim and model gating |
 | Custom provider | Configured per provider | — | Any OpenAI-compatible HTTP endpoint you define yourself |
 

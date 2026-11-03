@@ -41,6 +41,14 @@ import type { AggregateEntry } from '../../../shared/aggregate'
  * baselines carry only the rows freellmpool marks enabled+auto; the disabled
  * and pin-only rows stay out (noted per entry) and discovery can still merge
  * them later. Base URLs and keyless model lists were verified live that day.
+ *
+ * Ten domestic entries were added on 2026-11-03: Baichuan, Alibaba Cloud Bailian
+ * (pay-as-you-go and Token Plan), SiliconFlow China, iFlytek Spark, StepFun
+ * (pay-as-you-go and Step Plan), Volcengine Ark (platform and Agent Plan) and
+ * Yi. A vendor's pay-as-you-go endpoint and its subscription endpoint are always
+ * separate entries: the vendors isolate the API key and base URL per billing
+ * channel, and mixing them either returns 401/403 or silently bills the payg
+ * account. The array now carries 89 entries / 570 models.
  */
 export const AGGREGATE_REGISTRY: AggregateEntry[] = [
   {
@@ -1928,12 +1936,16 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
   },
   {
     "id": "volcengine-ark",
-    "name": "Volcengine Ark",
+    "name": "Volcengine Ark (Coding Plan)",
     "category": "apikey",
     "authKind": "apiKey",
     "baseUrl": "https://ark.cn-beijing.volces.com/api/coding/v3",
     "wire": "openai-chat",
     "models": [
+      {
+        "id": "Doubao-Seed-2.1-turbo",
+        "name": "Doubao-Seed-2.1-turbo"
+      },
       {
         "id": "Doubao-Seed-2.0-Code",
         "name": "Doubao-Seed-2.0-Code"
@@ -1959,21 +1971,29 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
         "name": "DeepSeek-V4-Pro"
       },
       {
-        "id": "GLM-5.1",
-        "name": "GLM-5.1"
+        "id": "GLM-5.2",
+        "name": "GLM-5.2"
       },
       {
         "id": "MiniMax-M2.7",
         "name": "MiniMax-M2.7"
       },
       {
+        "id": "MiniMax-M3",
+        "name": "MiniMax-M3"
+      },
+      {
         "id": "Kimi-K2.6",
         "name": "Kimi-K2.6"
+      },
+      {
+        "id": "Kimi-K2.7-Code",
+        "name": "Kimi-K2.7-Code"
       }
     ],
     "authUrl": "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
     "envVar": "ARK_API_KEY",
-    "notes": "ByteDance Volcengine coding endpoint (CN); 9router registry declares the key URL.",
+    "notes": "ByteDance Volcengine coding-plan endpoint (CN). The plan key is isolated from the platform key and only spends Coding Plan allowance on this base URL; GLM-5.1 was retired upstream on 2026-06-30 and is not listed.",
     "website": "https://console.volcengine.com/ark"
   },
   {
@@ -3264,6 +3284,217 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     "baseUrlOverrideEnv": "OLLAMA_BASE_URL",
     "notes": "Local server; FCC normalizes the configured root to /v1, and the model list is whatever the user has pulled.",
     "website": "https://ollama.com/"
+  },
+  // 2026-11-03: 国内主站，以及订阅制 Token Plan / Agent Plan 的专属端点。
+  // 套餐端点与按量端点的 Base URL、Key 完全隔离，必须各占一条，不能靠用户改 baseUrl 合并。
+  {
+    "id": "baichuan",
+    "name": "Baichuan",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://api.baichuan-ai.com/v1",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "Baichuan4-Turbo", "name": "Baichuan4 Turbo" },
+      { "id": "Baichuan4-Air", "name": "Baichuan4 Air" },
+      { "id": "Baichuan4", "name": "Baichuan4" },
+      { "id": "Baichuan3-Turbo-128k", "name": "Baichuan3 Turbo 128K" }
+    ],
+    "authUrl": "https://platform.baichuan-ai.com/",
+    "envVar": "BAICHUAN_API_KEY",
+    "notes": "Baichuan's OpenAI-compatible chat endpoint (platform.baichuan-ai.com/docs/api; ids checked 2026-11-03).",
+    "website": "https://platform.baichuan-ai.com/"
+  },
+  {
+    "id": "bailian",
+    "name": "阿里云百炼",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "qwen3.8-max", "name": "Qwen3.8 Max" },
+      { "id": "qwen3.8-flash", "name": "Qwen3.8 Flash" },
+      { "id": "qwen3.7-max", "name": "Qwen3.7 Max" },
+      { "id": "qwen3.7-plus", "name": "Qwen3.7 Plus" },
+      { "id": "qwen3.6-flash", "name": "Qwen3.6 Flash" },
+      { "id": "qwen3-coder-plus", "name": "Qwen3 Coder Plus" },
+      { "id": "qwen3-coder-next", "name": "Qwen3 Coder Next" },
+      { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro" },
+      { "id": "glm-5.3", "name": "GLM 5.3" },
+      { "id": "glm-5.2", "name": "GLM 5.2" },
+      { "id": "MiniMax-M2.5", "name": "MiniMax M2.5" },
+      { "id": "kimi-k2.5", "name": "Kimi K2.5" }
+    ],
+    "authUrl": "https://bailian.console.aliyun.com/",
+    "envVar": "DASHSCOPE_API_KEY",
+    "baseUrlOverrideEnv": "DASHSCOPE_BASE_URL",
+    "notes": "阿里云百炼中国站按量付费 OpenAI 兼容端点（官方 compatibility-of-openai-with-dashscope）。北京地域的 WorkspaceId 专属域名可用 baseUrl 覆盖；与 alibaba_cloud（新加坡国际站）是两个计费域，不能混用 Key。",
+    "website": "https://help.aliyun.com/zh/model-studio/"
+  },
+  {
+    "id": "bailian_token_plan",
+    "name": "阿里云百炼 Token Plan",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "qwen3.8-max", "name": "Qwen3.8 Max" },
+      { "id": "qwen3.8-flash", "name": "Qwen3.8 Flash" },
+      { "id": "qwen3.7-max", "name": "Qwen3.7 Max" },
+      { "id": "qwen3.7-plus", "name": "Qwen3.7 Plus" },
+      { "id": "qwen3.6-flash", "name": "Qwen3.6 Flash" },
+      { "id": "deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash" },
+      { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro" },
+      { "id": "glm-5.3", "name": "GLM 5.3" },
+      { "id": "glm-5.2", "name": "GLM 5.2" }
+    ],
+    "authUrl": "https://bailian.console.aliyun.com/cn-beijing/subscription/token-plan/personal",
+    "envVar": "DASHSCOPE_TOKEN_PLAN_API_KEY",
+    "notes": "阿里云百炼 Token Plan 专属端点：Key 以 sk-sp- 开头，只在该 Base URL 上抵扣订阅 Credits。官方另给 Anthropic 兼容地址 .../apps/anthropic；目录只登记 OpenAI 兼容线。与按量、Coding Plan 的 Key 互不相通。",
+    "website": "https://help.aliyun.com/zh/model-studio/token-plan-overview"
+  },
+  {
+    "id": "siliconflow_cn",
+    "name": "硅基流动 (中国站)",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://api.siliconflow.cn/v1",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "deepseek-ai/DeepSeek-V4-Pro", "name": "DeepSeek V4 Pro" },
+      { "id": "deepseek-ai/DeepSeek-V4-Flash", "name": "DeepSeek V4 Flash" },
+      { "id": "deepseek-ai/DeepSeek-V3.2", "name": "DeepSeek V3.2" },
+      { "id": "Qwen/Qwen3.5-397B-A17B", "name": "Qwen 3.5 397B A17B" },
+      { "id": "Qwen/Qwen3.5-122B-A10B", "name": "Qwen 3.5 122B A10B" },
+      { "id": "zai-org/GLM-5.1", "name": "GLM 5.1" },
+      { "id": "zai-org/GLM-5", "name": "GLM 5" },
+      { "id": "moonshotai/Kimi-K2.6", "name": "Kimi K2.6" },
+      { "id": "MiniMaxAI/MiniMax-M2.5", "name": "MiniMax M2.5" }
+    ],
+    "authUrl": "https://cloud.siliconflow.cn/account/ak",
+    "envVar": "SILICONFLOW_CN_API_KEY",
+    "modelsUrl": "https://api.siliconflow.cn/v1/models",
+    "notes": "SiliconFlow 中国站（api.siliconflow.cn）与 siliconflow（api.siliconflow.com）是两套站点和 Key；模型 id 沿用同一开源模型命名。",
+    "website": "https://siliconflow.cn/"
+  },
+  {
+    "id": "spark",
+    "name": "讯飞星火",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://spark-api-open.xf-yun.com/v1",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "4.0Ultra", "name": "Spark 4.0 Ultra" },
+      { "id": "generalv3", "name": "Spark Pro" },
+      { "id": "pro-128k", "name": "Spark Pro 128K" },
+      { "id": "lite", "name": "Spark Lite" }
+    ],
+    "authUrl": "https://console.xfyun.cn/",
+    "envVar": "SPARK_API_PASSWORD",
+    "notes": "讯飞星火 OpenAI 兼容 HTTP 端点；model 字段直接填 domain 名。Max 版本套餐已于 2026-03-10 下线，故 max-32k / generalv3.5 不登记。",
+    "website": "https://www.xfyun.cn/"
+  },
+  {
+    "id": "stepfun",
+    "name": "阶跃星辰 StepFun",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://api.stepfun.com/v1",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "step-5-preview", "name": "Step 5 Preview" },
+      { "id": "step-3.7-flash", "name": "Step 3.7 Flash" },
+      { "id": "step-3.5-flash", "name": "Step 3.5 Flash" },
+      { "id": "step-3.5-flash-2603", "name": "Step 3.5 Flash 2603" }
+    ],
+    "authUrl": "https://platform.stepfun.com/interface-key",
+    "envVar": "STEPFUN_API_KEY",
+    "notes": "阶跃星辰中国站（api.stepfun.com）；国际站 api.stepfun.ai 不登记。Step Plan 订阅走单独的 /step_plan/v1 前缀。",
+    "website": "https://platform.stepfun.com/"
+  },
+  {
+    "id": "stepfun_step_plan",
+    "name": "阶跃星辰 Step Plan",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://api.stepfun.com/step_plan/v1",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "step-5-preview", "name": "Step 5 Preview" },
+      { "id": "step-3.7-flash", "name": "Step 3.7 Flash" },
+      { "id": "step-3.5-flash", "name": "Step 3.5 Flash" },
+      { "id": "step-3.5-flash-2603", "name": "Step 3.5 Flash 2603" }
+    ],
+    "authUrl": "https://platform.stepfun.com/interface-key",
+    "envVar": "STEPFUN_STEP_PLAN_API_KEY",
+    "notes": "Step Plan 订阅端点：官方 overview 写明按月 Credit 额度、OpenAI 兼容 base 为 /step_plan/v1、Anthropic 兼容 base 为 /step_plan。目录只登记 OpenAI 兼容线。",
+    "website": "https://platform.stepfun.com/docs/zh/step-plan/overview"
+  },
+  {
+    "id": "volcengine_ark_platform",
+    "name": "火山方舟（按量）",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://ark.cn-beijing.volces.com/api/v3",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "doubao-seed-2.1-turbo", "name": "Doubao Seed 2.1 Turbo" },
+      { "id": "doubao-seed-2.0-pro", "name": "Doubao Seed 2.0 Pro" },
+      { "id": "doubao-seed-2.0-lite", "name": "Doubao Seed 2.0 Lite" },
+      { "id": "doubao-seed-2.0-code", "name": "Doubao Seed 2.0 Code" },
+      { "id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash" },
+      { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro" },
+      { "id": "glm-5.2", "name": "GLM 5.2" },
+      { "id": "kimi-k2.7-code", "name": "Kimi K2.7 Code" },
+      { "id": "minimax-m3", "name": "MiniMax M3" }
+    ],
+    "authUrl": "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
+    "envVar": "ARK_API_KEY",
+    "notes": "火山方舟平台按量端点 /api/v3。它与 /api/coding/v3（volcengine-ark）和 /api/plan/v3（volcengine_ark_agent_plan）是三条计费通路，Key 与 Base URL 不可混用。",
+    "website": "https://console.volcengine.com/ark"
+  },
+  {
+    "id": "volcengine_ark_agent_plan",
+    "name": "火山方舟 Agent Plan",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://ark.cn-beijing.volces.com/api/plan/v3",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "ark-code-latest", "name": "Ark Code Latest" },
+      { "id": "doubao-seed-2.1-turbo", "name": "Doubao Seed 2.1 Turbo" },
+      { "id": "doubao-seed-2.0-pro", "name": "Doubao Seed 2.0 Pro" },
+      { "id": "doubao-seed-2.0-lite", "name": "Doubao Seed 2.0 Lite" },
+      { "id": "doubao-seed-2.0-code", "name": "Doubao Seed 2.0 Code" },
+      { "id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash" },
+      { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro" },
+      { "id": "glm-5.2", "name": "GLM 5.2" },
+      { "id": "kimi-k2.7-code", "name": "Kimi K2.7 Code" },
+      { "id": "minimax-m3", "name": "MiniMax M3" }
+    ],
+    "authUrl": "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
+    "envVar": "ARK_AGENT_PLAN_API_KEY",
+    "notes": "Agent Plan 订阅端点：官方接入文档给出 OpenAI 协议 /api/plan/v3、Anthropic 协议 /api/plan，并要求使用 Agent Plan 专属 Key。ark-code-latest 由控制台切换实际模型；Kimi K3 只在 Medium 及以上档位提供，故不进基线。",
+    "website": "https://www.volcengine.com/docs/82379/2374459"
+  },
+  {
+    "id": "yi",
+    "name": "零一万物 Yi",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://api.lingyiwanwu.com/v1",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "yi-lightning", "name": "Yi Lightning" },
+      { "id": "yi-vision-v2", "name": "Yi Vision V2" }
+    ],
+    "authUrl": "https://platform.lingyiwanwu.com/",
+    "envVar": "YI_API_KEY",
+    "notes": "零一万物 OpenAI 兼容端点。官方文档注明自 2025-08-07 起 Yi-Lightning / Yi-Vision-V2 由智能路由承载，可能落到 DeepSeek / Qwen 等后端。",
+    "website": "https://platform.lingyiwanwu.com/docs"
   },
 ]
 
