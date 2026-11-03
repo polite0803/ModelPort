@@ -19,6 +19,7 @@ import type {
   ModelCapabilityHint,
   CompressionConfig,
   AnthropicInboundConfig,
+  ModelListRefreshConfig,
 } from '../../shared/types.ts'
 import type { ChannelLoginKind } from '../../shared/channels.ts'
 import {
@@ -382,6 +383,13 @@ export interface AppConfig {
    * `storeManager.updateConfig({ anthropicInbound })` 直接编译不过（UI 写路径就是它）。
    */
   anthropicInbound?: AnthropicInboundConfig
+  /**
+   * 供应商模型清单定时刷新。缺席即默认行为（见 `DEFAULT_MODEL_REFRESH`）。
+   *
+   * 与 `src/shared/types.ts` 同一份声明、两处都要写 —— 少这一处，主进程侧
+   * `storeManager.updateConfig({ modelListRefresh })` 直接编译不过（UI 写路径就是它）。
+   */
+  modelListRefresh?: ModelListRefreshConfig
   /**
    * 免验证（keyless）聚合条目的自动开通黑名单：用户显式删除过的条目 id 记在这里，
    * 启动期自动开通不再复活它们。

@@ -66,7 +66,7 @@ import {
   planKeySetup,
 } from './keyMigration'
 import { applyServed, buildModelCatalogue, namespaceModelOverrides } from './modelServing'
-import { DEFAULT_AUTO_ROUTING_CONFIG, RETIRED_PROVIDER_IDS } from '../../shared/types'
+import { DEFAULT_AUTO_ROUTING_CONFIG, RETIRED_PROVIDER_IDS, normalizeModelListRefresh } from '../../shared/types'
 import { normalizeAutoRoutingConfig } from './autoRoutingConfig'
 import {
   allModelRoutes,
@@ -547,6 +547,7 @@ class StoreManager {
       // 摘要策略退役后，老 `data.json` 里的 `strategies.summary` 与 `executionOrder` 里那一项
       // 都由同一个归一摘掉 —— 面板与管理 API 读到的就是运行态真正会用的那两个策略。
       contextManagement: normalizeContextManagementConfig(rawConfig.contextManagement),
+      modelListRefresh: normalizeModelListRefresh(rawConfig.modelListRefresh),
     }
 
     // 退役掉的注入层在老 `data.json` 里留下的键。上面是 spread，死键会原样活到

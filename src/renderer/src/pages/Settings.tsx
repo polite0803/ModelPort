@@ -6,6 +6,7 @@ import {
   GeneralSettings,
   DataManagement,
   ManagementApiSettings,
+  ModelListRefreshSettings,
 } from '@/components/settings'
 import { About } from '@/pages/About'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -56,6 +57,7 @@ export function Settings() {
           <div className="space-y-6">
             <AppearanceSettings />
             <GeneralSettings />
+            <ModelListRefreshSettings />
           </div>
         </TabsContent>
 

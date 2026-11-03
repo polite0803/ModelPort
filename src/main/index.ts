@@ -10,6 +10,8 @@ import { storeManager } from './store/store'
 import { aggregateProviderManager } from './providers/aggregate'
 import { detectHiddenLaunch, reconcileAutoStart } from './autostartHost'
 import { recordProcessCrash, setCrashLogWriter } from './logging/crashReporter'
+import { configureModelListRefresh } from './scheduler/modelListRefresh'
+import { scheduler } from './scheduler/Scheduler'
 
 // Keep the Electron profile directory stable across product renames.
 // safeStorage seals store.key and every stored credential against this profile
@@ -118,6 +120,8 @@ async function initializeApp(): Promise<void> {
 
   app.on('before-quit', () => {
     app.isQuitting = true
+    // 停止统一调度器：清掉所有 setInterval，避免退出后定时器仍持有回调。
+    scheduler.stop()
     trayManager?.destroy()
   })
 
@@ -169,6 +173,13 @@ async function setupApp(): Promise<void> {
   // 异步执行不阻塞启动，失败只告警；存储初始化失败时直接跳过。
   if (!storeManager.hasInitializationError()) {
     void aggregateProviderManager.autoProvisionKeyless()
+  }
+
+  // 模型清单定时刷新：store 就绪后按当前配置装配调度任务并启动统一调度器。
+  // 存储不可用时跳过（调度器依赖 store 枚举 provider，没意义也无从落状态）。
+  if (!storeManager.hasInitializationError()) {
+    configureModelListRefresh(storeManager.getConfig().modelListRefresh)
+    scheduler.start()
   }
 
   trayManager = createTrayManager(mainWindow)

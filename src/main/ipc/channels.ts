@@ -173,6 +173,11 @@ export const IpcChannels = {
 
   CONTEXT_MANAGEMENT_GET_CONFIG: 'contextManagement:getConfig',
   CONTEXT_MANAGEMENT_UPDATE_CONFIG: 'contextManagement:updateConfig',
+
+  // 供应商模型清单定时刷新：状态只读（lastRun/nextRun/开关），配置走 config:update，
+  // 立即刷新一把走 triggerNow。与 AGGREGATE_QUERY_CREDITS 同款"手动触发才发一次"纪律。
+  MODEL_REFRESH_GET_STATUS: 'modelRefresh:getStatus',
+  MODEL_REFRESH_TRIGGER_NOW: 'modelRefresh:triggerNow',
 } as const
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels]

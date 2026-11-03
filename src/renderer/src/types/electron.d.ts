@@ -32,6 +32,8 @@ import type {
   AppLogTrendPoint,
   ModelsFetchFailure,
   ModelCapabilityHint,
+  ModelListRefreshConfig,
+  SchedulerTaskStatus,
   RoutePreviewResult,
   RoutePreviewSample,
   TlsStatus,
@@ -638,6 +640,23 @@ interface AnthropicDiscoveryAPI {
   apply: () => Promise<AnthropicRouteApplyResult>
 }
 
+/**
+ * 供应商模型清单定时刷新：只读状态（`getStatus` 返回当前配置与各任务上次/下次运行时间）
+ * 与手动触发（`triggerNow`）。配置变更走 `config.update` 的 `modelListRefresh` 字段，
+ * 主进程 `CONFIG_UPDATE` handler 会重新装配调度任务。
+ */
+interface ModelRefreshAPI {
+  getStatus: () => Promise<{
+    config: ModelListRefreshConfig | null
+    tasks: SchedulerTaskStatus[]
+  }>
+  triggerNow: () => Promise<{
+    ok: boolean
+    reason?: string
+    tasks: SchedulerTaskStatus[]
+  }>
+}
+
 interface ElectronAPI {
   proxy: ProxyAPI
   tls: TlsAPI
@@ -658,6 +677,7 @@ interface ElectronAPI {
   managementApi: ManagementApiAPI
   contextManagement: ContextManagementAPI
   tray: TrayAPI
+  modelRefresh: ModelRefreshAPI
 }
 
 declare global {

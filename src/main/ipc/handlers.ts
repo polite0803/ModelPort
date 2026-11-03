@@ -19,6 +19,7 @@ import type { AggregateSaveInput } from '../../shared/aggregate'
 import { getBuiltinProviders, getBuiltinProvider } from '../providers/builtin'
 import { oauthManager } from '../oauth/manager'
 import { fetchProviderModels } from '../providers/modelCatalog'
+import { schedulerStatus, triggerModelListRefreshNow, configureModelListRefresh } from '../scheduler/modelListRefresh'
 import { proxyServer } from '../proxy/server'
 import {
   getTlsStatus,
@@ -295,6 +296,11 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     // 配置一落地就重新核对监听安全：`checkStartupSecurity` 原本只在 `start()` 跑一次，
     // 「先带 Key 绑 0.0.0.0 启动、再把 Key 清空」会让服务继续以无鉴权状态对外监听。
     proxyServer.revalidateSecurity()
+
+    // 模型清单刷新配置变更：运行时重排调度任务（增删类别 / 改周期 / 整体开关）。
+    if (updates.modelListRefresh !== undefined) {
+      configureModelListRefresh(newConfig.modelListRefresh)
+    }
 
     return true
   })
@@ -1387,7 +1393,22 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     
     return newContextConfig
   })
-  
+
+  // 模型清单定时刷新：状态只读 + 手动触发。配置变更走 `config:update` 的
+  // `modelListRefresh` 字段（CONFIG_UPDATE handler 会重新 `configureModelListRefresh`）。
+  ipcMain.handle(IpcChannels.MODEL_REFRESH_GET_STATUS, async () => {
+    return {
+      config: storeManager.getConfig().modelListRefresh ?? null,
+      tasks: schedulerStatus(),
+    }
+  })
+  ipcMain.handle(IpcChannels.MODEL_REFRESH_TRIGGER_NOW, async () => {
+    const refresh = storeManager.getConfig().modelListRefresh
+    if (!refresh || !refresh.enabled) return { ok: false, reason: 'disabled' }
+    await triggerModelListRefreshNow()
+    return { ok: true, tasks: schedulerStatus() }
+  })
+
   oauthManager.on('progress', (event) => {
     mainWindow?.webContents.send(IpcChannels.OAUTH_PROGRESS, event)
   })

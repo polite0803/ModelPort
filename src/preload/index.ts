@@ -700,6 +700,14 @@ const trayAPI = {
     ipcRenderer.send('tray:quit-app'),
 }
 
+const modelRefreshAPI = {
+  getStatus: (): Promise<{ config: unknown; tasks: unknown[] }> =>
+    ipcRenderer.invoke(IpcChannels.MODEL_REFRESH_GET_STATUS),
+
+  triggerNow: (): Promise<{ ok: boolean; reason?: string; tasks: unknown[] }> =>
+    ipcRenderer.invoke(IpcChannels.MODEL_REFRESH_TRIGGER_NOW),
+}
+
 const aggregateAPI = {
   list: (): Promise<AggregateListResult> =>
     ipcRenderer.invoke(IpcChannels.AGGREGATE_LIST),
@@ -827,6 +835,7 @@ const electronAPI = {
   managementApi: managementApiAPI,
   contextManagement: contextManagementAPI,
   tray: trayAPI,
+  modelRefresh: modelRefreshAPI,
 
   // 这里刻意**没有**通用的 `invoke` / `send` / `on`。曾经有，等于把整个 `ipcRenderer`
   // 原样交给渲染进程：任何在渲染层执行的 JS 都能调用全部通道，包括

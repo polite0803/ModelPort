@@ -730,6 +730,59 @@ export interface AppConfig {
   anthropicInbound?: AnthropicInboundConfig
   compression: CompressionConfig
   language: 'zh-CN' | 'en-US'
+  /**
+   * 供应商模型清单定时刷新。缺席即默认行为（见 `DEFAULT_MODEL_REFRESH`），
+   * 所以老配置无需迁移——和 `routes` / `seededPresetRoutes` 同款的"缺席即默认"门禁。
+   */
+  modelListRefresh?: ModelListRefreshConfig
+}
+
+/**
+ * 模型清单定时刷新配置。
+ *
+ * `enabled` 关掉则调度器完全不挂任务；三个开关分别控制哪一类纳入预热。
+ *
+ * ## 为什么是**两档**周期而非一档
+ *
+ * 三类来源的取数成本天差地别：
+ * - 账号渠道走渠道包**本地** `model.list` RPC（进程内调用，零网络、零凭据解析），
+ *   成本极低；
+ * - 聚合目录 `syncModels` 与内置供应商 `fetchProviderModels` 都是**真·HTTP 打上游**，
+ *   频繁触发会被限流/风控。
+ *
+ * 而更重要的事实是：**模型清单本身是周/月级事件**（上游增删模型、倍率/免费标记
+ * 调整都是低频的），分钟级轮询纯属浪费还增加上游压力。所以拆成两档且都用天/周/月
+ * 单位：`accountIntervalMs`（本地 RPC，默认 1 周）与 `aggregateIntervalMs`
+ * （真·HTTP，默认 1 月）；`builtin` 与聚合同档（同样是 HTTP）。UI 只暴露天/周/月档位。
+ */
+export interface ModelListRefreshConfig {
+  enabled: boolean
+  /** 账号渠道刷新周期（毫秒），默认 1 周。本地 RPC 零成本，但清单变化本就低频。 */
+  accountIntervalMs: number
+  /** 聚合目录 + 内置供应商刷新周期（毫秒），默认 1 月。真·HTTP 打上游，宜稀疏。 */
+  aggregateIntervalMs: number
+  /** 账号渠道（13 个：本地 model.list RPC 预热）。 */
+  accountChannels: boolean
+  /** 聚合目录（遍历已配置 aggregate 条目跑 syncModels）。 */
+  aggregate: boolean
+  /** 内置供应商（有 modelsFetch 的 builtin 真·HTTP 重拉；当前为空集合）。 */
+  builtin: boolean
+}
+
+/**
+ * 调度任务的状态快照（供 UI 展示）。
+ *
+ * 纯数据类型，无运行时依赖，主进程 `Scheduler` 与渲染端类型定义共用同一份，
+ * 避免渲染端 import 主进程文件（会带进 electron）。
+ */
+export interface SchedulerTaskStatus {
+  name: string
+  intervalMs: number
+  running: boolean
+  lastRunAt: number | null
+  nextRunAt: number | null
+  lastError: string | null
+  lastSuccessAt: number | null
 }
 
 /** Compression strength; multiplies the adaptive retention budget. */
@@ -762,6 +815,61 @@ export const COMPRESSION_AGGRESSIVENESS: CompressionAggressiveness[] = [
 export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
   enabled: true,
   aggressiveness: 'moderate',
+}
+
+/**
+ * 模型清单定时刷新出厂默认值。
+ *
+ * 模型清单（上游增删模型、倍率/免费标记调整）本质是**周/月级**事件，不是分钟级。
+ * 所以周期用的是天/周/月单位，而不是小时：账号渠道默认 **1 周**（本地 RPC 零成本，
+ * 但仍没必要天天刷），聚合/内置默认 **1 月**（真·HTTP 打上游，稀疏为宜）。
+ *
+ * 三类默认全开（内置当前为空集合，开启无害）。UI 改的是复写的真值，这里只是
+ * 老配置/缺省时的回落。注意 `DEFAULT_CONFIG` 不预置 `modelListRefresh` 字段，
+ * 由 `normalizeModelListRefresh` 在读取侧补，保持与 `routes` 同款"缺省即默认"纪律。
+ */
+export const DAY_MS = 24 * 60 * 60 * 1000
+export const WEEK_MS = 7 * DAY_MS
+export const MONTH_MS = 30 * DAY_MS
+
+export const DEFAULT_MODEL_REFRESH: ModelListRefreshConfig = {
+  enabled: true,
+  accountIntervalMs: WEEK_MS,
+  aggregateIntervalMs: 2 * WEEK_MS,
+  accountChannels: true,
+  aggregate: true,
+  builtin: true,
+}
+
+/**
+ * 把任意（含 undefined / 畸形）输入归一成合法的 `ModelListRefreshConfig`。
+ * 两档周期各自下限 60s 防呆（UI 只暴露天/周/月档位，不会让人误设成分钟级）。
+ */
+export function normalizeModelListRefresh(input: unknown): ModelListRefreshConfig {
+  if (input === undefined || input === null || typeof input !== 'object' || Array.isArray(input)) {
+    return { ...DEFAULT_MODEL_REFRESH }
+  }
+  const raw = input as Partial<ModelListRefreshConfig>
+  const accountIntervalMs =
+    typeof raw.accountIntervalMs === 'number' &&
+    Number.isFinite(raw.accountIntervalMs) &&
+    raw.accountIntervalMs >= 60_000
+      ? raw.accountIntervalMs
+      : DEFAULT_MODEL_REFRESH.accountIntervalMs
+  const aggregateIntervalMs =
+    typeof raw.aggregateIntervalMs === 'number' &&
+    Number.isFinite(raw.aggregateIntervalMs) &&
+    raw.aggregateIntervalMs >= 60_000
+      ? raw.aggregateIntervalMs
+      : DEFAULT_MODEL_REFRESH.aggregateIntervalMs
+  return {
+    enabled: raw.enabled === true,
+    accountIntervalMs,
+    aggregateIntervalMs,
+    accountChannels: raw.accountChannels !== false,
+    aggregate: raw.aggregate !== false,
+    builtin: raw.builtin !== false,
+  }
 }
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'

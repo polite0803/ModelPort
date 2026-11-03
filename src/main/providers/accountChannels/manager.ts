@@ -406,6 +406,35 @@ class AccountChannelManager {
   }
 
   /**
+   * 周期预热入口（供 `Scheduler` 调用）。
+   *
+   * 与 `refreshModels` 的本质区别：后者走 `resync()`（清整个缓存 → `syncProviders`
+   * 写 provider 记录 + 全局 modelMappings + 广播），那是"用户在界面里点了刷新、
+   * 期望状态立即生效"的语义。定时预热不想要这套副作用：
+   *
+   * - **不写持久化**：定时跑出来的目录不该覆盖用户手动的停用/恢复决策；
+   * - **不广播**：后台预热不该让界面每 4 小时闪一次；
+   * - 只刷新内存里的 `modelsCache`（下一次 `modelsFor` 读到的就是新的）。
+   *
+   * 失败 fail-soft：`bridge` 起不来或渠道包无应答时保持旧缓存，记 warning 即可
+   * （继承 `fetchModels`「拉不到就空表」但也别清掉已有内存副本的纪律——这里直接
+   * 保留旧 `modelsCache`，比 `fetchModels` 更保守：后台任务失败绝不能把可用的
+   * 内存目录变成空）。
+   */
+  async warmModels(): Promise<void> {
+    try {
+      const bridge = await this.bridgeOrThrow()
+      // 只清缓存、重读内存副本，不触碰 `syncProviders` / 磁盘 / 广播。
+      this.modelsCache = null
+      await this.models(bridge)
+    } catch (error) {
+      console.warn(
+        `[ChannelPack] 定时预热模型目录失败，保留旧缓存：${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+  }
+
+  /**
    * 打开 / 关闭单个模型。
    *
    * 渠道包写盘后会广播一次目录变更，理论上不下发返回值也能等到界面刷新；但
