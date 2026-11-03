@@ -851,6 +851,22 @@ export interface TlsCertificateInfo {
   selfSigned: boolean
 }
 
+/** One TLS handshake failure family, counted since the listener started. */
+export interface TlsHandshakeRejectionStat {
+  code: string
+  count: number
+  /** True when the code means "the client rejected our certificate", not a protocol error. */
+  certificate: boolean
+}
+
+export interface TlsHandshakeStats {
+  /** Epoch ms of the moment counting began (the listener start). */
+  sinceAt: number
+  total: number
+  lastAt: number | null
+  byCode: TlsHandshakeRejectionStat[]
+}
+
 export interface TlsStatus {
   enabled: boolean
   /** Whether the HTTPS listener is actually accepting connections. */
@@ -862,8 +878,28 @@ export interface TlsStatus {
   certificate: TlsCertificateInfo | null
   /** null = this platform has no cheap trust-store probe. */
   trusted: boolean | null
+  /**
+   * Handshakes the client aborted before any HTTP was exchanged. Those requests
+   * never reach the request log, so this counter is the only evidence that a
+   * client tried and was refused by its own certificate check.
+   */
+  handshakeRejections: TlsHandshakeStats | null
   /** Why the listener is enabled but not running. */
   error: string | null
+}
+
+/** The certificate a client needs in order to trust this listener. */
+export interface TlsCertificateBundle {
+  certPath: string
+  /** PEM of the certificate only; never the private key. */
+  pem: string
+  source: TlsCertificateInfo['source']
+  subject: string
+  issuer: string
+  fingerprint256: string
+  validTo: string
+  subjectAltName: string | null
+  selfSigned: boolean
 }
 
 export interface TlsTrustResult {

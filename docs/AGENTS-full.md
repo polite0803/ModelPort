@@ -1129,6 +1129,40 @@ that path.
   blocks to native OpenAI `tool_calls`.
 - `/v1/management/sessions*` is retired and answers 501: there is no server-side session table.
 
+### HTTPS Listener and Certificate Trust
+
+The proxy can run a TLS listener (`httpsPort`, default 8443) beside the HTTP one; both serve the same
+Koa app. The presented certificate is either a custom PEM pair (`httpsCertPath` + `httpsKeyPath`,
+all-or-nothing) or the managed self-signed one in `~/.modelport/tls/server.crt|server.key`, issued for
+397 days, renewed inside the last 7 days and reissued whenever a host the clients actually connect by is
+missing from its SAN (`proxy/tls.ts::loadTlsMaterial`).
+
+* **Trust has two consumers, and `TlsStatus.trusted` only answers the first one.**
+  `installCertificateTrust()` writes the *OS* store (`certutil -user -addstore Root` on Windows,
+  `security add-trusted-cert` on macOS). Chromium/Schannel clients - Claude Desktop, browsers, Windows
+  `curl` - read that store. **Node-based clients never do**: Codex CLI, the WorkBuddy/CodeBuddy agent
+  and anything built on `node:https` or undici use Node's bundled CA set plus `NODE_EXTRA_CA_CERTS`.
+  A green "Trusted" badge therefore does not mean a given client can connect. The settings panel prints
+  the copyable `NODE_EXTRA_CA_CERTS=<certPath>` line next to it, and
+  `GET /v1/management/tls/ca` hands the same PEM (certificate only, never the key) to a machine that is
+  not this one. Measured 2026-11-03: WorkBuddy against `https://<lan-ip>:8443` produced 142 failed model
+  calls, every one `DEPTH_ZERO_SELF_SIGNED_CERT`, while the very same certificate sat in
+  `CurrentUser\Root` and `curl` on that machine shook hands fine. Diagnosing that from the gateway side
+  was impossible - there was nothing to read.
+* **A handshake the client refuses is the only client failure that produces no request row.** No route
+  runs, so there is no request-log row, no `X-Request-Id`, no attempt list - the user sees "network
+  error" and the gateway looks idle. `httpsServer.on('tlsClientError')` feeds
+  `proxy/tls.ts::createHandshakeRejectionTracker`, which counts per OpenSSL code, writes one app-log line
+  per code per 30s window (that client alone produced 567 identical failures in eight minutes), and
+  exposes the numbers as `TlsStatus.handshakeRejections` - in the panel and through
+  `GET /v1/management/tls/status`. Counting begins at the listener start and the counter is dropped when
+  the listener stops, so a stopped listener never shows a stale "still refusing".
+  `isCertificateRejection` is the classifier: a protocol failure (`ERR_SSL_WRONG_VERSION_NUMBER`,
+  `EPROTO` - usually an HTTP client aimed at the HTTPS port) must not be worded as a trust problem,
+  because the fix is different.
+* Never report a client as working on the strength of the trust flag; the honest evidence is a handshake
+  that turned into a request row.
+
 ## Data Storage
 
 Application data lives in `~/.modelport/`. The Electron profile directory is pinned to

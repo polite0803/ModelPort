@@ -107,6 +107,13 @@ inbound gives it a required string `input` schema (chat has no other contract sl
 must answer with `custom_tool_call` + that text - the client dispatches on item `type`, so a
 `function_call` there means the write silently never happens. Those items must also be read back out of
 history, or the model cannot see its own attempts and re-declares the write every turn.
+* **System-store trust is not "the client can connect".** `installCertificateTrust()` only satisfies
+Chromium/Schannel clients; Node-based clients (Codex CLI, the WorkBuddy/CodeBuddy agent) ignore that
+store entirely and need `NODE_EXTRA_CA_CERTS` - the same PEM a remote machine can fetch from
+`GET /v1/management/tls/ca`. A refused handshake creates no request row, no `X-Request-Id` and no
+attempt list, so read `TlsStatus.handshakeRejections` (`GET /v1/management/tls/status`) before
+concluding the gateway saw nothing. Details in `docs/AGENTS-full.md` §HTTPS Listener and Certificate
+Trust.
 * **Failover status policy**: 400 is terminal (capability-mismatch 400s are explicit exceptions);
 401-407, **404**, 409-499, 5xx and network errors switch to the next candidate; 408/504/524 may switch
 but are never retried against the same target. A 404 means "this channel does not supply that model",

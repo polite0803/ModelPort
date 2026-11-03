@@ -13,6 +13,7 @@ import statisticsRouter from './statistics'
 import proxyRouter from './proxy'
 import toolCallingRouter from './toolCalling'
 import compressionRouter from './compression'
+import tlsRouter from './tls'
 
 export {
   configRouter,
@@ -25,6 +26,7 @@ export {
   proxyRouter,
   toolCallingRouter,
   compressionRouter,
+  tlsRouter,
 }
 
 export default [
@@ -38,4 +40,5 @@ export default [
   proxyRouter,
   toolCallingRouter,
   compressionRouter,
+  tlsRouter,
 ]

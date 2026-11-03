@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'f
 import { homedir } from 'os'
 import { join } from 'path'
 import { generate } from 'selfsigned'
-import type { TlsCertificateInfo, TlsStatus, TlsTrustResult } from '../../shared/types'
+import type { TlsCertificateInfo, TlsHandshakeStats, TlsStatus, TlsTrustResult } from '../../shared/types'
 import type { AppConfig } from '../store/types'
 import { buildHttpsUrl, isIpv4, isIpv6, requiredSanHosts } from '../../shared/httpsConfig.ts'
 
@@ -24,6 +24,8 @@ export interface TlsRuntimeStatus {
   host: string
   port: number
   error: string | null
+  /** Rejected handshakes counted by the running listener; null when it never started. */
+  handshakes?: TlsHandshakeStats | null
 }
 
 /** The config slice that decides which certificate gets presented. */
@@ -200,9 +202,115 @@ export function sha1Thumbprint(certPem: string): string {
 }
 
 /**
+ * OpenSSL codes that mean "this client does not trust the certificate we
+ * presented". Everything else on `tlsClientError` is a protocol-level failure
+ * (an HTTP client hitting the HTTPS port, a dead TLS version, a broken tunnel)
+ * and must not be reported as a trust problem.
+ */
+const CERTIFICATE_REJECTION_CODES = new Set([
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNKNOWN_CA',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'CERT_UNTRUSTED',
+  'CERT_HAS_EXPIRED',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+  'HOST_NOT_FOUND_ANYWHERE',
+])
+
+export function isCertificateRejection(code: string): boolean {
+  return CERTIFICATE_REJECTION_CODES.has((code || '').toUpperCase())
+}
+
+export interface HandshakeRejectionTracker {
+  record(code: string, at: number): void
+  stats(): TlsHandshakeStats
+}
+
+/**
+ * Counts handshakes the client aborted before HTTP started.
+ *
+ * Such a request is invisible everywhere else: no route runs, so there is no
+ * request-log row and no `X-Request-Id`, and the user only sees "the client
+ * cannot connect". The counter is what makes that absence explainable.
+ * Repeats of one code inside `dedupWindowMs` are counted but not logged again,
+ * because a retrying client can produce hundreds of identical failures.
+ *
+ * ⚠️ What the server can and cannot know. A client that rejects *our*
+ * certificate sends a TLS alert, and Node reports it here as a bare
+ * `ECONNRESET` - measured 2026-11-03: the code `DEPTH_ZERO_SELF_SIGNED_CERT`
+ * exists only on the client. So claiming "the client did not trust the
+ * certificate" from a code would be a fabrication; the honest statement is that
+ * the handshake died before any request, and that when this listener presents a
+ * self-signed certificate the client's own verification is the first suspect.
+ */
+export function createHandshakeRejectionTracker(input: {
+  startedAt: number
+  certPath: string
+  selfSigned: boolean
+  log: (level: 'warn', message: string) => void
+  dedupWindowMs?: number
+}): HandshakeRejectionTracker {
+  const dedupWindowMs = input.dedupWindowMs ?? 30_000
+  const counts = new Map<string, number>()
+  const lastLoggedAt = new Map<string, number>()
+  let total = 0
+  let lastAt: number | null = null
+
+  return {
+    record(code, at) {
+      const key = (code || 'TLS_HANDSHAKE_ERROR').toUpperCase()
+      total += 1
+      lastAt = at
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+
+      const previous = lastLoggedAt.get(key)
+      if (previous !== undefined && at - previous < dedupWindowMs) return
+      lastLoggedAt.set(key, at)
+      const count = counts.get(key) ?? 1
+      const certificate = isCertificateRejection(key)
+      const suffix = count > 1 ? ` (${count} of this code since the listener started)` : ''
+      const trustHint =
+        `Chromium/Schannel clients read the OS trust store (use "Install into system trust"); Node-based ` +
+        `clients ignore that store entirely and need NODE_EXTRA_CA_CERTS=${input.certPath} - the same PEM ` +
+        `is served by GET /v1/management/tls/ca.`
+      input.log(
+        'warn',
+        certificate
+          ? `HTTPS handshake refused by the client: ${key}${suffix}. This code names a certificate ` +
+              `problem, so nothing reached the proxy and no request was logged. ${trustHint}`
+          : `HTTPS handshake aborted before any request: ${key}${suffix}. No request row exists for it. ` +
+              (input.selfSigned
+                ? `This listener presents a self-signed certificate, so the first suspect is the client's own ` +
+                    `certificate verification - the alert reaches us as ${key}, the reason code stays on the ` +
+                    `client. ${trustHint} `
+                : '') +
+              `An HTTP client aimed at the HTTPS port breaks here too: check the URL scheme against the port.`,
+      )
+    },
+    stats() {
+      return {
+        sinceAt: input.startedAt,
+        total,
+        lastAt,
+        byCode: [...counts.entries()].map(([code, count]) => ({
+          code,
+          count,
+          certificate: isCertificateRejection(code),
+        })),
+      }
+    },
+  }
+}
+
+/**
  * Whether the certificate is trusted by the OS store. Chromium-based clients
  * (Claude Desktop) use that store on Windows and macOS, so this is the same
  * question the client will ask. null means the platform has no cheap probe.
+ *
+ * ⚠️ A `true` here says nothing about Node-based clients (Codex CLI, the
+ * WorkBuddy/CodeBuddy agent, anything using `node:https` or undici): Node never
+ * consults the OS store, it uses its bundled CA set plus `NODE_EXTRA_CA_CERTS`.
  */
 export async function isCertificateTrusted(material: TlsMaterial): Promise<boolean | null> {
   if (process.platform === 'win32') {
@@ -344,6 +452,7 @@ export async function getTlsStatus(config: AppConfig, runtime: TlsRuntimeStatus)
         }
       : null,
     trusted,
+    handshakeRejections: runtime.handshakes ?? null,
     error: runtime.error,
   }
 }

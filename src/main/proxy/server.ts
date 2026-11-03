@@ -14,7 +14,13 @@ import managementRoutes from './routes/management'
 import { proxyStatusManager } from './status'
 import { storeManager } from '../store/store'
 import { sessionManager } from './sessionManager'
-import { loadTlsMaterial, type TlsMaterial, type TlsRuntimeStatus } from './tls'
+import {
+  createHandshakeRejectionTracker,
+  loadTlsMaterial,
+  type HandshakeRejectionTracker,
+  type TlsMaterial,
+  type TlsRuntimeStatus,
+} from './tls'
 import { isClientDisconnectError } from './clientAbort'
 import {
   checkStartupSecurity,
@@ -134,6 +140,7 @@ export class ProxyServer {
   private httpsHost: string = '127.0.0.1'
   private httpsError: string | null = null
   private httpsMaterial: TlsMaterial | null = null
+  private httpsHandshakes: HandshakeRejectionTracker | null = null
 
   constructor() {
     this.app = new Koa()
@@ -516,6 +523,12 @@ export class ProxyServer {
       return
     }
     this.httpsMaterial = material
+    this.httpsHandshakes = createHandshakeRejectionTracker({
+      startedAt: Date.now(),
+      certPath: material.certPath,
+      selfSigned: material.selfSigned,
+      log: (level, message) => storeManager.addLog(level, message),
+    })
 
     await new Promise<void>((resolve) => {
       try {
@@ -524,6 +537,13 @@ export class ProxyServer {
           this.app.callback(),
         )
         this.httpsServer = httpsServer
+
+        // A client that refuses the certificate never reaches a route, so it
+        // produces no request-log row and no X-Request-Id. Without this, the
+        // only symptom is "the client cannot connect" and nothing here explains it.
+        httpsServer.on('tlsClientError', (err: NodeJS.ErrnoException) => {
+          this.httpsHandshakes?.record(err.code ?? 'TLS_HANDSHAKE_ERROR', Date.now())
+        })
 
         httpsServer.once('error', (err: NodeJS.ErrnoException) => {
           this.httpsServer = null
@@ -593,6 +613,7 @@ export class ProxyServer {
     this.server = null
     this.httpsServer = null
     this.httpsError = null
+    this.httpsHandshakes = null
 
     return new Promise((resolve) => {
       let remaining = servers.length
@@ -663,6 +684,7 @@ export class ProxyServer {
       host: this.httpsHost,
       port: this.httpsPort,
       error: this.httpsError,
+      handshakes: this.httpsHandshakes?.stats() ?? null,
     }
   }
 

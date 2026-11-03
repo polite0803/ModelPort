@@ -234,6 +234,17 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
     }
   }
 
+  const copyCaEnvLine = async () => {
+    const certPath = tlsStatus?.certificate?.certPath
+    if (!certPath) return
+    try {
+      await navigator.clipboard.writeText(`NODE_EXTRA_CA_CERTS=${certPath}`)
+      toast({ title: t('proxy.httpsCaCopied') })
+    } catch {
+      toast({ title: t('proxy.httpsCaCopyFailed'), variant: 'destructive' })
+    }
+  }
+
   const handleSave = async () => {
     const portError = validatePort(formData.port)
     const hostError = validateHost(formData.host)
@@ -591,6 +602,22 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
                             ? t('proxy.httpsCertTrusted')
                             : t('proxy.httpsCertUntrusted')}
                       </div>
+                      {tlsStatus.handshakeRejections && (
+                        <div>
+                          {t('proxy.httpsHandshakeRejections')}:{' '}
+                          {tlsStatus.handshakeRejections.total === 0
+                            ? t('proxy.httpsHandshakeNone')
+                            : t('proxy.httpsHandshakeCount', {
+                                total: tlsStatus.handshakeRejections.total,
+                                certificate: tlsStatus.handshakeRejections.byCode
+                                  .filter((entry) => entry.certificate)
+                                  .reduce((sum, entry) => sum + entry.count, 0),
+                                codes: tlsStatus.handshakeRejections.byCode
+                                  .map((entry) => `${entry.code} x${entry.count}`)
+                                  .join(', '),
+                              })}
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <p className="text-xs text-muted-foreground">{t('proxy.httpsCertNotGenerated')}</p>
@@ -616,6 +643,20 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
                       {tlsBusy ? t('proxy.httpsUninstalling') : t('proxy.httpsUninstallTrust')}
                     </Button>
                   </div>
+                  {tlsStatus?.certificate && (
+                    <div className="space-y-1">
+                      <Label className="text-xs">{t('proxy.httpsNodeClientEnv')}</Label>
+                      <div className="flex items-center gap-2">
+                        <code className="block flex-1 rounded bg-[var(--bg-subtle)] px-2 py-1.5 text-xs break-all">
+                          NODE_EXTRA_CA_CERTS={tlsStatus.certificate.certPath}
+                        </code>
+                        <Button type="button" variant="outline" size="sm" onClick={() => void copyCaEnvLine()}>
+                          {t('proxy.httpsCopyCa')}
+                        </Button>
+                      </div>
+                      <p className="text-xs text-muted-foreground">{t('proxy.httpsNodeClientHelp')}</p>
+                    </div>
+                  )}
                   <p className="text-xs text-muted-foreground">{t('proxy.httpsInstallTrustHelp')}</p>
                   <p className="text-xs text-muted-foreground">{t('proxy.httpsRemoteTrustHint')}</p>
                 </div>
