@@ -105,3 +105,24 @@ A 批必须新增/更新的测试：
 - C1/C2/C3/C4：Anthropic 工具结果图片/`is_error`、历史 `thinking`、cache usage；Responses `reasoning`；新增可选参数透传（内置供应商仍剥离）。
 - C5 的落地口径改为「不把非法 JSON 回传上游，但降级不再静默」：`tool_calls.arguments` 仍归成合法 JSON（`{}` 或 `{__raw_arguments}`），响应头写 `X-ModelPort-Tool-Args-Repaired/Discarded`，控制台保留计数。直接保留原文会重新引入「严格上游整段会话 400」那一类故障。
 - 门禁：`npm run build`、两个 `tsc --noEmit`、全量 `node --test` 均通过（见本轮回报的读数）。
+
+## 5. 两条拍板（2026-11-03）
+
+**速度 vs 省钱 → 省钱。** agent 路由（`codex` 及其池子）不加首字延迟门槛、不排除慢渠道，
+`prefer` 与成本权重照旧。实测代价要说在前面：同一段会话里 qodercn 首字节 1.2s / 整轮 4.3s，
+raccoon 2.0s / 6.5s，loomy 4.8s / 14.9s；而粘性（`69a0686`）生效后，第一轮选中谁，整段会话
+就都跟着谁的延迟走 —— 这是「稳定」换「便宜」的对价，不是回归。网关自己每轮的税与池子无关，
+实测中位 655ms（p90 1.05s），占客户端等到首字的 3.1s 的两成。
+
+**流已出内容后失败 → 已发内容 + 错误帧交回客户端，绝不整轮重跑。** 现码已经是这个语义，
+本轮只是把它钉住并纠正我上一轮的错判：
+
+- 换家只发生在**首帧之前**：`forwarder.ts::firstStreamEvent` + `probeSseHead` 判定错误才
+  `continue` 到下一家；一旦头已提交给客户端，尝试就定局。
+- 出内容后中止（块间静默看门狗 `forwarder.ts:1045`）走 `routes/chat.ts:1069-1076`：
+  已转发的正文保留，追加 `buildStreamErrorFrame(...)` 再补唯一那个 `[DONE]`；
+  Responses 侧对应 `response.failed` 且不再补 `completed`。
+- 我上一轮说「53.7s / 78.5s 那两轮是流断掉后在别家重跑了一遍」——**按尝试记录核对后不成立**：
+  那两轮的 `att=3` / `att=2` 全是内容之前的 502（每次 0.9–1.8s，`outcome=failover`），
+  赢的那家 `endReason=done`、`truncated=false`、`bytesOut` 651KB / 140KB，
+  即长生成本身，不是重跑。尾巴长的真原因是输出体量与所选渠道，不是换家语义。
