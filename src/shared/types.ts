@@ -277,6 +277,22 @@ export const DEFAULT_AUTO_ROUTING_CONFIG: AutoRoutingConfig = {
 }
 
 /**
+ * Fallback for `ModelRoute.fairnessLead` when a route does not carry the field.
+ *
+ * Why not 0: 0 is strict rotation - a model never serves twice in a row, which
+ * repays the upstream prompt cache on every turn for clients whose stickiness did not
+ * already pin the conversation. Why not larger: every +1 doubles the number of
+ * requests needed to walk the whole pool once, so "every model in the pool gets
+ * routed" drifts further away. 2 lets one model serve three consecutive dispatches
+ * before the rotation moves on, which still completes a full round of a several-hundred
+ * model pool in a few hundred requests.
+ */
+export const DEFAULT_FAIRNESS_LEAD = 2
+
+/** Upper bound for `fairnessLead`: past this the rotation is weak enough to be off. */
+export const FAIRNESS_LEAD_MAX = 20
+
+/**
  * One named route the caller can ask for instead of a model.
  *
  * A route is a *request-time pool decision*, not a membership list: the pool is
@@ -325,6 +341,21 @@ export interface ModelRoute {
    * mechanism, which is what the routing v2 plan originally specified.
    */
   stickyHardPin?: boolean
+  /**
+   * Fairness lead, in dispatches: a model may run this many times ahead of the
+   * **least-dispatched model in this route's own pool** before the share rotation
+   * moves it behind every candidate that has served less. Within each group the score
+   * still decides the order, so the score did not stop mattering - it stopped deciding
+   * *who gets to represent the pool at all*.
+   *
+   * Why this exists: the ranking is deterministic, so with the whole catalogue in the
+   * pool the same top scorer answers every request forever. `0` is strict rotation
+   * (serve one, move on), `1` allows two in a row, `2` (the shipped default) allows
+   * three - the compromise for agent clients, where a model change mid-conversation
+   * repays the upstream prompt cache even though stickiness already covers the
+   * same-session case. A large value (upper bound 20) is effectively "no rotation".
+   */
+  fairnessLead?: number
   /** Static pool filters, evaluated left to right; empty means no filtering. */
   poolStrategies: AutoPoolStrategy[]
   /**
@@ -1215,6 +1246,22 @@ export interface RequestLogEntry {
     reason: 'only' | 'sticky' | 'score'
     attempts: number
     candidates: string[]
+    /**
+     * 这条路由本次给出的**整条候选链**有多长（`candidates` 只列前面几个）。
+     * 没有这一格，日志里的 10 个名字会被读成「池子就这么大」—— 而池子现在
+     * 是整池展开的，可能是几百个模型。老行没有它，界面上显示为未知而不是 0。
+     */
+    chainLength?: number
+    /**
+     * 前置剔除的候选（`provider/model:原因`）最前面几条。
+     *
+     * 「为什么没走某家」的两种答案分别落在 `chainLength`（它压根没进链）与这里（它进了
+     * 但被额度/限流/工具数闸门筛掉）。整渠道限流时这个清单能到几十条，所以只留前面这些，
+     * 余下的条数写在 `skippedMore`。
+     */
+    skipped?: string[]
+    /** `skipped` 之外还有几条没写进来；没有截尾时这一格不出现 */
+    skippedMore?: number
     /** Contracts that could not be met but the request was routed anyway */
     degraded?: string[]
     /**

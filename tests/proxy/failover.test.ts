@@ -32,7 +32,6 @@ import { PassThrough } from 'stream'
 
 import {
   ATTEMPT_REASON_MAX_CHARS,
-  AUTO_RECOVERABLE_EXTRA_ATTEMPTS,
   AUTO_WALL_CLOCK_BUDGET_MS,
   autoExhaustedResponse,
   createIdleWatchdog,
@@ -439,6 +438,15 @@ test('可恢复类失败识别：各家渠道的排队/额度原文命中', () =
   assert.ok(isRecoverableChannelFailure('qoder: Billing daily count exceeded (110/model_error)'))
   assert.ok(isRecoverableChannelFailure('loomy: 模型 spark-x2.6 所有账号均受限，请稍后再试'))
   assert.ok(isRecoverableChannelFailure('insufficient_quota: You exceeded your current quota'))
+  // BazaarLink 额度为 0：402 "requires more credits ... can only afford 0"（2026-11-03 用户报障）
+  assert.ok(isRecoverableChannelFailure('This request requires more credits, or fewer max_tokens. You requested up to 1 tokens, but can only afford 0.'))
+  assert.ok(isRecoverableChannelFailure('bazaarlink: You have insufficient credits for this request'))
+  assert.ok(isRecoverableChannelFailure('You do not have enough credits for this request'))
+  assert.ok(isRecoverableChannelFailure('Your credit balance is too low'))
+  // opencode 匿名槽：「所有通道对该模型均受限（…(free_usage_limit)）」（2026-11-03 DSH 那笔）
+  assert.ok(isRecoverableChannelFailure(
+    'opencode: 所有通道对该模型均受限（opencode-anon-7b81de(free_usage_limit)）',
+  ))
 })
 
 test('可恢复类失败识别：窄口径，账号故障与无关文案不得误判', () => {
@@ -450,6 +458,9 @@ test('可恢复类失败识别：窄口径，账号故障与无关文案不得�
   assert.equal(isRecoverableChannelFailure('Request failed with status code 502'), false)
   // 工具数超限走自己的分支，不属于可恢复渠道失败
   assert.equal(isRecoverableChannelFailure("Invalid value for 'tools': maximum number of items is 128."), false)
+  // 「credit」不带不足语义时不命中（否则 payment/credit card 类文案会被误判成额度用尽）
+  assert.equal(isRecoverableChannelFailure('Your credit card was declined'), false)
+  assert.equal(isRecoverableChannelFailure('credits are added within 24 hours'), false)
 })
 
 test('分级尝试上限：纯账号故障撞基础上限收手；排队/额度类放行到扩展上限', () => {
@@ -498,13 +509,22 @@ test('forwarder 的换家循环必须按分级上限与墙钟预算收口（源�
   )
 })
 
-test('autoRouter 候选必须放宽到基础上限 + 可恢复余量（源码钉点）', () => {
-  assert.match(
+test('候选链不预裁家数，可恢复类失败由墙钟预算收口（源码钉点）', () => {
+  // 2026-11-04 之前这条钉的是 `candidates.slice(0, maxAttempts + AUTO_RECOVERABLE_EXTRA_ATTEMPTS)`：
+  // 选号阶段把池子裁到 6 家，等于替供应商决定「这条路由只准用这几个模型」。
+  // 现在整条排序结果都交给换家循环，`extendedCap` 就是链长，可恢复类失败的家数上限
+  // 落在墙钟预算上 —— 账号故障类仍然撞满 `baseCap` 就收手。
+  assert.doesNotMatch(
     autoRouterSource,
-    /candidates\.slice\(0, maxAttempts \+ AUTO_RECOVERABLE_EXTRA_ATTEMPTS\)/,
-    'select must hand the forwarder the extended candidate tail for recoverable failures',
+    /candidates\.slice\(/,
+    'select must hand the forwarder the whole ranked chain, not a pre-trimmed tail',
   )
-  assert.equal(AUTO_RECOVERABLE_EXTRA_ATTEMPTS, 3, '默认 3 + 3 = 6 家')
+  assert.match(
+    forwarderSource,
+    /extendedCap: candidates\.length/,
+    'the failover loop caps attempts at the chain it was handed',
+  )
+  assert.equal(AUTO_WALL_CLOCK_BUDGET_MS, 90_000, '一条全是排队/额度失败的长链最多跑到这里')
 })
 
 /* ---------------- PLAN P0-2：跳过原因透出 ---------------- */
@@ -529,11 +549,23 @@ test('chat 路由必须把跳过清单写进 X-ModelPort-Auto-Skipped（源码�
     /quota_reset_in_\$\{resetMinutes\}m/,
     'rate-limit pre-check drops must record the reset ETA as the skip reason',
   )
-  // 头必须在任何 return 之前写（候选被剔光的 503 也带得上解释）
+  // 头必须在任何 return 之前写（候选被剔光的 503 也带得上解释），并且只透前
+  // `AUTO_SKIPPED_HEADER_LIMIT` 条、其余折成 `+N`：候选链不再裁短之后，一条整渠道
+  // 限流的链能把几十条原因塞进同一个每请求都发的响应头。
   assert.match(
     chatRouteSource,
-    /ctx\.set\('X-ModelPort-Auto-Skipped', toHeaderValue\(autoDecision\.skipped\.join\(','\)\)\)/,
-    'the skipped list must be surfaced as X-ModelPort-Auto-Skipped',
+    /const shown = autoDecision\.skipped\.slice\(0, AUTO_SKIPPED_HEADER_LIMIT\)/,
+    'the skipped list must be capped before it goes into a header',
+  )
+  assert.match(
+    chatRouteSource,
+    /ctx\.set\('X-ModelPort-Auto-Skipped', toHeaderValue\(/,
+    'the skipped list must be surfaced as X-ModelPort-Auto-Skipped, through toHeaderValue',
+  )
+  assert.match(
+    chatRouteSource,
+    /\+\$\{hidden\}/,
+    'the hidden tail must be reported, not dropped silently',
   )
 })
 
@@ -965,4 +997,55 @@ test('「上游目录不认这个模型」识别：按目录缺失语义判 capa
     status: 400,
     providerType: 'aggregate',
   }).kind, 'capability')
+})
+
+/**
+ * 2026-11-03 用户报障那一笔的完整复盘（远程网关 192.168.85.131 实测）。
+ *
+ * DSH 客户端（UA `deepseek-harness/0.2.1`）经 `daily` 路由发出
+ * `claude-opus-4.7`（上下文 224983 tokens，`max_tokens=1`），三次尝试分别是：
+ *
+ * | # | 候选 | 状态码 | 文案 | 原判 | 现在 |
+ * |---|------|--------|------|------|------|
+ * | 1 | OpenCode / Nemotron 3.5 | 502 | 所有通道对该模型均受限（free_usage_limit） | 账号故障 | 可恢复 |
+ * | 2 | MiniMax Code / M3.1-Flash | 502 | 模型未返回任何内容块 | 账号故障 | 账号故障（仍算） |
+ * | 3 | bazaarlink / claude-opus-4.7 | 402 | requires more credits … can only afford 0 | 账号故障 | 可恢复 |
+ *
+ * 第 1 家与第 3 家都是**上游暂时不可服务**（匿名槽限流 / 积分用尽），却都被
+ * 当成账号故障计入了 `accountFailures`。加上第 2 家那笔普通 502，账户故障上限
+ * （`baseCap = 3`）在第 3 次尝试后就撞满，换家循环在第 4 家（Raccoon）之前
+ * 收手 —— 池里其实还有两家活着的候选没试。
+ *
+ * 这个测试把三段判据钉死：
+ * 1. 前两家的文案必须判**可恢复类**（不占账号故障上限）；
+ * 2. 于是 `accountFailures` 只剩 1，链还能继续往下试（Raccoon / Qoder）；
+ * 3. 三条日志记录的 `kind` 都必须是 `failover`（换家类），不能是 `fatal`。
+ */
+test('2026-11-03 DSH 那笔 402：额度/限流类失败必须不占账号故障上限', () => {
+  const opencode = 'opencode: 所有通道对该模型均受限（opencode-anon-7b81de(free_usage_limit)）'
+  const minimax = 'minimax: 模型未返回任何内容块'
+  const bazaar = 'This request requires more credits, or fewer max_tokens. You requested up to 1 tokens, but can only afford 0.'
+
+  // 1) 前两家不再被当成账号故障
+  assert.equal(isRecoverableChannelFailure(opencode), true)
+  assert.equal(isRecoverableChannelFailure(bazaar), true)
+  // 第 2 家是上游空响应，仍是普通 502（账号故障）—— 不放宽它，只放开额度/限流那两类
+  assert.equal(isRecoverableChannelFailure(minimax), false)
+
+  // 2) 换家循环因此不会在第 4 家之前收手
+  const base = { baseCap: 3, extendedCap: 6, elapsedMs: 0, budgetMs: AUTO_WALL_CLOCK_BUDGET_MS }
+  // 修好之前：3 次全是账号故障 → accountFailures=3 → 撞满基础上限，收手
+  assert.equal(shouldTryNextAutoCandidate({ ...base, attempts: 3, accountFailures: 3 }), false)
+  // 修好之后：只有第 2 家那笔普通 502 计入 → accountFailures=1，还能继续试第 4、5 家
+  assert.equal(shouldTryNextAutoCandidate({ ...base, attempts: 3, accountFailures: 1 }), true)
+  assert.equal(shouldTryNextAutoCandidate({ ...base, attempts: 5, accountFailures: 1 }), true)
+
+  // 3) 三条日志记录的分类都必须是 failover（换家），不是 fatal
+  for (const failure of [
+    { candidate: 'OpenCode / Nemotron 3.5 Lightning Free', status: 502, error: opencode },
+    { candidate: 'MiniMax Code / M3.1-Flash', status: 502, error: minimax },
+    { candidate: 'bazaarlink/claude-opus-4.7', status: 402, error: bazaar },
+  ]) {
+    assert.equal(describeAttemptFailure(failure).kind, 'failover', failure.candidate)
+  }
 })

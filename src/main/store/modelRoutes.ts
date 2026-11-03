@@ -20,7 +20,7 @@ import type {
   ModelRoute,
   RouteModelRef,
 } from '../../shared/types.ts'
-import { isAutoPoolStrategyId } from '../../shared/types.ts'
+import { isAutoPoolStrategyId, FAIRNESS_LEAD_MAX } from '../../shared/types.ts'
 import { normalizeAutoRoutingConfig } from './autoRoutingConfig.ts'
 import type { ModelRouteError } from '../../shared/modelRouteName.ts'
 import {
@@ -138,6 +138,18 @@ export function checkRouteModelRefs(
  * 未知 prefer→balanced、非法 pool strategy id 剔除、undefined→出厂默认）。
  * 这里不复用它的 `enabled`：那是 legacy 的「auto 模型开关」，与路由的启用位语义不同。
  */
+/**
+ * 份额轮转领先档（`ModelRoute.fairnessLead`）的归一。
+ *
+ * 非法值返回 `undefined` 而不是出厂默认：这个字段与 `stickyHardPin` 同形，「没配」
+ * 必须保持不落键，读侧才有唯一的默认落点（`shared/types.ts::DEFAULT_FAIRNESS_LEAD`）。
+ * 上界夹到 `FAIRNESS_LEAD_MAX`，因为领先档每加 1，把全池转一圈要的请求数就翻倍。
+ */
+function normalizeFairnessLead(input: unknown): number | undefined {
+  if (typeof input !== 'number' || !Number.isFinite(input) || input < 0) return undefined
+  return Math.min(FAIRNESS_LEAD_MAX, Math.round(input))
+}
+
 function normalizeRouteFields(name: string, entry: Record<string, unknown>, options: NormalizeRoutesOptions): ModelRoute {
   // 只把**存在**的键交给归一化：缺省键要落到 `normalizeAutoRoutingConfig` 自己的
   // 出厂默认（`{...DEFAULT, ...input}`），写成 `maxAttempts: undefined` 会把默认值
@@ -150,6 +162,10 @@ function normalizeRouteFields(name: string, entry: Record<string, unknown>, opti
   } as Partial<AutoRoutingConfig>)
 
   const basedOn = canonicalRouteName(entry.basedOnRoute)
+  // 份额轮转的领先档：非数或负数按「没配」处理（读侧回落到出厂默认），合法值取整并夹到
+  // `FAIRNESS_LEAD_MAX`。这里不落出厂默认值是有意的：`fairnessLead` 与 `stickyHardPin`
+  // 同形，缺省键不进 Record，盘上每条路由才不会多出这一格。
+  const fairnessLead = normalizeFairnessLead(entry.fairnessLead)
 
   return {
     name,
@@ -167,6 +183,7 @@ function normalizeRouteFields(name: string, entry: Record<string, unknown>, opti
     // 只在显式关掉时落键：缺省即硬钉（见 `ModelRoute.stickyHardPin`）。把「没配」也归一成
     // `true` 会让盘上每条路由多出这一格，而读侧两处判断（`!== false`）本来就同形。
     ...(entry.stickyHardPin === false ? { stickyHardPin: false } : {}),
+    ...(fairnessLead === undefined ? {} : { fairnessLead }),
     // 引用只认规范名，且**不许引用自己**：手坏的盘上留一个自引用就会让「取池」这一步
     // 无限递归，写入侧本来拒绝，读侧再兜一层保证不 500。
     ...(basedOn.length > 0 && basedOn !== name ? { basedOnRoute: basedOn } : {}),
@@ -337,6 +354,9 @@ export function presetRouteFields(
     // 与 `stickyMinutes` 同一条继承规则：种子路由跟着 `auto` 那一条走，用户关过硬钉
     // 就不该在下次播种时被悄悄打开。写成布尔即可 —— 归一化只保留显式 `false`。
     stickyHardPin: auto?.stickyHardPin !== false,
+    // 份额轮转跟着 `auto` 那条走，同 `stickyHardPin` 一条继承规则；没配过就不落键，
+    // 让读侧的出厂默认（`DEFAULT_FAIRNESS_LEAD`）保持唯一落点。
+    ...(auto?.fairnessLead !== undefined ? { fairnessLead: auto.fairnessLead } : {}),
     poolStrategies: seed.poolStrategies ?? auto?.poolStrategies ?? legacy.poolStrategies,
     // 不钉名：钉谁只能来自用户目录里真实存在的 (providerId, displayName)。
     pinModels: [],

@@ -194,7 +194,10 @@ export class Scheduler {
     } finally {
       task.running = false
     }
-    this.armTimer(task)
+    // Reschedule only if the task is still registered
+    if (this.tasks.has(task.name)) {
+      this.armTimer(task)
+    }
   }
 
   private disposeTimers(task: RegisteredTask): void {

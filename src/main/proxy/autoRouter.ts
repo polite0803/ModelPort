@@ -28,6 +28,7 @@ import type {
   RoutePreviewSample,
   RoutePreviewStatus,
 } from '../../shared/types'
+import { DEFAULT_FAIRNESS_LEAD } from '../../shared/types'
 import type { ChatCompletionRequest } from './types'
 import { accountRuntime } from './accountRuntime'
 import { getChannelDefinition } from '../providers/accountChannels/catalogue'
@@ -55,7 +56,7 @@ import {
 } from './autoRouting'
 import { createQuotaGateContext, quotaBlockReason, aggregateHeadroom } from './quota/gate.ts'
 import { aggregateBanditStats, banditKeyOf } from './autoBandit.ts'
-import { AUTO_RECOVERABLE_EXTRA_ATTEMPTS } from './failover.ts'
+import { dispatchLedger, dispatchKeyOf } from './dispatchLedger.ts'
 import { aggregateContextWindow } from './modelCapabilities.ts'
 import { aggregateThirdPartyHint } from '../../shared/aggregateCapabilities.ts'
 import { costBucketOf, type CostBucket } from '../../shared/channels.ts'
@@ -424,6 +425,8 @@ class AutoRouter {
     // Bandit 实时战绩（PLAN P2-5 第一步）：从请求日志内存副本滚动 24h 聚合。
     // 每请求一次、单遍 O(n)，n 受 requestLogs.maxEntries 上限约束。
     const bandit = aggregateBanditStats(storeManager.getRequestLogs(), now)
+    // 份额轮转的读数（`dispatchLedger`）：每请求一次全表快照，逐候选只是查表。
+    const dispatches = dispatchLedger.snapshot(now)
     // 闸门读取只做一次：加密 store 每次 `get` 都要整份解密，逐候选问会把
     // 一次选号放大成几百次同步 I/O（见 `quota/gate.ts` 的上下文注释）。
     const gateContext = createQuotaGateContext()
@@ -527,6 +530,7 @@ class AutoRouter {
             ...(costSignal.costClass === undefined ? {} : { costClass: costSignal.costClass }),
             ...(quotaHeadroom === undefined ? {} : { quotaHeadroom }),
             ...(live === undefined ? {} : { live }),
+            dispatchCount: dispatches.counts.get(dispatchKeyOf(provider.id, model.actualModelId)) ?? 0,
           }
           rankInputs.push(candidate)
           candidatesByKey.set(key, {
@@ -633,13 +637,20 @@ class AutoRouter {
       }
     }
 
+    // 候选链不再预裁：整条排序结果交给换家循环，真正的上限在它那一侧
+    // （账号故障类撞满 `baseCap`、墙钟 `AUTO_WALL_CLOCK_BUDGET_MS`）。以前这里是
+    // `maxAttempts + AUTO_RECOVERABLE_EXTRA_ATTEMPTS` 家，等于在选号阶段就把池子
+    // 砍到 6 家 —— 与「供应商只做配额/积分筛选，打分基于全池展开」直接冲突。
     const ranked = rankCandidates(profile, contractPool, {
       now,
-      limit: Math.max(maxAttempts, contractPool.length),
+      limit: contractPool.length,
       seed,
       strategy: effectiveStrategy,
       prefer,
       sticky,
+      // 份额轮转：分数决定的是轮转次序，不再是「谁能一直代表这家被派出」。
+      // `fairnessLead` 缺省 1（每个模型连发 2 次再换），0 = 严格轮流，取大 = 接近纯分数。
+      fairness: { lead: route?.fairnessLead ?? DEFAULT_FAIRNESS_LEAD },
     })
 
     // 候选池非空却排不出结果时，说明缺的是某种能力，而不是没有供应商
@@ -681,13 +692,14 @@ class AutoRouter {
         ? {}
         : { contextWindow: capabilityOfCandidate(ordered[0]!).contextTokens }),
       // 换家的基础上限随 decision 交给 forwarder：转发层不许再自己去读
-      // legacy 全局 `autoRouting.maxAttempts`，那样逐路由的设置只对第一次
-      // 候选裁剪生效、对失败换家不生效。
+      // legacy 全局 `autoRouting.maxAttempts`，那样逐路由的设置只对账号故障类的
+      // 收口生效、对失败换家不生效。
       baseCap: maxAttempts,
-      // 候选不只是 maxAttempts 家：尾部多带 AUTO_RECOVERABLE_EXTRA_ATTEMPTS 家，
-      // 供 forwardFirstReachable 在可恢复类失败（排队/额度/限流）时继续换家；
-      // 账号故障类（5xx/网络）仍然只消耗基础上限家数（分级收口在换家循环里）。
-      candidates: candidates.slice(0, maxAttempts + AUTO_RECOVERABLE_EXTRA_ATTEMPTS),
+      // 整条排序结果都交给换家循环：尾部候选在可恢复类失败（排队/额度/限流/目录不认）
+      // 时继续顶上，账号故障类（5xx/网络）撞满 `baseCap` 就收手，另有墙钟预算兜底。
+      // 这里不再裁剪家数 —— 裁到 `maxAttempts + 3` 就等于在选号阶段替供应商做了
+      // 「这条路由只准用这几个模型」的决定，而池子里其余模型连被派一次的机会都没有。
+      candidates,
       conversationKey: key,
       stickyKeySource,
       degraded,
@@ -906,6 +918,8 @@ class AutoRouter {
   /** 代理服务重启时清空，避免跨进程生命周期残留 */
   reset(): void {
     accountRuntime.reset()
+    // 份额账本与运行时指标同生命周期：重启后不该继续背着上一轮的派发欠债
+    dispatchLedger.reset()
     this.sticky.clear()
     this.seed = 0
   }

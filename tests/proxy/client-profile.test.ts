@@ -24,6 +24,13 @@ test('Qoder 中国版与国际版都归为 qoder', () => {
 test('dsh 按词边界识别，不误伤 dashboard', () => {
   assert.equal(identifyClientByUserAgent('dsh/0.3.1').id, 'dsh')
   assert.equal(identifyClientByUserAgent('@deepseek-ai/dsh-llm 1.2.0').id, 'dsh')
+  // 真实 DSH 客户端的 UA 是 deepseek-harness/<version>（不带 "dsh" 字样），
+  // 远程网关日志里曾因此被误归为 other/deepseek-harness。
+  assert.equal(identifyClientByUserAgent('deepseek-harness/0.2.1').id, 'dsh')
+  const dsh = identifyClientByUserAgent('deepseek-harness/0.2.1')
+  assert.equal(dsh.label, 'DSH')
+  assert.equal(dsh.version, '0.2.1')
+  assert.equal(clientHeaderValue(dsh), 'dsh/0.2.1')
 
   const dashboard = identifyClientByUserAgent('dashboard/1.0')
   assert.equal(dashboard.id, 'other')

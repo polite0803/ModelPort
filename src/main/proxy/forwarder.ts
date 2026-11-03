@@ -53,8 +53,15 @@ export interface ForwardChainOutcome<T extends ChainCandidate> {
   attemptTrace: RequestAttemptTrace[]
 }
 
-/** 日志里最多留几次失败：候选链本身不超 6 家，留出余量只为防御异常循环。 */
-const MAX_LOGGED_ATTEMPT_FAILURES = 8
+/**
+ * 日志里最多留几次失败。
+ *
+ * 候选链不再在选号阶段裁到 6 家（见 `autoRouter.ts::select`），所以这个数不再是
+ * 「防御异常循环」而是真实的排障预算：一整条链可能是几十家可恢复类失败，而请求日志
+ * 的保留下限要求一次突发不能把正在被诊断的那条失败挤掉。取 20 条封顶，超出部分不进
+ * 这一行的 `failures`，但 `attempts` 记的是真实尝试数，两者差额就是被裁掉的尾部。
+ */
+const MAX_LOGGED_ATTEMPT_FAILURES = 20
 
 /**
  * axios 流在提交响应头之前的首帧探测窗口。
@@ -77,6 +84,7 @@ export interface FailoverBudget {
 }
 import { attemptTraceOf } from './attemptTrace.ts'
 import { accountRuntime } from './accountRuntime'
+import { dispatchLedger } from './dispatchLedger.ts'
 import { planAttemptDeadline, planForwardRetries } from './retryPolicy'
 import { stripUnsupportedForBuiltin } from './parameterPolicy'
 import { ensureAnthropicOutputCap, outputCapFallbackOf } from './utils/outputCap.ts'
@@ -375,6 +383,11 @@ export class RequestForwarder {
       }
 
       let result: ForwardResult
+      // 派发记账：份额轮转的读数源。记「真的发到上游去了」而不是「成功返回」——
+      // 一次失败的尝试同样占掉了这一家的当日额度与一次完整往返，只数成功会让
+      // 一直失败的候选停在「没被派过」上，被公平规则一遍遍重新推上来。
+      // 本地 AIMD 准入被拒（上面 break 那条）不进账：那一次根本没出网关。
+      dispatchLedger.record(provider.id, actualModel)
       try {
         result = await this.doForward(modifiedRequest, account, provider, actualModel, context)
       } catch (error) {
@@ -569,8 +582,9 @@ export class RequestForwarder {
           }
 
     for (const candidate of candidates) {
-      // 分级尝试上限 + 墙钟预算（分级判据本体与测试在 failover.ts；候选列表
-      // 已由 autoRouter.select 裁剪为「基础上限 + 可恢复余量」家）。
+      // 分级尝试上限 + 墙钟预算（分级判据本体与测试在 failover.ts）。
+      // `extendedCap` 现在就是整条候选链的长度：选号阶段不再裁家数，所以可恢复类
+      // 失败实际由墙钟预算收口，账号故障类由 `baseCap` 收口。
       if (attempts > 0 && !shouldTryNextAutoCandidate({
         attempts,
         accountFailures,

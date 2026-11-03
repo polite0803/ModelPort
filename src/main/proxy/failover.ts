@@ -376,8 +376,10 @@ export function autoExhaustedResponse(
  *   默认 3 家）就收手 —— 积分账号每次失败都可能烧钱，5xx 通常意味着系统性问题，
  *   多试只是多烧；
  * - **可恢复类**（本函数命中的排队/额度/限流，外加工具数超限）：请求被上游
- *   在生成**之前**拒绝，几乎不烧积分，且换家命中率真实存在 —— 上限放宽
- *   {@link AUTO_RECOVERABLE_EXTRA_ATTEMPTS} 家。
+ *   在生成**之前**拒绝，几乎不烧积分，且换家命中率真实存在 —— 不受基础上限约束，
+ *   由**整条候选链走完**与墙钟预算 {@link AUTO_WALL_CLOCK_BUDGET_MS} 收口。
+ *   2026-11-04 起候选链不再在选号阶段裁成「基础上限 + 3 家」，所以这里没有另一个
+ *   家数常量了：链有多长，可恢复类就能换多长，最长不超过墙钟。
  *
  * ⚠️ 识别口径必须**窄**（与 {@link isToolOverflowError} 同一纪律）。渠道错误
  * 跨桥时只带 `message`/`status`（bridge.ts 只透传这两个字段，LlmError 的 code
@@ -385,13 +387,35 @@ export function autoExhaustedResponse(
  * - 排队：`ModelQueuedError` 的 message 是「模型排队中」；排队 JSON 体
  *   （`10605`/`isQueued`）可能原样出现在 message 里；
  * - 额度：qoder 110「Billing daily count exceeded」、buddy「所有账号均受限」、
- *   其余上游的 quota 字样（错误文案里出现 quota 几乎必然是配额问题，正常
- *   内容不会进 error 字段）。
+ *   BazaarLink「requires more credits … can only afford 0」、其余上游的 quota/credits
+ *   字样（错误文案里出现 quota/credits 几乎必然是配额问题，正常内容不会进 error 字段）。
  */
+/**
+ * 「额度用尽」类文案：积分/credits/余额类上游（BazaarLink 的 402 等）。
+ *
+ * 口径要窄：光看 `credit` 这个词不够（"credit card" 与额度毫无关系），
+ * 必须同时出现「不足」语义。所以拆成两支：
+ * - `不足词 + credits`：insufficient credits / not enough credits / out of credits /
+ *   exhausted credits / requires more credits …
+ * - `can only afford N`：BazaarLink 402 的原话（2026-11-03 用户报障）。
+ */
+const CREDIT_EXHAUSTED_PATTERN = new RegExp(
+  [
+    '(insufficient|not\\s+(?:have\\s+|has\\s+)?enough|out\\s+of|exhausted|depleted'
+      + '|no\\s+more|requires?\\s+more|lack(?:s|ing)?|too\\s+low)'
+      + '\\s*[\\w-]*\\s*credits?',
+    'credits?\\s+(?:balance\\s+)?(?:is\\s+)?(?:exhausted|depleted|insufficient|empty|zero|too\\s+low)',
+    'credit\\s+balance\\s+(?:is\\s+)?(?:too\\s+low|insufficient|exhausted|empty|zero)',
+    'can\\s+only\\s+afford',
+  ].join('|'),
+  'i',
+)
+
 export function isRecoverableChannelFailure(message: string | undefined): boolean {
   if (!message) return false
   return /排队|isQueued|10605/.test(message)
     || /quota/i.test(message)
+    || CREDIT_EXHAUSTED_PATTERN.test(message)
     || /billing\s+daily\s+count\s+exceeded/i.test(message)
     || /所有账号均受限/.test(message)
     // 渠道包在**发请求之前**就报「该模型全部启用账号都在限流中」（`index.ts` 的
@@ -400,6 +424,11 @@ export function isRecoverableChannelFailure(message: string | undefined): boolea
     // 按普通 502 计入账号故障上限的话，三家限流就把整条链判死，而池里其余候选
     // 其实都活着（2026-11-01 远程日志：这一类在真流量里排第 2 多）。
     || /均在限流中|频率超限/.test(message)
+    // opencode 匿名槽的同义文案：「所有通道对该模型均受限（…(free_usage_limit)）」。
+    // 与 buddy 的「所有账号均受限」同义，只是多了「通道」二字 —— 原先只认
+    // 「所有账号均受限」这一支，于是它被当成普通 502 账号故障，白白吃掉
+    // 账号故障上限的一家（2026-11-03 DSH 那笔 402 的链就是这样在第 3 家收手的）。
+    || /所有通道.*均受限/.test(message)
     || isChannelCredentialFailure(message)
 }
 
@@ -436,13 +465,16 @@ export function isChannelHumanRequiredFailure(message: string | undefined): bool
   return isChannelCredentialFailure(message) || isChannelRiskControlFailure(message)
 }
 
-/** 可恢复类失败在账号故障类上限之外额外放行的候选数（默认 3 + 3 = 6 家）。 */
-export const AUTO_RECOVERABLE_EXTRA_ATTEMPTS = 3
-
-/** 换家的墙钟总预算（毫秒）：整条候选链耗掉这么多时间就不再继续换家。 */
+/**
+ * 换家的墙钟总预算（毫秒）：整条候选链耗掉这么多时间就不再继续换家。
+ *
+ * 自 2026-11-04 起它是可恢复类失败的**唯一**家数之外的收口：候选链不再在选号阶段
+ * 裁短（原先的 `maxAttempts + 3` 上限把几百个模型的池折叠成 6 家），所以一条全在
+ * 排队/额度里的长链最坏会跑到这里为止，而不是跑到某个家数上限。
+ */
 export const AUTO_WALL_CLOCK_BUDGET_MS = 90_000
 
-/** 上游文案进日志时的截断长度（一条日志里最多 8 次失败，各 200 字符封顶）。 */
+/** 上游文案进日志时的截断长度（一条日志里最多 20 次失败，各 200 字符封顶）。 */
 export const ATTEMPT_REASON_MAX_CHARS = 200
 
 /**
@@ -515,7 +547,7 @@ export function shouldTryNextAutoCandidate(input: {
   accountFailures: number
   /** 账号故障类的尝试上限（autoRouting.maxAttempts） */
   baseCap: number
-  /** 总尝试上限（候选列表长度，select 已裁剪为基础上限 + 可恢复余量） */
+  /** 总尝试上限（整条候选链的长度；选号阶段不再裁短） */
   extendedCap: number
   /** 距请求开始的已耗时（毫秒） */
   elapsedMs: number

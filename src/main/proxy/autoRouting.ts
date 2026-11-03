@@ -510,11 +510,37 @@ export interface RankCandidate {
    * 成功率与延迟 p50。无数据的候选不携带 —— 冷启动乐观先验，不做调整。
    */
   live?: BanditStats
+  /**
+   * 滚动窗口内这个 (provider, model) 被派发过几次（`dispatchLedger.snapshot()`）。
+   * 缺席 = 这个窗口里没派过 = 0 次，份额轮转下它排在任何已派发的候选前面（同分序内）。
+   */
+  dispatchCount?: number
+}
+
+/**
+ * 份额轮转的入参：派发次数领先到多少就退到队后。
+ *
+ * 门槛 `ceiling = min(本次候选池的派发数) + lead`，派发数超过它的候选整组退到合格组
+ * 之后，合格组内部仍按分数降序 —— 分数没有被废除，只是**从「谁能被派出」降级成
+ * 「按什么次序被派出」**。`lead` 取 0 是严格轮流，取大数接近纯分数优先。
+ *
+ * 门槛取池内最小值而不是账本全局最小值：池里必然有从没派发的模型（读作 0），
+ * 用账本在册键的最小值会在「只有一个热键」时把门槛抬到那个键自己头上，
+ * 于是最需要轮转的时候轮转恰好不生效。
+ */
+export interface FairnessOptions {
+  lead: number
 }
 
 export interface RankOptions {
   now?: number
-  /** 最多返回多少个候选（失败切换次数上限），默认 3 */
+  /**
+   * 最多返回多少个候选，默认 3。
+   *
+   * 这里**不再**是失败切换的家数上限：候选链自 2026-11-04 起整条交给换家循环
+   * （`autoRouter.select` 传全池长度），真正的上限在 `failover.shouldTryNextAutoCandidate`
+   * 的账号故障上限与墙钟预算上。
+   */
   limit?: number
   /** 分散度种子，每次请求递增以打散同分候选 */
   seed?: number
@@ -524,6 +550,8 @@ export interface RankOptions {
   prefer?: AutoPreference
   /** 同一会话上次成功的候选，作为加分项而不是硬钉 */
   sticky?: StickyHint
+  /** 份额轮转；不传 = 不轮转（纯分数序） */
+  fairness?: FairnessOptions
 }
 
 export interface StickyHint {
@@ -1157,14 +1185,23 @@ function scoreCandidate(
 }
 
 /**
- * 排序候选项，返回最多 `limit` 个、按分数从高到低的候选。
+ * 排序候选项，返回按「份额轮次 → 分数」排好的候选链，最多 `limit` 个。
  *
  * 规则：
  * 1. 冷却中的账号直接排除；
  * 2. 先按视觉/工具/上下文做硬过滤；
  * 3. 硬过滤后为空时只放宽上下文长度（最容易被估算误差误伤）；
  * 4. 视觉/工具仍然不满足则返回空数组，由调用方报 503，绝不把图片发给不支持的模型；
- * 5. 每个账号只保留一个候选，避免 429 后在同一账号上换模型重试。
+ * 5. 份额轮转：派发数领先**池内最小值**超过 `fairness.lead` 的候选整组退到队后，
+ *    合格组内仍按分数降序 —— 分数没有作废，它从「谁能被派出」降级成「按什么次序被派出」；
+ * 6. 全量候选都进入链，**不再**按账号收敛到一个模型。
+ *
+ * 第 5、6 条是 2026-11-04 的一对改动，替掉原先的「每个账号只保留一个候选」。那条规则
+ * 把 570 个模型的池折叠成「有账号的供应商数」（实测一次请求最多 13 个候选、链只取前
+ * 6 家），每家永远由分数最高的那个模型代言，手动添加的模型在同账号内部竞争里第一轮
+ * 就被自己人挤掉。它当初要防的「429 后在同一账号上换模型重试」如今由 (账号, 模型)
+ * 档的冷却覆盖（`accountRuntime.snapshot(accountId, now, model)`）：账号级故障照样一次
+ * 清掉整家，只有被限流的那一个模型退下，同账号的兄弟模型该派得上。
  *
  * 打分（Phase 2）：
  * - 配额、RPM 余量、在途并发共同构成“限流健康度”；
@@ -1182,6 +1219,7 @@ export function rankCandidates(
   const strategy = options.strategy ?? 'round-robin'
   const prefer = options.prefer ?? 'balanced'
   const sticky = options.sticky
+  const fairness = options.fairness
 
   const usable = candidates.filter(candidate =>
     candidate.coolingUntil === undefined || candidate.coolingUntil <= now
@@ -1228,11 +1266,26 @@ export function rankCandidates(
     return keyA.localeCompare(keyB)
   })
 
+  // 门槛按**本次池子自己的最小派发数**算。池里只要有从没派发的模型，最小值就是 0，
+  // 领先 `lead` 次的候选退下，下一个模型接手；全部转完之后最小值抬起来，第二轮接着转。
+  // 不这么算而用账本的全局最小值，会在「表里只剩一个热键」时把门槛抬到那个键自己
+  // 头上 —— 最需要轮转的时候轮转恰好不生效。
+  const ordered = fairness === undefined
+    ? scored
+    : (() => {
+      const lead = Math.max(0, Math.round(fairness.lead))
+      const minDispatches = pool.reduce(
+        (min, candidate) => Math.min(min, candidate.dispatchCount ?? 0),
+        Number.POSITIVE_INFINITY
+      )
+      const ceiling = minDispatches + lead
+      const eligible = scored.filter(item => (item.candidate.dispatchCount ?? 0) <= ceiling)
+      const deferred = scored.filter(item => (item.candidate.dispatchCount ?? 0) > ceiling)
+      return deferred.length === 0 ? scored : [...eligible, ...deferred]
+    })()
+
   const ranked: RankCandidate[] = []
-  const usedAccounts = new Set<string>()
-  for (const item of scored) {
-    if (usedAccounts.has(item.candidate.accountId)) continue
-    usedAccounts.add(item.candidate.accountId)
+  for (const item of ordered) {
     ranked.push(item.candidate)
     if (ranked.length >= limit) break
   }

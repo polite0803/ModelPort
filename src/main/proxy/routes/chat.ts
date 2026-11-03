@@ -58,6 +58,21 @@ import {
 const router = new Router({ prefix: '/v1/chat' })
 
 /**
+ * `X-ModelPort-Auto-Skipped` 一次最多透几条跳过原因。
+ *
+ * 候选链不再裁短之后，「渠道整条限流」这类跳过可以一次性攒几十条，而这个头每请求都发，
+ * 超长头会让客户端（以及中间代理）把整条响应判坏。只透最前面这几条，其余折成 `+N`；
+ * 完整清单走请求日志的 `auto.skipped` / `auto.skippedMore`，两头口径不同是有意的。
+ */
+const AUTO_SKIPPED_HEADER_LIMIT = 8
+
+/** 请求日志与状态页里列出的候选数上限（链长另有一格，见 `auto.chainLength`）。 */
+const AUTO_LOG_CANDIDATES_SHOWN = 10
+
+/** 请求日志里列出的前置剔除条数上限；尾部只留条数（`auto.skippedMore`）。 */
+const AUTO_LOG_SKIPPED_SHOWN = 20
+
+/**
  * 「本轮请求体量 vs 这一家窗口」的读数工厂。
  *
  * 只在路由决策存在时产出（非路由请求没有可信的估算入量，宁可不写也不写 0）。
@@ -90,7 +105,21 @@ function autoLogRecord(
     prefer: decision.prefer,
     reason: decision.reason,
     attempts,
-    candidates: decision.candidates.slice(0, 5).map(candidate => candidate.displayName),
+    // 链不再裁短之后，前 5 个名字不足以解释「为什么没走某家」：多列几个，
+    // 同时把整条链的长度单独写成一格 —— 少了这一格，日志里的 10 个名字看起来
+    // 就像池子的全部，而池子可能是几百个模型。
+    candidates: decision.candidates.slice(0, AUTO_LOG_CANDIDATES_SHOWN).map(candidate => candidate.displayName),
+    chainLength: decision.candidates.length,
+    // 前置剔除的清单（`provider/model:原因`）。用户问「为什么没走某家」时，这一格
+    // 与上面那格就是答案：链长说明池有多大，剔除说明有多少在排队之前就被闸掉了。
+    ...(decision.skipped.length > 0
+      ? {
+        skipped: decision.skipped.slice(0, AUTO_LOG_SKIPPED_SHOWN),
+        ...(decision.skipped.length > AUTO_LOG_SKIPPED_SHOWN
+          ? { skippedMore: decision.skipped.length - AUTO_LOG_SKIPPED_SHOWN }
+          : {}),
+      }
+      : {}),
     // 粘性键来自客户端会话标识还是内容指纹：中途换家的两种解释靠这一格分开
     sessionKeySource: decision.stickyKeySource,
     ...(decision.degraded.length > 0 ? { degraded: decision.degraded } : {}),
@@ -488,8 +517,17 @@ router.post('/completions', async (ctx: Context) => {
   // 跳过清单透出：与 X-ModelPort-Auto-Degraded 并列。必须写在任何 return 之前
   // —— 候选被剔光导致 503 时正是最需要解释的场景。动态部分（供应商名可能是
   // 中文）一律过 toHeaderValue。
+  //
+  // 候选链不再裁短之后，「渠道整条限流」这类跳过可以一次性攒几十条，而这个头每请求都发；
+  // 头只留给客户端提示最前面那几条（超出折成 `+N`，客户端读到 `+N` 就知道还有隐情）。
+  // 完整清单目前不进这一行的日志，需要看全部时读 `decision.skipped` 的来源：配额预检
+  // 那一段与 `collectCandidates` 的前置剔除。
   if (autoDecision && autoDecision.skipped.length > 0) {
-    ctx.set('X-ModelPort-Auto-Skipped', toHeaderValue(autoDecision.skipped.join(',')))
+    const shown = autoDecision.skipped.slice(0, AUTO_SKIPPED_HEADER_LIMIT)
+    const hidden = autoDecision.skipped.length - shown.length
+    ctx.set('X-ModelPort-Auto-Skipped', toHeaderValue(
+      hidden > 0 ? `${shown.join(',')},+${hidden}` : shown.join(',')
+    ))
   }
 
   let selection: AccountSelection | null = null

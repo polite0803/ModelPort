@@ -458,7 +458,7 @@ test('explainMissing names the capability that emptied the pool', () => {
   )
 })
 
-test('rankCandidates keeps one candidate per account', () => {
+test('rankCandidates 让同一账号的多个模型都进链（供应商不再替池子选模型）', () => {
   const profile = profileRequest(textRequest('hi'))
 
   const ranked = rankCandidates(profile, [
@@ -466,8 +466,78 @@ test('rankCandidates keeps one candidate per account', () => {
     candidate({ displayName: 'Qwen3.5-Flash', actualModelId: 'qwen3.5-flash', accountId: 'same-account' }),
   ], { now: NOW })
 
-  assert.equal(ranked.length, 1)
-  assert.equal(ranked[0].accountId, 'same-account')
+  // 2026-11-04 之前这里断言 `ranked.length === 1`：每个账号只留一个候选，于是
+  // 「570 个模型的池」在一次请求里被折叠成「有账号的供应商数」，同账号其余模型
+  // 连被派一次的机会都没有。它当初防的是「429 后在同一账号上换模型重试」，而那条
+  // 保护现在由 (账号, 模型) 档的冷却承担 —— 下面那条 drops-accounts-in-cooldown
+  // 就是它，账号级故障仍然一次清掉整家。
+  assert.deepEqual(
+    ranked.map(item => item.displayName).sort(),
+    ['Qwen3.5-Flash', 'Qwen3.7-Max'],
+    '同一账号的两个模型都必须在链上，账号不再只由一个模型代言'
+  )
+  assert.deepEqual(ranked.map(item => item.accountId), ['same-account', 'same-account'])
+})
+
+test('份额轮转：派发领先池内最小值以上的候选退到合格组之后', () => {
+  const profile = profileRequest(textRequest('hi'))
+  const pool = [
+    candidate({ displayName: 'A', accountId: 'a', dispatchCount: 3 }),
+    candidate({ displayName: 'B', accountId: 'b', dispatchCount: 0 }),
+    candidate({ displayName: 'C', accountId: 'c', dispatchCount: 1 }),
+  ]
+
+  // `smart` 口径：round-robin 的散列项会把同分候选打散，那样钉下来的名字序其实是在
+  // 钉散列。这里要钉的是份额，所以先让静态分逐字相同（同 provider、无标注、无额度差），
+  // 同分交给名字键 —— 次序变化全部来自份额。
+  const options = { now: NOW, strategy: 'smart' as const }
+  const plain = rankCandidates(profile, pool, options)
+  assert.deepEqual(plain.map(item => item.displayName), ['A', 'B', 'C'])
+
+  const rotated = rankCandidates(profile, pool, { ...options, fairness: { lead: 0 } })
+  // 池内最小派发数 = 0，lead 0 ⇒ 只有派发数 0 的候选合格；A(3) 与 C(1) 整组退后，
+  // 组内仍按原分数序（A 在 C 前）。
+  assert.deepEqual(rotated.map(item => item.displayName), ['B', 'A', 'C'])
+})
+
+test('份额轮转：lead 给同一个模型连发的额度', () => {
+  const profile = profileRequest(textRequest('hi'))
+  const pool = [
+    candidate({ displayName: 'A', accountId: 'a', dispatchCount: 2 }),
+    candidate({ displayName: 'B', accountId: 'b', dispatchCount: 0 }),
+  ]
+  // 同 `smart` 口径的理由见上一个测试：不钉散列。
+  const options = { now: NOW, strategy: 'smart' as const }
+
+  // 最小值 0 + lead 2 ⇒ A 的 2 次仍在额度内，分数序原样保留。
+  assert.deepEqual(
+    rankCandidates(profile, pool, { ...options, fairness: { lead: 2 } }).map(item => item.displayName),
+    ['A', 'B'],
+  )
+  // 领先 1 时 A 退后 —— 每加 1 档，就是多允许连发一次。
+  assert.deepEqual(
+    rankCandidates(profile, pool, { ...options, fairness: { lead: 1 } }).map(item => item.displayName),
+    ['B', 'A'],
+  )
+})
+
+test('份额轮转不把唯一能用的候选筛掉：无人领先时公平是 no-op', () => {
+  const profile = profileRequest(textRequest('hi'))
+  const pool = [
+    candidate({ displayName: 'A', accountId: 'a', dispatchCount: 5 }),
+    candidate({ displayName: 'B', accountId: 'b', dispatchCount: 5 }),
+  ]
+
+  // 两条派发数相同 ⇒ 池内最小值就是 5，谁都不算领先 ⇒ 全部合格。这里比的是「与不启用
+  // 公平时逐字同序」而不是某个具体名字序：同分候选的次序由 round-robin 的散列项决定，
+  // 钉名字会把一个与公平无关的实现细节也钉死。
+  const plain = rankCandidates(profile, pool, { now: NOW })
+  assert.equal(plain.length, 2, '两条都该留下')
+  assert.deepEqual(
+    rankCandidates(profile, pool, { now: NOW, fairness: { lead: 0 } }).map(item => item.displayName),
+    plain.map(item => item.displayName),
+    '公平只在真的有候选领先时才动次序，绝不为了公平把链筛空',
+  )
 })
 
 test('rankCandidates drops accounts in cooldown', () => {

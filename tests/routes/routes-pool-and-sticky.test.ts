@@ -290,19 +290,22 @@ test('逐路由配置进决策：baseCap 取该路由的 maxAttempts（不传路
   assert.equal(select(loose).baseCap, 5)
 })
 
-test('逐路由配置进决策：候选条数按 maxAttempts + 可恢复余量（3）裁剪', () => {
-  // 三家各加两把 Key → 6 个候选，裁剪上限才看得见
+test('逐路由配置进决策：候选链是整池排序结果，不再按 maxAttempts 裁短', () => {
+  // 三家各加两把 Key → 9 个候选。以前这里断言裁到 `maxAttempts + 3` 家（4 与 5），
+  // 那等于在选号阶段替供应商决定「这条路由只准用这几个模型」；现在 `maxAttempts`
+  // 只剩一个含义 —— 账号故障类（5xx/网络）的换家上限，见 `baseCap`。
   for (const id of ['pa', 'pb', 'pc']) {
     sm.addAccount(accountFixture(id, 2) as never)
     sm.addAccount(accountFixture(id, 3) as never)
   }
   const route = makeRoute({ maxAttempts: 1 })
   const decision = select(route)
-  assert.equal(decision.candidates.length, 4, '1 + AUTO_RECOVERABLE_EXTRA_ATTEMPTS(3)')
-  assert.equal(decision.baseCap, 1)
+  assert.equal(decision.candidates.length, 9, '整池都进链，尾部候选由可恢复类失败顶上')
+  assert.equal(decision.baseCap, 1, '账号故障类仍然撞满该路由的 maxAttempts 就收手')
 
   const wide = makeRoute({ maxAttempts: 2 })
-  assert.equal(select(wide).candidates.length, 5)
+  assert.equal(select(wide).candidates.length, 9)
+  assert.equal(select(wide).baseCap, 2)
 
   for (const id of ['pa', 'pb', 'pc']) {
     sm.deleteAccount(`${id}-acct2`)

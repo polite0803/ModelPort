@@ -9,6 +9,8 @@ import {
   AUTO_POOL_STRATEGIES,
   AUTO_PREFERENCES,
   DEFAULT_AUTO_ROUTING_CONFIG,
+  DEFAULT_FAIRNESS_LEAD,
+  FAIRNESS_LEAD_MAX,
   type AutoPoolPresetMeta,
   type AutoPoolStrategy,
   type AutoPoolStrategyCategory,
@@ -36,6 +38,12 @@ export interface ModelRouteFieldValues {
    * 关掉它，粘性就只剩打分里的 +0.12 / +0.06，差距过大时会让位。
    */
   stickyHardPin: boolean
+  /**
+   * 份额轮转的领先档：同一个模型最多可以领先「本池派发最少的模型」几次，超过就退到
+   * 队后。0 = 严格轮流，越大越接近纯分数优先（上界 `FAIRNESS_LEAD_MAX`）。
+   * 盘上是可选键（缺省走出厂默认），界面用一个确定的数，写回时落显式值。
+   */
+  fairnessLead: number
   poolStrategies: AutoPoolStrategy[]
   /** 策略之后手动加回的模型（误筛修正）。 */
   includeModels: RouteModelRef[]
@@ -95,6 +103,7 @@ export function defaultRouteFieldValues(strategy: LoadBalanceStrategy): ModelRou
     stickyMinutes: DEFAULT_AUTO_ROUTING_CONFIG.stickyMinutes,
     // 与主进程同一条判据：缺键即硬钉（`!== false`），新路由的初值因此是开。
     stickyHardPin: true,
+    fairnessLead: DEFAULT_FAIRNESS_LEAD,
     poolStrategies: DEFAULT_AUTO_ROUTING_CONFIG.poolStrategies.map((strategyItem) => ({ ...strategyItem })),
     includeModels: [],
     excludeModels: [],
@@ -112,6 +121,8 @@ export function routeFieldValuesOf(route: ModelRoute): ModelRouteFieldValues {
     stickyMinutes: route.stickyMinutes,
     // 盘上没有这一格 = 硬钉开着，与 `autoRouter` 读侧同一条 `!== false` 判据。
     stickyHardPin: route.stickyHardPin !== false,
+    // 同上：盘上没这一格 = 走出厂默认，草稿里显示的就是实际生效的那个数。
+    fairnessLead: route.fairnessLead ?? DEFAULT_FAIRNESS_LEAD,
     poolStrategies: route.poolStrategies.map((strategyItem) => ({ ...strategyItem })),
     includeModels: route.includeModels.map((ref) => ({ ...ref })),
     excludeModels: route.excludeModels.map((ref) => ({ ...ref })),
@@ -291,6 +302,21 @@ export function ModelRouteFields({
             <p className="text-xs text-muted-foreground">{t('proxy.autoRoutingStickyHardPinIdle')}</p>
           )}
           <p className="text-xs text-muted-foreground">{t('proxy.autoRoutingStickyHardPinHelp')}</p>
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor={`auto-fairness-lead-${idPrefix}`}>{t('proxy.autoRoutingFairness')}</Label>
+          <Input
+            id={`auto-fairness-lead-${idPrefix}`}
+            type="number"
+            min={0}
+            max={FAIRNESS_LEAD_MAX}
+            value={values.fairnessLead}
+            onChange={(event) => onChange({
+              fairnessLead: Math.min(FAIRNESS_LEAD_MAX, Math.max(0, Math.round(Number(event.target.value) || 0)))
+            })}
+          />
+          <p className="text-xs text-muted-foreground">{t('proxy.autoRoutingFairnessHelp')}</p>
         </div>
       </div>
 
