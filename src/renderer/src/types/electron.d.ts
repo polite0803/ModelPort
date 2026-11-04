@@ -49,7 +49,12 @@ import type {
 } from '../../../shared/aggregate'
 import type { AggregateCreditQueryResult } from '../../../shared/aggregateCredit'
 import type { ModelMetadataReport } from '../../../shared/modelMetadata'
-import type { ModelProbeRunResult, ProbeScope } from '../../../shared/modelProbe'
+import type {
+  ModelProbeRunResult,
+  ProbeJobSnapshot,
+  ProbeProgressEvent,
+  ProbeScope,
+} from '../../../shared/modelProbe'
 import type {
   CatalogAdoption,
   CatalogAdoptionField,
@@ -225,9 +230,16 @@ interface ProvidersAPI {
     force?: boolean,
   ) => Promise<{
     success: boolean
+    jobId?: string
     result?: ModelProbeRunResult
     error?: string
   }>
+  /** 取消进行中的探测；已完成档位的结论保留。 */
+  cancelProbe: (jobId: string) => Promise<{ success: boolean; error?: string }>
+  /** 关闭弹窗后回读后台任务（进行中 + 最近完成）。 */
+  getProbeJobs: () => Promise<ProbeJobSnapshot[]>
+  /** 探测进度事件（主进程推送）；返回取消订阅函数。 */
+  onProbeProgress: (listener: (event: ProbeProgressEvent) => void) => () => void
   /** 标准模型库快照元数据（只读磁盘，不联网）。 */
   getCatalogStatuses: () => Promise<CatalogSnapshotStatus[]>
   /** 用户显式刷新一个来源；失败时旧快照保留。 */

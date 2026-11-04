@@ -13,15 +13,31 @@ import {
 } from '../../shared/modelCatalog.ts'
 
 const USD_PER_MILLION = 1_000_000
+/** 与 `shared/modelCatalog.ts::MAX_PRICE_PER_MILLION` 同一口径：USD / 1M tokens 展示上限。 */
+const MAX_PRICE_PER_MILLION = 10_000_000
+/** 换算后保留 6 位小数：per-token 值常见到 1e-8，6 位已足够且不会引入浮点尾巴。 */
+const PRICE_DECIMALS = 6
 
-function perMillion(perToken: unknown): number | undefined {
+/**
+ * LiteLLM/OpenRouter 的 per-token 价格 → USD / 1M tokens。
+ *
+ * 显式规则（口径写在这里，界面与采用 ledger 不再换算）：
+ * - 只接受有限、非负的数值；
+ * - 先按上限反推（`max / 1e6`），避免先乘后溢出；
+ * - 乘以 1e6 后保留 {@link PRICE_DECIMALS} 位小数；
+ * - 超出 `MAX_PRICE_PER_MILLION` 的值直接丢弃，不截断成上限（截断会伪造一个价格）。
+ */
+export function perTokenToPerMillion(perToken: unknown): number | undefined {
   if (typeof perToken !== 'number' || !Number.isFinite(perToken) || perToken < 0) return undefined
-  return Number((perToken * USD_PER_MILLION).toFixed(6))
+  if (perToken > MAX_PRICE_PER_MILLION / USD_PER_MILLION) return undefined
+  const converted = perToken * USD_PER_MILLION
+  if (!Number.isFinite(converted) || converted > MAX_PRICE_PER_MILLION) return undefined
+  return Number(converted.toFixed(PRICE_DECIMALS))
 }
 
 function money(input: unknown, output: unknown): CatalogPrice | undefined {
-  const inputPerMillion = perMillion(input)
-  const outputPerMillion = perMillion(output)
+  const inputPerMillion = perTokenToPerMillion(input)
+  const outputPerMillion = perTokenToPerMillion(output)
   if (inputPerMillion === undefined && outputPerMillion === undefined) return undefined
   return {
     ...(inputPerMillion === undefined ? {} : { inputPerMillion }),
@@ -94,9 +110,17 @@ export function parseModelsDev(raw: unknown): CatalogEntry[] {
 
 /**
  * LiteLLM `model_prices_and_context_window.json`：`{ [modelId]: {...} }`。
- * 价格是「每 token」美元，这里换算成 USD / 1M 供展示；换算只发生一次，
- * 且不会进入任何路由/额度计算。
+ *
+ * 口径（真实响应里 4,500+ 条，约 1/4 不是对话模型）：
+ * - 键可能带 provider 前缀（`azure/...`、`watsonx/core42/...`），前缀只用于展示来源；
+ * - `mode` 决定用途：只取 `chat` / `vision`；`embedding`、`rerank`、`image_generation`
+ *   等不是对话模型，混进来只会稀释候选。缺失 `mode` 的老条目按对话模型保留；
+ * - 价格是「每 token」美元，这里经 {@link perTokenToPerMillion} 一次性换算；
+ * - 上下文/输出上限按 `max_input_tokens` / `max_output_tokens` 直取（老的 `max_tokens`
+ *   是同义字段），不做「上下文减输出」之类的二次推断。
  */
+const LITELLM_CHAT_MODES: ReadonlySet<string> = new Set(['chat', 'vision'])
+
 export function parseLiteLLM(raw: unknown): CatalogEntry[] {
   const root = objectOf(raw)
   if (!root) return []
@@ -106,6 +130,8 @@ export function parseLiteLLM(raw: unknown): CatalogEntry[] {
     if (id === 'sample_spec') continue
     const info = objectOf(value)
     if (!info) continue
+    // 只保留对话/视觉模型；有 `mode` 但不是这两类的一律跳过。
+    if (typeof info.mode === 'string' && !LITELLM_CHAT_MODES.has(info.mode)) continue
     const maxOutput = info.max_output_tokens ?? info.max_tokens
     const entry = sanitizeCatalogEntry(
       {

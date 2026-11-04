@@ -79,6 +79,65 @@ export interface ModelProbeSidecar {
 
 export const EMPTY_PROBE_SIDECAR: ModelProbeSidecar = { version: 1, rows: [] }
 
+/** 一条探测请求的硬超时：上游不回包就按 `inconclusive` 收敛，不无限等待。 */
+export const PROBE_REQUEST_TIMEOUT_MS = 30_000
+
+/** 单次探测（一次点击/一个模型的一个 scope）的整体上限。 */
+export const PROBE_TOTAL_TIMEOUT_MS = 5 * 60 * 1000
+
+/**
+ * 失败分类只服务界面文案（网络不可达 / 鉴权失败 / 被限流 / 上游超时），
+ * 不参与判定；判定仍走 `classifyProbeFailure`，429/401/403/5xx 一律不构成上限。
+ */
+export type ProbeFailureKind = 'network' | 'auth' | 'rate-limit' | 'timeout' | 'upstream' | 'unknown'
+
+export function probeFailureKind(input: {
+  status?: number
+  timedOut?: boolean
+  localAdmissionRejected?: boolean
+}): ProbeFailureKind {
+  if (input.localAdmissionRejected === true) return 'rate-limit'
+  if (input.timedOut === true) return 'timeout'
+  const status = input.status
+  if (status === undefined) return 'network'
+  if (status === 401 || status === 403) return 'auth'
+  if (status === 408) return 'timeout'
+  if (status === 429) return 'rate-limit'
+  if (status >= 500) return 'upstream'
+  return 'unknown'
+}
+
+/** 弹窗可见阶段：准备 → 第 N 档 → 等待响应 → 结束/取消。 */
+export type ProbePhase = 'prepare' | 'tier' | 'awaiting' | 'done' | 'cancelled'
+
+export type ProbeJobStatus = 'running' | 'done' | 'failed' | 'cancelled'
+
+/** 主进程 → 界面的一次进度快照；关闭弹窗后可从 `getProbeJobs` 回读。 */
+export interface ProbeProgressEvent {
+  jobId: string
+  providerId: string
+  displayName: string
+  scope: ProbeScope
+  phase: ProbePhase
+  /** 1-based 档位序号与总档数；能力探测没有档位时为 undefined。 */
+  tierIndex?: number
+  tierCount?: number
+  tierTokens?: number
+  elapsedMs: number
+  requestsSent: number
+  requestLimit: number
+  startedAt: string
+  errorKind?: ProbeFailureKind
+  message?: string
+}
+
+/** 后台任务记录（进行中 + 最近完成），供关闭弹窗后回显。 */
+export interface ProbeJobSnapshot extends ProbeProgressEvent {
+  status: ProbeJobStatus
+  updatedAt: string
+  result?: ModelProbeRunResult
+}
+
 // ── 阶梯 ────────────────────────────────────────────────────────────────────
 
 /**

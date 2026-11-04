@@ -3,6 +3,7 @@
     "max_input_tokens": 0
   },
   "gpt-4o": {
+    "mode": "chat",
     "max_input_tokens": 128000,
     "max_output_tokens": 16384,
     "supports_vision": true,
@@ -15,5 +16,30 @@
     "max_tokens": 2048,
     "supports_vision": false,
     "supports_function_calling": false
+  },
+  "vision-preview": {
+    "mode": "vision",
+    "max_input_tokens": 4096,
+    "max_output_tokens": 1024,
+    "supports_vision": true
+  },
+  "embed-english": {
+    "mode": "embedding",
+    "max_input_tokens": 8192,
+    "input_cost_per_token": 0.0000001
+  },
+  "expensive-model": {
+    "mode": "chat",
+    "max_input_tokens": 128000,
+    "max_output_tokens": 4096,
+    "input_cost_per_token": 20,
+    "output_cost_per_token": 0.00001
+  },
+  "precise-price": {
+    "mode": "chat",
+    "max_input_tokens": 8192,
+    "max_output_tokens": 2048,
+    "input_cost_per_token": 0.0000001234,
+    "output_cost_per_token": 0.000000000123
   }
 }

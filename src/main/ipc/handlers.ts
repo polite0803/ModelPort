@@ -1,4 +1,5 @@
 import { ipcMain, app, BrowserWindow, dialog, shell } from 'electron'
+import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
 import axios from 'axios'
 import { IpcChannels } from './channels'
@@ -29,7 +30,8 @@ import {
   revokeCatalogAdoption,
 } from '../providers/modelCatalogService'
 import type { CatalogAdoptionField, CatalogSourceId } from '../../shared/modelCatalog.ts'
-import type { ProbeScope } from '../../shared/modelProbe.ts'
+import type { ProbeJobSnapshot, ProbeProgressEvent, ProbeScope } from '../../shared/modelProbe.ts'
+import { PROBE_TOTAL_TIMEOUT_MS } from '../../shared/modelProbe.ts'
 import { schedulerStatus, triggerModelListRefreshNow, configureModelListRefresh } from '../scheduler/modelListRefresh'
 import { proxyServer } from '../proxy/server'
 import {
@@ -102,6 +104,42 @@ function routeStorageError(error: unknown): { code: 'storage_unavailable'; messa
   return {
     code: 'storage_unavailable',
     message: error instanceof Error ? error.message : 'Storage is not available',
+  }
+}
+
+/**
+ * 探测后台任务：让「关闭弹窗」不等于「取消请求」。
+ *
+ * - 进行中的任务保存在这里，`getProbeJobs` 可在重新打开弹窗时回显；
+ * - 每个任务独立的整体超时（5 分钟）与取消入口；
+ * - 最多保留最近 20 条（含已完成），避免内存随点击增长。
+ *
+ * 注意：进度事件走 `webContents.send` 单向推送，UI 不依赖 invoke 的返回值刷新。
+ */
+interface ProbeJobRecord {
+  snapshot: ProbeJobSnapshot
+  controller: AbortController
+  timer: ReturnType<typeof setTimeout>
+}
+
+const probeJobs = new Map<string, ProbeJobRecord>()
+const MAX_PROBE_JOBS = 20
+
+function broadcastProbeProgress(snapshot: ProbeJobSnapshot): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) {
+      window.webContents.send(IpcChannels.PROVIDERS_PROBE_PROGRESS, snapshot)
+    }
+  }
+}
+
+function trimProbeJobs(): void {
+  while (probeJobs.size > MAX_PROBE_JOBS) {
+    const oldest = probeJobs.keys().next().value as string | undefined
+    if (oldest === undefined) return
+    const record = probeJobs.get(oldest)
+    if (record && record.snapshot.status === 'running') return
+    probeJobs.delete(oldest)
   }
 }
 
@@ -749,29 +787,106 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
       if (typeof providerId !== 'string' || typeof displayName !== 'string') {
         return { success: false, error: 'providerId and displayName are required' }
       }
-      const normalizedScope: ProbeScope | undefined =
+      const normalizedScope: ProbeScope =
         scope === 'context' || scope === 'output' || scope === 'capability'
           ? scope
-          : undefined
+          : 'capability'
+      const jobId = randomUUID()
+      const startedAt = Date.now()
+      const controller = new AbortController()
+      // 整体超时 5 分钟：到点后信号置为 'timeout'，runner 按 inconclusive 收敛。
+      const timer = setTimeout(() => controller.abort('timeout'), PROBE_TOTAL_TIMEOUT_MS)
+      const initial: ProbeJobSnapshot = {
+        jobId,
+        providerId,
+        displayName,
+        scope: normalizedScope,
+        phase: 'prepare',
+        elapsedMs: 0,
+        requestsSent: 0,
+        requestLimit: 0,
+        startedAt: new Date(startedAt).toISOString(),
+        status: 'running',
+        updatedAt: new Date(startedAt).toISOString(),
+      }
+      const record: ProbeJobRecord = { controller, timer, snapshot: initial }
+      probeJobs.set(jobId, record)
+      trimProbeJobs()
+      broadcastProbeProgress(initial)
+
+      const emit = (event: ProbeProgressEvent): void => {
+        const status: ProbeJobSnapshot['status'] =
+          event.phase === 'cancelled'
+            ? 'cancelled'
+            : event.phase === 'done'
+              ? 'done'
+              : 'running'
+        record.snapshot = {
+          ...record.snapshot,
+          ...event,
+          jobId,
+          status,
+          updatedAt: new Date().toISOString(),
+        }
+        broadcastProbeProgress(record.snapshot)
+      }
+
       try {
         // 一次点击 → 一条阶梯；不会在打开页面时自动触发。
-        return {
-          success: true,
-          result: await runModelCapabilityProbe({
-            providerId,
-            displayName,
-            ...(normalizedScope === undefined ? {} : { scope: normalizedScope }),
-            force: force === true,
-          }),
+        const result = await runModelCapabilityProbe({
+          providerId,
+          displayName,
+          scope: normalizedScope,
+          force: force === true,
+          run: { jobId, signal: controller.signal, onProgress: emit },
+        })
+        const aborted = controller.signal.aborted
+        // `inconclusive` 是一次「跑完但没结论」的结果，不是任务失败；
+        // 结论（measured/skipped/inconclusive）由 result.status 表达。
+        const finalStatus: ProbeJobSnapshot['status'] = aborted
+          ? controller.signal.reason === 'timeout'
+            ? 'failed'
+            : 'cancelled'
+          : 'done'
+        const timedOut = aborted && controller.signal.reason === 'timeout'
+        record.snapshot = {
+          ...record.snapshot,
+          status: finalStatus,
+          // 整体超时：阶段收口到 done，并显式给出「上游超时」分类，
+          // 避免把一次超时显示成「等待响应 / 网络不可达」。
+          ...(timedOut ? { phase: 'done' as const, errorKind: 'timeout' as const } : {}),
+          updatedAt: new Date().toISOString(),
+          result,
         }
+        broadcastProbeProgress(record.snapshot)
+        return { success: true, jobId, result }
       } catch (error) {
         console.error('[IPC] Failed to probe model metadata:', error)
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : 'Failed to probe model metadata',
+        const message = error instanceof Error ? error.message : 'Failed to probe model metadata'
+        record.snapshot = {
+          ...record.snapshot,
+          status: 'failed',
+          phase: 'done',
+          message,
+          updatedAt: new Date().toISOString(),
         }
+        broadcastProbeProgress(record.snapshot)
+        return { success: false, jobId, error: message }
+      } finally {
+        clearTimeout(timer)
       }
-    }
+    },
+  )
+
+  ipcMain.handle(IpcChannels.PROVIDERS_CANCEL_PROBE, (_, jobId: string) => {
+    const record = probeJobs.get(jobId)
+    if (!record) return { success: false, error: '未知的探测任务' }
+    record.controller.abort('cancel')
+    return { success: true }
+  })
+
+  ipcMain.handle(IpcChannels.PROVIDERS_GET_PROBE_JOBS, () =>
+    [...probeJobs.values()].map((record) => record.snapshot),
   )
 
   ipcMain.handle(IpcChannels.PROVIDERS_GET_CATALOG_STATUSES, async () => {

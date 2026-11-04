@@ -14,8 +14,11 @@ import {
   isInconclusiveProbeFailure,
   planContextProbe,
   planOutputProbe,
+  probeFailureKind,
   probeFreshness,
   probeRowToLayer,
+  PROBE_REQUEST_TIMEOUT_MS,
+  PROBE_TOTAL_TIMEOUT_MS,
   sanitizeProbeSidecar,
   shouldSkipProbe,
   type ModelProbeRow,
@@ -267,4 +270,22 @@ test('前一个任务失败不会卡死后续探测', async () => {
   }))
   const value = await enqueue(async () => 7)
   assert.equal(value, 7)
+})
+
+test('失败分类给界面稳定的人读类别', () => {
+  assert.equal(probeFailureKind({ timedOut: true }), 'timeout')
+  assert.equal(probeFailureKind({ status: 401 }), 'auth')
+  assert.equal(probeFailureKind({ status: 403 }), 'auth')
+  assert.equal(probeFailureKind({ status: 429 }), 'rate-limit')
+  assert.equal(probeFailureKind({ localAdmissionRejected: true }), 'rate-limit')
+  assert.equal(probeFailureKind({ status: 408 }), 'timeout')
+  assert.equal(probeFailureKind({ status: 502 }), 'upstream')
+  assert.equal(probeFailureKind({ status: 503 }), 'upstream')
+  assert.equal(probeFailureKind({}), 'network')
+  assert.equal(probeFailureKind({ status: 400 }), 'unknown')
+})
+
+test('超时常量是显式的：单请求 30s、整体 5 分钟', () => {
+  assert.equal(PROBE_REQUEST_TIMEOUT_MS, 30_000)
+  assert.equal(PROBE_TOTAL_TIMEOUT_MS, 5 * 60 * 1000)
 })

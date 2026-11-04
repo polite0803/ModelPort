@@ -143,7 +143,7 @@ coverage[attr] = { known: 已知的行数, total: 当前目录总行数, rate: k
 | `main/proxy/autoRouting.ts` | `ModelCapability` 增加 `maxOutputTokens` 与来源；推定值进入硬过滤/打分 |
 | `renderer/components/models/ModelMetadataPanel.tsx` | 覆盖率看板 + 标准库快照卡片 + 待标注队列 + 候选/采用对话框 |
 | `renderer/pages/Models.tsx` | 「标注覆盖」页签入口 |
-| IPC | `providers:getModelMetadata`、`providers:probeModel`、`providers:getCatalogStatuses`、`providers:refreshCatalog`、`providers:getCatalogCandidates`、`providers:adoptCatalogField`、`providers:revokeCatalogAdoption`（刷新/探测都只在用户显式触发时执行） |
+| IPC | `providers:getModelMetadata`、`providers:probeModel`、`providers:cancelProbe`、`providers:getProbeJobs`、`providers:probeProgress`（单向事件）、`providers:getCatalogStatuses`、`providers:refreshCatalog`、`providers:getCatalogCandidates`、`providers:adoptCatalogField`、`providers:revokeCatalogAdoption`（刷新/探测/批量都只在用户显式触发时执行） |
 
 不修改 `docs/README.md` 索引（另一任务在整理索引）；索引需要补的条目见交付说明。
 
@@ -163,6 +163,20 @@ coverage[attr] = { known: 已知的行数, total: 当前目录总行数, rate: k
   只新增 `measured` 证据，人工标注仍最高优先级。
 - 探测请求走 `probe: true`：跳过派发账本、AIMD/Bandit/冷却与上下文裁剪；请求日志行带
   `kind: 'probe'`，不计入请求统计。全局串行队列保证同一模型串行、跨模型并发上限 1。
+- **可见进度与可取消**：探测在主进程登记为后台任务（`providers:getProbeJobs`），弹窗显示
+  阶段（准备 / 第 N 档 / 等待响应）、已用秒数、已发请求数/上限，并提供「取消探测」。
+  进度经 `providers:probeProgress` 单向推送；关闭/Esc 不等待长请求，重新打开会回显
+  同一任务。取消只停止后续档位，已完成档位的结论照常保留。
+- **显式超时**：单请求 `30s`（`PROBE_REQUEST_TIMEOUT_MS`），整体 `5min`
+  （`PROBE_TOTAL_TIMEOUT_MS`）。超时一律按 `inconclusive` 收敛，不无限等待；401/403、
+  429、5xx、网络不可达与超时在弹窗里分别显示「鉴权失败 / 被限流 / 上游错误 / 网络不可达 /
+  上游超时」，并给出重试入口。
+- **一键补全**：标注页对待标注模型提供统一入口。预演先读本地标准库候选（不联网），
+  列出模型数、预计采用字段数、探测请求条数与 token 合计，逐模型可勾选；`exact` 默认勾选，
+  `alias` 提示确认、`family` 默认不勾选。执行跨模型串行（并发 1）、可暂停/取消，逐模型
+  显示待处理/匹配中/探测中/已完成/跳过/失败，失败不中断整体，结束后汇总成功/跳过/失败。
+  采用仍逐字段写入 adoption ledger、可撤销；已声明字段（含人工标记）不进入候选采用列表。
+
 
 ## 9. 标准库层（第 5 步）
 
@@ -201,12 +215,22 @@ interface CatalogStore {
   许可、归属、条目数）；唯一的网络路径是用户点击的 `refreshCatalog(source)`。
 - **刷新失败保留旧快照**：HTTP 非 2xx、超时、JSON 损坏、解析为空都返回 `success:false`，
   写盘只发生在成功解析之后；`catalogSnapshotStatuses` 仍返回磁盘上的上一份数据。
+  失败结果带 `errorKind`（`network` / `timeout` / `http` / `parse` / `empty`）与耗时：
+  HTTP 非 2xx 附带响应体前 200 字符，网络失败带 `cause.code`，超时说明 60s 上限。
+  界面按来源展示失败原因；单个来源失败不影响其它来源，也不会清空整份快照。
+- **LiteLLM 抓取口径**：原始文件约 3.2 MB、4,500+ 条；`raw.githubusercontent` 显式
+  `redirect: 'follow'` 并带产品 User-Agent，整体抓取超时 60s（慢链路余量）。
+  解析只取 `mode` 为 `chat` / `vision` 的条目（缺失 `mode` 的老条目按对话模型保留）；
+  键里的 provider 前缀只用于归属展示。`max_input_tokens` / `max_output_tokens`
+  （老字段 `max_tokens`）按字段直取，不做「上下文减输出」之类的二次推断。
 - **写入是原子的**：唯一临时文件 + `rename`，且只覆盖被刷新的来源，其他来源保持原样。
 - **外部数据一律校验**：字段类型、正整数、上下文 ≤ 100,000,000、输出上限沿用
   **1,000,000** 上界、价格 0–10,000,000 USD/1M；模态只接受已知集合。元数据字段缺一即
   视为快照损坏，整份降级为空台账（界面显示「尚未抓取」而不是报错）。
 - 三个解析器（`modelCatalogParsers.ts`）把各自 shape 折成同一条目；价格在解析时一次性
   换算成 **USD / 1M tokens**（LiteLLM/OpenRouter 的 per-token 值 × 1e6），之后不再换算。
+  换算显式固定：先按 `max / 1e6` 反推上限避免先乘后溢出，再乘 1e6 并保留 6 位小数；
+  超上限的字段丢弃而不是截断成 10,000,000。
 
 ### 9.2 匹配策略（三档 + 置信度）
 
@@ -219,7 +243,8 @@ interface CatalogStore {
 - 三档按上表顺序合并、同一 `entry` 只保留最高档；结果按 exact → alias → family 排序，
   最多返回 5 条。
 - **默认不自动采用**：界面列出候选与置信度徽标，用户必须逐字段点击「采用」；刷新快照
-  或打开页面本身不会改变任何模型的可路由能力。
+  或打开页面本身不会改变任何模型的可路由能力。唯一的批量入口是用户点击「一键补全」后
+  在预演里确认：`exact` 默认勾选、`alias`/`family` 默认不勾选，采用仍按字段写入 ledger。
 - 候选查询一次建索引（`buildCatalogIndex`），不为每条模型重扫全量快照。
 
 ### 9.3 Adoption ledger（按字段采用、可撤销）

@@ -19,6 +19,7 @@ import {
   type CatalogAdoptionField,
   type CatalogCandidatesResult,
   type CatalogEntry,
+  type CatalogRefreshErrorKind,
   type CatalogRefreshResult,
   type CatalogSnapshotStatus,
   type CatalogSnapshot,
@@ -28,42 +29,108 @@ import { storeManager } from '../store/store.ts'
 import { parseCatalogPayload } from './modelCatalogParsers.ts'
 import { readCatalogStore, writeCatalogSnapshot } from './modelCatalogStore.ts'
 
-const FETCH_TIMEOUT_MS = 30_000
+/**
+ * LiteLLM 的原始文件约 3.2 MB（4,500+ 条）；慢链路下 30s 不够，给 60s。
+ * 这是「整体抓取」超时，不是单条解析超时。
+ */
+const FETCH_TIMEOUT_MS = 60_000
+/** 失败时把响应体前 200 字符带进错误信息，便于区分代理页/限流页/真 JSON。 */
+const ERROR_BODY_SNIPPET = 200
 
 function sha256(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex')
 }
 
+function snippetOf(text: string): string {
+  const collapsed = text.replace(/\s+/g, ' ').trim()
+  return collapsed.length > ERROR_BODY_SNIPPET
+    ? `${collapsed.slice(0, ERROR_BODY_SNIPPET)}…`
+    : collapsed
+}
+
+/**
+ * 把异常折成人读分类。`AbortSignal.timeout` 在 Node/Electron 里抛出 `TimeoutError`；
+ * 连接失败通常是 `TypeError: fetch failed`，根因在 `cause.code`（ENOTFOUND/ECONNREFUSED/
+ * ECONNRESET/ETIMEDOUT）。分类只用于界面提示，不改变「失败即保留旧快照」的语义。
+ */
+function classifyFetchError(error: unknown): { kind: CatalogRefreshErrorKind; message: string } {
+  if (error instanceof Error) {
+    if (error.name === 'TimeoutError' || error.name === 'AbortError') {
+      return { kind: 'timeout', message: `请求超时（${FETCH_TIMEOUT_MS / 1000}s 内未完成）` }
+    }
+    const cause = (error as { cause?: { code?: unknown } }).cause
+    const code = typeof cause?.code === 'string' ? cause.code : ''
+    if (error.name === 'TypeError' || code.startsWith('E')) {
+      return { kind: 'network', message: `网络不可达（${error.message}${code ? ` / ${code}` : ''}）` }
+    }
+    return { kind: 'unknown', message: error.message }
+  }
+  return { kind: 'unknown', message: String(error) }
+}
+
+function failure(
+  kind: CatalogRefreshErrorKind,
+  error: string,
+  startedAt: number,
+  statuses: CatalogSnapshotStatus[],
+): CatalogRefreshResult {
+  return { success: false, errorKind: kind, error, statuses, elapsedMs: Date.now() - startedAt }
+}
+
 /**
  * 刷新一个来源。成功才写盘；任何失败（网络、HTTP 非 2xx、JSON 损坏、解析为空）
  * 都返回 `success:false`，磁盘上的旧快照保持不变，界面提示「保留上一份数据」。
+ *
+ * 三个来源彼此独立：只覆盖被刷新的来源，另一个来源失败不会清掉这里的快照。
  */
 export async function refreshCatalog(source: CatalogSourceId): Promise<CatalogRefreshResult> {
   const meta = CATALOG_SOURCE_META[source]
+  const startedAt = Date.now()
   try {
     const response = await fetch(meta.sourceUrl, {
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      // raw.githubusercontent 会 301/302 到 CDN；显式跟随，避免把重定向当成失败。
+      redirect: 'follow',
       headers: {
         accept: 'application/json',
         'user-agent': 'ModelPort model-catalog refresh (manual)',
       },
     })
     if (!response.ok) {
-      return {
-        success: false,
-        error: `HTTP ${response.status} ${response.statusText}`,
-        statuses: catalogSnapshotStatuses(await readCatalogStore()),
+      let detail = ''
+      try {
+        detail = snippetOf(await response.text())
+      } catch {
+        // 读响应体失败不影响「HTTP 非 2xx」这个结论。
       }
+      return failure(
+        'http',
+        `HTTP ${response.status} ${response.statusText}${detail ? `：${detail}` : ''}`,
+        startedAt,
+        catalogSnapshotStatuses(await readCatalogStore()),
+      )
     }
     const text = await response.text()
-    const raw: unknown = JSON.parse(text)
+    let raw: unknown
+    try {
+      raw = JSON.parse(text)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return failure(
+        'parse',
+        `响应不是合法 JSON（${text.length} 字节）：${message}`,
+        startedAt,
+        catalogSnapshotStatuses(await readCatalogStore()),
+      )
+    }
     const entries = parseCatalogPayload(source, raw)
     if (entries.length === 0) {
-      return {
-        success: false,
-        error: '响应中没有可用的模型条目（保留上一份快照）',
-        statuses: catalogSnapshotStatuses(await readCatalogStore()),
-      }
+      return failure(
+        'empty',
+        '响应中没有可用的模型条目（保留上一份快照）',
+        startedAt,
+        catalogSnapshotStatuses(await readCatalogStore()),
+      )
     }
     const store = await writeCatalogSnapshot({
       source,
@@ -78,14 +145,16 @@ export async function refreshCatalog(source: CatalogSourceId): Promise<CatalogRe
       success: true,
       status: catalogSnapshotStatuses(store).find((item) => item.source === source),
       statuses: catalogSnapshotStatuses(store),
+      elapsedMs: Date.now() - startedAt,
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    return {
-      success: false,
-      error: message,
-      statuses: catalogSnapshotStatuses(await readCatalogStore()),
-    }
+    const classified = classifyFetchError(error)
+    return failure(
+      classified.kind,
+      classified.message,
+      startedAt,
+      catalogSnapshotStatuses(await readCatalogStore()),
+    )
   }
 }
 

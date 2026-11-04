@@ -38,7 +38,12 @@ import type {
 } from '../shared/anthropicDiscovery'
 import type { AggregateCreditQueryResult } from '../shared/aggregateCredit'
 import type { ModelMetadataReport } from '../shared/modelMetadata'
-import type { ModelProbeRunResult, ProbeScope } from '../shared/modelProbe'
+import type {
+  ModelProbeRunResult,
+  ProbeJobSnapshot,
+  ProbeProgressEvent,
+  ProbeScope,
+} from '../shared/modelProbe'
 import type {
   CatalogAdoption,
   CatalogAdoptionField,
@@ -222,10 +227,26 @@ const providersAPI = {
     force?: boolean,
   ): Promise<{
     success: boolean
+    jobId?: string
     result?: ModelProbeRunResult
     error?: string
   }> =>
     ipcRenderer.invoke(IpcChannels.PROVIDERS_PROBE_MODEL, providerId, displayName, scope, force),
+
+  /** 取消一条进行中的探测：立即停止后续档位，已完成档位结论保留。 */
+  cancelProbe: (jobId: string): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke(IpcChannels.PROVIDERS_CANCEL_PROBE, jobId),
+
+  /** 关闭弹窗后回读后台任务：进行中 + 最近完成。 */
+  getProbeJobs: (): Promise<ProbeJobSnapshot[]> =>
+    ipcRenderer.invoke(IpcChannels.PROVIDERS_GET_PROBE_JOBS),
+
+  /** 探测进度事件；返回取消订阅函数。 */
+  onProbeProgress: (listener: (event: ProbeProgressEvent) => void): (() => void) => {
+    const handler = (_event: unknown, payload: ProbeProgressEvent): void => listener(payload)
+    ipcRenderer.on(IpcChannels.PROVIDERS_PROBE_PROGRESS, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.PROVIDERS_PROBE_PROGRESS, handler)
+  },
 
   /** 标准模型库：快照元数据（不联网、不含 entries） */
   getCatalogStatuses: (): Promise<CatalogSnapshotStatus[]> =>

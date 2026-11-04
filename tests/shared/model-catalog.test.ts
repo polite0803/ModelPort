@@ -261,7 +261,13 @@ test('三个来源的解析器用本地 fixture：字段、单位换算与坏条
   })
 
   const litellm = parseLiteLLM(fixture('litellm.json'))
-  assert.equal(litellm.length, 2, 'sample_spec 被跳过')
+  assert.equal(litellm.length, 5, 'sample_spec 与 embedding 条目被跳过')
+  assert.equal(
+    litellm.some((item) => item.id === 'embed-english'),
+    false,
+    'mode 不是 chat/vision 的条目不得进入标准库',
+  )
+  assert.equal(litellm.find((item) => item.id === 'vision-preview')?.vision, 'yes')
   const gpt = litellm.find((item) => item.id === 'gpt-4o')!
   assert.equal(gpt.contextTokens, 128000)
   assert.equal(gpt.maxOutputTokens, 16384)
@@ -277,6 +283,23 @@ test('三个来源的解析器用本地 fixture：字段、单位换算与坏条
   assert.equal(legacy.maxOutputTokens, 2048)
   assert.equal(legacy.vision, 'no')
   assert.equal(legacy.tools, 'no')
+
+  // per-token → per-1M：20 * 1e6 = 20,000,000 > 10,000,000 上限，该字段丢弃而不是截断。
+  const expensive = litellm.find((item) => item.id === 'expensive-model')!
+  assert.equal(expensive.contextTokens, 128000, '超限价格不影响上下文直取')
+  assert.deepEqual(
+    expensive.price,
+    { outputPerMillion: 10, currency: 'USD' },
+    '超限的输入价格字段必须丢弃，合法输出价格保留',
+  )
+
+  // 精度固定 6 位小数：0.0000001234 → 0.1234；0.000000000123 → 0.000123。
+  const precise = litellm.find((item) => item.id === 'precise-price')!
+  assert.deepEqual(precise.price, {
+    inputPerMillion: 0.1234,
+    outputPerMillion: 0.000123,
+    currency: 'USD',
+  })
 
   const openrouter = parseOpenRouter(fixture('openrouter.json'))
   assert.equal(openrouter.length, 1)

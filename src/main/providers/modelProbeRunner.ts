@@ -25,13 +25,17 @@ import {
   evaluateOutputProbe,
   planContextProbe,
   planOutputProbe,
+  probeFailureKind,
   probeFreshness,
   probeRowKey,
+  PROBE_REQUEST_TIMEOUT_MS,
   shouldSkipProbe,
   type ModelProbeRow,
   type ModelProbeRunResult,
+  type ProbeFailureKind,
   type ProbeObservation,
   type ProbePlan,
+  type ProbeProgressEvent,
   type ProbeScope,
 } from '../../shared/modelProbe.ts'
 import { familyRuleLayer } from '../../shared/modelFamilyRules.ts'
@@ -99,20 +103,95 @@ function probeContextOf(
   }
 }
 
+/** 一次探测的后台上下文：进度回传 + 取消/整体超时信号。 */
+export interface ProbeRunOptions {
+  jobId?: string
+  signal?: AbortSignal
+  onProgress?: (event: ProbeProgressEvent) => void
+}
+
+interface ProbeEmitter {
+  emit: (
+    phase: 'prepare' | 'tier' | 'awaiting' | 'done' | 'cancelled',
+    extra?: {
+      tierIndex?: number
+      tierCount?: number
+      tierTokens?: number
+      errorKind?: ProbeFailureKind
+      message?: string
+    },
+  ) => void
+  sent: () => void
+}
+
+function createEmitter(input: {
+  run: ProbeRunOptions
+  providerId: string
+  displayName: string
+  scope: ProbeScope
+  startedAt: number
+  requestLimit: number
+}): ProbeEmitter {
+  let requestsSent = 0
+  const emit: ProbeEmitter['emit'] = (phase, extra = {}) => {
+    input.run.onProgress?.({
+      jobId: input.run.jobId ?? '',
+      providerId: input.providerId,
+      displayName: input.displayName,
+      scope: input.scope,
+      phase,
+      elapsedMs: Date.now() - input.startedAt,
+      requestsSent,
+      requestLimit: input.requestLimit,
+      startedAt: new Date(input.startedAt).toISOString(),
+      ...extra,
+    })
+  }
+  return { emit, sent: () => { requestsSent += 1 } }
+}
+
+/** 整体信号被中止时区分「用户取消」与「整体超时」。 */
+function abortReasonOf(run: ProbeRunOptions): 'cancelled' | 'timeout' | undefined {
+  if (run.signal?.aborted !== true) return undefined
+  return run.signal.reason === 'timeout' ? 'timeout' : 'cancelled'
+}
+
+function abortReasonText(reason: 'cancelled' | 'timeout'): string {
+  return reason === 'timeout' ? '整体探测超时（5 分钟），按 inconclusive 收敛' : '已取消，保留已完成档位的结论'
+}
+
+/**
+ * 单条请求：30s 硬超时 + 外层整体信号。`timedOut` 只用于人读提示与分类，
+ * 判定仍按 `inconclusive`——超时永远不写成上限。
+ */
 async function forwardProbe(
   request: ChatCompletionRequest,
   account: Account,
   provider: Provider,
   actualModel: string,
-): Promise<ForwardResult> {
-  return requestForwarder.forwardChatCompletion(
-    request,
-    account,
-    provider,
-    actualModel,
-    probeContextOf(request.requestId ?? randomUUID(), provider, account, actualModel),
-    { maxRetries: 0, probe: true },
-  )
+  run: ProbeRunOptions = {},
+): Promise<{ result: ForwardResult; timedOut: boolean }> {
+  const requestController = new AbortController()
+  const timer = setTimeout(() => requestController.abort('timeout'), PROBE_REQUEST_TIMEOUT_MS)
+  const signal = run.signal
+    ? AbortSignal.any([requestController.signal, run.signal])
+    : requestController.signal
+  try {
+    const result = await requestForwarder.forwardChatCompletion(
+      { ...request, signal },
+      account,
+      provider,
+      actualModel,
+      probeContextOf(request.requestId ?? randomUUID(), provider, account, actualModel),
+      { maxRetries: 0, probe: true },
+    )
+    return {
+      result,
+      timedOut: requestController.signal.aborted === true || run.signal?.reason === 'timeout',
+    }
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 function bodyOf(result: ForwardResult): Record<string, unknown> | undefined {
@@ -220,10 +299,21 @@ async function previousRowFor(providerId: string, displayName: string): Promise<
   return sidecar.rows.find((row) => probeRowKey(row) === key)
 }
 
-function probeFailureReason(result: ForwardResult): string {
+function probeFailureReason(result: ForwardResult, timedOut = false): string {
+  if (timedOut) return `探测请求超时（${PROBE_REQUEST_TIMEOUT_MS / 1000}s）`
   const status = result.status ?? '无状态'
   const detail = result.error ?? result.errorDetails?.message ?? ''
   return `HTTP ${status}${detail ? `：${detail}` : ''}`
+}
+
+function failureKindOf(result: ForwardResult, timedOut = false): ProbeFailureKind {
+  return probeFailureKind({
+    ...(result.status === undefined ? {} : { status: result.status }),
+    timedOut,
+    ...(result.localAdmissionRejected === undefined
+      ? {}
+      : { localAdmissionRejected: result.localAdmissionRejected }),
+  })
 }
 
 /** 上下文探测：从低档向上推，遇到明确超限或不可判定原因即停。 */
@@ -234,14 +324,33 @@ async function probeContext(input: {
   actualModelId: string
   hintTokens: number | undefined
   hintSource: 'family-rule' | 'declared' | undefined
-}): Promise<{ result: ModelProbeRunResult; row: ModelProbeRow }> {
+  run: ProbeRunOptions
+}): Promise<{ result: ModelProbeRunResult; row?: ModelProbeRow }> {
   const plan = planContextProbe({ hintTokens: input.hintTokens, hintSource: input.hintSource })
   const previous = await previousRowFor(input.provider.id, input.displayName)
   const observations: ProbeObservation[] = []
+  const startedAt = Date.now()
+  const emitter = createEmitter({
+    run: input.run,
+    providerId: input.provider.id,
+    displayName: input.displayName,
+    scope: 'context',
+    startedAt,
+    requestLimit: plan.requestCount,
+  })
+  emitter.emit('prepare')
   let requests = 0
   let latencyMs: number | undefined
+  let lastFailureKind: ProbeFailureKind | undefined
+  let cancelled: 'cancelled' | 'timeout' | undefined
 
-  for (const tier of plan.tiers) {
+  for (let index = 0; index < plan.tiers.length; index++) {
+    const abort = abortReasonOf(input.run)
+    if (abort) {
+      cancelled = abort
+      break
+    }
+    const tier = plan.tiers[index] as number
     const blocked = quotaBlockReason(
       { id: input.provider.id, type: input.provider.type },
       input.account.id,
@@ -252,15 +361,20 @@ async function probeContext(input: {
       break
     }
 
+    emitter.emit('tier', { tierIndex: index + 1, tierCount: plan.tiers.length, tierTokens: tier })
     const requestId = `${randomUUID()}-ctx-${tier}`
-    const startedAt = Date.now()
+    const requestStartedAt = Date.now()
     const request = baseProbeRequest(
       input.actualModelId,
       requestId,
       buildContextProbePrompt(tier),
     )
-    const result = await forwardProbe(request, input.account, input.provider, input.actualModelId)
+    emitter.emit('awaiting', { tierIndex: index + 1, tierCount: plan.tiers.length, tierTokens: tier })
+    const { result, timedOut } = await forwardProbe(
+      request, input.account, input.provider, input.actualModelId, input.run,
+    )
     requests += 1
+    emitter.sent()
     logProbeRequest({
       provider: input.provider,
       account: input.account,
@@ -268,10 +382,17 @@ async function probeContext(input: {
       actualModel: input.actualModelId,
       result,
       requestId,
-      startedAt,
+      startedAt: requestStartedAt,
       tier: undefined,
     })
-    if (latencyMs === undefined) latencyMs = result.latency ?? Date.now() - startedAt
+    if (latencyMs === undefined) latencyMs = result.latency ?? Date.now() - requestStartedAt
+
+    // 整体超时/用户取消：不追加观测，保留已通过的档位结论。
+    const abortAfter = abortReasonOf(input.run)
+    if (abortAfter) {
+      cancelled = abortAfter
+      break
+    }
 
     if (result.success) {
       observations.push({ tier, outcome: 'accepted', detail: `${tier} 档输入被接受` })
@@ -283,39 +404,62 @@ async function probeContext(input: {
       status: result.status,
       errorText: errorTextOf(result),
       localAdmissionRejected: result.localAdmissionRejected,
+      timedOut,
     })
+    lastFailureKind = failureKindOf(result, timedOut)
     if (classified === 'rejected') {
-      observations.push({ tier, outcome: 'rejected', detail: probeFailureReason(result) })
+      observations.push({
+        tier,
+        outcome: 'rejected',
+        detail: probeFailureReason(result, timedOut),
+      })
       break
     }
     observations.push({
       tier,
       outcome: classified === 'deferred' ? 'deferred' : 'inconclusive',
-      detail: probeFailureReason(result),
+      detail: probeFailureReason(result, timedOut),
     })
     break
   }
 
-  const verdict = evaluateContextProbe(observations)
-  const row = mergeProbeRow({
-    previous,
-    providerId: input.provider.id,
-    displayName: input.displayName,
-    actualModelId: input.actualModelId,
-    nowIso: new Date().toISOString(),
-    latencyMs,
-    scopeFields: {
-      contextStatus: verdict.status,
-      contextReason: verdict.reason,
-      contextRange: verdict.bound,
-      contextTokens: verdict.bound?.atLeast,
-      contextEvidence: `上下文阶梯探测：${plan.tiers.join(' / ')}；${observations.map((item) => `${item.tier}=${item.outcome}`).join('，')}`,
-    },
+  const timeoutSeen = observations.some((item) => item.outcome === 'inconclusive' && (item.detail ?? '').includes('超时'))
+  const verdict = cancelled === 'timeout' || timeoutSeen
+    ? {
+      status: 'inconclusive' as const,
+      reason: cancelled === 'timeout' ? abortReasonText('timeout') : `探测请求超时（${PROBE_REQUEST_TIMEOUT_MS / 1000}s），按 inconclusive 收敛`,
+      bound: undefined,
+    }
+    : cancelled === 'cancelled'
+      ? { ...evaluateContextProbe(observations), reason: abortReasonText('cancelled') }
+      : evaluateContextProbe(observations)
+  const recorded = cancelled !== undefined && observations.length === 0
+    ? undefined
+    : mergeProbeRow({
+      previous,
+      providerId: input.provider.id,
+      displayName: input.displayName,
+      actualModelId: input.actualModelId,
+      nowIso: new Date().toISOString(),
+      latencyMs,
+      scopeFields: {
+        contextStatus: verdict.status,
+        contextReason: verdict.reason,
+        contextRange: verdict.bound,
+        contextTokens: verdict.bound?.atLeast,
+        contextEvidence: `上下文阶梯探测：${plan.tiers.join(' / ')}；${observations.map((item) => `${item.tier}=${item.outcome}`).join('，')}`,
+      },
+    })
+  if (recorded) await recordModelProbe(recorded)
+  emitter.emit(cancelled === undefined ? 'done' : 'cancelled', {
+    ...(cancelled === 'timeout'
+      ? { errorKind: 'timeout' as const }
+      : lastFailureKind === undefined ? {} : { errorKind: lastFailureKind }),
+    ...(verdict.reason === undefined ? {} : { message: verdict.reason }),
   })
-  await recordModelProbe(row)
 
   return {
-    row,
+    ...(recorded === undefined ? {} : { row: recorded }),
     result: {
       scope: 'context',
       status: verdict.status,
@@ -324,7 +468,7 @@ async function probeContext(input: {
       estimatedInputTokens: plan.estimatedInputTokens,
       estimatedOutputTokens: plan.estimatedOutputTokens,
       ...(verdict.reason ? { reason: verdict.reason } : {}),
-      row,
+      ...(recorded === undefined ? {} : { row: recorded }),
     },
   }
 }
@@ -337,16 +481,35 @@ async function probeOutput(input: {
   actualModelId: string
   hintTokens: number | undefined
   hintSource: 'family-rule' | 'declared' | undefined
-}): Promise<{ result: ModelProbeRunResult; row: ModelProbeRow }> {
+  run: ProbeRunOptions
+}): Promise<{ result: ModelProbeRunResult; row?: ModelProbeRow }> {
   const plan = planOutputProbe({ hintTokens: input.hintTokens, hintSource: input.hintSource })
   const previous = await previousRowFor(input.provider.id, input.displayName)
   const observations: ProbeObservation[] = []
+  const startedAt = Date.now()
+  const emitter = createEmitter({
+    run: input.run,
+    providerId: input.provider.id,
+    displayName: input.displayName,
+    scope: 'output',
+    startedAt,
+    requestLimit: plan.requestCount,
+  })
+  emitter.emit('prepare')
   let requests = 0
   let latencyMs: number | undefined
   let lastFinishReason: string | undefined
   let lastCompletionTokens: number | undefined
+  let lastFailureKind: ProbeFailureKind | undefined
+  let cancelled: 'cancelled' | 'timeout' | undefined
 
-  for (const tier of plan.tiers) {
+  for (let index = 0; index < plan.tiers.length; index++) {
+    const abort = abortReasonOf(input.run)
+    if (abort) {
+      cancelled = abort
+      break
+    }
+    const tier = plan.tiers[index] as number
     const blocked = quotaBlockReason(
       { id: input.provider.id, type: input.provider.type },
       input.account.id,
@@ -357,15 +520,20 @@ async function probeOutput(input: {
       break
     }
 
+    emitter.emit('tier', { tierIndex: index + 1, tierCount: plan.tiers.length, tierTokens: tier })
     const requestId = `${randomUUID()}-out-${tier}`
-    const startedAt = Date.now()
+    const requestStartedAt = Date.now()
     // 两种入参名按既有折叠逻辑：别名优先，折成 `max_tokens` 再发。
     const request = normalizeOutputCap({
       ...baseProbeRequest(input.actualModelId, requestId, buildOutputProbePrompt()),
       max_completion_tokens: tier,
     })
-    const result = await forwardProbe(request, input.account, input.provider, input.actualModelId)
+    emitter.emit('awaiting', { tierIndex: index + 1, tierCount: plan.tiers.length, tierTokens: tier })
+    const { result, timedOut } = await forwardProbe(
+      request, input.account, input.provider, input.actualModelId, input.run,
+    )
     requests += 1
+    emitter.sent()
     lastFinishReason = finishReasonOf(result)
     lastCompletionTokens = completionTokensOf(result)
     logProbeRequest({
@@ -375,10 +543,16 @@ async function probeOutput(input: {
       actualModel: input.actualModelId,
       result,
       requestId,
-      startedAt,
+      startedAt: requestStartedAt,
       tier,
     })
-    if (latencyMs === undefined) latencyMs = result.latency ?? Date.now() - startedAt
+    if (latencyMs === undefined) latencyMs = result.latency ?? Date.now() - requestStartedAt
+
+    const abortAfter = abortReasonOf(input.run)
+    if (abortAfter) {
+      cancelled = abortAfter
+      break
+    }
 
     if (result.success) {
       const outcome = classifyOutputSuccess({
@@ -402,41 +576,64 @@ async function probeOutput(input: {
       status: result.status,
       errorText: errorTextOf(result),
       localAdmissionRejected: result.localAdmissionRejected,
+      timedOut,
     })
+    lastFailureKind = failureKindOf(result, timedOut)
     if (classified === 'rejected') {
-      observations.push({ tier, outcome: 'rejected', detail: probeFailureReason(result) })
+      observations.push({
+        tier,
+        outcome: 'rejected',
+        detail: probeFailureReason(result, timedOut),
+      })
       break
     }
     observations.push({
       tier,
       outcome: classified === 'deferred' ? 'deferred' : 'inconclusive',
-      detail: probeFailureReason(result),
+      detail: probeFailureReason(result, timedOut),
     })
     break
   }
 
-  const verdict = evaluateOutputProbe(observations)
-  const row = mergeProbeRow({
-    previous,
-    providerId: input.provider.id,
-    displayName: input.displayName,
-    actualModelId: input.actualModelId,
-    nowIso: new Date().toISOString(),
-    latencyMs,
-    scopeFields: {
-      maxOutputStatus: verdict.status,
-      maxOutputReason: verdict.reason,
-      maxOutputRange: verdict.bound,
-      maxOutputTokens: verdict.bound?.atLeast,
-      maxOutputEvidence: `输出阶梯探测：${plan.tiers.join(' / ')}；${observations
-        .map((item) => `${item.tier}=${item.outcome}`)
-        .join('，')}${lastFinishReason === undefined ? '' : `；最后一次 finish_reason=${lastFinishReason}`}`,
-    },
+  const timeoutSeen = observations.some((item) => item.outcome === 'inconclusive' && (item.detail ?? '').includes('超时'))
+  const verdict = cancelled === 'timeout' || timeoutSeen
+    ? {
+      status: 'inconclusive' as const,
+      reason: cancelled === 'timeout' ? abortReasonText('timeout') : `探测请求超时（${PROBE_REQUEST_TIMEOUT_MS / 1000}s），按 inconclusive 收敛`,
+      bound: undefined,
+    }
+    : cancelled === 'cancelled'
+      ? { ...evaluateOutputProbe(observations), reason: abortReasonText('cancelled') }
+      : evaluateOutputProbe(observations)
+  const recorded = cancelled !== undefined && observations.length === 0
+    ? undefined
+    : mergeProbeRow({
+      previous,
+      providerId: input.provider.id,
+      displayName: input.displayName,
+      actualModelId: input.actualModelId,
+      nowIso: new Date().toISOString(),
+      latencyMs,
+      scopeFields: {
+        maxOutputStatus: verdict.status,
+        maxOutputReason: verdict.reason,
+        maxOutputRange: verdict.bound,
+        maxOutputTokens: verdict.bound?.atLeast,
+        maxOutputEvidence: `输出阶梯探测：${plan.tiers.join(' / ')}；${observations
+          .map((item) => `${item.tier}=${item.outcome}`)
+          .join('，')}${lastFinishReason === undefined ? '' : `；最后一次 finish_reason=${lastFinishReason}`}`,
+      },
+    })
+  if (recorded) await recordModelProbe(recorded)
+  emitter.emit(cancelled === undefined ? 'done' : 'cancelled', {
+    ...(cancelled === 'timeout'
+      ? { errorKind: 'timeout' as const }
+      : lastFailureKind === undefined ? {} : { errorKind: lastFailureKind }),
+    ...(verdict.reason === undefined ? {} : { message: verdict.reason }),
   })
-  await recordModelProbe(row)
 
   return {
-    row,
+    ...(recorded === undefined ? {} : { row: recorded }),
     result: {
       scope: 'output',
       status: verdict.status,
@@ -445,7 +642,7 @@ async function probeOutput(input: {
       estimatedInputTokens: plan.estimatedInputTokens,
       estimatedOutputTokens: plan.estimatedOutputTokens,
       ...(verdict.reason ? { reason: verdict.reason } : {}),
-      row,
+      ...(recorded === undefined ? {} : { row: recorded }),
     },
   }
 }
@@ -456,7 +653,8 @@ async function probeCapability(input: {
   account: Account
   displayName: string
   actualModelId: string
-}): Promise<{ result: ModelProbeRunResult; row: ModelProbeRow }> {
+  run: ProbeRunOptions
+}): Promise<{ result: ModelProbeRunResult; row?: ModelProbeRow }> {
   const plan: ProbePlan = {
     scope: 'capability',
     tiers: [],
@@ -467,13 +665,48 @@ async function probeCapability(input: {
   const previous = await previousRowFor(input.provider.id, input.displayName)
   const requestId = randomUUID()
   const startedAt = Date.now()
+  const emitter = createEmitter({
+    run: input.run,
+    providerId: input.provider.id,
+    displayName: input.displayName,
+    scope: 'capability',
+    startedAt,
+    requestLimit: 3,
+  })
+  emitter.emit('prepare')
+  let requests = 0
+  let cancelled: 'cancelled' | 'timeout' | undefined
 
-  const textResult = await forwardProbe(
+  const abort = abortReasonOf(input.run)
+  if (abort) {
+    emitter.emit('cancelled', {
+      ...(abort === 'timeout' ? { errorKind: 'timeout' as const } : {}),
+      message: abortReasonText(abort),
+    })
+    return {
+      result: {
+        scope: 'capability',
+        status: 'inconclusive',
+        plan,
+        requests: 0,
+        estimatedInputTokens: 0,
+        estimatedOutputTokens: 0,
+        reason: abortReasonText(abort),
+      },
+    }
+  }
+
+  emitter.emit('tier', { tierIndex: 1, tierCount: 3 })
+  emitter.emit('awaiting', { tierIndex: 1, tierCount: 3 })
+  const { result: textResult, timedOut } = await forwardProbe(
     baseProbeRequest(input.actualModelId, `${requestId}-text`, 'Reply with the single word ok.'),
     input.account,
     input.provider,
     input.actualModelId,
+    input.run,
   )
+  requests += 1
+  emitter.sent()
   logProbeRequest({
     provider: input.provider,
     account: input.account,
@@ -483,12 +716,36 @@ async function probeCapability(input: {
     requestId: `${requestId}-text`,
     startedAt,
   })
+  cancelled = abortReasonOf(input.run)
+  if (cancelled) {
+    const kind = cancelled === 'timeout' ? 'timeout' : failureKindOf(textResult, timedOut)
+    emitter.emit('cancelled', {
+      ...(kind === 'unknown' ? {} : { errorKind: kind }),
+      message: abortReasonText(cancelled),
+    })
+    return {
+      result: {
+        scope: 'capability',
+        status: 'inconclusive',
+        plan,
+        requests,
+        estimatedInputTokens: plan.estimatedInputTokens,
+        estimatedOutputTokens: plan.estimatedOutputTokens,
+        reason: abortReasonText(cancelled),
+      },
+    }
+  }
   if (!textResult.success) {
     const classified = classifyProbeFailure({
       scope: 'context',
       status: textResult.status,
       errorText: errorTextOf(textResult),
       localAdmissionRejected: textResult.localAdmissionRejected,
+      timedOut,
+    })
+    emitter.emit('done', {
+      errorKind: failureKindOf(textResult, timedOut),
+      message: probeFailureReason(textResult, timedOut),
     })
     return {
       row: mergeProbeRow({
@@ -503,18 +760,20 @@ async function probeCapability(input: {
         scope: 'capability',
         status: classified === 'deferred' ? 'deferred' : 'inconclusive',
         plan,
-        requests: 1,
+        requests,
         estimatedInputTokens: plan.estimatedInputTokens,
         estimatedOutputTokens: plan.estimatedOutputTokens,
-        reason: probeFailureReason(textResult),
+        reason: probeFailureReason(textResult, timedOut),
       },
     }
   }
   const latencyMs = Date.now() - startedAt
 
+  emitter.emit('tier', { tierIndex: 2, tierCount: 3 })
+  emitter.emit('awaiting', { tierIndex: 2, tierCount: 3 })
   // 工具：声明一个 no-op 工具，成功即代表上游接受 tools 字段。
   const toolsStart = Date.now()
-  const toolsResult = await forwardProbe(
+  const { result: toolsResult } = await forwardProbe(
     {
       ...baseProbeRequest(input.actualModelId, `${requestId}-tools`, 'Reply with the single word ok.'),
       tools: [
@@ -532,7 +791,10 @@ async function probeCapability(input: {
     input.account,
     input.provider,
     input.actualModelId,
+    input.run,
   )
+  requests += 1
+  emitter.sent()
   logProbeRequest({
     provider: input.provider,
     account: input.account,
@@ -547,10 +809,30 @@ async function probeCapability(input: {
     : looksLikeCapabilityRejection(toolsResult, ['tool', 'function'])
       ? 'no'
       : undefined
+  cancelled = abortReasonOf(input.run)
+  if (cancelled) {
+    emitter.emit('cancelled', {
+      ...(cancelled === 'timeout' ? { errorKind: 'timeout' as const } : {}),
+      message: abortReasonText(cancelled),
+    })
+    return {
+      result: {
+        scope: 'capability',
+        status: 'inconclusive',
+        plan,
+        requests,
+        estimatedInputTokens: plan.estimatedInputTokens,
+        estimatedOutputTokens: plan.estimatedOutputTokens,
+        reason: abortReasonText(cancelled),
+      },
+    }
+  }
 
+  emitter.emit('tier', { tierIndex: 3, tierCount: 3 })
+  emitter.emit('awaiting', { tierIndex: 3, tierCount: 3 })
   // 图片：1×1 PNG，成功即代表上游接受 image_url 内容块。
   const visionStart = Date.now()
-  const visionResult = await forwardProbe(
+  const { result: visionResult } = await forwardProbe(
     baseProbeRequest(input.actualModelId, `${requestId}-vision`, [
       { type: 'text', text: 'What color is this pixel? One word.' },
       { type: 'image_url', image_url: { url: ONE_PIXEL_PNG, detail: 'low' } },
@@ -558,7 +840,10 @@ async function probeCapability(input: {
     input.account,
     input.provider,
     input.actualModelId,
+    input.run,
   )
+  requests += 1
+  emitter.sent()
   logProbeRequest({
     provider: input.provider,
     account: input.account,
@@ -573,6 +858,7 @@ async function probeCapability(input: {
     : looksLikeCapabilityRejection(visionResult, ['image', 'vision', 'mode', 'content type'])
       ? 'no'
       : undefined
+  cancelled = abortReasonOf(input.run)
 
   const observed: string[] = ['文本可达']
   if (tools === 'yes') observed.push('tools 已接受')
@@ -594,16 +880,21 @@ async function probeCapability(input: {
     },
   })
   await recordModelProbe(row)
+  emitter.emit(cancelled === undefined ? 'done' : 'cancelled', {
+    ...(cancelled === 'timeout' ? { errorKind: 'timeout' as const } : {}),
+    ...(cancelled === undefined ? {} : { message: abortReasonText(cancelled) }),
+  })
 
   return {
     row,
     result: {
       scope: 'capability',
-      status: 'measured',
+      status: cancelled === undefined ? 'measured' : 'inconclusive',
       plan,
-      requests: 3,
+      requests,
       estimatedInputTokens: plan.estimatedInputTokens,
       estimatedOutputTokens: plan.estimatedOutputTokens,
+      ...(cancelled === undefined ? {} : { reason: abortReasonText(cancelled) }),
       row,
     },
   }
@@ -618,6 +909,7 @@ export async function runModelCapabilityProbe(input: {
   displayName: string
   scope?: ProbeScope
   force?: boolean
+  run?: ProbeRunOptions
 }): Promise<ModelProbeRunResult> {
   return serialQueue(() => runProbeInner(input))
 }
@@ -627,7 +919,9 @@ async function runProbeInner(input: {
   displayName: string
   scope?: ProbeScope
   force?: boolean
+  run?: ProbeRunOptions
 }): Promise<ModelProbeRunResult> {
+  const run = input.run ?? {}
   const provider = storeManager.getProviderById(input.providerId)
   if (!provider) throw new Error('供应商不存在')
   const model = storeManager
@@ -643,7 +937,7 @@ async function runProbeInner(input: {
   const scope: ProbeScope = input.scope ?? 'capability'
   if (scope === 'capability') {
     return (await probeCapability({
-      provider, account, displayName: model.displayName, actualModelId: model.actualModelId,
+      provider, account, displayName: model.displayName, actualModelId: model.actualModelId, run,
     })).result
   }
 
@@ -654,6 +948,18 @@ async function runProbeInner(input: {
   const fact = metadata?.[scope === 'context' ? 'contextTokens' : 'maxOutputTokens']
   if (shouldSkipProbe(fact, input.force === true)) {
     const plan = scope === 'context' ? planContextProbe() : planOutputProbe()
+    run.onProgress?.({
+      jobId: run.jobId ?? '',
+      providerId: provider.id,
+      displayName: model.displayName,
+      scope,
+      phase: 'done',
+      elapsedMs: 0,
+      requestsSent: 0,
+      requestLimit: 0,
+      startedAt: new Date().toISOString(),
+      message: '已有声明级来源，无需探测（可强制重测）',
+    })
     return {
       scope,
       status: 'skipped',
@@ -680,11 +986,11 @@ async function runProbeInner(input: {
   if (scope === 'context') {
     return (await probeContext({
       provider, account, displayName: model.displayName, actualModelId: model.actualModelId,
-      hintTokens, hintSource,
+      hintTokens, hintSource, run,
     })).result
   }
   return (await probeOutput({
     provider, account, displayName: model.displayName, actualModelId: model.actualModelId,
-    hintTokens, hintSource,
+    hintTokens, hintSource, run,
   })).result
 }

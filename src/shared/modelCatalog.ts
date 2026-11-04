@@ -118,12 +118,24 @@ export interface CatalogCandidatesResult {
   adoptions: CatalogAdoption[]
 }
 
+/** 刷新失败的分类：界面据此给出「网络不可达 / 超时 / HTTP / 解析 / 空响应」的人读提示。 */
+export type CatalogRefreshErrorKind =
+  | 'network'
+  | 'timeout'
+  | 'http'
+  | 'parse'
+  | 'empty'
+  | 'unknown'
+
 /** 刷新结果：失败时 `statuses` 仍是磁盘上的旧快照。 */
 export interface CatalogRefreshResult {
   success: boolean
   status?: CatalogSnapshotStatus
   statuses: CatalogSnapshotStatus[]
   error?: string
+  errorKind?: CatalogRefreshErrorKind
+  /** 本次抓取耗时（毫秒）；失败时也返回，便于诊断是不是超时。 */
+  elapsedMs?: number
 }
 
 const MAX_CONTEXT_TOKENS = 100_000_000

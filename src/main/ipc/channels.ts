@@ -66,6 +66,10 @@ export const IpcChannels = {
   // 元数据解析报表（覆盖率 + 待标注队列）与手动探测（打开页面不发起请求）
   PROVIDERS_GET_MODEL_METADATA: 'providers:getModelMetadata',
   PROVIDERS_PROBE_MODEL: 'providers:probeModel',
+  PROVIDERS_CANCEL_PROBE: 'providers:cancelProbe',
+  PROVIDERS_GET_PROBE_JOBS: 'providers:getProbeJobs',
+  /** 主进程 → 界面的进度事件（单向推送，不是 invoke）。 */
+  PROVIDERS_PROBE_PROGRESS: 'providers:probeProgress',
   // 标准模型库：读取快照只读磁盘；刷新必须由用户显式触发（无定时、无开页自动抓取）
   PROVIDERS_GET_CATALOG_STATUSES: 'providers:getCatalogStatuses',
   PROVIDERS_REFRESH_CATALOG: 'providers:refreshCatalog',
