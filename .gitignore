@@ -67,8 +67,8 @@ coverage/
 # Next.js experimental app (not part of Electron build)
 src/renderer/next-app/
 
-# Backup
-backup/
+# Local backup archives at the repo root (the in-app backup feature lives in src/main/backup)
+/backup/
 
 # Local reference material dropped in by tooling (not part of the app)
 .uploads/

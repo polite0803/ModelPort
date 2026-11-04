@@ -14,7 +14,7 @@ ModelPort 是一个 Electron 33 桌面应用：主进程负责存储、代理服
 
 界面状态集中在 Zustand store：`proxyStore` 持有代理启停与运行状态，`providersStore` 持有供应商/账号/模型，`dashboardStore` 持有统计，`settingsStore` 持有配置，`navigationStore` 持有当前页面。组件不直接订阅 IPC 原始事件，而是订阅 store 的派生状态，避免多个页面各自维护一份运行态。
 
-设置页的“数据管理”提供界面偏好导入/导出：导出件是浏览器侧清洗后的 `localStorage` 快照（`modelport-config-YYYY-MM-DD.json`），磁盘上旧的含 Key `config` 不会被带出；导入走同一套清洗逻辑。`.mpc` 只是安装包注册的文件关联扩展名，与这份配置导出不是同一条链路。诊断包与日志导出属于另一条独立路径，不复用该导入导出。
+设置页的“数据安全”里有两条不同的导出链路：**完整备份与迁移**（`backup:*` 通道，见 [`data-backup.md`](data-backup.md)）搬供应商、账号凭据、配置、路由、模型标注与渠道登录态；**界面偏好同步**只搬浏览器侧清洗后的 `localStorage` 快照（`modelport-config-YYYY-MM-DD.json`），磁盘上旧的含 Key `config` 不会被带出，导入走同一套清洗逻辑。`.mpc` 只是安装包注册的文件关联扩展名，与这两条都不是同一条链路。诊断包与日志导出属于另一条独立路径，不复用它们。
 
 preload 只暴露按领域分组的方法与事件订阅函数；每个订阅函数返回取消订阅句柄，页面卸载时必须调用，否则重复进入页面会叠加监听器并造成内存泄漏。主进程侧的事件名集中在 `ipc/channels.ts`，新增通道必须同时更新 preload 与处理器，不能只在渲染层硬编码字符串。
 

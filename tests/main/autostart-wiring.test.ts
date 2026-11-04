@@ -20,10 +20,21 @@ const store = readFileSync('src/main/store/store.ts', 'utf8')
 const host = readFileSync('src/main/autostartHost.ts', 'utf8')
 const main = readFileSync('src/main/index.ts', 'utf8')
 
-test('三条配置写路径全部接上了开机自启副作用', () => {
-  // setConfig / updateConfig / resetConfig 各一处
+test('四条配置写路径全部接上了开机自启副作用', () => {
+  // setConfig / updateConfig / resetConfig / restoreConfig 各一处。
+  // `restoreConfig` 是备份导入用的整份恢复（路由取备份那份），它同样会把
+  // `autoStart` 改回备份里的值 —— 漏掉它，导入完成后操作系统里留着的是导入前的登录项。
   const calls = store.match(/this\.applyAutoStart\(/g) ?? []
-  assert.equal(calls.length, 3, 'setConfig、updateConfig、resetConfig 都必须调用 applyAutoStart')
+  assert.equal(
+    calls.length,
+    4,
+    'setConfig、updateConfig、resetConfig、restoreConfig 都必须调用 applyAutoStart',
+  )
+  assert.match(
+    store,
+    /restoreConfig\(config: unknown\): AppConfig \{[\s\S]*?this\.applyAutoStart\(previous, normalized\)/,
+    'restoreConfig 需要与其它三条路径一样带 applyAutoStart（含 previous 短路）',
+  )
 })
 
 test('值没变时不碰操作系统（否则每次保存设置都会写注册表）', () => {

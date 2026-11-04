@@ -48,6 +48,14 @@ import type {
   AggregateSaveInput,
 } from '../../../shared/aggregate'
 import type { AggregateCreditQueryResult } from '../../../shared/aggregateCredit'
+import type {
+  BackupApplyResult,
+  BackupExportOptions,
+  BackupExportResult,
+  BackupMode,
+  BackupPickResult,
+  BackupUnlockResult,
+} from '../../../shared/backup'
 import type { ModelMetadataReport } from '../../../shared/modelMetadata'
 import type {
   ModelProbeRunResult,
@@ -159,6 +167,15 @@ interface StoreAPI {
   clearAll: () => Promise<void>
   onInitError: (callback: (error: { message: string | null }) => void) => () => void
   retryInit: () => Promise<{ success: boolean; error?: string }>
+}
+
+interface BackupAPI {
+  export: (options: BackupExportOptions) => Promise<BackupExportResult>
+  pick: () => Promise<BackupPickResult>
+  unlock: (token: string, password: string) => Promise<BackupUnlockResult>
+  apply: (token: string, mode: BackupMode) => Promise<BackupApplyResult>
+  cancel: (token: string) => Promise<void>
+  restart: () => Promise<void>
 }
 
 interface ProvidersAPI {
@@ -716,6 +733,7 @@ interface ElectronAPI {
   proxy: ProxyAPI
   tls: TlsAPI
   store: StoreAPI
+  backup: BackupAPI
   providers: ProvidersAPI
   aggregate: AggregateAPI
   channels: ChannelsAPI

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
 import axios from 'axios'
 import { IpcChannels } from './channels'
+import { registerBackupHandlers } from '../backup/ipc'
 import { installTrustedSenderGuard } from './trustedSender'
 import { storeManager } from '../store/store'
 import { applyAnthropicRoutes, planAnthropicRoutes } from '../store/anthropicRoutes'
@@ -169,6 +170,10 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
   }
 
   registerStoreRetryHandler(mainWindow)
+
+  // 完整备份（全部数据与配置）。与存储是否初始化成功无关地注册：失败时各 handler 会
+  // 返回 `storage-not-ready`，界面能显示原因，而不是「No handler registered」。
+  registerBackupHandlers(mainWindow)
 
   // Check if auto-start proxy is needed
   const config = storageReady ? storeManager.getConfig() : null

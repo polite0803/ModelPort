@@ -1349,6 +1349,31 @@ class StoreManager {
   }
 
   /**
+   * Restore Configuration from a Backup
+   *
+   * 与 {@link setConfig} 只差一处：**路由表取传入的那份**。`setConfig` 永远保留盘上现表
+   * （它服务的是渲染层整对象回写，那份镜像可能陈旧，不能有抹掉路由的能力）；而「恢复
+   * 备份」的定义就是把备份的配置装回来 —— 丢掉 `routes` 会让每个恢复的别名都解析不到
+   * 候选，`/v1/models` 也会少掉整批名字。
+   *
+   * 归一仍走 `normalizeConfig`：备份可能来自旧版本，非法条目在读侧被丢弃而不是抛异常。
+   * 副作用（日志上限、请求日志配置、开机自启）与 `setConfig` 保持一致，否则导入后
+   * 运行时行为与盘上配置不同步。
+   */
+  restoreConfig(config: unknown): AppConfig {
+    this.ensureInitialized()
+    const previous = this.getConfig()
+    const rawIsObject = config !== null && typeof config === 'object' && !Array.isArray(config)
+    const incoming = (rawIsObject ? config : {}) as Partial<AppConfig>
+    const normalized = this.normalizeConfig(incoming)
+    this.store!.set('config', normalized)
+    this.appLogManager?.setMaxEntries(this.getMaxLogEntries(normalized))
+    this.applyRequestLogConfig(normalized.requestLogConfig)
+    this.applyAutoStart(previous, normalized)
+    return normalized
+  }
+
+  /**
    * Update Application Configuration
    */
   updateConfig(updates: Partial<AppConfig>): AppConfig {
@@ -1907,6 +1932,19 @@ class StoreManager {
     this.ensureInitialized()
     this.getRequestLogManager().clearRequestLogs()
     this.store!.set('statistics', DEFAULT_STATISTICS)
+  }
+
+  /**
+   * Replace Request Logs
+   *
+   * 备份导入专用：整表替换历史请求行。与 `clearRequestLogs` 一样经由管理器写入
+   * （它持内存副本并在防抖到期时整份回写，绕过去写文件会被下一次刷新覆盖）。
+   * 刻意不动 `statistics`：统计是独立的一块数据，备份里有没有它由导入流程自己决定。
+   */
+  replaceRequestLogs(entries: RequestLogEntry[]): void {
+    this.ensureInitialized()
+    this.getRequestLogManager().replaceRequestLogs(entries)
+    this.store!.set('requestLogs', [])
   }
 
   /**

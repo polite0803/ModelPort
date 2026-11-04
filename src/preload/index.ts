@@ -27,6 +27,14 @@ import type {
   TlsTrustResult,
 } from '../shared/types'
 import type {
+  BackupApplyResult,
+  BackupExportOptions,
+  BackupExportResult,
+  BackupMode,
+  BackupPickResult,
+  BackupUnlockResult,
+} from '../shared/backup'
+import type {
   RouteListResult,
   RouteMutationResult,
   RouteRemovalResult,
@@ -122,6 +130,33 @@ const storeAPI = {
   
   retryInit: (): Promise<{ success: boolean; error?: string }> => 
     ipcRenderer.invoke(IpcChannels.STORE_RETRY_INIT),
+}
+
+/**
+ * 完整备份（全部数据与配置）。
+ *
+ * 这里刻意**没有**「把一段 JSON 直接导入」的方法：`pick` 由主进程自己读文件并缓存，
+ * 返回的 token 是唯一凭据。渲染层能做的只有「选文件 / 解口令 / 确认应用」，构造不出
+ * 一份内容自定的备份去改账号表。
+ */
+const backupAPI = {
+  export: (options: BackupExportOptions): Promise<BackupExportResult> =>
+    ipcRenderer.invoke(IpcChannels.BACKUP_EXPORT, options),
+
+  pick: (): Promise<BackupPickResult> =>
+    ipcRenderer.invoke(IpcChannels.BACKUP_PICK),
+
+  unlock: (token: string, password: string): Promise<BackupUnlockResult> =>
+    ipcRenderer.invoke(IpcChannels.BACKUP_UNLOCK, token, password),
+
+  apply: (token: string, mode: BackupMode): Promise<BackupApplyResult> =>
+    ipcRenderer.invoke(IpcChannels.BACKUP_APPLY, token, mode),
+
+  cancel: (token: string): Promise<void> =>
+    ipcRenderer.invoke(IpcChannels.BACKUP_CANCEL, token),
+
+  restart: (): Promise<void> =>
+    ipcRenderer.invoke(IpcChannels.BACKUP_RESTART),
 }
 
 const providersAPI = {
@@ -905,6 +940,7 @@ const electronAPI = {
   proxy: proxyAPI,
   tls: tlsAPI,
   store: storeAPI,
+  backup: backupAPI,
   providers: providersAPI,
   aggregate: aggregateAPI,
   channels: channelsAPI,

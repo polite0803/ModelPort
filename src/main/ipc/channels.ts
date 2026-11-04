@@ -43,6 +43,18 @@ export const IpcChannels = {
   STORE_INIT_ERROR: 'store:initError',
   STORE_RETRY_INIT: 'store:retryInit',
 
+  // 完整备份（全部数据与配置）。与 `providers:export`（单个自定义供应商）以及渲染层
+  // localStorage 的「界面偏好导出」是三件事：这条通道搬的是 providers / accounts（含
+  // 解密后的凭据）/ config / 路由 / 模型标注 / 渠道登录态。
+  // `backup:pick` 把文件读进主进程并返回一次性 token，`backup:apply` 只认 token ——
+  // 渲染层没有构造一份「备份」直接改账号表的能力。
+  BACKUP_EXPORT: 'backup:export',
+  BACKUP_PICK: 'backup:pick',
+  BACKUP_UNLOCK: 'backup:unlock',
+  BACKUP_APPLY: 'backup:apply',
+  BACKUP_CANCEL: 'backup:cancel',
+  BACKUP_RESTART: 'backup:restart',
+
   PROVIDERS_GET_ALL: 'providers:getAll',
   PROVIDERS_GET_BUILTIN: 'providers:getBuiltin',
   PROVIDERS_ADD: 'providers:add',

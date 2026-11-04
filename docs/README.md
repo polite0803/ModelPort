@@ -90,6 +90,7 @@
 
 | 文档 | 说明 | 适用版本 | 状态 | 日期 |
 | --- | --- | --- | --- | --- |
+| [`features/data-backup.md`](features/data-backup.md) | 完整备份与迁移：导出范围、跨机凭据「解密再重封」、口令封装、覆盖/合并语义、导入 token 与重启 | v1.7.2 | 现行 | 2026-11-04 |
 | [`features/desktop-ui-updates.md`](features/desktop-ui-updates.md) | 桌面界面与更新：主/渲染进程分工、具名 IPC、单实例与托盘、开机自启对账、`electron-updater` 检查下载安装 | v1.7.1 | 现行 | 2026-11-04 |
 | [`features/https-certificate-trust.md`](features/https-certificate-trust.md) | HTTPS 与证书信任：8443 TLS 监听、托管自签与自带 PEM 两种来源、SAN 覆盖、系统信任库与 Node 客户端的 `NODE_EXTRA_CA_CERTS` 通路 | v1.7.1 | 现行 | 2026-11-04 |
 | [`features/logging-diagnostics.md`](features/logging-diagnostics.md) | 日志与诊断：请求行的尝试/`streamTrace` 读数、错误保留下限、脱敏与截断、`X-ModelPort-Trace` 与诊断包导出 | v1.7.1 | 现行 | 2026-11-04 |

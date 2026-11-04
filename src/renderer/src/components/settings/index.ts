@@ -1,5 +1,6 @@
 export { AppearanceSettings } from './AppearanceSettings'
 export { GeneralSettings } from './GeneralSettings'
+export { DataBackup } from './DataBackup'
 export { DataManagement } from './DataManagement'
 export { ManagementApiSettings } from './ManagementApiSettings'
 export { ModelListRefreshSettings } from './ModelListRefreshSettings'

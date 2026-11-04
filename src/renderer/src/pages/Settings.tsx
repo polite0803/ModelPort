@@ -4,6 +4,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   AppearanceSettings,
   GeneralSettings,
+  DataBackup,
   DataManagement,
   ManagementApiSettings,
   ModelListRefreshSettings,
@@ -63,6 +64,7 @@ export function Settings() {
 
         <TabsContent value="dataSecurity">
           <div className="space-y-6">
+            <DataBackup />
             <DataManagement />
           </div>
         </TabsContent>
