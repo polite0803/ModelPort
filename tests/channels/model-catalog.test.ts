@@ -85,12 +85,17 @@ test('capability hints carry only what the catalogue actually declares', () => {
       { id: 'text-paid', name: 'Text Paid · x2', supportsImage: false },
       // 没有任何已知字段：返回 undefined，调用方据此保持「未知」
       { id: 'silent', name: 'Silent' },
+      // 有模态但没有倍率（trae / minimax 这类渠道不报倍率）：
+      // `free` 两个方向都不写 —— 「不知道」既不是免费，也不是收费。
+      { id: 'no-rate', name: 'No Rate', supportsImage: false },
     ],
   })
 
   assert.deepEqual(capabilityHintOf(models[0]), { vision: 'yes', weight: 0, free: true })
-  assert.deepEqual(capabilityHintOf(models[1]), { vision: 'no', weight: 2 })
+  // 明确的正倍率就是「不免费」：这是渠道自己报的价，不是把缺失折成 false。
+  assert.deepEqual(capabilityHintOf(models[1]), { vision: 'no', weight: 2, free: false })
   assert.equal(capabilityHintOf(models[2]), undefined)
+  assert.deepEqual(capabilityHintOf(models[3]), { vision: 'no' })
 })
 
 /**

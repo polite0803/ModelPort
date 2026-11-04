@@ -79,6 +79,7 @@
     "js-sha3": "^0.9.3",
     "koa": "^2.15.3",
     "koa-bodyparser": "^4.4.1",
+    "koa-ratelimit": "^6.0.0",
     "koa-router": "^12.0.1",
     "lucide-react": "^0.454.0",
     "mime-types": "^3.0.2",

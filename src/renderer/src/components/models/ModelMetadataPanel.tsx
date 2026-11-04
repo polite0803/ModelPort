@@ -22,7 +22,7 @@ import {
 import { useToast } from '@/hooks/use-toast'
 import { Database, Loader2, RefreshCw, Radar, RotateCcw } from 'lucide-react'
 import type { ModelMetadataReport, Fact, MetadataAttribute, ModelMetadataRow } from '@shared/modelMetadata'
-import { METADATA_ATTRIBUTES } from '@shared/modelMetadata'
+import { METADATA_ATTRIBUTES, ROUTING_METADATA_ATTRIBUTES } from '@shared/modelMetadata'
 import type {
   CatalogAdoptionField,
   CatalogCandidatesResult,
@@ -96,12 +96,14 @@ const CATALOG_CONFIDENCE_LABEL_KEYS: Record<CatalogMatchConfidence, string> = {
   exact: 'models.metadata.catalogConfidenceExact',
   alias: 'models.metadata.catalogConfidenceAlias',
   family: 'models.metadata.catalogConfidenceFamily',
+  fuzzy: 'models.metadata.catalogConfidenceFuzzy',
 }
 
 const CATALOG_CONFIDENCE_TONE: Record<CatalogMatchConfidence, string> = {
   exact: 'text-success',
   alias: 'text-warning',
   family: 'text-muted-foreground',
+  fuzzy: 'text-muted-foreground',
 }
 
 const CATALOG_FIELD_LABEL_KEYS: Record<CatalogAdoptionField, string> = {
@@ -111,6 +113,7 @@ const CATALOG_FIELD_LABEL_KEYS: Record<CatalogAdoptionField, string> = {
   modalities: 'models.metadata.attrModalities',
   vision: 'models.metadata.attrVision',
   tools: 'models.metadata.attrTools',
+  reasoning: 'models.metadata.attrReasoning',
 }
 
 /** 采用条目里每个字段的展示值；价格只以 USD / 1M tokens 说明，不换算。 */
@@ -964,6 +967,7 @@ export function ModelMetadataPanel() {
     attribute,
     ...report.coverage[attribute],
     gap: report.coverageGaps[attribute],
+    critical: (ROUTING_METADATA_ATTRIBUTES as readonly MetadataAttribute[]).includes(attribute),
   }))
   const batchAvailable = report.queue.length > 0
   const batchElapsedMs = batchSnapshot
@@ -1035,27 +1039,39 @@ export function ModelMetadataPanel() {
               <div className="text-2xl font-semibold">{report.totals.models}</div>
             </div>
             <div className="rounded-lg border p-3">
-              <div className="text-xs text-muted-foreground">{t('models.metadata.annotated')}</div>
-              <div className="text-2xl font-semibold text-success">{report.totals.annotated}</div>
+              <div className="text-xs text-muted-foreground">{t('models.metadata.routingComplete')}</div>
+              <div className="text-2xl font-semibold text-success">{report.totals.routingComplete}</div>
+              <div className="text-xs text-muted-foreground">
+                {t('models.metadata.fullyAnnotatedHint', { count: report.totals.fullyAnnotated })}
+              </div>
             </div>
             <div className="rounded-lg border p-3">
-              <div className="text-xs text-muted-foreground">{t('models.metadata.unclassifiedCount')}</div>
-              <div className="text-2xl font-semibold text-warning">{report.totals.unclassified}</div>
+              <div className="text-xs text-muted-foreground">{t('models.metadata.routingIncomplete')}</div>
+              <div className="text-2xl font-semibold text-warning">{report.totals.routingIncomplete}</div>
             </div>
           </div>
 
           <div className="space-y-2">
             {coverageRows.map((row) => (
               <div key={row.attribute} className="flex items-center gap-3">
-                <span className="w-32 shrink-0 text-sm">{t(ATTRIBUTE_LABEL_KEYS[row.attribute])}</span>
+                <span className="w-32 shrink-0 text-sm">
+                  {t(ATTRIBUTE_LABEL_KEYS[row.attribute])}
+                  {!row.critical && (
+                    <span className="ml-1 text-[10px] text-muted-foreground">
+                      {t('models.metadata.referenceAttribute')}
+                    </span>
+                  )}
+                </span>
                 <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
                   <div
                     className="h-full rounded-full bg-primary transition-all"
                     style={{ width: `${Math.round(row.rate * 100)}%` }}
                   />
                 </div>
-                <span className="w-28 shrink-0 text-right text-xs text-muted-foreground">
-                  {Math.round(row.rate * 100)}% · {row.known}/{row.total}
+                <span className="w-40 shrink-0 text-right text-xs text-muted-foreground">
+                  {Math.round(row.rate * 100)}% · {row.known}/{row.applicable}
+                  {row.notApplicable > 0 &&
+                    ` · ${t('models.metadata.notApplicable', { count: row.notApplicable })}`}
                 </span>
               </div>
             ))}
@@ -1251,11 +1267,20 @@ export function ModelMetadataPanel() {
                       </TableCell>
                       <TableCell>
                         <div className="flex flex-wrap gap-1">
+                          {!row.critical && (
+                            <Badge variant="outline" className="text-muted-foreground">
+                              {t('models.metadata.referenceOnlyBadge')}
+                            </Badge>
+                          )}
                           {row.missing
                             .filter((attribute) => attribute !== 'contextTokens' && attribute !== 'maxOutputTokens')
                             .slice(0, 4)
                             .map((attribute) => (
-                              <Badge key={attribute} variant="outline" className="text-warning">
+                              <Badge
+                                key={attribute}
+                                variant="outline"
+                                className={row.critical ? 'text-warning' : 'text-muted-foreground'}
+                              >
                                 {t(ATTRIBUTE_LABEL_KEYS[attribute])}
                               </Badge>
                             ))}

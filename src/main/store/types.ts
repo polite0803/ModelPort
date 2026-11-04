@@ -522,8 +522,6 @@ export interface ManagementApiConfig {
   enableManagementApi: boolean
   /** Secret key for management API authentication */
   managementApiSecret: string
-  /** Management API port (optional, defaults to proxyPort) */
-  managementApiPort?: number
 }
 
 /**

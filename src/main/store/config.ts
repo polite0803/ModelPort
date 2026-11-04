@@ -15,6 +15,7 @@ import { isMappingActive } from './modelServing'
 import { validateRoutesForWrite } from './modelRoutes'
 import { isLoopbackHost } from '../proxy/authPolicy'
 import { validateHttpsConfig } from '../../shared/httpsConfig'
+import { maskConfig } from '../logging/maskConfig'
 
 /**
  * Config Manager class
@@ -34,15 +35,14 @@ export class ConfigManager {
    * @returns Updated complete configuration
    */
   static update(updates: Partial<AppConfig>): AppConfig {
-    const current = this.get()
-    const newConfig = { ...current, ...updates }
-    
     const updated = storeManager.updateConfig(updates)
-    
+
     storeManager.addLog('info', 'Update app configuration', {
-      data: { updates },
+      // 只记录被改动的键，且值一律过脱敏：整份 config 进日志既噪声大，
+      // 又会把 managementApiSecret / apiKeys[].key 这类凭据原样写进日志文件。
+      data: { changedKeys: Object.keys(updates), updates: maskConfig(updates) },
     })
-    
+
     return updated
   }
 

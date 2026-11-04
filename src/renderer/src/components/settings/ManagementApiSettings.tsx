@@ -19,7 +19,6 @@ import { Key, Copy, RefreshCw, AlertTriangle, Terminal, Check, Eye, EyeOff } fro
 interface ManagementApiConfig {
   enableManagementApi: boolean
   managementApiSecret: string
-  managementApiPort?: number
 }
 
 export function ManagementApiSettings() {

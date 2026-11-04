@@ -8,6 +8,11 @@
  * 都在这里定死，主进程只负责发请求和落盘（见 `providers/modelProbeRunner.ts`）。
  */
 import type { MetadataLayer } from './modelMetadata.ts'
+import {
+  probeTerminalFresh,
+  sanitizeProbeTerminal,
+  type ProbeTerminalVerdict,
+} from './probeDisposition.ts'
 
 export const MODEL_PROBE_TTL_DAYS = 30
 
@@ -70,6 +75,15 @@ export interface ModelProbeRow {
   /** 首条探测请求的往返耗时，仅作诊断。 */
   latencyMs?: number
   evidence?: string
+  /**
+   * 确定性失败的终局结论（`inconclusive` 之上再叠一层「重探也不会变」的判定）。
+   *
+   * 它**只回答「这一条目/这个账号当前能不能服务」**，永远不折成 `contextTokens`
+   * 或 `maxOutputTokens`（判据见 `probeRowToLayer`），也不参与路由候选筛选与
+   * `/v1/models` 的广告口径。有终局 ≠ 有测量：`contextStatus` 仍是 `inconclusive`，
+   * 两者的区别就在这一格 —— 前者是「上游给了确定的不给」，后者是「这次没结论」。
+   */
+  terminal?: ProbeTerminalVerdict
 }
 
 export interface ModelProbeSidecar {
@@ -485,6 +499,21 @@ export function probeFreshness(asOf: string, nowMs: number = Date.now()): ProbeF
   return nowMs - stamp <= MODEL_PROBE_TTL_MS ? 'fresh' : 'expired'
 }
 
+/**
+ * 这一行上的终局结论，且只在有效期内返回；过期即 `undefined`（下一轮重新探）。
+ *
+ * 终局的 TTL 与读数的 TTL 是两把钟（7 天 / 30 天）：一个「上游说不提供」的结论
+ * 比一个「窗口至少 4096」的读数更容易被用户的一次控制台操作推翻。
+ */
+export function probeTerminalOf(
+  row: Pick<ModelProbeRow, 'terminal'> | undefined,
+  nowMs: number = Date.now(),
+): ProbeTerminalVerdict | undefined {
+  const terminal = row?.terminal
+  if (terminal === undefined) return undefined
+  return probeTerminalFresh(terminal.asOf, nowMs) ? terminal : undefined
+}
+
 function boundOf(value: unknown): ProbeBound | undefined {
   if (!value || typeof value !== 'object') return undefined
   const raw = value as Record<string, unknown>
@@ -512,14 +541,24 @@ function rangeText(label: string, bound: ProbeBound | undefined): string | undef
 /**
  * 只有新鲜且 `measured` 的区间才折成证据层；过期行、inconclusive、suspect
  * 都不参与解析（设计文档 §5、§8）。
+ *
+ * 终局结论（`row.terminal`）**永远不进这一层**：它说的是「当前服务不了」，
+ * 不是「窗口有多大」。这里的判据依旧只看 `contextStatus` / `maxOutputStatus`，
+ * 所以一次以终局收口的探测（状态必为 `inconclusive`，因为阶梯在第一档就没了）
+ * 折不出任何窗口数字，界面与路由看到的仍然是「未知」而不是一个猜值。
  */
 export function probeRowToLayer(
   row: ModelProbeRow,
   nowMs: number = Date.now(),
 ): MetadataLayer | undefined {
   if (probeFreshness(row.asOf, nowMs) !== 'fresh') return undefined
-  const contextMeasured = row.contextStatus === undefined || row.contextStatus === 'measured'
-  const outputMeasured = row.maxOutputStatus === undefined || row.maxOutputStatus === 'measured'
+  // 带终局的行不再吃「老行没有状态也算 measured」这条兜底：它唯一能带的数字
+  // 必须是自己标明 measured 的那一次，终局本身一格数字都不产生。
+  const terminalFresh = probeTerminalOf(row, nowMs) !== undefined
+  const contextMeasured = row.contextStatus === 'measured'
+    || (row.contextStatus === undefined && terminalFresh !== true)
+  const outputMeasured = row.maxOutputStatus === 'measured'
+    || (row.maxOutputStatus === undefined && terminalFresh !== true)
   const hint = {
     ...(row.vision ? { vision: row.vision } : {}),
     ...(row.tools ? { tools: row.tools } : {}),
@@ -587,8 +626,12 @@ export function sanitizeProbeSidecar(raw: unknown): ModelProbeSidecar {
     }
     const contextStatus = statusOf(row.contextStatus)
     const maxOutputStatus = statusOf(row.maxOutputStatus)
-    const contextMeasured = contextStatus === undefined || contextStatus === 'measured'
-    const outputMeasured = maxOutputStatus === undefined || maxOutputStatus === 'measured'
+    const terminal = sanitizeProbeTerminal(row.terminal)
+    // 与 `probeRowToLayer` 同一口径：带终局结论的行，数字只认自己标过 measured 的那一次。
+    const contextMeasured = contextStatus === 'measured'
+      || (contextStatus === undefined && terminal === undefined)
+    const outputMeasured = maxOutputStatus === 'measured'
+      || (maxOutputStatus === undefined && terminal === undefined)
     valid.push({
       providerId: row.providerId,
       displayName: row.displayName,
@@ -614,6 +657,7 @@ export function sanitizeProbeSidecar(raw: unknown): ModelProbeSidecar {
         ? { latencyMs: row.latencyMs }
         : {}),
       ...(typeof row.evidence === 'string' ? { evidence: row.evidence } : {}),
+      ...(terminal === undefined ? {} : { terminal }),
     })
   }
   return { version: 1, rows: valid }

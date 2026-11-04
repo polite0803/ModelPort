@@ -101,6 +101,7 @@ import { AppLogManager } from '../appLogs/manager'
 import { QuotaLedger } from '../proxy/quota/ledger'
 import { syncBuiltinProvider } from './providerSync'
 import { syncAutoStart } from '../autostartHost'
+import { debugLog } from '../logging/debugLog'
 import type { AppLogFilter } from '../appLogs/types'
 
 // Dynamically import electron-store (ESM module)
@@ -566,6 +567,19 @@ class StoreManager {
     // 于是 API 会报「这一格存在」，改它却没有任何代码读。读侧摘掉。
     for (const retiredKey of ['toolCallingConfig', 'toolPromptConfig', 'trailingUserGuard', 'outputSteering']) {
       delete (normalized as unknown as Record<string, unknown>)[retiredKey]
+    }
+
+    // `managementApi.managementApiPort` 从来没有被任何代码读过（管理面一直跟着
+    // `proxyPort` 走），已从类型里删除；老 `data.json` 里它还在，spread 会把死键
+    // 带回 `getConfig()`。同一条判据：读侧摘掉，`GET /v1/management/config` 不再
+    // 报告一个「存在却改不动」的格子。
+    const managementApiRecord = normalized.managementApi as unknown as
+      | Record<string, unknown>
+      | undefined
+    if (managementApiRecord && Object.prototype.hasOwnProperty.call(managementApiRecord, 'managementApiPort')) {
+      const rest = { ...managementApiRecord }
+      delete rest.managementApiPort
+      normalized.managementApi = rest as unknown as AppConfig['managementApi']
     }
 
     // 镜像地址只接受 https；非法或非字符串一律丢弃（管理 API 不能报告一个没人读的值）。
@@ -1213,7 +1227,7 @@ class StoreManager {
       // 只记元数据（动了哪个账号、哪些凭据字段）。这里原本连着四条输出：明文旧凭据、
       // 解密后的旧凭据、加密后的新值、以及两者是否相同 —— 以控制台方式启动、带
       // `--enable-logging`、或任何接走 stdout 的采集，都等于把全部上游凭据抄进日志。
-      console.log('[Store] Update account:', { id, changedCredentialFields: Object.keys(provided) })
+      debugLog('[Store] Update account:', { id, changedCredentialFields: Object.keys(provided) })
     }
 
     accounts[index] = updatedAccount

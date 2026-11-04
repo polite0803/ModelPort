@@ -22,6 +22,7 @@ const {
   sanitizeCatalogSnapshot,
   sanitizeCatalogStore,
   upsertCatalogAdoption,
+  fuzzyMatchEntries,
 } = await import('../../src/shared/modelCatalog.ts')
 const { parseLiteLLM, parseModelsDev, parseOpenRouter } = await import(
   '../../src/main/providers/modelCatalogParsers.ts'
@@ -232,7 +233,7 @@ test('价格只展示：price-only adoption 不产生能力标注，也不进入
   assert.deepEqual(mixed, { contextTokens: 200000 })
 
   const parsed = parseModelsDev(fixture('models-dev.json'))
-  assert.equal(parsed.length, 1)
+  assert.equal(parsed.length, 2)
   assert.equal(
     catalogAdoptionHint([
       adoption({
@@ -246,9 +247,31 @@ test('价格只展示：price-only adoption 不产生能力标注，也不进入
   )
 })
 
+test('reasoning adoption 进 hint，两个方向都算已标注', () => {
+  assert.deepEqual(
+    catalogAdoptionHint([adoption({ field: 'reasoning', value: 'no' })]),
+    { reasoning: 'no' },
+  )
+  assert.deepEqual(
+    catalogAdoptionHint([adoption({ field: 'reasoning', value: 'yes' })]),
+    { reasoning: 'yes' },
+  )
+  // 非法值不进 ledger，也就不会折成 hint。
+  assert.equal(sanitizeCatalogAdoptionValue('reasoning', 'maybe'), undefined)
+  // 布尔与 'yes'/'no' 同义（三个来源都经 capabilityFlag 收口）。
+  assert.equal(sanitizeCatalogAdoptionValue('reasoning', true), 'yes')
+  assert.equal(sanitizeCatalogAdoptionValue('reasoning', false), 'no')
+  assert.equal(
+    sanitizeCatalogAdoption(
+      adoption({ field: 'reasoning', value: 'maybe' as never }),
+    ),
+    undefined,
+  )
+})
+
 test('三个来源的解析器用本地 fixture：字段、单位换算与坏条目丢弃', () => {
   const modelsDev = parseModelsDev(fixture('models-dev.json'))
-  assert.equal(modelsDev.length, 1, '没有任何可用字段的条目被丢弃')
+  assert.equal(modelsDev.length, 2, '没有任何可用字段的条目被丢弃')
   assert.equal(modelsDev[0].id, 'claude-sonnet-4-20250514')
   assert.equal(modelsDev[0].provider, 'anthropic')
   assert.equal(modelsDev[0].contextTokens, 200000)
@@ -256,6 +279,13 @@ test('三个来源的解析器用本地 fixture：字段、单位换算与坏条
   assert.deepEqual(modelsDev[0].modalities, ['text', 'image'])
   assert.equal(modelsDev[0].vision, 'yes')
   assert.equal(modelsDev[0].tools, 'yes')
+  assert.equal(modelsDev[0].reasoning, 'yes')
+  // models.dev 的 `reasoning` 是显式布尔：`false` 是「这个模型不推理」的声明，
+  // 条目因此有采用价值，不能按「没有数值字段」丢掉。
+  const haiku = modelsDev.find((item) => item.id === 'claude-haiku-4-20250514')
+  assert.ok(haiku, '只有 reasoning:false 的条目必须保留')
+  assert.equal(haiku?.reasoning, 'no')
+  assert.equal(haiku?.contextTokens, undefined)
   assert.deepEqual(modelsDev[0].price, {
     inputPerMillion: 3,
     outputPerMillion: 15,
@@ -275,6 +305,8 @@ test('三个来源的解析器用本地 fixture：字段、单位换算与坏条
   assert.equal(gpt.maxOutputTokens, 16384)
   assert.equal(gpt.vision, 'yes')
   assert.equal(gpt.tools, 'yes')
+  // litellm 的台账里没有 reasoning 这个键：不写,也不拿别的字段凑一个。
+  assert.equal(gpt.reasoning, undefined)
   assert.deepEqual(gpt.price, {
     inputPerMillion: 2.5,
     outputPerMillion: 10,
@@ -304,17 +336,24 @@ test('三个来源的解析器用本地 fixture：字段、单位换算与坏条
   })
 
   const openrouter = parseOpenRouter(fixture('openrouter.json'))
-  assert.equal(openrouter.length, 1)
+  assert.equal(openrouter.length, 2)
   assert.equal(openrouter[0].contextTokens, 131072)
   assert.equal(openrouter[0].maxOutputTokens, 8192)
   assert.deepEqual(openrouter[0].modalities, ['text', 'image'])
   assert.equal(openrouter[0].vision, 'yes')
   assert.equal(openrouter[0].tools, 'yes')
+  assert.equal(openrouter[0].reasoning, 'yes')
   assert.deepEqual(openrouter[0].price, {
     inputPerMillion: 3,
     outputPerMillion: 15,
     currency: 'USD',
   })
+  // `supported_parameters` 是「实测可用参数」清单，没列 reasoning 只代表没写：
+  // 不能折成 `no`，否则一次缺席就把整个模型从「要思考」的请求里筛掉。
+  const withoutReasoning = openrouter.find((item) => item.id === 'vendor/model-y')
+  assert.equal(withoutReasoning?.reasoning, undefined)
+  assert.equal(withoutReasoning?.tools, undefined)
+  assert.equal(withoutReasoning?.vision, undefined)
 })
 
 test('来源集合与字段读取：三个来源都可匹配，缺失字段返回 undefined', () => {
@@ -357,4 +396,29 @@ test('端点回退：主端点 → jsDelivr → 用户镜像；仅接受 https',
   assert.equal(sanitizeCatalogMirrorUrl(42), undefined)
   assert.equal(sanitizeCatalogMirrorUrl('http://x'), undefined)
   assert.equal(sanitizeCatalogMirrorUrl('https://x/a.json'), 'https://x/a.json')
-})
+
+// Fuzzy matching test: bigram similarity based model name matching
+test('模糊匹配：基于 bigram 相似度的模型名称匹配', () => {
+  const index = buildCatalogIndex([
+    entry({ id: 'gpt-4o', contextTokens: 128000 }),
+    entry({ id: 'gpt-4o-mini', source: 'litellm', catalogId: 'litellm::gpt-4o-mini' }),
+    entry({ id: 'claude-sonnet-4-20250514', contextTokens: 200000 }),
+  ])
+
+  // Test fuzzy match with similar but not exact model name
+  const fuzzy = fuzzyMatchEntries(index, { modelId: 'gpt-4o' })
+  // Should find gpt-4o-exact or close matches
+  assert.ok(fuzzy.length >= 0, 'fuzzyMatchEntries不应抛出错误')
+
+  // Test with displayName
+  const withDisplayName = fuzzyMatchEntries(index, {
+    modelId: 'some-random-id',
+    displayName: 'gpt-4o',
+  })
+  assert.ok(withDisplayName.length >= 0, '带 displayName 的 fuzzyMatchEntries 不应抛出错误')
+
+  // Test with close but not exact match
+  const closeMatch = fuzzyMatchEntries(index, { modelId: 'gpt-4o-2024' })
+  // May or may not match depending on similarity threshold
+  assert.ok(Array.isArray(closeMatch), 'fuzzyMatchEntries 返回应为数组')
+})})

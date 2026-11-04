@@ -76,3 +76,114 @@ export function rejectionEntryFromContext(
     model: requestedModelOf(ctx.request?.body),
   })
 }
+
+/**
+ * Fold window for unmounted-route 404s. The observed poller hits each path
+ * every ~5 minutes; 30 minutes keeps at most two warns per hour per path while
+ * still surfacing a client that never stops probing the wrong surface.
+ */
+export const UNMOUNTED_ROUTE_FOLD_WINDOW_MS = 30 * 60_000
+
+/** Paths are attacker-controllable - the fold table must stay bounded. */
+export const MAX_TRACKED_UNMOUNTED_ROUTES = 100
+
+export interface UnmountedRouteHit {
+  method: string
+  path: string
+  clientIP: string
+  /** The X-Request-Id this response carries; quoted in the warn so the line resolves. */
+  requestId: string
+  now: number
+}
+
+interface UnmountedRouteFold {
+  count: number
+  firstSeenAt: number
+  lastEmittedAt: number
+  clientIP: string
+}
+
+/**
+ * App-log trace for `route_not_found` 404s, replacing the request-log error row.
+ *
+ * These probes are clients mistaking ModelPort for Ollama; they are traffic
+ * facts, not gateway faults, so the row (and its stats fold-in) goes away - but
+ * "the client is polling wrong paths from 192.168.85.1" must stay diagnosable.
+ * The tracer keeps one line per method+path: the first hit warns immediately
+ * (method/path/clientIP/requestId), repeats fold into a silent counter, and the
+ * next hit after the fold window re-warns with the cumulative count and the
+ * first-seen timestamp. Aligned precedent: probe traffic is excluded from
+ * `RequestLogManager::getRequestLogStats` via `kind: 'probe'` - the same "not
+ * real traffic, still traceable" shape, one level down in the log stack.
+ *
+ * Pure: the sink (warn logger) is injected so `node --test` runs it without an
+ * Electron runtime, and every state update replaces the record instead of
+ * mutating it in place.
+ */
+export function createUnmountedRouteTracer(deps: {
+  log: (message: string, data: Record<string, unknown>) => void
+  foldWindowMs?: number
+  maxTracked?: number
+}): { observe: (hit: UnmountedRouteHit) => void } {
+  const foldWindowMs = deps.foldWindowMs ?? UNMOUNTED_ROUTE_FOLD_WINDOW_MS
+  const maxTracked = deps.maxTracked ?? MAX_TRACKED_UNMOUNTED_ROUTES
+  const folds = new Map<string, UnmountedRouteFold>()
+
+  const emit = (hit: UnmountedRouteHit, fold: UnmountedRouteFold, headline: string): void => {
+    deps.log(
+      `${headline}: ${hit.method.toUpperCase()} ${hit.path} -> 404 route_not_found ` +
+        `from ${hit.clientIP} (${fold.count} hit${fold.count === 1 ? '' : 's'} ` +
+        `since ${new Date(fold.firstSeenAt).toISOString()}, requestId ${hit.requestId})`,
+      {
+        method: hit.method.toUpperCase(),
+        path: hit.path,
+        status: 404,
+        code: 'route_not_found',
+        clientIP: hit.clientIP,
+        requestId: hit.requestId,
+        hits: fold.count,
+        firstSeenAt: fold.firstSeenAt,
+      },
+    )
+  }
+
+  return {
+    observe(hit: UnmountedRouteHit): void {
+      const key = `${hit.method.toUpperCase()} ${hit.path}`
+      const existing = folds.get(key)
+
+      if (!existing) {
+        // Flood of distinct paths: evict the longest-unseen key first so memory
+        // stays bounded; the re-appeared old key simply re-warns as "first seen".
+        if (folds.size >= maxTracked) {
+          const oldest = folds.keys().next().value
+          if (oldest !== undefined) folds.delete(oldest)
+        }
+        const fold: UnmountedRouteFold = {
+          count: 1,
+          firstSeenAt: hit.now,
+          lastEmittedAt: hit.now,
+          clientIP: hit.clientIP,
+        }
+        folds.set(key, fold)
+        emit(hit, fold, 'Unmounted route probe')
+        return
+      }
+
+      const next: UnmountedRouteFold = {
+        ...existing,
+        count: existing.count + 1,
+        clientIP: hit.clientIP,
+      }
+
+      if (hit.now - existing.lastEmittedAt >= foldWindowMs) {
+        next.lastEmittedAt = hit.now
+        folds.set(key, next)
+        emit(hit, next, 'Repeated unmounted route probe')
+        return
+      }
+
+      folds.set(key, next)
+    },
+  }
+}

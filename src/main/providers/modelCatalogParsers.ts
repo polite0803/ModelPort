@@ -91,6 +91,9 @@ export function parseModelsDev(raw: unknown): CatalogEntry[] {
           modalities: Array.isArray(modalities?.input) ? modalities.input : undefined,
           vision: booleanFlag(model.attachment),
           tools: booleanFlag(model.tool_call),
+          // models.dev 的 `reasoning` 是显式布尔：`false` 是「这个模型不推理」的声明，
+          // 与 `attachment`/`tool_call` 同一口径，两个方向都收。
+          reasoning: booleanFlag(model.reasoning),
           price:
             typeof cost?.input === 'number' || typeof cost?.output === 'number'
               ? {
@@ -186,6 +189,9 @@ export function parseOpenRouter(raw: unknown): CatalogEntry[] {
         modalities,
         vision: Array.isArray(modalities) && modalities.includes('image') ? 'yes' : undefined,
         tools: supported.includes('tools') ? 'yes' : undefined,
+        // `supported_parameters` 是「这个端点实测可用的参数清单」，不是完整能力表：
+        // 没列 `reasoning` 只代表没写，不代表不支持，所以只往一个方向折。
+        reasoning: supported.includes('reasoning') ? 'yes' : undefined,
         price: money(prompt, completion),
       },
       'openrouter',

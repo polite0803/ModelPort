@@ -9,6 +9,7 @@ import { join } from 'path'
 import { storeManager } from '../store/store.ts'
 import {
   EMPTY_PROBE_SIDECAR,
+  probeRowKey,
   sanitizeProbeSidecar,
   upsertProbeRow,
   type ModelProbeRow,
@@ -63,6 +64,31 @@ export async function writeModelProbeRows(rows: readonly ModelProbeRow[]): Promi
 export async function recordModelProbe(row: ModelProbeRow): Promise<ModelProbeRow[]> {
   const sidecar = await readModelProbeSidecar()
   const rows = upsertProbeRow(sidecar.rows, row)
+  await writeModelProbeRows(rows)
+  return rows
+}
+
+/**
+ * 抹掉某一行的终局结论，**保留**它已有的实测读数。
+ *
+ * 手动重探（以及界面上的「清除探测结果」）必须先走这一步：终局是给规划层用的
+ * 缓存，用户既然重新点了，缓存就得立刻失效 —— 否则一次点击只会换来一句
+ * 「上次上游说过不给」。没有终局的行原样不动，也不写盘。
+ */
+export async function clearModelProbeTerminal(
+  providerId: string,
+  displayName: string,
+): Promise<ModelProbeRow[]> {
+  const sidecar = await readModelProbeSidecar()
+  const key = probeRowKey({ providerId, displayName })
+  let cleared = false
+  const rows = sidecar.rows.map((row) => {
+    if (probeRowKey(row) !== key || row.terminal === undefined) return row
+    cleared = true
+    const { terminal: _terminal, ...rest } = row
+    return rest
+  })
+  if (!cleared) return sidecar.rows
   await writeModelProbeRows(rows)
   return rows
 }

@@ -35,7 +35,7 @@ import type {
 import type { ModelCapabilityHint } from '../../../shared/types'
 import { ACCOUNT_CHANNELS, getChannelDefinition } from './catalogue'
 import { accountRuntime } from '../../proxy/accountRuntime'
-import { attachContextWindows, capabilityHintOf, readModelList } from './modelCatalog'
+import { attachContextWindows, capabilityHintOf, qualifyChannelModel, readModelList } from './modelCatalog'
 import { channelRuntimeState } from './runtimeState'
 import { resyncsAfterChannelRpc } from './rpcSync'
 import { ChannelCredentialVault } from './vault'
@@ -55,10 +55,33 @@ interface PackAccount {
 }
 
 const MODELS_CACHE_MS = 30_000
+/** 服务清单预检的成功/失败 TTL：与限流预检同一档（成功 30s 对齐目录缓存，失败 5s 防打爆）。 */
+const PACK_SERVED_CACHE_MS = 30_000
+const PACK_SERVED_FAILURE_CACHE_MS = 5_000
+/**
+ * 过期清单的**继续可用**宽限期。
+ *
+ * 预检跑在选路热路径上，而一次 `bridge.models()` 的 RPC 上限是 120s —— 在请求
+ * 路径上等目录读取等于把「一次本地必败」换成「一笔可能卡两分钟的请求」。所以
+ * 过期只触发**后台**刷新，宽限期内的旧清单照用；超过宽限期就按未知处理
+ * （= 不剔除），仍然不许同步等。
+ */
+const PACK_SERVED_STALE_GRACE_MS = 10 * 60_000
 
 interface ModelsCache {
   at: number
   byChannel: Map<string, ChannelModelInfo[]>
+}
+
+/**
+ * 某渠道**渠道 pack 自己愿意服务**的模型全集（完整 `<channel>/<model>` id）。
+ *
+ * `null` = 未知（运行时没在跑、`bridge.models()` 抛错、这一家整组缺席），
+ * 与「一个都不服务」是两件事 —— 前者必须放行，否则一次目录故障就把整池打死。
+ */
+interface PackServedCache {
+  ids: ReadonlySet<string> | null
+  expiresAt: number
 }
 
 class AccountChannelManager {
@@ -67,6 +90,9 @@ class AccountChannelManager {
   private initializing: Promise<void> | null = null
   private syncing: Promise<void> | null = null
   private modelsCache: ModelsCache | null = null
+  private packServedCache = new Map<string, PackServedCache>()
+  /** 后台刷新的单飞标记：同一轮只跑一份，逐请求只查表（见 `refreshPackServedInBackground`）。 */
+  private packServedRefreshing: Promise<void> | null = null
   private onChanged: (() => void) | null = null
   private rateLimitCache = new Map<string, { value: Record<string, { limited: true; resetAtMs: number }>; expiresAt: number }>()
 
@@ -324,6 +350,156 @@ class AccountChannelManager {
   }
 
   /**
+   * 查询某渠道一批模型**是否根本不在渠道 pack 的服务清单里**（auto 选路预检）。
+   *
+   * ## 背景（真实流量 2026-11-01 → 11-04：137 行 `模型不存在或已停用`）
+   *
+   * 宿主的可路由名单来自 `model.list`，而它优先取适配器的 `listAllModels()`——
+   * **静态兜底表，不套身份档、也不随远端目录消失的条目收缩**；渠道 worker 的
+   * 请求前校验（`channelPack/worker.ts`）读的却是**分档后**的 `listModels(provider)`。
+   * 两个集合一分歧，用户点名或 auto 选中的条目就会在**发出任何上游请求之前**
+   * 被自己的进程 404 掉，换下一候选大概率同样 404，一次对话反复撞。
+   *
+   * 本方法把那道闸门提前到选路阶段：返回的表里出现的模型 id = pack 明确不服务，
+   * 调用方据此剔候选（`failover.ts` 那句精确文案识别保留，兜住预检之后的竞态）。
+   *
+   * ## 口径与缓存
+   *
+   * 数据源必须是 `bridge.models()`（worker 的 `models()` → 逐 provider
+   * `ctx.llm.listModels`），**与那道闸门同一个源**；`model.list` 在这里无效，
+   * 它就是分歧的另一侧。整轮视图一次读全 12 家，缓存在 `packServedCache`，与目录
+   * 缓存同源同生命周期（{@link models} 每轮回填，`invalidateModelsCache` 一起作废），
+   * 所以一次 select 里同一家几个候选也只读一份清单，不逐条重复解 store。
+   *
+   * ⚠️ **过期只后台刷**（`refreshPackServedInBackground`）：这道 RPC 的上限是 120s，
+   * 在选择路径上等它等于把「一次本地必败」换成「一笔可能卡两分钟的请求」。宽限期内
+   * 用旧清单，超出宽限期按未知处理（= 不剔除）。
+   *
+   * ⚠️ **一律 fail-open**：运行时没在跑（状态检查不许顺手拉起 Worker，与 opencode
+   * 同一条规则）、视图拉不到、或这一家在视图里**一条都没有**（可能是整家未登录，
+   * 也可能是适配器这轮读目录抛错，两者在返回值上不可区分）→ 返回空表 = 什么都不剔。
+   * 预检只能减少「本地必败」，不能新增「目录故障时把整池打死」。
+   */
+  async packUnservedModels(id: string, modelIds: string[]): Promise<Record<string, { unserved: true }>> {
+    if (getChannelDefinition(id) === undefined || modelIds.length === 0) return {}
+    const served = await this.packServedIds(id)
+    if (served === null || served.size === 0) return {}
+    const unserved: Record<string, { unserved: true }> = {}
+    for (const modelId of new Set(modelIds)) {
+      // 目录里可能留着**裸 id** 的旧行（见 `qualifyChannelModel`），而视图的键永远是
+      // 完整的 `<channel>/<model>`，所以两边都用补全后的形状比，别拿裸 id 去查。
+      if (!served.has(qualifyChannelModel(id, modelId))) {
+        unserved[modelId] = { unserved: true }
+      }
+    }
+    return unserved
+  }
+
+  /**
+   * 某渠道 pack 侧服务清单的模型 id 全集（完整形状）；`null` = 未知。
+   *
+   * 走 {@link models} 的 30s 目录缓存顺带回填的 `packServedCache`：一次读目录把
+   * 全 12 家一起填满，不在候选循环里逐家重拉。
+   */
+  private async packServedIds(id: string): Promise<ReadonlySet<string> | null> {
+    if (!this.isRuntimeRunning()) {
+      // 运行时不在 = 清单**未知**，旧缓存在这里一起作废：把「pack 掉了」读成
+      // 「这些模型它不服务」，等于让一次状态故障制造整池 503。
+      // 状态检查也不许顺手拉起 Worker（与 opencode 同一条规则）。
+      this.packServedCache.clear()
+      return null
+    }
+    const now = Date.now()
+    const entry = this.packServedCache.get(id)
+    if (entry !== undefined && now < entry.expiresAt) return entry.ids
+    // 过期或缺席：只触发后台刷新，**绝不**在选路热路径上等一次目录读
+    // （`bridge.models()` 走 RPC_TIMEOUT_MS = 120s）。
+    this.refreshPackServedInBackground()
+    if (entry !== undefined && now < entry.expiresAt + PACK_SERVED_STALE_GRACE_MS) {
+      return entry.ids
+    }
+    return null
+  }
+
+  /**
+   * 后台刷新全 12 家的服务清单（同一轮只跑一份，逐请求只是查表）。
+   *
+   * 只读 `bridge.models()` 这一份视图，不重跑 `model.list` 那 12 次 RPC：预检要的
+   * 就是 `listModels` 的分档口径，倍率与 `disabled` 标记对它无用。
+   * 失败保持旧条目（下次宽限期外自然降级成「未知 → 不剔除」），并给缺席的家记
+   * 一条 5s 的「未知」，免得每个请求都重开一轮。
+   */
+  private refreshPackServedInBackground(): void {
+    if (this.packServedRefreshing !== null) return
+    if (!this.isRuntimeRunning()) return
+    const task = (async () => {
+      try {
+        const bridge = await this.bridgeOrThrow()
+        const view = await this.modelView(bridge)
+        if (view !== null) {
+          this.seedPackServedCache(view, Date.now())
+          return
+        }
+      } catch (error) {
+        console.warn(
+          `[ChannelPack] 后台刷新服务清单失败，保留旧条目：${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
+      // 读不到：完全没有条目的家记一条 5s 的「未知」，免得每个请求都重开一轮刷新；
+      // 已有条目的家**不动**（宽限期内的旧清单仍按上面的判据继续用）。
+      const unknownUntil = Date.now() + PACK_SERVED_FAILURE_CACHE_MS
+      for (const channel of ACCOUNT_CHANNELS) {
+        if (this.packServedCache.has(channel.id)) continue
+        this.packServedCache.set(channel.id, { ids: null, expiresAt: unknownUntil })
+      }
+    })().finally(() => {
+      this.packServedRefreshing = null
+    })
+    this.packServedRefreshing = task
+  }
+
+  /**
+   * 用 `bridge.models()` 的视图回填每家的服务清单缓存。
+   *
+   * 视图条目形状是 `{ id: '<provider>/<model>', … }`（`toOpenAiModelIds` 拼的），
+   * 与 worker 那道闸门比的 `entry.id` 同源，所以这里**只做切分不做推断**：
+   * 按第一个 `/` 取 provider，整条 id 作为键。
+   */
+  private seedPackServedCache(
+    view: ReadonlyArray<Record<string, unknown>>,
+    fetchedAt: number,
+  ): void {
+    const grouped = new Map<string, Set<string>>()
+    for (const entry of view) {
+      if (entry === null || typeof entry !== 'object') continue
+      const modelId = typeof entry.id === 'string' ? entry.id.trim() : ''
+      if (modelId.length === 0) continue
+      const slash = modelId.indexOf('/')
+      if (slash <= 0) continue
+      const provider = modelId.slice(0, slash)
+      let bucket = grouped.get(provider)
+      if (bucket === undefined) {
+        bucket = new Set<string>()
+        grouped.set(provider, bucket)
+      }
+      bucket.add(modelId)
+    }
+    const expiresAt = fetchedAt + PACK_SERVED_CACHE_MS
+    for (const channel of ACCOUNT_CHANNELS) {
+      // 这一家在视图里一条都没有 → 记下「未知」而不是空集合：`collectGatewayModels`
+      // 会跳过 listModels 抛错的那一家，空与缺席在视图里不可区分。
+      const ids = grouped.get(channel.id) ?? null
+      this.packServedCache.set(channel.id, { ids, expiresAt })
+    }
+  }
+
+  /** 目录缓存与服务清单缓存同源同生命周期：清一个必须清另一个。 */
+  private invalidateModelsCache(): void {
+    this.modelsCache = null
+    this.packServedCache.clear()
+  }
+
+  /**
    * Reads the global "claim every account's daily credits automatically" switch.
    *
    * The switch is one for all channels: when on, the pack claims once per
@@ -425,7 +601,7 @@ class AccountChannelManager {
     try {
       const bridge = await this.bridgeOrThrow()
       // 只清缓存、重读内存副本，不触碰 `syncProviders` / 磁盘 / 广播。
-      this.modelsCache = null
+      this.invalidateModelsCache()
       await this.models(bridge)
     } catch (error) {
       console.warn(
@@ -527,7 +703,7 @@ class AccountChannelManager {
 
   /** 账号池或模型目录可能变了：清缓存、重建 provider 记录、通知界面。 */
   private notifyChanged(): void {
-    this.modelsCache = null
+    this.invalidateModelsCache()
     // 池子一变就解除凭据类冷却（`accountRuntime.recordCredentialFailure` 那条
     // 5–30 分钟的档）。那条冷却的前提是「要人来处理」，而 `changed` / 登录 /
     // `account.refresh` 正是人已经处理完的信号 —— 不解就变成「重新登录成功了，
@@ -570,7 +746,7 @@ class AccountChannelManager {
       }
     }
     this.dropProvider(id)
-    this.modelsCache = null
+    this.invalidateModelsCache()
     this.onChanged?.()
     return { success: true }
   }
@@ -690,9 +866,12 @@ class AccountChannelManager {
     const view = await this.modelView(bridge)
     const byChannel = new Map<string, ChannelModelInfo[]>()
     await Promise.all(ACCOUNT_CHANNELS.map(async channel => {
-      byChannel.set(channel.id, await this.fetchModels(bridge, channel.id, view))
+      byChannel.set(channel.id, await this.fetchModels(bridge, channel.id, view ?? []))
     }))
     this.modelsCache = { at: now, byChannel }
+    // 同一次视图读取顺手填服务清单缓存：视图拿不到（`modelView` 返回 null）就**不填**，
+    // 让 `packServedIds` 落到「未知 → 不剔除」，而不是把一次目录故障读成「整家没模型」。
+    if (view !== null) this.seedPackServedCache(view, now)
     // 一行可 grep 的诊断：哪些渠道真的报了上下文窗口、哪些没有。
     // 用 `storeManager.addLog` 而不是 `console.log` —— 只有前者会落进
     // `<dataDir>/logs/app-logs.ndjson`，而"窗口有没有下发"这件事恰恰只能从
@@ -719,15 +898,23 @@ class AccountChannelManager {
     }
   }
 
-  /** `/v1/models` 视图，只为取 `context_window`；拉不到就空表（= 全部保持未知）。 */
-  private async modelView(bridge: ChannelBridge): Promise<Array<Record<string, unknown>>> {
+  /**
+   * `/v1/models` 视图：既为 `model.list` 补 `context_window`，也是**服务清单预检**的
+   * 数据源（它逐 provider 调 `ctx.llm.listModels`，与 `channelPack/worker.ts` 那道
+   * 请求前闸门同源）。
+   *
+   * ⚠️ 拉不到时返回 `null` 而不是 `[]`：窗口那一侧 `[]` 与真目录 `[]` 等价（都保持
+   * 未知），但预检那一侧 `[]` 会被读成「这一家什么都不服务」，把一次目录故障变成
+   * 整池 503 —— 两种处境必须能分开。
+   */
+  private async modelView(bridge: ChannelBridge): Promise<Array<Record<string, unknown>> | null> {
     try {
       return await bridge.models()
     } catch (error) {
       console.warn(
         `[ChannelPack] 读取 /v1/models 视图失败，模型窗口将保持未知：${error instanceof Error ? error.message : String(error)}`,
       )
-      return []
+      return null
     }
   }
 
@@ -743,7 +930,7 @@ class AccountChannelManager {
    * 从而把它们的 provider 记录关掉。
    */
   private async resync(): Promise<void> {
-    this.modelsCache = null
+    this.invalidateModelsCache()
     await this.syncProviders()
   }
 

@@ -15,6 +15,7 @@ import { familyRuleLayer } from '../../shared/modelFamilyRules.ts'
 import {
   buildUnclassifiedQueue,
   computeMetadataCoverage,
+  isRoutingComplete,
   mergeModelMetadata,
   unclassifiedAttributes,
   type MetadataAttribute,
@@ -183,6 +184,7 @@ export async function getResolvedModelMetadata(input: {
     providerId: provider.id,
     displayName: model.displayName,
     actualModelId: model.actualModelId,
+    providerType: provider.type,
     layers: layersForModel({
       provider,
       displayName: model.displayName,
@@ -198,7 +200,9 @@ export async function getResolvedModelMetadata(input: {
 function coverageGapsOf(coverage: MetadataCoverage): Record<MetadataAttribute, number> {
   const gaps = {} as Record<MetadataAttribute, number>
   for (const [attribute, row] of Object.entries(coverage)) {
-    gaps[attribute as MetadataAttribute] = Math.max(0, row.total - row.known)
+    // 分母是**适用**行数：聚合行的 `weight` 没有出处，把它算成缺口就等于宣布一个
+    // 永远补不完的任务（见 shared/modelMetadata.ts::isAttributeApplicable）。
+    gaps[attribute as MetadataAttribute] = Math.max(0, row.applicable - row.known)
   }
   return gaps
 }
@@ -220,6 +224,7 @@ export async function getModelMetadataReport(
           providerId: provider.id,
           displayName: model.displayName,
           actualModelId: model.actualModelId,
+          providerType: provider.type,
           layers: layersForModel({
             provider,
             displayName: model.displayName,
@@ -235,19 +240,25 @@ export async function getModelMetadataReport(
   }
 
   const coverage = computeMetadataCoverage(records)
-  const annotated = records.filter((record) => unclassifiedAttributes(record).length === 0).length
-  const queue: ModelMetadataRow[] = buildUnclassifiedQueue(records, modelUsage).map((row) => ({
+  const fullyAnnotated = records.filter(
+    (record) => unclassifiedAttributes(record).length === 0,
+  ).length
+  const rows = buildUnclassifiedQueue(records, modelUsage)
+  const routingComplete = records.filter(isRoutingComplete).length
+  const queue: ModelMetadataRow[] = rows.map((row) => ({
     ...row.metadata,
     calls: row.calls,
     missing: row.missing,
+    critical: row.critical,
   }))
 
   return {
     generatedAt: new Date(nowMs).toISOString(),
     totals: {
       models: records.length,
-      annotated,
-      unclassified: records.length - annotated,
+      routingComplete,
+      routingIncomplete: records.length - routingComplete,
+      fullyAnnotated,
     },
     coverage,
     queue,

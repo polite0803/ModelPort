@@ -13,7 +13,7 @@ import type {
 } from '../../shared/anthropicDiscovery'
 import { ProviderManager } from '../store/providers'
 import { AccountManager } from '../store/accounts'
-import { ProviderChecker } from '../providers/checker'
+import { ProviderChecker, checkAllProviderStatuses } from '../providers/checker'
 import { CustomProviderManager } from '../providers/custom'
 import { aggregateProviderManager } from '../providers/aggregate'
 import { accountChannelManager } from '../providers/accountChannels/manager'
@@ -612,35 +612,26 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
       }
     }
 
-    const result = await ProviderChecker.checkProviderStatus(provider)
-    
-    // Save status to provider
-    ProviderManager.update(providerId, {
-      status: result.status,
-      lastStatusCheck: Date.now(),
-    })
-    
+    // 单查入口是「用户点了刷新」：`force` 绕过巡检缓存的 TTL，重新探一次。
+    // 同一 provider 的在途探测仍然复用（`ProviderChecker` 内部去重），不会并发发两次。
+    const result = await ProviderChecker.checkProviderStatus(provider, { force: true })
+
+    // 落盘只在状态翻转时发生：`provider.status` 是「最后一次已知快照」，实时显示读的是
+    // 下面这个返回值（`dashboardStore` / `ProviderCard` 都优先用检查结果）。
+    ProviderManager.persistStatusSnapshot(providerId, result.status)
+
     return result
   })
 
   ipcMain.handle(IpcChannels.PROVIDERS_CHECK_ALL_STATUS, async (): Promise<Record<string, ProviderCheckResult>> => {
-    const providers = ProviderManager.getAll()
-    const results: Record<string, ProviderCheckResult> = {}
-    
-    await Promise.all(
-      providers.map(async (provider) => {
-        const result = await ProviderChecker.checkProviderStatus(provider)
-        results[provider.id] = result
-        
-        // Save status to provider
-        ProviderManager.update(provider.id, {
-          status: result.status,
-          lastStatusCheck: Date.now(),
-        })
-      })
+    // 一轮巡检：结果进 `ProviderChecker` 的 5 分钟缓存（Dashboard 每 60s 打一次这条通道，
+    // 23 个 provider ⇒ 改前是每分钟 23 次整份 `data.json` 加密落盘 + 约 10 次上游 GET），
+    // 落盘交给 `persistStatusSnapshot` 那道「只认翻转」的门。
+    return checkAllProviderStatuses(
+      ProviderManager.getAll(),
+      (providerId, status, checkedAt) =>
+        ProviderManager.persistStatusSnapshot(providerId, status, checkedAt),
     )
-    
-    return results
   })
 
   ipcMain.handle(IpcChannels.PROVIDERS_DUPLICATE, async (_, id: string): Promise<Provider> => {

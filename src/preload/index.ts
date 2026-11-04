@@ -809,7 +809,6 @@ const sessionAPI = {
 interface ManagementApiConfig {
   enableManagementApi: boolean
   managementApiSecret: string
-  managementApiPort?: number
 }
 
 interface ContextManagementConfig {

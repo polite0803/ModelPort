@@ -28,6 +28,15 @@ import { buildStreamErrorFrame, mapForwardFailure, retryAfterHeader, withRequest
 import { startSseHeartbeat, type SseHeartbeat } from '../utils/sseHeartbeat'
 import { findUnsupportedParameter, unsupportedParameterError } from '../parameterPolicy'
 import { createToolViolationTap } from '../utils/toolViolationTap'
+import {
+  collectToolCallNames,
+  createUndeclaredToolNameTap,
+  declaredChatToolNames,
+  findUndeclaredToolNames,
+  formatUndeclaredToolNameLine,
+  rawChatToolNames,
+  undeclaredToolNameLimiter,
+} from '../utils/undeclaredToolNameAudit'
 import { normalizeMessageRoles } from '../utils/messageRoles'
 import { normalizeToolCallArguments } from '../utils/toolArguments'
 import { normalizeOutputCap } from '../utils/outputCap'
@@ -65,6 +74,15 @@ const router = new Router({ prefix: '/v1/chat' })
  * 完整清单走请求日志的 `auto.skipped` / `auto.skippedMore`，两头口径不同是有意的。
  */
 const AUTO_SKIPPED_HEADER_LIMIT = 8
+
+/**
+ * 与 `channelPack/worker.ts` 请求前闸门抛出的 404 **逐字节同一**的原文。
+ *
+ * ⚠️ 依赖：`failover.ts::isChannelModelUnavailableError` 就是按这句原文做精确识别
+ * （换候选、不冷却账号）。具名路径的服务清单预检用它在宿主本地复现 worker 的那笔
+ * 404，改一个字节都会让识别失明、并把客户端可见错误体改掉。
+ */
+const CHANNEL_MODEL_UNSERVED_MESSAGE = '模型不存在或已停用'
 
 /** 请求日志与状态页里列出的候选数上限（链长另有一格，见 `auto.chainLength`）。 */
 const AUTO_LOG_CANDIDATES_SHOWN = 10
@@ -514,6 +532,42 @@ router.post('/completions', async (ctx: Context) => {
     })
   }
 
+  // 服务清单预检（与上面的限流预检同一位置、同一跳过透出、同样只在发请求前剔除）：
+  // 宿主的可路由名单来自渠道包的 `model.list`（`listAllModels()`，不套身份档，也不随
+  // 远端目录收缩），而渠道 worker 的请求前闸门读的是**分档后**的 `listModels(provider)`
+  // （`channelPack/worker.ts`）。两个集合一分歧，被点名/被 auto 选中的条目就在**任何上游
+  // 请求发出之前**本地 404 `模型不存在或已停用`，换下一候选大概率同样 404 —— 实测 4 天
+  // 137 行（providerId 全是 `opencode`）。这里把那道闸门提前：pack 明确不服务的候选
+  // 直接不进换家循环。`failover.ts::isChannelModelUnavailableError` 的精确文案识别保留，
+  // 兜住预检与请求之间的竞态。
+  if (autoDecision && autoDecision.candidates.length > 0) {
+    const modelIdsByChannel = new Map<string, Set<string>>()
+    for (const candidate of autoDecision.candidates) {
+      if (candidate.provider.type !== 'account') continue
+      let ids = modelIdsByChannel.get(candidate.provider.id)
+      if (ids === undefined) {
+        ids = new Set<string>()
+        modelIdsByChannel.set(candidate.provider.id, ids)
+      }
+      ids.add(candidate.actualModel)
+    }
+    // 逐家一次、不是逐候选一次：一家几个候选都读同一份 TTL 缓存清单。
+    const unservedByChannel = new Map<string, Record<string, { unserved: true }>>()
+    for (const [channelId, modelIds] of modelIdsByChannel) {
+      unservedByChannel.set(channelId, await accountChannelManager.packUnservedModels(channelId, [...modelIds]))
+    }
+    autoDecision.candidates = autoDecision.candidates.filter(candidate => {
+      if (candidate.provider.type !== 'account') return true
+      const table = unservedByChannel.get(candidate.provider.id)
+      const unserved = table === undefined ? undefined : table[candidate.actualModel]
+      if (unserved === undefined) return true
+      autoDecision.skipped.push(
+        `${candidate.provider.id}/${candidate.displayName}:pack_not_serving`
+      )
+      return false
+    })
+  }
+
   // 跳过清单透出：与 X-ModelPort-Auto-Degraded 并列。必须写在任何 return 之前
   // —— 候选被剔光导致 503 时正是最需要解释的场景。动态部分（供应商名可能是
   // 中文）一律过 toHeaderValue。
@@ -565,6 +619,116 @@ router.post('/completions', async (ctx: Context) => {
           code: 'no_available_account',
         },
       }
+      return
+    }
+
+    // 服务清单预检（点名/显式选模路径）：与上面 auto 路径的预检同一判据、同一个
+    // `packUnservedModels`。宿主可路由名单来自 `model.list`（不套身份档），渠道
+    // worker 的请求前闸门读的却是**分档后**的 `listModels(provider)`
+    // （`channelPack/worker.ts`）——不命中的条目在任何上游请求发出之前就被 worker
+    // 本地 404 `模型不存在或已停用`。把那道闸门提前到宿主：pack 明确不服务的候选
+    // 不再付 worker 往返；同一家多账号点名的也不再逐个空转。
+    //
+    // 客户端可见结果与今天**逐字相同**：404 错误体由既有的 `mapForwardFailure` +
+    // `withRequestId` 产出（与 worker 那笔失败今天走的同一条映射），文案取
+    // `CHANNEL_MODEL_UNSERVED_MESSAGE`——`failover.ts::isChannelModelUnavailableError`
+    // 按这句原文识别，预检与请求之间的竞态仍由 worker 404 经它兜住，一个字节不许改。
+    //
+    // fail-open 纪律照抄 auto 路径：清单未知/空表 ⇒ 什么都不剔，绝不因读不到清单
+    // 阻断请求。剔除原因 `pack_not_serving` 写进错误行的 `errorCode`——具名路径没有
+    // `skipped` 透出通道（`X-ModelPort-Auto-Skipped` 只属于 autoDecision），不发明新响应字段。
+    const packModelIdsByChannel = new Map<string, Set<string>>()
+    for (const candidate of [selection, ...chainCandidates]) {
+      if (candidate.provider.type !== 'account') continue
+      let ids = packModelIdsByChannel.get(candidate.provider.id)
+      if (ids === undefined) {
+        ids = new Set<string>()
+        packModelIdsByChannel.set(candidate.provider.id, ids)
+      }
+      ids.add(candidate.actualModel)
+    }
+    // 逐家一次、不是逐候选一次（与 auto 路径同形）。
+    const packUnservedByChannel = new Map<string, Record<string, { unserved: true }>>()
+    for (const [channelId, modelIds] of packModelIdsByChannel) {
+      packUnservedByChannel.set(channelId, await accountChannelManager.packUnservedModels(channelId, [...modelIds]))
+    }
+    const isPackUnserved = (candidate: AccountSelection): boolean => {
+      if (candidate.provider.type !== 'account') return false
+      const table = packUnservedByChannel.get(candidate.provider.id)
+      return table !== undefined && table[candidate.actualModel] !== undefined
+    }
+
+    // 本地交付 worker 那笔 404：状态码/错误体逐字复用今天的映射管线；错误行沿用
+    // 本文件「发请求前 return」分支的既有形态（`rejectionEntryFromContext`），
+    // 并补上今天失败行携带的相关字段，保住「每一行错误都能被 X-Request-Id 对上」。
+    const respondPackModelUnserved = (dead: AccountSelection): void => {
+      const mapped = mapForwardFailure({
+        status: 404,
+        message: CHANNEL_MODEL_UNSERVED_MESSAGE,
+        details: { message: CHANNEL_MODEL_UNSERVED_MESSAGE },
+      })
+      const message = withRequestId(mapped.message, requestId)
+      const errorBody = {
+        error: {
+          message,
+          type: mapped.type,
+          param: mapped.param,
+          code: mapped.code,
+        },
+      }
+      ctx.status = mapped.status
+      ctx.body = errorBody
+      const latency = Date.now() - startTime
+      storeManager.addLog('error', `Request failed: ${message}`, {
+        requestId,
+        providerId: dead.provider.id,
+        accountId: dead.account.id,
+        model: request.model,
+        latency,
+      })
+      const rejected = rejectionEntryFromContext(ctx, mapped.status, 'pack_not_serving', message)
+      rejected.client = client
+      rejected.requestId = requestId
+      rejected.providerId = dead.provider.id
+      rejected.providerName = dead.provider.name
+      rejected.accountId = dead.account.id
+      rejected.accountName = dead.account.name
+      rejected.actualModel = dead.actualModel
+      rejected.errorType = mapped.type
+      rejected.errorCode = 'pack_not_serving'
+      rejected.errorParam = mapped.param
+      // 今天失败行的 `errorMessage`/`responseBody` 口径：原文 message + 错误体 JSON；
+      // rejection 行的 `code:` 前缀只留给无转发上下文的通用拒绝。
+      rejected.errorMessage = message
+      rejected.responseBody = JSON.stringify(errorBody)
+      storeManager.addRequestLog(rejected)
+      storeManager.recordRequestInStats(false, latency, request.model, dead.provider.id, dead.account.id)
+    }
+
+    if (chainCandidates.length > 1) {
+      // 链分支今天就不把 selection 直接转发，pack 不服务的链上候选只贡献「一次
+      // worker 本地 404 + 换下一家」；剔掉它们省掉空转，剩下的候选继续换家。
+      // 整链都被剔光时，今天这一笔的可见结果就是最后一发 worker 404——由宿主
+      // 逐字交付同一错误体，不再付任何 worker 往返（这条 404 只在剔除真的发生时
+      // 出现：候选链为空**且确因** pack 不服务）。
+      const survivingChain = chainCandidates.filter(candidate => !isPackUnserved(candidate))
+      if (survivingChain.length === 0) {
+        respondPackModelUnserved(chainCandidates[0])
+        return
+      }
+      chainCandidates = survivingChain
+      // 下面转发分支的判据是 `chainCandidates.length > 1`：剔除让它 2→1 时分支会
+      // 翻成单发 `selection`，必须把 selection 指到剩余链首——那正是今天换家循环
+      // 实际交付的那一发；链仍 ≥2 时不碰 selection，上下文/日志形态与今天一致。
+      if (chainCandidates.length === 1) {
+        selection = chainCandidates[0]
+        // 链分支命中后会设 `X-ModelPort-Aggregate-Chain`；翻成单发分支后没人设，
+        // 在这里补一发，头口径不丢。
+        ctx.set('X-ModelPort-Aggregate-Chain', toHeaderValue(selection.provider.id))
+      }
+    } else if (isPackUnserved(selection)) {
+      // 单发分支：今天这笔就是 worker 零上游调用的本地 404，原样交付。
+      respondPackModelUnserved(selection)
       return
     }
   }
@@ -1001,6 +1165,29 @@ router.post('/completions', async (ctx: Context) => {
 
     storeManager.recordRequestInStats(true, latency, request.model, provider.id, account.id)
 
+    // 上游返回了本次请求没声明的工具名时记一行（纯观测，不改响应字节）。
+    // 没声明任何工具的请求不跑：那种请求里任何调用都算「越界」，只会变成噪声。
+    const declaredToolNames = declaredChatToolNames(request.tools)
+    const droppedToolNames = [...rawChatToolNames(request.tools)]
+      .filter(name => !declaredToolNames.has(name))
+    const auditUndeclaredToolNames = (offending: readonly string[]): void => {
+      if (declaredToolNames.size === 0 || offending.length === 0) return
+      if (!undeclaredToolNameLimiter.claim(`${actualModel}|${offending.join(',')}`)) return
+      storeManager.addLog('warn', formatUndeclaredToolNameLine({
+        model: actualModel,
+        offending,
+        declared: declaredToolNames,
+        dropped: droppedToolNames,
+        requestId,
+      }), {
+        requestId,
+        providerId: provider.id,
+        accountId: account.id,
+        model: request.model,
+        actualModel,
+      })
+    }
+
     if (!request.stream) {
       const outputText = String((result.body as Record<string, any> | undefined)?.choices?.[0]?.message?.content ?? '')
       meterQuota(
@@ -1330,7 +1517,15 @@ router.post('/completions', async (ctx: Context) => {
         request.tool_choice === 'required' ||
         (typeof request.tool_choice === 'object' && request.tool_choice?.type === 'function')
 
-      ctx.body = requiresToolCall ? wrapperStream.pipe(createToolViolationTap()) : wrapperStream
+      let outStream: Readable = wrapperStream
+      if (declaredToolNames.size > 0) {
+        outStream = outStream.pipe(createUndeclaredToolNameTap({
+          declared: declaredToolNames,
+          onUndeclared: auditUndeclaredToolNames,
+        }))
+      }
+      if (requiresToolCall) outStream = outStream.pipe(createToolViolationTap())
+      ctx.body = outStream
 
       // 立即发送响应头：客户端通常只对“响应头”计时（例如 10s），首个 token 可能远晚于此
       ctx.res.flushHeaders()
@@ -1360,6 +1555,9 @@ router.post('/completions', async (ctx: Context) => {
       }
 
       if (result.body) {
+        auditUndeclaredToolNames(
+          findUndeclaredToolNames(collectToolCallNames(result.body), declaredToolNames),
+        )
         // Check if we need to transform to Anthropic format
         if (isAnthropicToolFormat(request.tool_format)) {
           ctx.body = transformResponseToAnthropic(result.body)

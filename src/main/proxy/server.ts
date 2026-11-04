@@ -7,6 +7,7 @@ import Koa, { type Context, type Next } from 'koa'
 import Router from '@koa/router'
 import bodyParser from 'koa-bodyparser'
 import { app } from 'electron'
+import { randomUUID } from 'node:crypto'
 import { Server as HttpServer } from 'http'
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'https'
 import routes from './routes'
@@ -31,8 +32,9 @@ import {
   safeKeyEquals,
 } from './authPolicy'
 import { autoRouter } from './autoRouter'
-import { buildRouteError, isModelApiPath } from './routeErrorPolicy'
-import { buildRejectionLogEntry, requestedModelOf } from './rejectionLog'
+import { managementRateLimiter } from './middleware/rateLimiter'
+import { buildRouteError, isModelApiPath, isUnmountedRouteNotFound } from './routeErrorPolicy'
+import { buildRejectionLogEntry, createUnmountedRouteTracer, requestedModelOf } from './rejectionLog'
 import { anthropicErrorBody } from '../../shared/anthropicWire'
 
 const SLOW_REQUEST_THRESHOLD_MS = 1500
@@ -125,6 +127,18 @@ function recordRejectedRequest(ctx: Context, statusCode: number, code: string, m
   storeManager.addRequestLog(entry)
   storeManager.recordRequestInStats(false, entry.latency, entry.model || undefined)
 }
+
+/**
+ * 未挂载路由的 `route_not_found` 404（Ollama 类客户端把本网关当成对端在轮询
+ * `GET /v1/props` 等路径）不再落请求日志的 error 行：它不是网关故障，曾占当天
+ * 非探测错误的 27%。痕迹改为 app 日志的折叠 warn（首次一条，重复按
+ * method+path 计数，出窗后再补一条含累计次数与首见时间的），口径与
+ * `getRequestLogStats` 排除 `kind:'probe'` 的先例一致 - 「不是真实流量，
+ * 但必须查得到」。响应状态码、响应体、错误 code 一字未改。
+ */
+const unmountedRouteTracer = createUnmountedRouteTracer({
+  log: (message, data) => storeManager.addLog('warn', message, { data }),
+})
 
 /**
  * Proxy Server Class
@@ -263,7 +277,10 @@ export class ProxyServer {
       try {
         await next()
       } finally {
-        inFlightRequests--
+        // 夹到 0：`stop()` 会把计数直接归零，此时若有请求在 `close()` 之后才走到
+        // finally，裸 `--` 会把一个本该为 0 的计数做成负数，下一次 start() 的闸
+        // 就凭空多出一档余量。
+        inFlightRequests = Math.max(0, inFlightRequests - 1)
       }
     })
 
@@ -282,8 +299,13 @@ export class ProxyServer {
       // The model list is polled by every client, so only its reads stay silent;
       // anything else on that path is a client misconfiguration worth a trace.
       const isModelListRead = ctx.method === 'GET' && ctx.path.startsWith('/v1/models')
+      // 未挂载 404 已由 catch-all 的折叠 tracer 接管（warn + 每请求 debug 行）；
+      // 这里再按 status>=400 打一条 warn，就是每轮 Ollama 轮询双刷 app 日志。
+      // 兜底中间件秒回，慢请求判据对它无意义，保留表达式本身不动别人的阈值语义。
+      const unmounted404Traced = ctx.state.unmountedRouteTraced === true
       const shouldRecordAccessLog =
         !isModelListRead &&
+        !unmounted404Traced &&
         (ctx.status >= 400 || latency >= SLOW_REQUEST_THRESHOLD_MS)
 
       if (shouldRecordAccessLog) {
@@ -382,6 +404,11 @@ export class ProxyServer {
 
     this.app.use(managementEnableCheck)
 
+    // 管理面限流：挂在 `/v1/management` 前缀上、位于 enable 检查之后 —— 关掉管理面时
+    // 的 404 探测不该消耗额度，而打开后的每一次调用（含暴力试密钥）都要计。
+    // 鉴权之前，所以计数键只能是 IP（见 middleware/rateLimiter.ts）。
+    this.app.use(managementRateLimiter())
+
     // Register all management routes (they already have /v1/management prefix)
     for (const route of managementRoutes) {
       this.app.use(route.routes())
@@ -404,6 +431,39 @@ export class ProxyServer {
         ctx.set('Allow', routeError.allow)
       }
       ctx.body = routeError.body
+
+      if (isUnmountedRouteNotFound(routeError)) {
+        // 未挂载 404：不写请求日志行、不进 recordRequestInStats（行与卡片/图表
+        // 保持同一集合）。header 契约不塌：这条响应新挂上 X-Request-Id，且每个
+        // id 都有一条 debug 行一一对应，折叠的 warn 再给出 method/path/clientIP
+        // 与累计计数。
+        const requestId = randomUUID()
+        ctx.set('X-Request-Id', requestId)
+        ctx.state.unmountedRouteTraced = true
+        unmountedRouteTracer.observe({
+          method: ctx.method,
+          path: ctx.path,
+          clientIP: ctx.ip,
+          requestId,
+          now: Date.now(),
+        })
+        storeManager.addLog(
+          'debug',
+          `Unmounted route: ${ctx.method} ${ctx.path} -> 404 route_not_found`,
+          {
+            data: {
+              method: ctx.method,
+              path: ctx.path,
+              status: 404,
+              code: 'route_not_found',
+              clientIP: ctx.ip,
+              requestId,
+            },
+          },
+        )
+        return
+      }
+
       recordRejectedRequest(ctx, routeError.status, routeError.body.error.code, routeError.body.error.message)
     })
   }
@@ -449,6 +509,11 @@ export class ProxyServer {
 
     this.port = port || proxyStatusManager.getPort()
     this.host = host || proxyStatusManager.getHost()
+
+    // 在途计数是模块级状态，上一次运行若在 `stop()` 之后仍残留（异常退出、
+    // closeAllConnections 掐断的请求不会再走到 finally），这里必须回到干净基线，
+    // 否则 100 的闸会带着一个虚高的起点提前拒绝。
+    inFlightRequests = 0
 
     const security = checkStartupSecurity({
       apiKeys: storeManager.getConfig().apiKeys,
@@ -636,6 +701,9 @@ export class ProxyServer {
           return
         }
 
+        // 所有监听都已关闭，在途请求要么已走完 finally、要么已被掐断。
+        // 显式归零，让「重启后闸被历史计数占满」这种跨生命周期污染不可能发生。
+        inFlightRequests = 0
         proxyStatusManager.stop()
         storeManager.addLog('info', 'Proxy server stopped')
         resolve(true)

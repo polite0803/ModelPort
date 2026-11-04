@@ -1,6 +1,6 @@
 # ModelPort 文档索引
 
-> 适用版本：v1.7.1 ｜ 最后核对：2026-11-04 ｜ 状态：现行
+> 适用版本：v1.7.3 ｜ 最后核对：2026-11-04 ｜ 状态：现行
 
 这是 `docs/` 下唯一的索引入口。所有文档按性质归入 `design/`（方案）、`plan/`（计划）、
 `audit/`（审计）与 `features/`（功能手册）四类；供应商笔记、上游快照与数据票据保留在原有旁支目录。索引覆盖
@@ -57,7 +57,7 @@
 | [`design/PLAN-model-list-scheduler.md`](design/PLAN-model-list-scheduler.md) | 三类供应商模型清单的周期刷新调度器与周期拍板，已落地于 `src/main/scheduler/` | v1.6.1 | 现行 | 2026-11-03 |
 | [`design/2026-05-26-in-app-update-design.md`](design/2026-05-26-in-app-update-design.md) | 应用内更新（electron-updater 检查、下载、重启安装）设计方案 | v1.3.0 | 历史记录 | 2026-05-26 |
 | [`design/2026-05-27-modelport-tool-testing-skills-design.md`](design/2026-05-27-modelport-tool-testing-skills-design.md) | 工具调用测试技能集（管理 API、HAR、客户端回放、模型矩阵）设计 | v1.3.0 | 历史记录 | 2026-05-27 |
-| [`design/2026-11-04-model-metadata-resolution.md`](design/2026-11-04-model-metadata-resolution.md) | 《模型元数据自动标注的分层解析链》：六层来源优先级（人工标记 > 上游声明 > 标准库 > 实测探测 > 家族规则 > 成本台账）、`ModelFact` 结构与分库、探测档位与 TTL、覆盖率与对外暴露门槛 | v1.7.1 | 现行 | 2026-11-04 |
+| [`design/2026-11-04-model-metadata-resolution.md`](design/2026-11-04-model-metadata-resolution.md) | 《模型元数据自动标注的分层解析链》：六层来源优先级（人工标记 > 上游声明 > 标准库 > 实测探测 > 家族规则 > 成本台账）、`ModelFact` 结构与分库、探测档位与 TTL、覆盖率与对外暴露门槛 | v1.7.3 | 现行 | 2026-11-04 |
 
 ## 计划（plan/）
 
@@ -83,6 +83,7 @@
 | [`audit/PLAN-api-defects.md`](audit/PLAN-api-defects.md) | `/v1/*` 鉴权、契约、失败语义与工具调用的两轮缺陷核查与修复结论 | v1.4.0 | 历史记录 | 2026-10-27 |
 | [`audit/PLAN-api-defects-status.md`](audit/PLAN-api-defects-status.md) | 上述修复的门禁读数、完成清单与遗留项状态 | v1.4.0 | 历史记录 | 2026-10-27 |
 | [`audit/PLAN-channel-auto-stability.md`](audit/PLAN-channel-auto-stability.md) | 渠道与 auto 路由连接稳定性的实测取证（192.168.85.131）与修复批次 | v1.4.10 | 历史记录 | 2026-11-01 |
+| [`audit/DEFECT_ANALYSIS_REPORT.md`](audit/DEFECT_ANALYSIS_REPORT.md) | 主进程关键子系统的逐文件缺陷核查（限流、脱敏、调试输出、探测终局、巡检写盘放大）与完善建议；本仓按 `AGENTS-full.md` 口径对照，落地的修复见 CHANGELOG v1.7.3 | v1.7.3 | 历史记录 | 2026-11-04 |
 
 ## 功能手册（features/）
 
@@ -90,11 +91,11 @@
 
 | 文档 | 说明 | 适用版本 | 状态 | 日期 |
 | --- | --- | --- | --- | --- |
-| [`features/data-backup.md`](features/data-backup.md) | 完整备份与迁移：导出范围、跨机凭据「解密再重封」、口令封装、覆盖/合并语义、导入 token 与重启 | v1.7.2 | 现行 | 2026-11-04 |
-| [`features/desktop-ui-updates.md`](features/desktop-ui-updates.md) | 桌面界面与更新：主/渲染进程分工、具名 IPC、单实例与托盘、开机自启对账、`electron-updater` 检查下载安装 | v1.7.1 | 现行 | 2026-11-04 |
-| [`features/https-certificate-trust.md`](features/https-certificate-trust.md) | HTTPS 与证书信任：8443 TLS 监听、托管自签与自带 PEM 两种来源、SAN 覆盖、系统信任库与 Node 客户端的 `NODE_EXTRA_CA_CERTS` 通路 | v1.7.1 | 现行 | 2026-11-04 |
-| [`features/logging-diagnostics.md`](features/logging-diagnostics.md) | 日志与诊断：请求行的尝试/`streamTrace` 读数、错误保留下限、脱敏与截断、`X-ModelPort-Trace` 与诊断包导出 | v1.7.1 | 现行 | 2026-11-04 |
-| [`features/providers-accounts.md`](features/providers-accounts.md) | 渠道与账号：聚合目录（89 条 / 570 模型）、账号渠道、自定义供应商三类的记录来源、凭据与清单归属 | v1.7.1 | 现行 | 2026-11-04 |
+| [`features/data-backup.md`](features/data-backup.md) | 完整备份与迁移：导出范围、跨机凭据「解密再重封」、口令封装、覆盖/合并语义、导入 token 与重启 | v1.7.3 | 现行 | 2026-11-04 |
+| [`features/desktop-ui-updates.md`](features/desktop-ui-updates.md) | 桌面界面与更新：主/渲染进程分工、具名 IPC、单实例与托盘、开机自启对账、`electron-updater` 检查下载安装 | v1.7.3 | 现行 | 2026-11-04 |
+| [`features/https-certificate-trust.md`](features/https-certificate-trust.md) | HTTPS 与证书信任：8443 TLS 监听、托管自签与自带 PEM 两种来源、SAN 覆盖、系统信任库与 Node 客户端的 `NODE_EXTRA_CA_CERTS` 通路 | v1.7.3 | 现行 | 2026-11-04 |
+| [`features/logging-diagnostics.md`](features/logging-diagnostics.md) | 日志与诊断：请求行的尝试/`streamTrace` 读数、错误保留下限、脱敏与截断、`X-ModelPort-Trace` 与诊断包导出 | v1.7.3 | 现行 | 2026-11-04 |
+| [`features/providers-accounts.md`](features/providers-accounts.md) | 渠道与账号：聚合目录（89 条 / 570 模型）、账号渠道、自定义供应商三类的记录来源、凭据与清单归属 | v1.7.3 | 现行 | 2026-11-04 |
 
 ## 参考与旁支目录
 
@@ -102,17 +103,17 @@
 
 | 文档或目录 | 说明 | 适用版本 | 状态 |
 | --- | --- | --- | --- |
-| [`README.md`](README.md) | 本索引：分类规则、全量清单与版本/状态维护方式 | v1.7.1 | 现行 |
-| [`AGENTS-full.md`](AGENTS-full.md) | 完整子系统参考；每条规则背后的故障与边界 | v1.7.1 | 现行 |
-| [`../AGENTS.md`](../AGENTS.md) | 编码代理的简版规则书：构建门禁、架构、不变量 | v1.7.1 | 现行 |
+| [`README.md`](README.md) | 本索引：分类规则、全量清单与版本/状态维护方式 | v1.7.3 | 现行 |
+| [`AGENTS-full.md`](AGENTS-full.md) | 完整子系统参考；每条规则背后的故障与边界 | v1.7.3 | 现行 |
+| [`../AGENTS.md`](../AGENTS.md) | 编码代理的简版规则书：构建门禁、架构、不变量 | v1.7.3 | 现行 |
 | [`../CODE_WIKI.md`](../CODE_WIKI.md) | 较早的模块定位概览；与 `AGENTS.md` 冲突时以后者为准 | v1.7.0 | 部分过期 |
-| [`../README.md`](../README.md)、[`../README_CN.md`](../README_CN.md) | 面向使用者的安装、配置与运行说明 | v1.7.1 | 现行 |
-| [`providers/README.md`](providers/README.md) | 三类供应商的存储、命名空间与聚合保存流程 | v1.7.1 | 现行 |
-| [`providers/opencode.md`](providers/opencode.md) | `opencode` 账号渠道，以及已退役本机运行时的区分 | v1.7.1 | 现行 |
+| [`../README.md`](../README.md)、[`../README_CN.md`](../README_CN.md) | 面向使用者的安装、配置与运行说明 | v1.7.3 | 现行 |
+| [`providers/README.md`](providers/README.md) | 三类供应商的存储、命名空间与聚合保存流程 | v1.7.3 | 现行 |
+| [`providers/opencode.md`](providers/opencode.md) | `opencode` 账号渠道，以及已退役本机运行时的区分 | v1.7.3 | 现行 |
 | [`upstream/workbuddy-v2.5.1/README.md`](upstream/workbuddy-v2.5.1/README.md) | WorkBuddy v2.5.1 逐字快照的来源、校验和与用途 | v1.6.1 | 历史记录 |
-| [`repo-description.md`](repo-description.md) | GitHub “About” 文案：短描述与长介绍 | v1.7.1 | 现行 |
-| [`data/`](data/) | 生成型 sidecar 的源票据（`models-dev-cost.json`、`models-dev-capabilities.json`、`free-quota-research/*.json`）；只改票据再跑 builder | v1.7.1 | 现行 |
-| [`screenshots/`](screenshots/) | README 使用的截图资源；不存在的页面不应保留旧图 | v1.7.1 | 现行 |
+| [`repo-description.md`](repo-description.md) | GitHub “About” 文案：短描述与长介绍 | v1.7.3 | 现行 |
+| [`data/`](data/) | 生成型 sidecar 的源票据（`models-dev-cost.json`、`models-dev-capabilities.json`、`free-quota-research/*.json`）；只改票据再跑 builder | v1.7.3 | 现行 |
+| [`screenshots/`](screenshots/) | README 使用的截图资源；不存在的页面不应保留旧图 | v1.7.3 | 现行 |
 
 数据票据与生成物的对应关系：
 
@@ -125,7 +126,7 @@
 ## 版本与状态字段怎么维护
 
 - **适用版本**：这份文档描述的代码状态对应的版本号。现行文档统一对齐 `package.json` 的当前
-  版本（1.7.1）；历史文档写“成文版本”，按撰写时点的 CHANGELOG 版本边界判定，无法确定的写
+  版本（1.7.3）；历史文档写“成文版本”，按撰写时点的 CHANGELOG 版本边界判定，无法确定的写
   “待核对”，不编造。
 - **状态**：`现行`（内容与当前代码一致）、`部分过期`（主体可用但含已退役内容）、`已退休`
   （所述能力已整体移除，需写明“自 v某版本起退役”）、`历史记录`（成文时的计划或审计记录，

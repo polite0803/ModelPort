@@ -108,14 +108,41 @@ type Fact<T> = KnownFact<T> | UnclassifiedFact
 
 ## 6. 覆盖率指标与对外暴露门槛
 
-覆盖率按**属性**统计：
+### 6.1 属性分组（2026-11-04 裁定）
+
+九项属性按「路由是否真的据此判断」分成两组，判据来自 `proxy/autoRouting.ts`，不是按观感挑：
+
+| 组 | 属性 | 为什么 |
+| --- | --- | --- |
+| 关键 `ROUTING_METADATA_ATTRIBUTES` | `vision` / `tools` / `reasoning` / `modalities` / `contextTokens` / `maxOutputTokens` | 前四项参与 `hardFilterFailure` 与 `supportsVision` 的候选筛选，`contextTokens` 是容量硬过滤与对外承诺的输入，`maxOutputTokens` 决定要不要裁剪请求 |
+| 参考 `REFERENCE_METADATA_ATTRIBUTES` | `modelType` / `weight` / `free` | `modelType` 由 `modalities`/`vision` **派生**，算进完整度等于同一份证据数两遍；`weight`/`free` 是计费展示与「免费优先」排序的输入，缺了不影响一次请求能否成 |
+
+**不适用 ≠ 未标注**（`isAttributeApplicable`）：`weight` 是渠道包的积分倍率，只有 `account`
+provider 存在这个概念；`free` 对 `account`（`· 免费` 标签 / 上游 `isFree`）和 `aggregate`
+（`docs/data` 成本票据）有出处，`custom`/`builtin` 没有任何生产者。这类行不进该属性的分母，
+也不算缺口。
+
+**关键 ≠ 自动补齐**：分组说的是「路由会不会因为这个属性不知道而判断错」，不是「批量一定要
+把它填上」。`reasoning` 是关键属性，但标准库的值只允许逐字段手工采用（§9.3），所以它可能长期
+留在缺口里——那是一个诚实的「上游没证据」，不是一个待办。
+
+> 这一条是 1.7.2 那轮观感「补齐没效果」的根因：旧口径把「已完整标注」定义成九项全有来源，
+> 于是聚合侧 570 行因为 `weight` 按构造补不上而永远挂在「仍有缺失」里——1000 行报 998 行缺失，
+> 数字与两轮第三方标注、探测的实际进展无关。
+
+### 6.2 覆盖率
 
 ```
-coverage[attr] = { known: 已知的行数, total: 当前目录总行数, rate: known / total }
+coverage[attr] = { known, total, applicable, notApplicable, rate: known / applicable }
+coverageGaps[attr] = applicable - known
 ```
 
-`rate` 为 0–1 的比值，界面按百分比显示。分母只算启用供应商的目录（含停用但仍在目录里的行），
-与「待标注队列」同源，避免两个页面各算一套。
+分母是**适用**行数，界面与「待标注队列」同源（同一批 records、同一套适用性判据）。
+`totals = { models, routingComplete, routingIncomplete, fullyAnnotated }`：
+`routingComplete` 用 `isRoutingComplete`（六项关键属性全有来源）判定，
+`fullyAnnotated` 保留「全部适用项都有来源」作为次要读数（聚合行没有 `weight` 这一项，是 8 而不是 9），
+界面用它说明上限还有多远。
+队列只留仍有**适用**缺口的行，每行带 `critical`：`false` 表示关键属性已齐、只剩参考项。
 
 **对外暴露门槛**（不可协商，源自 AGENTS.md；判据是**误差方向**，不是来源标签）：
 
@@ -269,6 +296,16 @@ interface CatalogStore {
   换算成 **USD / 1M tokens**（LiteLLM/OpenRouter 的 per-token 值 × 1e6），之后不再换算。
   换算显式固定：先按 `max / 1e6` 反推上限避免先乘后溢出，再乘 1e6 并保留 6 位小数；
   超上限的字段丢弃而不是截断成 10,000,000。
+- **`reasoning`（2026-11-04 追加）**：三个来源分开定口径，都经 `capabilityFlag` 收口。
+  models.dev 的顶层 `reasoning` 是 schema 里的显式布尔，`true` 与 `false` 都是**声明**，
+  两个方向都收（与同源的 `attachment` / `tool_call` 一致）；OpenRouter 的
+  `supported_parameters` 是「这条端点实测可用的参数清单」而不是完整能力表，只列出
+  `reasoning` 才写 `yes`，**缺席不折成 `no`**；LiteLLM 台账没有这个键，一律不写。
+  这条与聚合旁表 `shared/aggregateCapabilities.ts` 的「只采 `true`」不是同一口径：那张表
+  是社区填表、`false` 更可能是「没填」，而 catalog 层的 `vision`/`tools` 早已按「显式布尔
+  两向都收」处理，`reasoning` 跟随后者。加上这一项之前，`reasoning` 在标准库层根本没有
+  生产者，覆盖率里它是一个永远补不上的洞。采用范围与 `vision`/`tools` 不同：只允许逐字段
+  手工采用，不进批量自动采用（理由见 §9.3）。
 
 ### 9.2 端点回退与内置兜底
 
@@ -326,7 +363,11 @@ interface CatalogStore {
 - **默认不自动采用**：界面列出候选与置信度徽标，用户必须逐字段点击「采用」；刷新快照
   或打开页面本身不会改变任何模型的可路由能力。唯一的批量入口是用户点击「全部补齐」后
   由主进程自动执行：`exact`/`alias` 自动采用（alias 在结果中标注来源），`family` 只作
-  候选，价格不参与自动采用；采用仍按字段写入 ledger。
+  候选，价格与 `reasoning` 不参与自动采用（`CATALOG_BATCH_AUTO_FIELDS`）；采用仍按字段写入 ledger。
+- **`reasoning` 只允许逐字段手工采用**：它是 `hardFilterFailure` 的判据之一（请求要求思考时，
+  `reasoning: 'no'` 的候选被排除），而第三方台账对它的 `false` 常常只是「按默认回答」。批量写入
+  等于让一份社区表格获得把模型从请求里筛掉的权力；误判的代价是用户看不见那个模型，不是一次
+  次优路由。想要这个效果就得在候选对话框里逐字段点「采用」——显式动作，随时可撤销。
 - 候选查询一次建索引（`buildCatalogIndex`），不为每条模型重扫全量快照。
 
 ### 9.4 Adoption ledger（按字段采用、可撤销）
@@ -339,7 +380,7 @@ interface CatalogAdoption {
   providerId: string
   displayName: string
   catalogId: string          // `${source}:${provider ?? ''}:${id}`
-  field: 'contextTokens' | 'maxOutputTokens' | 'price' | 'modalities' | 'vision' | 'tools'
+  field: 'contextTokens' | 'maxOutputTokens' | 'price' | 'modalities' | 'vision' | 'tools' | 'reasoning'
   value: unknown             // 写入前经 sanitizeCatalogAdoptionValue
   source: CatalogSourceId
   evidenceId: string         // `${快照 contentHash}:${条目 id}`，可追溯用的是哪份数据

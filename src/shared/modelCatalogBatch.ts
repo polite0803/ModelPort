@@ -21,7 +21,16 @@ import {
   type ProbeScope,
 } from './modelProbe.ts'
 
-/** 自动采用字段：价格只展示，绝不进入自动采用。 */
+/**
+ * 自动采用字段：价格只展示，绝不进入自动采用；`reasoning` 同样不自动采用。
+ *
+ * `reasoning` 是可逐字段手工采用的标准库字段（`CATALOG_ADOPTION_FIELDS` 里有它），但不进批量：
+ * 它是 `hardFilterFailure` 的判据之一（`autoRouting.ts::needsReasoning` 命中时，`reasoning:'no'`
+ * 的候选会被排除），而第三方台账对它的判断是**单点类比**——models.dev 报 `false` 常常只是
+ * 「这张表按默认回答」。批量把这个值写进几千行，等于让一份社区表格获得「把模型从请求里
+ * 筛掉」的权力；一次误判的代价是用户看不到那个模型，而不是一次次优路由。
+ * 要这个效果就得由用户逐字段点「采用」，那是显式动作，且随时可撤销。
+ */
 export const CATALOG_BATCH_AUTO_FIELDS: readonly CatalogAdoptionField[] = [
   'contextTokens',
   'maxOutputTokens',
@@ -260,7 +269,7 @@ export function planCatalogBatchItem(
     actualModelId: row.actualModelId,
     matchConfidence: auto?.confidence,
     matchCatalogId: auto?.entry.catalogId,
-    familyCandidate: auto === undefined && matches.some((match) => match.confidence === 'family'),
+    familyCandidate: auto === undefined && matches.some((match) => match.confidence === 'family' || match.confidence === 'fuzzy'),
     adoptFields,
     probeScopes,
     probePlans,

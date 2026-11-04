@@ -7,7 +7,12 @@
         "cost": { "input": 3, "output": 15 },
         "modalities": { "input": ["text", "image"] },
         "attachment": true,
-        "tool_call": true
+        "tool_call": true,
+        "reasoning": true
+      },
+      "claude-haiku-4-20250514": {
+        "id": "claude-haiku-4-20250514",
+        "reasoning": false
       }
     }
   },

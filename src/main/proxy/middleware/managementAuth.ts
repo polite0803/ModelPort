@@ -105,7 +105,7 @@ export async function managementAuthMiddleware(ctx: Context, next: Next): Promis
   if (!providedToken) {
     ctx.status = 401
     ctx.body = createUnauthorizedResponse(
-      'Authentication required. Provide Authorization: Bearer <secret> or X-Management-Secret header',
+      'Authentication required. Provide Authorization: Bearer *** or X-Management-Secret header',
       'missing_authentication'
     )
     return
@@ -122,6 +122,9 @@ export async function managementAuthMiddleware(ctx: Context, next: Next): Promis
     return
   }
 
+  // 限流不在这里做：本文件是按路由注册的（有的 router 用 `router.use`，有的写在
+  // 单条路由上），在这里计数会随注册方式重复计数或漏计。管理面限流统一挂在
+  // `server.ts` 的 `/v1/management` 前缀中间件上（middleware/rateLimiter.ts）。
   await next()
 }
 

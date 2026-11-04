@@ -1394,7 +1394,6 @@ export interface AppLogTrendPoint {
 export interface ManagementApiConfig {
   enableManagementApi: boolean
   managementApiSecret: string
-  managementApiPort?: number
 }
 
 export interface ManagementApiResponse<T = unknown> {

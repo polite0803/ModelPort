@@ -12,6 +12,7 @@ import { resolveAggregateChain } from '../../shared/aggregateRouting'
 import { aggregateHeadroom, quotaBlockReason } from './quota/gate'
 import { resolveCaps } from './quota/limits'
 import { pickBestPace, pickSoonestReset, type AccountQuotaFacts } from '../../shared/quotaPacing'
+import { debugLog } from '../logging/debugLog'
 
 /**
  * Load Balancer
@@ -221,10 +222,12 @@ export class LoadBalancer {
         // 额度已打满的账号不进候选：让失败切换把一次上游请求花在有余额的那家身上
         .filter(account => !quotaBlockReason(provider, account.id, actualModel))
 
-      console.log(`[LoadBalancer] Provider ${provider.name} (${provider.id}) has ${accounts.length} available accounts`)
+      debugLog(`[LoadBalancer] Provider ${provider.name} (${provider.id}) has ${accounts.length} available accounts`)
 
       for (const account of accounts) {
-        console.log(`[LoadBalancer] Account ${account.name} (${account.id}) Token: ${(account.credentials.token || '').length}...`)
+        // 原来的这一行连 token 长度一起打；选路只需要知道「谁进了池」，
+        // 凭据的任何形态都不该出现在 stdout 上。
+        debugLog(`[LoadBalancer] Account ${account.name} (${account.id}) in pool`)
         candidates.push({
           account,
           provider,
@@ -254,7 +257,7 @@ export class LoadBalancer {
     })
 
     if (!routable) {
-      console.log(`[LoadBalancer] Provider ${provider.name} does not support model ${model}`)
+      debugLog(`[LoadBalancer] Provider ${provider.name} does not support model ${model}`)
     }
 
     return routable
@@ -279,7 +282,7 @@ export class LoadBalancer {
    * Map model name
    */
   private mapModel(model: string, provider: Provider): string {
-    console.log(`[LoadBalancer] mapModel called with model="${model}", provider="${provider.name}"`)
+    debugLog(`[LoadBalancer] mapModel called with model="${model}", provider="${provider.name}"`)
     
     const effectiveModels = storeManager.getEffectiveModels(provider.id)
     const effectiveModel = effectiveModels.find(m => 
@@ -287,7 +290,7 @@ export class LoadBalancer {
     )
     
     if (effectiveModel) {
-      console.log(`[LoadBalancer] Model mapped from "${model}" to "${effectiveModel.actualModelId}" via effective models`)
+      debugLog(`[LoadBalancer] Model mapped from "${model}" to "${effectiveModel.actualModelId}" via effective models`)
       return effectiveModel.actualModelId
     }
 
@@ -296,20 +299,20 @@ export class LoadBalancer {
 
     if (isMappingActive(mapping) && (!mapping.preferredProviderId || mapping.preferredProviderId === provider.id)) {
       const actualModel = mapping.actualModel
-      console.log(`[LoadBalancer] Model mapped from "${model}" to "${actualModel}" via global mapping`)
+      debugLog(`[LoadBalancer] Model mapped from "${model}" to "${actualModel}" via global mapping`)
       
       const actualEffectiveModel = effectiveModels.find(m => 
         m.displayName.toLowerCase() === actualModel.toLowerCase()
       )
       if (actualEffectiveModel) {
-        console.log(`[LoadBalancer] Model further mapped from "${actualModel}" to "${actualEffectiveModel.actualModelId}" via effective models`)
+        debugLog(`[LoadBalancer] Model further mapped from "${actualModel}" to "${actualEffectiveModel.actualModelId}" via effective models`)
         return actualEffectiveModel.actualModelId
       }
       
       return actualModel
     }
 
-    console.log(`[LoadBalancer] No mapping found, returning original model "${model}"`)
+    debugLog(`[LoadBalancer] No mapping found, returning original model "${model}"`)
     return model
   }
 

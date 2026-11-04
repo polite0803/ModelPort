@@ -674,7 +674,6 @@ interface TrayAPI {
 interface ManagementApiConfig {
   enableManagementApi: boolean
   managementApiSecret: string
-  managementApiPort?: number
 }
 
 interface ManagementApiAPI {

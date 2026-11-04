@@ -175,14 +175,21 @@ export function attachContextWindows(
  * 目录条目 → `auto` 路由用的能力标注。
  *
  * 只写目录**明确说了**的字段：`supportsImage` 缺失表示渠道没给模态信息，
- * 不能写成 `no`；倍率缺失同理，`free` 只在确认为真时写。没有任何已知字段
- * 时返回 `undefined`，调用方据此不写记录（保持未知）。
+ * 不能写成 `no`；倍率缺失同理。没有任何已知字段时返回 `undefined`，调用方据此
+ * 不写记录（保持未知）。
+ *
+ * `free` 有两个方向，但都必须是**证据**而不是默认值：
+ * - `· 免费` 标签 / 上游 `isFree: true` → `free: true`；
+ * - 明确的正倍率（`· x1.5`、`x0.2→x0.1`）→ `free: false`：按倍率扣积分就不可能
+ *   同时是免费模型，这是从渠道自己的报价读出来的，不是「没标注折成 false」；
+ * - 倍率缺失（trae / minimax 这类不报倍率的渠道）→ 两个都不写，保持未知。
  */
 export function capabilityHintOf(model: ChannelModelInfo): ModelCapabilityHint | undefined {
   const hint: ModelCapabilityHint = {}
   if (model.supportsImage !== undefined) hint.vision = model.supportsImage ? 'yes' : 'no'
   if (model.weight !== undefined) hint.weight = model.weight
   if (model.free) hint.free = true
+  else if (model.weight !== undefined && model.weight > 0) hint.free = false
   // 窗口只在渠道包明确说了时才写。写成 0 或猜一个值，会让 `auto` 在长上下文请求上
   // 把这条渠道直接判成「装不下」而排除掉（`autoRouting.ts` 拿 `contextTokens` 硬过滤）。
   if (model.contextWindow !== undefined) hint.contextTokens = model.contextWindow

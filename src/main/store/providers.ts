@@ -5,6 +5,7 @@
 
 import { storeManager } from './store'
 import { Provider, ProviderType, AuthType, BUILTIN_PROVIDERS } from './types'
+import type { ProviderStatus } from '../../shared/types'
 
 /**
  * Provider Manager Class
@@ -155,14 +156,63 @@ export class ProviderManager {
     }
     
     const updated = storeManager.updateProvider(id, updates)
-    
+
     if (updated) {
-      storeManager.addLog('info', `Update provider: ${existing.name}`, {
-        providerId: id,
-      })
+      // 留痕的判据：一次更新真的动了东西才值得一条 info。
+      // 实测一轮巡检 23 条同文案 info（一天 3829 行）把别的事件从日志里挤掉了，而
+      // `logLevel` 默认是 'info' —— 降到 debug 等于直接不记（`shouldRecordLog`），
+      // UI 手工改供应商的证据也就没了。所以这里不降级，只把「纯状态快照且状态没变」
+      // 这一类不重复占行；其余照旧 info。
+      const statusFlipped = 'status' in updates && updates.status !== existing.status
+      const snapshotOnly = Object.keys(updates).every(
+        (key) => key === 'status' || key === 'lastStatusCheck',
+      )
+
+      if (snapshotOnly && !statusFlipped) {
+        // 纯快照、状态未变：store 已经写过（updatedAt），不再打一行「Update provider」
+      } else if (statusFlipped) {
+        storeManager.addLog(
+          'info',
+          `Update provider: ${existing.name} (${existing.status ?? 'unknown'} → ${updates.status})`,
+          {
+            providerId: id,
+          },
+        )
+      } else {
+        storeManager.addLog('info', `Update provider: ${existing.name}`, {
+          providerId: id,
+        })
+      }
     }
-    
+
     return updated
+  }
+
+  /**
+   * 健康巡检快照的唯一落盘入口：**只有状态真的相对库里那份翻转才写**。
+   *
+   * `provider.status` 在 store 里的语义是「最后一次已知快照（重启后没有实时检查结果时
+   * 的兜底）」，实时显示走的是检查返回值本身：
+   * - `renderer/src/stores/dashboardStore.ts` 用 `check?.status ?? provider.status`；
+   * - `renderer/src/components/providers/ProviderCard.tsx` 注释原文：「现场检查的结果
+   *   优先：provider.status 是上次落库的那份快照」。
+   * 所以未翻转时不写：省掉一次 `data.json`（加密、940KB）的整份序列化 + 落盘，也省掉
+   * 一行日志。`lastStatusCheck` 的语义随之从「最后一次检查时间」变成「最后一次状态
+   * 变化时间」—— 全仓没有任何消费方读它（只有这两处巡检写入），所以这个收窄是零成本的。
+   *
+   * @returns 是否真的写了盘
+   */
+  static persistStatusSnapshot(
+    id: string,
+    status: ProviderStatus,
+    now: number = Date.now(),
+  ): boolean {
+    const existing = storeManager.getProviderById(id)
+
+    if (!existing) return false
+    if (existing.status === status) return false
+
+    return this.update(id, { status, lastStatusCheck: now }) !== null
   }
 
   /**

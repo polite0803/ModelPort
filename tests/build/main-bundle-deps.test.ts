@@ -37,6 +37,15 @@ test('packaging ships no node_modules, so electron-store must stay bundled', () 
     /['"]electron-store['"]/,
     'electron-store must be in the exclude list (bundled), never external: the packaged app has no node_modules',
   )
+
+  // 管理面限流是同一个坑：server.ts 静态 import koa-ratelimit，一旦留作 external，
+  // 安装包在启动时就会 ERR_MODULE_NOT_FOUND（整条代理起不来，不只是限流失效）。
+  assert.ok(pkg.dependencies?.['koa-ratelimit'], 'koa-ratelimit must remain a runtime dependency')
+  assert.match(
+    mainExclude,
+    /['"]koa-ratelimit['"]/,
+    'koa-ratelimit must be in the exclude list (bundled), never external',
+  )
 })
 
 /**

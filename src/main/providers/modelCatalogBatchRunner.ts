@@ -19,6 +19,7 @@ import {
   planCatalogBatchItem,
   type CatalogBatchEstimate,
   type CatalogBatchFailure,
+  type CatalogBatchPlanItem,
   type CatalogBatchRowOutcome,
   type CatalogBatchSnapshot,
   type CatalogBatchStartInput,
@@ -31,7 +32,16 @@ import { enabledModelRoutes, resolvePoolRoute } from '../store/modelRoutes.ts'
 import { getCatalogCandidates, adoptCatalogField } from './modelCatalogService.ts'
 import { getModelMetadataReport } from './modelMetadataService.ts'
 import { runModelCapabilityProbe } from './modelProbeRunner.ts'
+import { getProbeRowsSync } from './modelProbeStore.ts'
+import { indexProbeRows, probeRowKey, probeTerminalOf } from '../../shared/modelProbe.ts'
 import type { ProbeFailureKind } from '../../shared/modelProbe.ts'
+import {
+  classifyProbeModality,
+  decideProbeGate,
+  type ProbeGateDecision,
+  type ProbeModalityFacts,
+  type ProbeTerminalVerdict,
+} from '../../shared/probeDisposition.ts'
 
 /** 内部节奏：每 10 个模型为一个隐式批次，跑完自动继续，界面不展示。 */
 export const CATALOG_BATCH_SIZE = 10
@@ -214,6 +224,79 @@ function filterBatchTargets(rows: readonly ModelMetadataRow[]): FilteredTargets 
   return { targets, skippedDisabled }
 }
 
+/**
+ * 探测闸门的规划侧快照。
+ *
+ * 每行现建一次而不是任务开始时建一次：账号级终局是在这一轮的头一个模型上
+ * 换来的，同一 provider 后面那十四个要在**本轮**就吃到它，否则今天 ModelScope
+ * 那种「一家 15 个模型 ×2 次全 403」还是会每轮重来一遍。
+ * 读的是 `getProbeRowsSync()` 的进程内快照，不在热路径上做 I/O。
+ */
+interface ProbeGateSnapshot {
+  nowMs: number
+  providerEnabledById: Map<string, boolean>
+  terminalByKey: Map<string, ProbeTerminalVerdict>
+  accountTerminalByProvider: Map<string, ProbeTerminalVerdict>
+}
+
+function buildProbeGateSnapshot(nowMs: number = Date.now()): ProbeGateSnapshot {
+  const providerEnabledById = new Map<string, boolean>()
+  for (const provider of storeManager.getProviders()) {
+    providerEnabledById.set(provider.id, provider.enabled !== false)
+  }
+  const terminalByKey = new Map<string, ProbeTerminalVerdict>()
+  const accountTerminalByProvider = new Map<string, ProbeTerminalVerdict>()
+  for (const row of getProbeRowsSync()) {
+    const terminal = probeTerminalOf(row, nowMs)
+    if (terminal === undefined) continue
+    terminalByKey.set(probeRowKey(row), terminal)
+    if (terminal.scope !== 'account') continue
+    const held = accountTerminalByProvider.get(row.providerId)
+    if (held === undefined || Date.parse(terminal.asOf) > Date.parse(held.asOf)) {
+      accountTerminalByProvider.set(row.providerId, terminal)
+    }
+  }
+  return { nowMs, providerEnabledById, terminalByKey, accountTerminalByProvider }
+}
+
+/** 只有 `declared` 置信度的模态声明才有资格阻断（缺席即未知，未知就放行）。 */
+function rowModalityFacts(row: ModelMetadataRow): ProbeModalityFacts {
+  const fact = row.modalities
+  if (fact?.state !== 'known' || fact.confidence !== 'declared') return {}
+  return { inputModalities: fact.value }
+}
+
+function gateDecisionFor(row: ModelMetadataRow, snapshot: ProbeGateSnapshot): ProbeGateDecision {
+  const terminal = snapshot.terminalByKey.get(probeRowKey(row))
+  const accountTerminal = snapshot.accountTerminalByProvider.get(row.providerId)
+  return decideProbeGate({
+    providerEnabled: snapshot.providerEnabledById.get(row.providerId),
+    modality: classifyProbeModality(rowModalityFacts(row)),
+    ...(terminal === undefined ? {} : { terminal }),
+    ...(accountTerminal === undefined ? {} : { accountTerminal }),
+  })
+}
+
+/**
+ * 把闸门落到计划项上：被拦下的条目保留匹配与采用（那是离线工作，不花上游请求），
+ * 只把探测 scope 摘干净并重算成本 —— 预演显示的条数因此永远等于真正会发的条数。
+ */
+function applyProbeGate(
+  item: CatalogBatchPlanItem,
+  row: ModelMetadataRow,
+  snapshot: ProbeGateSnapshot,
+): CatalogBatchPlanItem {
+  if (item.probeScopes.length === 0) return item
+  if (gateDecisionFor(row, snapshot).probe) return item
+  return {
+    ...item,
+    probeScopes: [],
+    probePlans: [],
+    probeRequests: 0,
+    probeTokens: 0,
+  }
+}
+
 async function processRow(
   record: BatchJobRecord,
   row: ModelMetadataRow,
@@ -231,7 +314,11 @@ async function processRow(
     displayName: row.displayName,
     actualModelId: row.actualModelId,
   })
-  const plan = planCatalogBatchItem(row, candidates.matches, candidates.adoptions)
+  const plan = applyProbeGate(
+    planCatalogBatchItem(row, candidates.matches, candidates.adoptions),
+    row,
+    buildProbeGateSnapshot(),
+  )
   if (record.abort.signal.aborted) {
     return { status: 'skipped', adopted: 0, measuredFields: 0, alias: false }
   }
@@ -288,6 +375,8 @@ async function processRow(
           displayName: row.displayName,
           scope,
           force: false,
+          // 批量是唯一会吃终局缓存的发起方；单模型点击永远重问并作废缓存。
+          origin: 'batch',
           run: {
             jobId: `${record.snapshot.jobId}:${scope}`,
             signal: record.abort.signal,
@@ -442,6 +531,8 @@ async function runJob(record: BatchJobRecord): Promise<void> {
 export async function estimateCatalogBatch(): Promise<CatalogBatchEstimate> {
   const report = await getModelMetadataReport()
   const filtered = filterBatchTargets(report.queue)
+  // 预演与执行读同一道闸门（`applyProbeGate`），差别只是预演期间不会有人写终局。
+  const snapshot = buildProbeGateSnapshot()
   const items = []
   for (const row of filtered.targets) {
     const candidates = await getCatalogCandidates({
@@ -449,7 +540,7 @@ export async function estimateCatalogBatch(): Promise<CatalogBatchEstimate> {
       displayName: row.displayName,
       actualModelId: row.actualModelId,
     })
-    items.push(planCatalogBatchItem(row, candidates.matches, candidates.adoptions))
+    items.push(applyProbeGate(planCatalogBatchItem(row, candidates.matches, candidates.adoptions), row, snapshot))
   }
   return estimateCatalogBatchPlan(items, filtered.skippedDisabled)
 }

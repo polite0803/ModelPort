@@ -9,76 +9,13 @@ import { managementAuthMiddleware } from '../../middleware/managementAuth'
 import ConfigManager from '../../../store/config'
 import type { ManagementApiResponse, ConfigUpdateRequest } from '../../../../shared/types'
 import type { AppConfig } from '../../../store/types'
+// 脱敏口径统一在 main/logging/maskConfig.ts：同一条规则同时约束配置变更日志与
+// 管理接口响应体，否则「HTTP 已脱敏、日志仍明文」的分叉会重新长出来。
+import { maskConfig, maskSensitiveValue } from '../../../logging/maskConfig'
 
 const router = new Router({ prefix: '/v1/management/config' })
 
 router.use(managementAuthMiddleware)
-
-const SENSITIVE_KEYS = ['managementApiSecret', 'apiKeys', 'credentials']
-
-function maskSensitiveValue(value: unknown, key?: string): unknown {
-  if (typeof value === 'string') {
-    if (key && SENSITIVE_KEYS.some(k => key.toLowerCase().includes(k.toLowerCase()))) {
-      return '***'
-    }
-    return value
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((item, index) => {
-      if (typeof item === 'object' && item !== null) {
-        return maskSensitiveObject(item as Record<string, unknown>)
-      }
-      return maskSensitiveValue(item)
-    })
-  }
-
-  if (typeof value === 'object' && value !== null) {
-    return maskSensitiveObject(value as Record<string, unknown>)
-  }
-
-  return value
-}
-
-function maskSensitiveObject(obj: Record<string, unknown>): Record<string, unknown> {
-  const masked: Record<string, unknown> = {}
-
-  for (const [key, value] of Object.entries(obj)) {
-    if (key === 'key' || key === 'managementApiSecret' || key === 'credentials') {
-      masked[key] = '***'
-    } else if (key === 'apiKeys' && Array.isArray(value)) {
-      masked[key] = value.map(apiKey => ({
-        ...apiKey,
-        key: '***',
-      }))
-    } else if (typeof value === 'object' && value !== null) {
-      masked[key] = maskSensitiveValue(value, key)
-    } else {
-      masked[key] = value
-    }
-  }
-
-  return masked
-}
-
-function maskConfig(config: AppConfig): Record<string, unknown> {
-  const masked = { ...config } as Record<string, unknown>
-
-  if (masked.managementApi) {
-    const managementApi = { ...(masked.managementApi as Record<string, unknown>) }
-    managementApi.managementApiSecret = '***'
-    masked.managementApi = managementApi
-  }
-
-  if (Array.isArray(masked.apiKeys)) {
-    masked.apiKeys = masked.apiKeys.map(apiKey => ({
-      ...(apiKey as Record<string, unknown>),
-      key: '***',
-    }))
-  }
-
-  return masked
-}
 
 router.get('/', async (ctx: Context) => {
   try {

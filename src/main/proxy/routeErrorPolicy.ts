@@ -63,6 +63,22 @@ export function buildRouteError(input: {
   }
 }
 
+/**
+ * True only for the 404 *this gateway* raises from its own catch-all
+ * (`route_not_found`): the client is polling a surface that was never mounted
+ * here (Ollama-style `GET /v1/props`). It is a client-configuration fact, not a
+ * gateway failure, so it must not join the request-log error rows - the
+ * fallback traces it in the app log instead (folded per method+path).
+ *
+ * Deliberately keyed on our own code string: an upstream-shaped 404 that means
+ * "this channel does not serve that model" (failover switches on it per
+ * AGENTS.md) carries a different code and keeps its request-log row, and a 405
+ * (`method_not_allowed`, a wrong call against a mounted route) keeps its row too.
+ */
+export function isUnmountedRouteNotFound(error: RouteError): boolean {
+  return error.status === 404 && error.body.error.code === 'route_not_found'
+}
+
 function allowedMethodsOf(layers?: RouteMatchLayer[]): string[] {
   const methods = new Set<string>()
   for (const layer of layers ?? []) {

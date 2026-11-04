@@ -79,6 +79,10 @@ export default defineConfig({
           // generator and its node-forge dependency must be rolled into the
           // main bundle (same reason as electron-store below).
           'selfsigned',
+          // 管理面限流：同样是运行时依赖，必须内联。`koa-ratelimit` 默认驱动是
+          // redis，我们只用 memory 驱动，但它仍会 require 到 async-ratelimiter/ms，
+          // 一并由 rollup 打进 out/main。
+          'koa-ratelimit',
           // ⚠️ electron-store 必须放进 exclude（= 打进 bundle），不能留作 external。
           //
           // 打包产物里根本没有 node_modules：`package.json` 的 build.files 排除了

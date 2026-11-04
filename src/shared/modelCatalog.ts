@@ -57,6 +57,7 @@ export const CATALOG_ADOPTION_FIELDS = [
   'modalities',
   'vision',
   'tools',
+  'reasoning',
 ] as const
 export type CatalogAdoptionField = (typeof CATALOG_ADOPTION_FIELDS)[number]
 
@@ -77,6 +78,12 @@ export interface CatalogEntry {
   modalities?: InputModality[]
   vision?: Exclude<CapabilityState, 'unknown'>
   tools?: Exclude<CapabilityState, 'unknown'>
+  /**
+   * 是否为推理（thinking）模型。models.dev 的 `reasoning` 是 schema 里的显式布尔，
+   * `false` 是**声明**而不是「没填」，所以这一项和 `vision`/`tools` 同口径收 yes/no 两值；
+   * openrouter 只在 `supported_parameters` 列出 `reasoning` 时写 `yes`（缺席不等于不支持）。
+   */
+  reasoning?: Exclude<CapabilityState, 'unknown'>
   price?: CatalogPrice
   source: CatalogSourceId
 }
@@ -209,7 +216,7 @@ const MAX_OUTPUT_TOKENS = 1_000_000
 const MAX_PRICE_PER_MILLION = 10_000_000
 const INPUT_MODALITIES: readonly InputModality[] = ['text', 'image', 'audio', 'video', 'pdf']
 
-export type CatalogMatchConfidence = 'exact' | 'alias' | 'family'
+export type CatalogMatchConfidence = 'exact' | 'alias' | 'family' | 'fuzzy'
 
 export interface CatalogMatch {
   entry: CatalogEntry
@@ -307,6 +314,7 @@ export function sanitizeCatalogEntry(
   const modalities = sanitizeModalities(value.modalities)
   const vision = capabilityFlag(value.vision)
   const tools = capabilityFlag(value.tools)
+  const reasoning = capabilityFlag(value.reasoning)
   const price = sanitizeCatalogPrice(value.price)
 
   const entry: CatalogEntry = {
@@ -324,6 +332,7 @@ export function sanitizeCatalogEntry(
   if (modalities !== undefined) entry.modalities = modalities
   if (vision !== undefined) entry.vision = vision
   if (tools !== undefined) entry.tools = tools
+  if (reasoning !== undefined) entry.reasoning = reasoning
   if (price !== undefined) entry.price = price
 
   // 一个字段都没有的条目没有采用价值，直接丢掉（它只会让匹配列表变长）。
@@ -333,6 +342,7 @@ export function sanitizeCatalogEntry(
     entry.modalities === undefined &&
     entry.vision === undefined &&
     entry.tools === undefined &&
+    entry.reasoning === undefined &&
     entry.price === undefined
   ) {
     return undefined
@@ -415,10 +425,10 @@ export function normalizeCatalogAlias(id: string): string {
   const slash = key.lastIndexOf('/')
   if (slash >= 0) key = key.slice(slash + 1)
   key = key.replace(/-[0-9]{4}-[0-9]{2}-[0-9]{2}$/, '')
-  key = key.replace(/-[0-9]{8}$/, '')
-  key = key.replace(/-latest$/, '')
-  key = key.replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
-  return key
+    key = key.replace(/-[0-9]{8}$/, '')
+    key = key.replace(/-latest$/, '')
+    key = key.replace(/[^a-z0-9]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
+    return key
 }
 
 /** 家族键：别名键的第一段（`claude-sonnet-4` → `claude`）。只在第三档用。 */
@@ -475,7 +485,7 @@ export function matchCatalogEntries(
       const key = `${entry.source}:${entry.catalogId}`
       const current = found.get(key)
       const rank = (value: CatalogMatchConfidence): number =>
-        value === 'exact' ? 0 : value === 'alias' ? 1 : 2
+        value === 'exact' ? 0 : value === 'alias' ? 1 : value === 'family' ? 2 : 3
       if (current === undefined || rank(confidence) < rank(current.confidence)) {
         found.set(key, { entry, confidence })
       }
@@ -495,10 +505,19 @@ export function matchCatalogEntries(
     consider(index.family.get(catalogFamilyKey(input.displayName)), 'family')
   }
 
+  // 第五档：模糊匹配（仅候选建议，不自动采用）
+  const fuzzy = fuzzyMatchEntries(index, input)
+  for (const match of fuzzy) {
+    const key = `${match.entry.source}:${match.entry.catalogId}`
+    if (!found.has(key)) {
+      found.set(key, match)
+    }
+  }
+
   return [...found.values()]
     .sort((a, b) => {
       const rank = (value: CatalogMatchConfidence): number =>
-        value === 'exact' ? 0 : value === 'alias' ? 1 : 2
+        value === 'exact' ? 0 : value === 'alias' ? 1 : value === 'family' ? 2 : 3
       if (rank(a.confidence) !== rank(b.confidence)) return rank(a.confidence) - rank(b.confidence)
       return a.entry.catalogId.localeCompare(b.entry.catalogId)
     })
@@ -520,6 +539,8 @@ export function catalogFieldValue(
       return entry.vision
     case 'tools':
       return entry.tools
+    case 'reasoning':
+      return entry.reasoning
     case 'price':
       return entry.price
   }
@@ -545,7 +566,8 @@ export function sanitizeCatalogAdoptionValue(
     case 'modalities':
       return sanitizeModalities(value)
     case 'vision':
-    case 'tools': {
+    case 'tools':
+    case 'reasoning': {
       const flag = capabilityFlag(value)
       return flag
     }
@@ -676,6 +698,9 @@ export function catalogAdoptionHint(
       case 'tools':
         if (adoption.value === 'yes' || adoption.value === 'no') hint.tools = adoption.value
         break
+      case 'reasoning':
+        if (adoption.value === 'yes' || adoption.value === 'no') hint.reasoning = adoption.value
+        break
       case 'price':
         // 只展示，不换算。显式空分支让这条口径可被审阅。
         break
@@ -684,6 +709,85 @@ export function catalogAdoptionHint(
   return Object.keys(hint).length === 0 ? undefined : hint
 }
 
+/** 为模糊匹配做的归一化：比 normalizeCatalogAlias 更激进，只保留字母数字。 */
+function normalizeFuzzyKey(input: string): string {
+  let key = input.trim().toLowerCase()
+  const slash = key.lastIndexOf('/')
+  if (slash >= 0) key = key.slice(slash + 1)
+  key = key.replace(/-[0-9]{4}-[0-9]{2}-[0-9]{2}$/, '')
+  key = key.replace(/-[0-9]{8}$/, '')
+  key = key.replace(/-latest$/, '')
+  // 只保留字母数字，其他全部去掉
+  key = key.replace(/[^a-z0-9]/g, '')
+  return key
+}
+
+/** 计算两个字符串的 bigram 重叠相似度 (0-1)，值越大越相似。 */
+function bigramSimilarity(a: string, b: string): number {
+  if (a === b) return 1
+  if (a.length < 2 || b.length < 2) return 0
+  const bigramsA = new Set<string>()
+  const bigramsB = new Set<string>()
+  for (let i = 0; i < a.length - 1; i++) bigramsA.add(a.slice(i, i + 2))
+  for (let i = 0; i < b.length - 1; i++) bigramsB.add(b.slice(i, i + 2))
+  let intersection = 0
+  for (const bg of bigramsA) {
+    if (bigramsB.has(bg)) intersection++
+  }
+  return (2 * intersection) / (bigramsA.size + bigramsB.size)
+}
+
+/** Fuzzy 匹配阈值：0.55 以上视为潜在匹配。 */
+const FUZZY_SIMILARITY_THRESHOLD = 0.55
+const FUZZY_MAX_RESULTS = 5
+
+/** 使用模糊匹配在目录索引中查找候选项。仅用于候选建议，不自动采用。 */
+export function fuzzyMatchEntries(
+  index: CatalogIndex,
+  input: { modelId: string; displayName?: string },
+): CatalogMatch[] {
+  const candidates = new Map<string, CatalogMatch>()
+  const seen = new Set<string>()
+
+  const tryMatch = (raw: string) => {
+    const key = normalizeFuzzyKey(raw)
+    if (key.length < 2) return
+    for (const entry of index.entries) {
+      const entryKey = normalizeFuzzyKey(entry.id)
+      if (entryKey.length < 2) continue
+      const similarity = bigramSimilarity(key, entryKey)
+      if (similarity >= FUZZY_SIMILARITY_THRESHOLD) {
+        const catalogKey = `${entry.source}:${entry.catalogId}`
+        if (!seen.has(catalogKey)) {
+          seen.add(catalogKey)
+          candidates.set(catalogKey, { entry, confidence: 'fuzzy' as const })
+        }
+      }
+    }
+  }
+
+  // 先尝试 displayName（更可能包含真实模型名），再尝试 modelId
+  if (input.displayName) {
+    // 尝试分割后的基础名（去掉渠道前缀）
+    const parts = input.displayName.split('/')
+    const baseName = parts[parts.length - 1]?.trim()
+    if (baseName && baseName !== input.displayName) tryMatch(baseName)
+    tryMatch(input.displayName)
+  }
+  tryMatch(input.modelId)
+
+  return [...candidates.values()]
+    .sort((a, b) => {
+      const keyA = normalizeFuzzyKey(input.displayName ?? input.modelId)
+      return bigramSimilarity(keyA, normalizeFuzzyKey(b.entry.id)) - bigramSimilarity(keyA, normalizeFuzzyKey(a.entry.id))
+    })
+    .slice(0, FUZZY_MAX_RESULTS)
+}
+
+/** 三档匹配：原文 id → 归一化别名 → 家族启发式 → 模糊匹配。置信度只降不升，同一 entry
+ * 出现多次时保留最高档。默认最多返回 `limit` 条，界面按顺序展示，不自动采用。
+ */
+
 /** 采用字段的证据文案，写进 MetadataLayer.evidence。 */
 export function catalogAdoptionEvidence(adoptions: readonly CatalogAdoption[]): string {
   const sources = [...new Set(adoptions.map((item) => CATALOG_SOURCE_META[item.source].label))]
@@ -691,4 +795,5 @@ export function catalogAdoptionEvidence(adoptions: readonly CatalogAdoption[]): 
   const list = ids.slice(0, 2).join(', ')
   const suffix = ids.length > 2 ? ` 等 ${ids.length} 条` : ''
   return `标准模型库采用（${sources.join('/')}；${list}${suffix}）`
-}
+
+/** 获取标准模型库各来源的模型概览。用于 fuzzy 匹配无结果时的备选展示。 */}

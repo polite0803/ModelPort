@@ -1,6 +1,6 @@
 # AGENTS.md
 
-> 适用版本：v1.7.1 ｜ 最后核对：2026-11-04 ｜ 状态：现行
+> 适用版本：v1.7.3 ｜ 最后核对：2026-11-04 ｜ 状态：现行
 
 This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
@@ -665,6 +665,15 @@ over the label, so a model is free when `isFree` is set **or** the weight parses
 inventing a small number silently removes whole channels from every long-context request, which is
 the opposite of the "unknown is a real answer" rule the router is built on.
 
+`capabilityHintOf` writes `free` in **both** directions, but only from evidence: `· 免费` /
+`isFree: true` gives `free: true`, and an explicit positive multiplier (`· x2`, `x0.2→x0.1`) gives
+`free: false` — a model the channel prices by weight cannot simultaneously be a free model, so this
+is read off the channel's own quote, not "unknown folded into false". No rate label at all (trae /
+minimax) writes neither value, and the attribute stays `unclassified`. Routing is unaffected either
+way: `costSignalFor` short-circuits on `free === true` and `costBucketOf` keys off `weight`, so
+`false` behaves exactly like absent there; what changes is annotation coverage, where `free` used to
+be unfillable for every metered channel model.
+
 The IPC surface is `channels:models` (one channel's catalogue, 30s cache),
 `channels:refreshModels` (re-read online, then rewrite the provider record and the global model
 mappings; failures return `reason: 'empty'` while keeping the old record), and the two model
@@ -1099,6 +1108,18 @@ field and no `parentMessageId` handling in `SessionConfig`.
 whitelists all three (after `sanitizeChatToolDefinitions` drops unusable definitions, e.g. Codex's
 empty-name placeholders), and the reply is forwarded as-is - upstream produces the `tool_calls`, the
 client executes them and sends the results back. Nothing in the gateway rewrites either side.
+
+Since 2026-11-04 there is one observation-only exception on this path. When a request declared at
+least one tool and the reply carries a `tool_calls[].function.name` outside that declared set,
+`routes/chat.ts` writes a `warn` app-log line (serving model, offending names, up to 12 declared
+names, `request_id`) through `utils/undeclaredToolNameAudit.ts`. It never validates, drops or
+rewrites a byte - the client receives exactly what upstream produced. The line exists because the
+request log does not record tool names, so a client-side `Model generated invalid tool call: <name>`
+was otherwise indistinguishable from a gateway truncation. One line per `(model, name)` per 5
+minutes, so a client retry loop cannot flood the app log. `/v1/messages` and `/v1/responses` need no
+hook of their own: both translate inbound tools into chat `function` definitions (names kept verbatim)
+and loop back through this same route, so one check covers all three entry points. `/v1/completions`
+bypasses the chat route but has no `tool_calls` in its response shape, so it is out of scope.
 
 The managed layer that used to render tool descriptions into a `system` turn and parse text replies
 back into `tool_calls` (`src/main/proxy/toolCalling/`, `src/shared/toolCalling.ts`,

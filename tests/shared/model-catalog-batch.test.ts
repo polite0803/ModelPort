@@ -11,6 +11,7 @@ const {
   mergeCatalogBatchFailure,
   planCatalogBatchItem,
 } = await import('../../src/shared/modelCatalogBatch.ts')
+const { CATALOG_ADOPTION_FIELDS } = await import('../../src/shared/modelCatalog.ts')
 
 type Fact<T> = import('../../src/shared/modelMetadata.ts').Fact<T>
 type ModelMetadataRow = import('../../src/shared/modelMetadata.ts').ModelMetadataRow
@@ -31,6 +32,7 @@ const row = (overrides: Partial<ModelMetadataRow> = {}): ModelMetadataRow => ({
   providerId: 'provider-a',
   displayName: 'gpt-4o',
   actualModelId: 'gpt-4o',
+  providerType: 'account',
   modelType: unknownFact<ResolvedModelType>(),
   vision: unknownFact<'yes' | 'no' | 'unknown'>(),
   tools: unknownFact<'yes' | 'no' | 'unknown'>(),
@@ -42,6 +44,7 @@ const row = (overrides: Partial<ModelMetadataRow> = {}): ModelMetadataRow => ({
   free: unknownFact<boolean>(),
   calls: 3,
   missing: [],
+  critical: true,
   ...overrides,
 })
 
@@ -81,6 +84,22 @@ test('exact/alias 自动采用字段，family 不采用；价格永不在自动�
   assert.deepEqual(family.adoptFields, [])
   // family 不采用，但仍可能按需探测未标注的 context/output。
   assert.deepEqual(family.probeScopes, ['context', 'output'])
+})
+
+test('reasoning 可逐字段手工采用，但不进批量：第三方单点判断不该替用户筛掉候选', () => {
+  const match: CatalogMatch = {
+    confidence: 'exact',
+    entry: entry({ id: 'o4-mini', reasoning: 'no', tools: 'yes', contextTokens: 200000 }),
+  }
+  const plan = planCatalogBatchItem(row(), [match])
+  assert.deepEqual(plan.adoptFields, ['contextTokens', 'tools'])
+  assert.ok(
+    !plan.adoptFields.includes('reasoning' as never),
+    'reasoning 是 hardFilterFailure 的判据，误报的代价是模型从请求里消失，不是一次次优路由',
+  )
+  assert.ok(!CATALOG_BATCH_AUTO_FIELDS.includes('reasoning' as never))
+  // 但它仍是合法的手工采用字段：候选对话框里由用户逐字段点「采用」，随时可撤销。
+  assert.ok(CATALOG_ADOPTION_FIELDS.includes('reasoning'))
 })
 
 test('人工/上游声明字段不进入采用与探测；inferred 才需要探测', () => {

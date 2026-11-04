@@ -10,7 +10,7 @@
  * - `source` 只有六层 + `unclassified`；更细的出处写 `evidence`。
  * - `asOf` 只在证据本身带时间时透传，从不补齐。
  */
-import type { InputModality, ModelCapabilityHint } from './types.ts'
+import type { InputModality, ModelCapabilityHint, ProviderType } from './types.ts'
 
 /** 一次解析覆盖的属性；顺序即界面上的展示顺序。 */
 export const METADATA_ATTRIBUTES = [
@@ -26,6 +26,59 @@ export const METADATA_ATTRIBUTES = [
 ] as const
 
 export type MetadataAttribute = (typeof METADATA_ATTRIBUTES)[number]
+
+/**
+ * 「关键属性」：路由**真的**据此做判断的六项。
+ *
+ * 判据来自 `proxy/autoRouting.ts`，不是按「哪个字段好看」挑的：
+ * - `vision` / `tools` / `reasoning`：`hardFilterFailure`（`:1027-1030`）在请求带图/带工具/
+ *   要思考时按这三个值筛候选；
+ * - `modalities`：`supportsVision`（`:163-167`）优先于 `vision` 判定装不装得下图；
+ * - `contextTokens`：容量硬过滤与 `advertisedContextFloorOf` 的输入；
+ * - `maxOutputTokens`：`requestedMaxOutput > cap` 的裁剪判断（`:1198-1199`）。
+ *
+ * `modelType` 不在这里：它由 `modalities`/`vision` 派生，没有独立生产者，把它算进
+ * 完整度只会把同一份证据数两遍。`weight`/`free` 也不在：那是计费展示与「免费优先」
+ * 排序的输入，缺了不影响一次请求能不能成。
+ *
+ * 「关键」讲的是**判断会不会出错**，不是「批量必须把它填上」：`reasoning` 是关键属性，
+ * 但标准库的值只允许逐字段手工采用（`modelCatalogBatch.ts::CATALOG_BATCH_AUTO_FIELDS`），
+ * 所以它留在缺口里是诚实的「上游没有证据」，不是一个待办。
+ */
+export const ROUTING_METADATA_ATTRIBUTES = [
+  'vision',
+  'tools',
+  'reasoning',
+  'modalities',
+  'contextTokens',
+  'maxOutputTokens',
+] as const satisfies readonly MetadataAttribute[]
+
+/** 参考属性：面板展示与排序用，缺失不阻塞路由。与 {@link ROUTING_METADATA_ATTRIBUTES} 互补。 */
+export const REFERENCE_METADATA_ATTRIBUTES = [
+  'modelType',
+  'weight',
+  'free',
+] as const satisfies readonly MetadataAttribute[]
+
+/**
+ * 属性对某类 provider 是否**有意义**。不适用 ≠ 未标注：把「这条渠道没有倍率这个概念」
+ * 记成缺失，覆盖率就永远钉死在 0，而它其实是一个真答案。
+ *
+ * - `weight` 是渠道包的积分倍率（`· x4.0` 标签），只有 `account` provider 存在这个概念；
+ *   聚合与自定义供应商没有倍率这回事。
+ * - `free` 对 `account`（免费标签）和 `aggregate`（`docs/data` 成本票据）都有出处；
+ *   `custom`/`builtin` 没有任何生产者，写进分母就是永久缺失。
+ * - 其余六项对所有 provider 都适用。
+ */
+export function isAttributeApplicable(
+  attribute: MetadataAttribute,
+  providerType: ProviderType
+): boolean {
+  if (attribute === 'weight') return providerType === 'account'
+  if (attribute === 'free') return providerType === 'account' || providerType === 'aggregate'
+  return true
+}
 
 /**
  * 六层来源（高 → 低）+ 「谁都不知道」。
@@ -73,6 +126,8 @@ export interface ModelMetadata {
   providerId: string
   displayName: string
   actualModelId: string
+  /** 决定哪些属性对这一行有意义（见 {@link isAttributeApplicable}）。 */
+  providerType: ProviderType
   modelType: Fact<ResolvedModelType>
   vision: Fact<Exclude<ModelCapabilityHint['vision'], undefined>>
   tools: Fact<Exclude<ModelCapabilityHint['tools'], undefined>>
@@ -163,6 +218,7 @@ export function mergeModelMetadata(input: {
   providerId: string
   displayName: string
   actualModelId: string
+  providerType: ProviderType
   layers: readonly MetadataLayer[]
 }): ModelMetadata {
   const sorted = [...input.layers].sort(
@@ -182,6 +238,7 @@ export function mergeModelMetadata(input: {
     providerId: input.providerId,
     displayName: input.displayName,
     actualModelId: input.actualModelId,
+    providerType: input.providerType,
     modelType: deriveModelType(modalities, vision),
     vision,
     tools,
@@ -194,38 +251,70 @@ export function mergeModelMetadata(input: {
   }
 }
 
-/** 某条记录里仍为 `unclassified` 的属性列表。 */
+/**
+ * 某条记录里仍为 `unclassified` 的**适用**属性。
+ *
+ * 不适用的属性不参与：聚合 provider 的 `weight` 没有倍率这个概念，把它算成缺失，
+ * 「仍有缺失」就会永远等于目录行数（1.7.2 前就是这样：1000 行里 998 行「缺失」，
+ * 而其中 570 行的缺口是 `weight` 一项按构造补不上的）。
+ */
 export function unclassifiedAttributes(metadata: ModelMetadata): MetadataAttribute[] {
   return METADATA_ATTRIBUTES.filter((attribute) => {
+    if (!isAttributeApplicable(attribute, metadata.providerType)) return false
     const fact: Fact<unknown> = metadata[attribute]
     return fact.state === 'unclassified'
   })
 }
 
+/** 关键属性里仍缺失的部分；空数组即「这一行路由用得上了」。 */
+export function routingGapsOf(metadata: ModelMetadata): MetadataAttribute[] {
+  return ROUTING_METADATA_ATTRIBUTES.filter(
+    (attribute) => (metadata[attribute] as Fact<unknown>).state === 'unclassified'
+  )
+}
+
+/** 六项关键属性全部有来源。 */
+export function isRoutingComplete(metadata: ModelMetadata): boolean {
+  return routingGapsOf(metadata).length === 0
+}
+
 export interface AttributeCoverage {
   known: number
+  /** 目录总行数，含对这一行没有意义的行。 */
   total: number
-  /** 0–1；`total === 0` 时记 0。 */
+  /** 分母：这一项对该 provider 类型有意义的行数（= total - notApplicable）。 */
+  applicable: number
+  /** 按构造不可能有出处的行数（聚合/自定义行的 `weight` 等），界面要能说「不适用」而不是「未标注」。 */
+  notApplicable: number
+  /** `known / applicable`；`applicable === 0` 时记 0。 */
   rate: number
 }
 
 export type MetadataCoverage = Record<MetadataAttribute, AttributeCoverage>
 
-/** 每项属性的已知行数 / 目录总行数。分母与「待标注队列」同源。 */
+/**
+ * 每项属性的已知行数 / **适用**行数。分母与「待标注队列」同源（同一批 records、同一套
+ * {@link isAttributeApplicable} 判据），所以界面上的覆盖条和队列不会各算一套。
+ */
 export function computeMetadataCoverage(
   records: readonly ModelMetadata[],
 ): MetadataCoverage {
   const total = records.length
   const coverage = {} as MetadataCoverage
   for (const attribute of METADATA_ATTRIBUTES) {
-    const known = records.reduce(
-      (count, record) => (record[attribute].state === 'known' ? count + 1 : count),
-      0,
-    )
+    let known = 0
+    let applicable = 0
+    for (const record of records) {
+      if (!isAttributeApplicable(attribute, record.providerType)) continue
+      applicable += 1
+      if (record[attribute].state === 'known') known += 1
+    }
     coverage[attribute] = {
       known,
       total,
-      rate: total === 0 ? 0 : known / total,
+      applicable,
+      notApplicable: total - applicable,
+      rate: applicable === 0 ? 0 : known / applicable,
     }
   }
   return coverage
@@ -245,10 +334,12 @@ export interface UnclassifiedQueueRow {
   metadata: ModelMetadata
   missing: MetadataAttribute[]
   calls: number
+  /** 缺的是不是关键属性：`false` = 六项关键属性已齐，只剩参考项。 */
+  critical: boolean
 }
 
 /**
- * 「待标注」队列：只保留仍有未分类属性的模型，按调用量降序；调用量相同再按
+ * 「待标注」队列：只保留仍有未分类**适用**属性的模型，按调用量降序；调用量相同再按
  * providerId + 展示名排序，保证界面稳定。
  */
 export function buildUnclassifiedQueue(
@@ -260,6 +351,7 @@ export function buildUnclassifiedQueue(
       metadata,
       missing: unclassifiedAttributes(metadata),
       calls: callVolumeOf(callVolume, metadata.displayName),
+      critical: !isRoutingComplete(metadata),
     }))
     .filter((row) => row.missing.length > 0)
     .sort(
@@ -290,21 +382,28 @@ export function metadataToHint(metadata: ModelMetadata): ModelCapabilityHint {
   return hint
 }
 
-/** 界面/覆盖率报告的一行：解析结果 + 调用量 + 仍缺失的属性。 */
+/** 界面/覆盖率报告的一行：解析结果 + 调用量 + 仍缺失的适用属性。 */
 export interface ModelMetadataRow extends ModelMetadata {
   calls: number
   missing: MetadataAttribute[]
+  /** 见 {@link UnclassifiedQueueRow.critical}：`false` 时这一行只剩参考项。 */
+  critical: boolean
 }
 
 export interface ModelMetadataReport {
   generatedAt: string
   totals: {
     models: number
-    annotated: number
-    unclassified: number
+    /** 六项关键属性全部有来源的行数（{@link isRoutingComplete}）。 */
+    routingComplete: number
+    /** 关键属性仍有缺口，且这一行在待标注队列里。 */
+    routingIncomplete: number
+    /** 全部**适用**属性都有来源的行数（聚合行没有 `weight` 这一项，所以是 8 而不是 9）；
+     *  只作为「上限还有多远」的次要读数。 */
+    fullyAnnotated: number
   }
   coverage: MetadataCoverage
   queue: ModelMetadataRow[]
-  /** 每项属性仍有缺失的模型数，等同覆盖率分母减去已知数。 */
+  /** 每项属性仍有缺失的模型数：适用行数减去已知数（不适用的行不计入缺口）。 */
   coverageGaps: Record<MetadataAttribute, number>
 }

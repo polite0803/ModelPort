@@ -4,12 +4,17 @@ import assert from 'node:assert/strict'
 const {
   METADATA_ATTRIBUTES,
   METADATA_SOURCE_PRIORITY,
+  REFERENCE_METADATA_ATTRIBUTES,
+  ROUTING_METADATA_ATTRIBUTES,
   buildUnclassifiedQueue,
   computeMetadataCoverage,
   deriveModelType,
+  isAttributeApplicable,
+  isRoutingComplete,
   mergeModelMetadata,
   metadataSourceRank,
   metadataToHint,
+  routingGapsOf,
   unclassifiedAttributes,
 } = await import('../../src/shared/modelMetadata.ts')
 const {
@@ -27,6 +32,7 @@ const {
 } = await import('../../src/shared/modelProbe.ts')
 
 type Layer = import('../../src/shared/modelMetadata.ts').MetadataLayer
+type ProviderTypeArg = import('../../src/shared/types.ts').ProviderType
 
 const base = (overrides: Partial<Layer> = {}): Layer => ({
   source: 'upstream',
@@ -35,13 +41,32 @@ const base = (overrides: Partial<Layer> = {}): Layer => ({
   ...overrides,
 })
 
-const resolve = (layers: Layer[]) =>
+/** 缺省按 `account`：九项属性全适用，测试里想验证「不适用」要显式换类型。 */
+const resolve = (layers: Layer[], providerType: ProviderTypeArg = 'account') =>
   mergeModelMetadata({
     providerId: 'provider-a',
     displayName: 'model-x',
     actualModelId: 'model-x',
+    providerType,
     layers,
   })
+
+test('属性分组：六项关键 + 三项参考，互不重叠且并起来就是全表', () => {
+  assert.deepEqual(
+    [...ROUTING_METADATA_ATTRIBUTES, ...REFERENCE_METADATA_ATTRIBUTES].sort(),
+    [...METADATA_ATTRIBUTES].sort(),
+  )
+  // modelType 由 modalities/vision 派生，算进完整度就是同一份证据数两遍；
+  // weight/free 是计费展示，缺了不影响一次请求能不能成。
+  assert.deepEqual([...ROUTING_METADATA_ATTRIBUTES], [
+    'vision',
+    'tools',
+    'reasoning',
+    'modalities',
+    'contextTokens',
+    'maxOutputTokens',
+  ])
+})
 
 test('优先级表固定为 manual > upstream > catalog > probe > family-rule > cost-ledger', () => {
   const ranks = METADATA_SOURCE_PRIORITY.map((source) => metadataSourceRank(source))
@@ -155,7 +180,7 @@ test('modelType 由 modalities/vision 派生，两者都未知时为 unclassifie
   )
 })
 
-test('coverage 分母同源，queue 只留缺失行并按调用量降序', () => {
+test('coverage 分母是适用行：聚合行的 weight 不算缺口；queue 只留缺失行并按调用量降序', () => {
   const full = resolve([
     base({
       hint: {
@@ -170,29 +195,90 @@ test('coverage 分母同源，queue 只留缺失行并按调用量降序', () =>
       },
     }),
   ])
+  // 聚合 provider 没有倍率这个概念：它的 weight 行既不进分母也不算缺口。
   const sparse = mergeModelMetadata({
     providerId: 'provider-b',
     displayName: 'sparse-model',
     actualModelId: 'sparse-model',
+    providerType: 'aggregate',
     layers: [],
+  })
+  // 关键属性齐、只差参考项（free 无出处）：留在队列里，但不再算「待补」。
+  const referenceOnly = mergeModelMetadata({
+    providerId: 'provider-a',
+    displayName: 'reference-model',
+    actualModelId: 'reference-model',
+    providerType: 'account',
+    layers: [base({
+      hint: {
+        tools: 'yes',
+        vision: 'no',
+        reasoning: 'no',
+        modalities: ['text'],
+        contextTokens: 131072,
+        maxOutputTokens: 16384,
+        weight: 2,
+      },
+    })],
   })
 
   const coverage = computeMetadataCoverage([full, sparse])
   assert.equal(coverage.contextTokens.total, 2)
+  assert.equal(coverage.contextTokens.applicable, 2)
   assert.equal(coverage.contextTokens.known, 1)
   assert.equal(coverage.contextTokens.rate, 0.5)
   assert.equal(coverage.maxOutputTokens.known, 1)
+  assert.equal(coverage.weight.total, 2)
+  assert.equal(coverage.weight.applicable, 1)
+  assert.equal(coverage.weight.notApplicable, 1)
+  assert.equal(coverage.weight.known, 1)
+  assert.equal(coverage.weight.rate, 1)
   assert.deepEqual(coverage.modelType, {
     known: 1,
     total: 2,
+    applicable: 2,
+    notApplicable: 0,
     rate: 0.5,
   })
 
-  const queue = buildUnclassifiedQueue([sparse, full], { 'sparse-model': 7, 'model-x': 99 })
-  assert.equal(queue.length, 1)
-  assert.equal(queue[0].metadata.displayName, 'sparse-model')
-  assert.equal(queue[0].calls, 7)
-  assert.ok(queue[0].missing.includes('contextTokens'))
+  const queue = buildUnclassifiedQueue([sparse, full, referenceOnly], {
+    'sparse-model': 7,
+    'reference-model': 50,
+  })
+  // `full` 九项全齐，出队；`referenceOnly` 与 `sparse` 仍有适用缺口，留在队里，
+  // 按调用量降序：reference-model(50) 在 sparse-model(7) 之前。
+  assert.equal(queue.length, 2)
+  assert.equal(queue[0].metadata.displayName, 'reference-model')
+  assert.equal(queue[0].critical, false)
+  assert.deepEqual(queue[0].missing, ['free'])
+  assert.equal(queue[1].metadata.displayName, 'sparse-model')
+  assert.equal(queue[1].calls, 7)
+  assert.equal(queue[1].critical, true)
+  assert.ok(queue[1].missing.includes('contextTokens'))
+  // weight 不适用于聚合行：缺它不构成缺口。
+  assert.ok(!queue[1].missing.includes('weight'))
+  assert.equal(isRoutingComplete(referenceOnly), true)
+  assert.deepEqual(routingGapsOf(referenceOnly), [])
+})
+
+test('不适用只限 weight/free：关键六项对任何 provider 都算缺口', () => {
+  for (const providerType of ['account', 'aggregate', 'custom', 'builtin'] as const) {
+    for (const attribute of ROUTING_METADATA_ATTRIBUTES) {
+      assert.equal(
+        isAttributeApplicable(attribute, providerType),
+        true,
+        `${attribute} 在 ${providerType} 上必须适用`,
+      )
+    }
+    assert.equal(isAttributeApplicable('weight', providerType), providerType === 'account')
+    assert.equal(
+      isAttributeApplicable('free', providerType),
+      providerType === 'account' || providerType === 'aggregate'
+    )
+    const empty = resolve([], providerType)
+    assert.equal(isRoutingComplete(empty), false)
+    assert.equal(unclassifiedAttributes(empty).includes('weight'), providerType === 'account')
+  }
 })
 
 test('手工保存输出上限后，该属性从 unclassified 变成已标注（来源 manual）', () => {
