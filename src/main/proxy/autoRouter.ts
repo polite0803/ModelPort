@@ -32,6 +32,9 @@ import { DEFAULT_FAIRNESS_LEAD } from '../../shared/types'
 import type { ChatCompletionRequest } from './types'
 import type { CatalogAdoption } from '../../shared/modelCatalog.ts'
 import { adoptionsForModel, catalogAdoptionHint } from '../../shared/modelCatalog.ts'
+import type { ModelProbeRow } from '../../shared/modelProbe.ts'
+import { indexProbeRows, probeRowKey, probeRowToLayer } from '../../shared/modelProbe.ts'
+import { getProbeRowsSync } from '../providers/modelProbeStore.ts'
 import { accountRuntime } from './accountRuntime'
 import { getChannelDefinition } from '../providers/accountChannels/catalogue'
 import {
@@ -98,6 +101,12 @@ export interface AutoRouteDecision {
    * 不兜底成猜测值，日志与 `/v1/models` 用同一个口径（`shared/requestContextFit.ts`）。
    */
   contextWindow?: number
+  /**
+   * 可以**承诺给客户端**的那个数 —— 过了 `advertisedContextTokens` 的来源闸门。
+   * 与上面 `contextWindow` 的差别只在来源：家族规则、标准库快照这类推定读数进日志
+   * 有用，写进响应头会让客户端按一个可能偏大的上界安排压缩时机。
+   */
+  advertisedContextWindow?: number
   /** 会话指纹，成功后可交给 rememberRoute 固化本次选择 */
   conversationKey?: string
   /**
@@ -253,24 +262,28 @@ interface CandidateHints {
   record?: ModelCapabilityHint
   official?: ModelCapabilityHint
   catalog?: ModelCapabilityHint
+  probe?: ModelCapabilityHint
   thirdParty?: ModelCapabilityHint
   manual?: ModelCapabilityHint
 }
 
 /**
- * 收集一个模型全部标注层。`marks` / `adoptions` 是本次决策一次性读出的两张表 ——
- * 逐候选读 store 会让一次 `select` 读几十次盘上对象。
+ * 收集一个模型全部标注层。`marks` / `adoptions` / `probeIndex` 是本次决策一次性
+ * 读出的三张表 —— 逐候选读 store 会让一次 `select` 读几十次盘上对象。
  *
- * 顺序与 metadata 链一致：manual > record > official > catalog >（静态/第三方在
+ * 顺序与 metadata 链一致：manual > record > official > catalog > probe >（静态/第三方在
  * `resolveCapabilityDetail` 内按固定顺序补位）。catalog 只来自 adoption ledger，
- * 未采用的候选不参与；价格字段永远不会出现在这里。
+ * 未采用的候选不参与；价格字段永远不会出现在这里。probe 只取新鲜且 `measured`
+ * 的行（`probeRowToLayer` 自带这条判据，这里不重写第二份）。
  */
 function capabilityHintsFor(
   provider: Provider,
   displayName: string,
   actualModelId: string,
   marks: UserModelMarks,
-  adoptions: readonly CatalogAdoption[]
+  adoptions: readonly CatalogAdoption[],
+  probeIndex: ReadonlyMap<string, ModelProbeRow>,
+  nowMs: number
 ): CandidateHints {
   const record = provider.modelCapabilities?.[displayName]
   const aggregateId = provider.type === 'aggregate' ? (provider.aggregateId ?? provider.id) : undefined
@@ -282,11 +295,14 @@ function capabilityHintsFor(
     : aggregateThirdPartyHint(aggregateId, actualModelId)
   const manual = marks[provider.id]?.[displayName]
   const catalog = catalogAdoptionHint(adoptionsForModel(adoptions, provider.id, displayName))
+  const probeRow = probeIndex.get(probeRowKey({ providerId: provider.id, displayName }))
+  const probe = probeRow === undefined ? undefined : probeRowToLayer(probeRow, nowMs)?.hint
 
   return {
     ...(record === undefined ? {} : { record }),
     ...(contextWindow === undefined ? {} : { official: { contextTokens: contextWindow } }),
     ...(catalog === undefined ? {} : { catalog }),
+    ...(probe === undefined ? {} : { probe }),
     ...(thirdParty === undefined ? {} : { thirdParty }),
     ...(manual === undefined ? {} : { manual }),
   }
@@ -430,6 +446,9 @@ class AutoRouter {
     const needs = contractNeeds(request)
     const marks = storeManager.getUserModelMarks()
     const adoptions = storeManager.getCatalogAdoptions()
+    // 探测读数与上面两张表同一个口径：每决策从内存快照建一次索引，逐候选只查表。
+    // sidecar 本身是异步 JSON，热路径里 await 读盘会重演 1.6.1 那次选号卡顿。
+    const probeIndex = indexProbeRows(getProbeRowsSync())
     const rankInputs: PoolStrategyCandidate[] = []
     const candidatesByKey = new Map<string, AutoCandidate>()
     // 前置剔除的候选及原因（Set 去重：同一模型多账号命中同一原因只记一条）
@@ -497,7 +516,15 @@ class AutoRouter {
           // 「账号健康、但这个模型正在限流里」的那一档
           const runtime = accountRuntime.snapshot(account.id, now, model.actualModelId)
           const key = candidateKey(provider.id, account.id, model.displayName)
-          const hints = capabilityHintsFor(provider, model.displayName, model.actualModelId, marks, adoptions)
+          const hints = capabilityHintsFor(
+            provider,
+            model.displayName,
+            model.actualModelId,
+            marks,
+            adoptions,
+            probeIndex,
+            now
+          )
           // 配额余量（PLAN P1-3）：只对聚合目录候选计算 —— 账号渠道的帽在渠道
           // worker 内部，本地账本没有官方帽可对照，硬算只是噪声。函数自带
           // fail-open（读不到给 0.5 中性）。
@@ -537,6 +564,7 @@ class AutoRouter {
             ...(hints.manual === undefined ? {} : { manualHint: hints.manual }),
             ...(hints.official === undefined ? {} : { officialHint: hints.official }),
             ...(hints.catalog === undefined ? {} : { catalogHint: hints.catalog }),
+            ...(hints.probe === undefined ? {} : { probeHint: hints.probe }),
             ...(hints.thirdParty === undefined ? {} : { thirdPartyHint: hints.thirdParty }),
             contractCapable,
             costBucket: costSignal.bucket,
@@ -696,14 +724,23 @@ class AutoRouter {
       && candidates[0].provider.id === sticky.providerId
       && candidates[0].displayName === sticky.displayName
 
+    // 服务候选自己的能力描述只算一次：下面两个读数同源，不许各折一遍。
+    const servedCapability = ordered.length === 0 ? undefined : capabilityOfCandidate(ordered[0]!)
+    // 对外承诺的窗口要过 `/v1/models` 那道闸门（只收误差只会朝安全方向的来源）。
+    // 不复用 `contextWindow`：日志与界面看推定值是有用的，客户端拿它安排压缩时机不是。
+    const servedAdvertisedWindow = servedCapability === undefined
+      ? undefined
+      : advertisedContextTokens(servedCapability)
+
     return {
       profile,
       route,
       routeName,
       // 服务候选已公布的窗口；没公布就不写（`undefined`），日志/头都用同一个数
-      ...(ordered.length === 0 || capabilityOfCandidate(ordered[0]!).contextTokens === undefined
+      ...(servedCapability?.contextTokens === undefined
         ? {}
-        : { contextWindow: capabilityOfCandidate(ordered[0]!).contextTokens }),
+        : { contextWindow: servedCapability.contextTokens }),
+      ...(servedAdvertisedWindow === undefined ? {} : { advertisedContextWindow: servedAdvertisedWindow }),
       // 换家的基础上限随 decision 交给 forwarder：转发层不许再自己去读
       // legacy 全局 `autoRouting.maxAttempts`，那样逐路由的设置只对账号故障类的
       // 收口生效、对失败换家不生效。

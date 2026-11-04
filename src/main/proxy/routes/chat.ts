@@ -600,6 +600,14 @@ router.post('/completions', async (ctx: Context) => {
   if (autoDecision) {
     ctx.set('X-ModelPort-Auto-Prefer', autoDecision.prefer)
     ctx.set('X-ModelPort-Auto-Reason', autoDecision.reason)
+    // 本轮真实服务者的窗口，逐请求给 —— `/v1/models` 那条静态下界覆盖不了「这一跳
+    // 换了一家更小的」的情况。只承诺过了来源闸门的数（`advertisedContextWindow`），
+    // 没把握就不设这个头，让客户端继续用它自己的先验，而不是给一个可能偏大的上界。
+    // 流式也读得到：头在首帧之前就设，回环的 anthropic / responses 两道经
+    // `copyModelPortHeaders` 自动带走。
+    if (autoDecision.advertisedContextWindow !== undefined) {
+      ctx.set('X-ModelPort-Context-Window', String(autoDecision.advertisedContextWindow))
+    }
   }
 
   // auto 路由时先按排名第一的候选记录请求开始，成功后再用真实命中的账号结算用量

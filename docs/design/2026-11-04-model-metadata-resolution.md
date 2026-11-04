@@ -117,13 +117,19 @@ coverage[attr] = { known: 已知的行数, total: 当前目录总行数, rate: k
 `rate` 为 0–1 的比值，界面按百分比显示。分母只算启用供应商的目录（含停用但仍在目录里的行），
 与「待标注队列」同源，避免两个页面各算一套。
 
-**对外暴露门槛**（不可协商，源自 AGENTS.md）：
+**对外暴露门槛**（不可协商，源自 AGENTS.md；判据是**误差方向**，不是来源标签）：
 
-- `/v1/models` 的 `context_window` 只输出**声明级**事实（`upstream` 中来自官方/供应商声明的值，
-  或 `manual`），`catalog` / `family-rule` / `probe` / 第三方推定值**一律不对外**；
-- 标准库值属于 `catalog` 级，即便被用户采用也只是内部证据，**不外泄为事实**；
-- 没有声明级事实时**省略键**，不输出 0 或推定价；
-- 内部推定值只进入路由过滤/打分与界面，不进响应体；
+- `/v1/models` 的 `context_window` 只输出**不会朝危险方向错**的读数：`manual`、`upstream`
+  中来自官方/供应商声明的值，以及 `probe`（实测下界——证得过这一档收得下，只会低报不会
+  高报）；`catalog` / `family-rule` / 第三方推定值**一律不对外**，它们是单点类比或转述，
+  既可能过期也可能高报；
+- 标准库值属于 `catalog` 级，即便被用户采用也只是内部证据，**不外泄为事实**；要让它对外
+  生效，正确动作是把它升级写成 `manual`，而不是放宽这一格；
+- 没有合格读数时**省略键**，不输出 0 或推定价；
+- 推定值进路由过滤/打分与界面（`effectiveContextLimit` 不分来源，选错一家代价只是次优）；
+- **逐请求承诺**另走一个字段：`AutoRouteDecision.advertisedContextWindow` 过同一道闸门，
+  写进响应头 `X-ModelPort-Context-Window`；与 `contextWindow`（未分来源，供日志与界面）
+  并排存在，接线写反等于把猜值从新门放出去，由 `tests/proxy/probe-capability-layer.test.ts` 钉住；
 - 上游没报 `usage` 就保持 `null`，探测读数不改写 `usage`。
 
 ## 7. 与现有模块的接入点

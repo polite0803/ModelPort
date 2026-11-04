@@ -1202,7 +1202,11 @@ that path.
   `advertisedContextFloors(routes)` for the list, one pool walk for all routes) feeding the pure
   `autoRouting.ts::advertisedContextFloorOf`. Rules that keep it truthful: it is a floor, never an
   average (a route can land on any candidate in its own pool, so a number above the smallest one is
-  a lie); **only windows the upstream actually published participate**, and a route whose candidates
+  a lie); **only readings that cannot over-promise participate** - upstream-published values, manual
+  marks, and the measured lower bound recorded by `probe` (we proved that tier fits, so it can only
+  report low) - while a family-rule or standard-catalogue single-point claim may be stale or simply
+  too high, so it stays internal. Adopted catalogue values reach the public surface only by being
+  re-entered as a manual mark, never by widening this gate; and a route whose candidates
   published none omits the key instead of advertising a guess. The earlier rule - an un-annotated
   candidate counted as `UNANNOTATED_CONTEXT_FLOOR` (64000), the same number the admission filter used
   - was a lie in the other direction and is what broke long agent sessions: Codex reads
@@ -1219,6 +1223,17 @@ that path.
   deliberately not deducted - `collectCandidates` takes `ignoreTransientAvailability` for exactly
   this - because a number that shrinks between requests is worse than a conservative one. An empty
   pool omits the key, which is the same route's own 503 rather than somebody else's window.
+- The static floor cannot cover the case it exists for most: a route switching to a smaller model
+  mid-conversation. So every routed response also carries `X-ModelPort-Context-Window` -
+  `AutoRouteDecision.advertisedContextWindow`, the serving candidate's own window **after the same
+  source gate**, set in `routes/chat.ts` and `routes/completions.ts`; the loopback anthropic and
+  responses lanes inherit it through `utils/inboundLoopback.ts::copyModelPortHeaders` (prefix rule),
+  and it is a header rather than a rewritten body `model` on purpose - clients key caches, pricing and
+  their own model tables off that field, so replacing it with the upstream name breaks them and leaks
+  channel identity. `decision.contextWindow` sits next to it **ungated** for logs and the UI, where an
+  inferred value is useful; wiring the header to that field instead is the regression this line guards.
+  A client that ignores custom headers is unaffected - the inbound hard filter still keeps the request
+  off candidates that cannot hold it, and that half needs no client cooperation at all.
 - Every request row also carries the **fit reading**, not just the outcome: `inputTokensEstimate`,
   `modelContextWindow`, `contextFit` (`fits` / `overflow` / `unknown`) and `contextFitSource`
   (`measured` when the verdict came from an upstream context-class 400 rather than our own estimate),

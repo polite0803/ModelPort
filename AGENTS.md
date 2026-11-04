@@ -91,7 +91,13 @@ each rule came from):
 constant-time compare). With no key the server binds loopback only and `start()` refuses any other
 host. No `?api\_key=` support.
 * **`usage` is `null`, never fabricated**, when the upstream reported nothing. Same for
-`context\_window` on `/v1/models`: omit the key rather than emit `0` or a guess.
+`context\_window` on `/v1/models`: omit the key rather than emit `0` or a guess. The gate there is
+**direction of error, not source label** - manual marks, upstream declarations and the `probe`
+measured lower bound may be advertised; `catalog` / `family-rule` / third-party tables may not, and an
+adopted catalogue value reaches the client only by being re-entered as a manual mark. Per routed
+response, `X-ModelPort-Context-Window` carries the serving candidate's gated window so a mid-conversation
+switch is visible to clients that read headers; it must read `advertisedContextWindow`, never the ungated
+`contextWindow` that logs and the UI use.
 * **`/v1/models` advertises routes only** - the list and `GET /v1/models/:model` share that one name
 domain. A model's enabled state decides whether it joins any route's candidate pool and whether a
 request naming it directly is accepted; it never decides what a client can list. A stopped user

@@ -8,6 +8,7 @@ import { registerIpcHandlers } from './ipc/handlers'
 import { UpdaterManager } from './updater'
 import { storeManager } from './store/store'
 import { aggregateProviderManager } from './providers/aggregate'
+import { primeModelProbeCache } from './providers/modelProbeStore'
 import { detectHiddenLaunch, reconcileAutoStart } from './autostartHost'
 import { recordProcessCrash, setCrashLogWriter } from './logging/crashReporter'
 import { configureModelListRefresh } from './scheduler/modelListRefresh'
@@ -147,6 +148,13 @@ async function setupApp(): Promise<void> {
   })
 
   await registerIpcHandlers(mainWindow)
+
+  // 探测读数的内存快照必须在任何选号发生之前灌好：sidecar 是异步 JSON，而
+  // `autoRouter::select` 同步执行，热路径里读不了盘。存储不可用时保持空表 ——
+  // 探测层缺席只是回到「没实测」，不是错误。
+  if (!storeManager.hasInitializationError()) {
+    await primeModelProbeCache()
+  }
 
   // 存储就绪后把启动早期缓冲的崩溃写进应用日志；存储不可用时保留 crash-fallback.ndjson。
   if (!storeManager.hasInitializationError()) {

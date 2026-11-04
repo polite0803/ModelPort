@@ -126,11 +126,12 @@ const SOURCE_PRIORITY: Record<CapabilitySource, number> = {
   'provider-record': 1,
   'aggregate-official': 2,
   catalog: 3,
-  static: 4,
-  'provider-default': 5,
-  'third-party': 6,
-  heuristic: 7,
-  unknown: 8,
+  probe: 4,
+  static: 5,
+  'provider-default': 6,
+  'third-party': 7,
+  heuristic: 8,
+  unknown: 9,
 }
 
 /**
@@ -499,6 +500,8 @@ export interface RankCandidate {
    * **不带价格** —— 价格只展示，不参与路由、权重或额度换算。
    */
   catalogHint?: ModelCapabilityHint
+  /** 手动探测的实测读数（每决策从 `modelProbeStore` 的同步快照查一次）。 */
+  probeHint?: ModelCapabilityHint
   /** 该供应商能否满足本次请求的契约（`n > 1` / `response_format`），由采集层填入 */
   contractCapable?: boolean
   /** 成本档；缺省按 unknown 参与打分（中性） */
@@ -812,6 +815,8 @@ export interface CapabilityLayers {
   record?: ModelCapabilityHint
   aggregateOfficial?: ModelCapabilityHint
   catalog?: ModelCapabilityHint
+  /** 手动探测的实测读数（已过 TTL 的行不会进来）。 */
+  probe?: ModelCapabilityHint
   thirdParty?: ModelCapabilityHint
 }
 
@@ -845,6 +850,9 @@ export function resolveCapabilityDetail(
     ordered.push({ source: 'aggregate-official', hint: layers.aggregateOfficial })
   }
   if (layers.catalog !== undefined) ordered.push({ source: 'catalog', hint: layers.catalog })
+  // 实测排在规则之前：探测拿到的是「这一家真的收得下这么多」的证据，按名字推的家族
+  // 规则只是相似模型的类比。与元数据解析链同一顺序（设计文档 §2）。
+  if (layers.probe !== undefined) ordered.push({ source: 'probe', hint: layers.probe })
   if (ruleHint !== undefined) ordered.push({ source: 'static', hint: ruleHint })
   if (providerDefaults !== undefined) ordered.push({ source: 'provider-default', hint: providerDefaults })
   if (layers.thirdParty !== undefined) ordered.push({ source: 'third-party', hint: layers.thirdParty })
@@ -908,20 +916,21 @@ export function resolveCapability(
 
 /** 把一个候选的标注层拆出来，所有判定都经过同一个函数，口径不会分叉 */
 export function capabilityLayersOf(
-  candidate: Pick<RankCandidate, 'manualHint' | 'capabilityHint' | 'officialHint' | 'catalogHint' | 'thirdPartyHint'>
+  candidate: Pick<RankCandidate, 'manualHint' | 'capabilityHint' | 'officialHint' | 'catalogHint' | 'probeHint' | 'thirdPartyHint'>
 ): CapabilityLayers {
   return {
     ...(candidate.manualHint === undefined ? {} : { manual: candidate.manualHint }),
     ...(candidate.capabilityHint === undefined ? {} : { record: candidate.capabilityHint }),
     ...(candidate.officialHint === undefined ? {} : { aggregateOfficial: candidate.officialHint }),
     ...(candidate.catalogHint === undefined ? {} : { catalog: candidate.catalogHint }),
+    ...(candidate.probeHint === undefined ? {} : { probe: candidate.probeHint }),
     ...(candidate.thirdPartyHint === undefined ? {} : { thirdParty: candidate.thirdPartyHint }),
   }
 }
 
 /** 候选的合并能力描述：硬过滤、策略筛选、档位打分共用 */
 export function capabilityOfCandidate(
-  candidate: Pick<RankCandidate, 'providerId' | 'displayName' | 'manualHint' | 'capabilityHint' | 'officialHint' | 'catalogHint' | 'thirdPartyHint'>
+  candidate: Pick<RankCandidate, 'providerId' | 'displayName' | 'manualHint' | 'capabilityHint' | 'officialHint' | 'catalogHint' | 'probeHint' | 'thirdPartyHint'>
 ): ModelCapability {
   return resolveCapabilityDetail(candidate.providerId, candidate.displayName, capabilityLayersOf(candidate))
 }
@@ -979,14 +988,23 @@ export function advertisedContextFloorOf(
 }
 
 /**
- * 对外可广告的上下文窗口：只接受**声明级**来源。
+ * 对外可广告的上下文窗口：只接受**不会朝危险方向错**的读数。
  *
- * 家族规则、第三方旁表、探测读数与供应商兜底都是内部推定；把它们写进
- * `/v1/models` 会让客户端按一个假上界安排压缩时机（设计文档 §6）。
+ * 判据是误差方向，不是来源标签：客户端拿这个数决定发多少字节，所以只允许
+ * 「已知安全的下界」——人工标记与上游声明是承诺过的数；`probe` 是实测下界
+ * （证得过这一档收得下，只会低报不会高报）。家族规则、第三方旁表、标准库快照
+ * 与供应商兜底都是**单点类比或转述**，既可能过期也可能高报，高报才是害客户端
+ * 的那一侧（Codex 按 `×0.95` 定压缩点，一个假上界会让它提前摘要整轮历史）。
+ * 要让用户采用的标准库值对外生效，正确动作是把它升级成人工标记，而不是放宽这里。
  */
 export function advertisedContextTokens(capability: ModelCapability): number | undefined {
   const source = capability.sources.contextTokens
-  if (source !== 'manual' && source !== 'provider-record' && source !== 'aggregate-official') {
+  if (
+    source !== 'manual' &&
+    source !== 'provider-record' &&
+    source !== 'aggregate-official' &&
+    source !== 'probe'
+  ) {
     return undefined
   }
   return capability.contextTokens

@@ -227,6 +227,11 @@ router.post('/completions', async (ctx: Context) => {
     ctx.set('X-ModelPort-Auto-Skipped', toHeaderValue(autoDecision.skipped.join(',')))
   }
 
+  // 本轮真实服务者的窗口（判据与 chat 路由同一处：只承诺过了来源闸门的数，没把握就不设头）
+  if (autoDecision?.advertisedContextWindow !== undefined) {
+    ctx.set('X-ModelPort-Context-Window', String(autoDecision.advertisedContextWindow))
+  }
+
   if (autoDecision && !firstCandidate) {
     ctx.status = 503
     ctx.body = {

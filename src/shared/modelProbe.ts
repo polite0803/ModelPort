@@ -457,6 +457,18 @@ export function probeRowKey(row: Pick<ModelProbeRow, 'providerId' | 'displayName
   return `${row.providerId}\u0000${row.displayName}`
 }
 
+/**
+ * 按 `(providerId, displayName)` 建一次索引。
+ *
+ * 选号路径每决策建一次、逐候选只查表 —— 探测行与手工标记同一套口径：热路径里
+ * 逐候选读 sidecar 会把一次选号放大成几百次读表。
+ */
+export function indexProbeRows(rows: readonly ModelProbeRow[]): Map<string, ModelProbeRow> {
+  const index = new Map<string, ModelProbeRow>()
+  for (const row of rows) index.set(probeRowKey(row), row)
+  return index
+}
+
 /** 过期判定：时间不可解析也按过期处理，避免坏数据被当成新鲜证据。 */
 export function probeFreshness(asOf: string, nowMs: number = Date.now()): ProbeFreshness {
   const stamp = Date.parse(asOf)

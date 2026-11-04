@@ -58,3 +58,32 @@ test('no locale block is an empty object (dead namespaces must be deleted, not s
   for (const name of ['en-US', 'zh-CN']) walk(load(name), '', name)
   assert.deepEqual(problems, [], `empty locale blocks found:\n${problems.join('\n')}`)
 })
+
+// `RoutePoolEditor` builds these keys dynamically (`t(\`proxy.routePoolSource_${source}\`)`),
+// so a source member without its label renders the raw key — and the leaf-parity test above
+// cannot see it, because the key is missing from *both* locale files. The list is read out of
+// the production union instead of being retyped here, so adding a source cannot pass silently.
+test('every CapabilitySource member has both labels in both locales', () => {
+  const lines = readFileSync(join(root, 'src/shared/types.ts'), 'utf8').split('\n')
+  const start = lines.findIndex(line => line.startsWith('export type CapabilitySource ='))
+  assert.ok(start >= 0, 'CapabilitySource union not found in src/shared/types.ts')
+  const sources = []
+  for (let i = start + 1; i < lines.length; i++) {
+    const member = lines[i].match(/^\s*\|?\s*'([a-z-]+)'/)
+    if (!member) break
+    sources.push(member[1])
+  }
+  assert.ok(sources.length >= 8, `union parsed to only ${sources.length} members — the shape changed`)
+
+  const missing = []
+  for (const name of ['en-US', 'zh-CN']) {
+    const proxy = load(name).proxy
+    for (const source of sources) {
+      for (const prefix of ['routePoolSource_', 'routePoolSourceShort_']) {
+        const key = `${prefix}${source}`
+        if (typeof proxy?.[key] !== 'string' || proxy[key].trim() === '') missing.push(`${name}: ${key}`)
+      }
+    }
+  }
+  assert.deepEqual(missing, [], `unlabeled capability source(s):\n${missing.join('\n')}`)
+})

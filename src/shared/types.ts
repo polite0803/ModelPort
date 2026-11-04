@@ -109,6 +109,7 @@ export type CapabilitySource =
   | 'provider-record'
   | 'aggregate-official'
   | 'catalog'
+  | 'probe'
   | 'static'
   | 'provider-default'
   | 'third-party'
