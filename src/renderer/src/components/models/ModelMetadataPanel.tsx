@@ -29,14 +29,20 @@ import type {
   CatalogEntry,
   CatalogMatchConfidence,
   CatalogPrice,
+  CatalogRefreshEndpointAttempt,
   CatalogSnapshotStatus,
   CatalogSourceId,
 } from '@shared/modelCatalog'
+import type {
+  CatalogBatchEstimate,
+  CatalogBatchSnapshot,
+} from '@shared/modelCatalogBatch'
 import {
   CATALOG_ADOPTION_FIELDS,
   CATALOG_SOURCES,
   CATALOG_SOURCE_META,
   catalogFieldValue,
+  sanitizeCatalogMirrorUrl,
 } from '@shared/modelCatalog'
 import { familyRuleLayer } from '@shared/modelFamilyRules'
 import {
@@ -136,41 +142,7 @@ const STATUS_LABEL_KEYS: Record<string, string> = {
   skipped: 'models.metadata.probeStatusSkipped',
 }
 
-const BATCH_LIMIT = 10
-/** 批量自动预选的字段：价格只展示，不自动采用（见设计文档口径）。 */
-const AUTO_ADOPT_FIELDS: CatalogAdoptionField[] = [
-  'contextTokens',
-  'maxOutputTokens',
-  'modalities',
-  'vision',
-  'tools',
-]
-
-export type BatchModelStatus = 'pending' | 'matching' | 'probing' | 'done' | 'skipped' | 'failed'
-
-export interface BatchModelPlan {
-  row: ModelMetadataRow
-  scopes: ProbeScope[]
-  confidence?: CatalogMatchConfidence
-  catalogId?: string
-  adoptFields: CatalogAdoptionField[]
-  selected: boolean
-  status: BatchModelStatus
-  error?: string
-}
-
-type ProbeDialog =
-  | { mode: 'single'; row: ModelMetadataRow }
-  | { mode: 'batch'; items: BatchModelPlan[]; preparing: boolean }
-
-const BATCH_STATUS_LABEL_KEYS: Record<BatchModelStatus, string> = {
-  pending: 'models.metadata.batchStatusPending',
-  matching: 'models.metadata.batchStatusMatching',
-  probing: 'models.metadata.batchStatusProbing',
-  done: 'models.metadata.batchStatusDone',
-  skipped: 'models.metadata.batchStatusSkipped',
-  failed: 'models.metadata.batchStatusFailed',
-}
+type ProbeDialog = { mode: 'single'; row: ModelMetadataRow }
 
 const PROBE_PHASE_LABEL_KEYS: Record<ProbePhase, string> = {
   prepare: 'models.metadata.probePhasePrepare',
@@ -261,71 +233,15 @@ function planFor(row: ModelMetadataRow, scope: 'context' | 'output'): ProbePlan 
     : planOutputProbe({ hintTokens, hintSource })
 }
 
-/** 已声明来源（manual/upstream/成本账本）保持原值；批量只补未标注/推定字段。 */
-function isDeclaredField(row: ModelMetadataRow, field: CatalogAdoptionField): boolean {
-  const fact =
-    field === 'contextTokens'
-      ? row.contextTokens
-      : field === 'maxOutputTokens'
-        ? row.maxOutputTokens
-        : field === 'modalities'
-          ? row.modalities
-          : field === 'vision'
-            ? row.vision
-            : field === 'tools'
-              ? row.tools
-              : undefined
-  return fact !== undefined && fact.state === 'known' && fact.confidence === 'declared'
+function formatDate(iso: string): string {
+  return iso.slice(0, 10)
 }
 
-/**
- * 批量预演的一条：标准库高置信度自动预选，alias/family 只作为提示。
- * - exact 默认勾选；alias/family/无匹配默认不勾选；
- * - 价格永不自动采用；
- * - 已被声明字段（含人工标记）不进入采用列表，也不会被批量覆盖。
- */
-function buildBatchPlan(row: ModelMetadataRow, data: CatalogCandidatesResult | null): BatchModelPlan {
-  const exact = data?.matches.find((match) => match.confidence === 'exact')
-  const best = exact ?? data?.matches[0]
-  const adoptFields: CatalogAdoptionField[] = best && best.confidence !== 'family'
-    ? AUTO_ADOPT_FIELDS.filter(
-      (field) => catalogFieldValue(best.entry, field) !== undefined && !isDeclaredField(row, field),
-    )
-    : []
-  // 推定值（家族规则/第三方）也值得实测对比；声明级与已实测的不再重复。
-  // 标准库已经能补上的字段不再探测（先采用、再按需探测）。
-  const contextProbeable =
-    row.contextTokens.state !== 'known' || row.contextTokens.confidence === 'inferred'
-  const outputProbeable =
-    row.maxOutputTokens.state !== 'known' || row.maxOutputTokens.confidence === 'inferred'
-  const scopes: ProbeScope[] = []
-  if (contextProbeable && !adoptFields.includes('contextTokens')) scopes.push('context')
-  if (outputProbeable && !adoptFields.includes('maxOutputTokens')) scopes.push('output')
-  return {
-    row,
-    scopes,
-    ...(best === undefined ? {} : { confidence: best.confidence, catalogId: best.entry.catalogId }),
-    adoptFields,
-    selected: exact !== undefined,
-    status: 'pending',
-  }
-}
-
-function planTotalsOf(items: BatchModelPlan[]): { models: number; fields: number; requests: number; tokens: number } {
-  return items.reduce(
-    (totals, item) => {
-      if (!item.selected) return totals
-      totals.models += 1
-      totals.fields += item.adoptFields.length
-      for (const scope of item.scopes) {
-        const plan = planFor(item.row, scope as 'context' | 'output')
-        totals.requests += plan.requestCount
-        totals.tokens += plan.estimatedInputTokens + plan.estimatedOutputTokens
-      }
-      return totals
-    },
-    { models: 0, fields: 0, requests: 0, tokens: 0 },
-  )
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000))
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return minutes > 0 ? `${minutes}:${String(seconds).padStart(2, '0')}` : `${seconds}s`
 }
 
 /**
@@ -589,20 +505,26 @@ export function ModelMetadataPanel() {
   const [dialog, setDialog] = useState<ProbeDialog | null>(null)
   const [force, setForce] = useState(false)
   const [running, setRunning] = useState(false)
-  const [progress, setProgress] = useState({ done: 0, total: 0 })
   const [jobSnapshot, setJobSnapshot] = useState<ProbeJobSnapshot | null>(null)
   const [tick, setTick] = useState(0)
   const [lastScope, setLastScope] = useState<ProbeScope | null>(null)
-  const [batchPaused, setBatchPaused] = useState(false)
-  const batchCancelRef = useRef(false)
-  const batchPauseRef = useRef(false)
-  const runningModeRef = useRef<'single' | 'batch' | null>(null)
-  /** 批量条目在关闭弹窗后仍需保留，重新打开时回显同一批任务。 */
-  const batchItemsRef = useRef<BatchModelPlan[]>([])
+  const runningModeRef = useRef<'single' | null>(null)
+  /** 「全部补齐」的编排在主进程；界面只保存最近一次快照并订阅进度。 */
+  const [probeWithBatch, setProbeWithBatch] = useState(false)
+  const [batchSnapshot, setBatchSnapshot] = useState<CatalogBatchSnapshot | null>(null)
+  const [batchEstimate, setBatchEstimate] = useState<CatalogBatchEstimate | null>(null)
+  const [batchConfirmOpen, setBatchConfirmOpen] = useState(false)
+  const [batchDialogOpen, setBatchDialogOpen] = useState(false)
+  const [batchStarting, setBatchStarting] = useState(false)
   const [catalogStatuses, setCatalogStatuses] = useState<CatalogSnapshotStatus[]>([])
   const [catalogErrors, setCatalogErrors] = useState<Partial<Record<CatalogSourceId, string>>>({})
+  const [catalogAttempts, setCatalogAttempts] = useState<
+    Partial<Record<CatalogSourceId, CatalogRefreshEndpointAttempt[]>>
+  >({})
   const [refreshingCatalog, setRefreshingCatalog] = useState<CatalogSourceId | null>(null)
   const [catalogDialog, setCatalogDialog] = useState<ModelMetadataRow | null>(null)
+  const [mirrorUrl, setMirrorUrl] = useState('')
+  const [mirrorSaving, setMirrorSaving] = useState(false)
 
   const loadCatalog = useCallback(async () => {
     if (!window.electronAPI?.providers?.getCatalogStatuses) return
@@ -614,6 +536,38 @@ export function ModelMetadataPanel() {
     }
   }, [])
 
+  // 自定义镜像地址是普通配置项，打开页面只读取，不发请求。
+  useEffect(() => {
+    const api = window.electronAPI
+    if (!api?.config?.get) return
+    void api.config
+      .get()
+      .then((config) => setMirrorUrl(config.catalogMirrorUrl ?? ''))
+      .catch(() => undefined)
+  }, [])
+
+  const saveMirrorUrl = useCallback(async () => {
+    const api = window.electronAPI
+    if (!api?.config?.update) return
+    const mirror = sanitizeCatalogMirrorUrl(mirrorUrl)
+    if (mirror === undefined) {
+      toast({ title: t('models.metadata.catalogMirrorInvalid'), variant: 'destructive' })
+      return
+    }
+    setMirrorSaving(true)
+    try {
+      const saved = await api.config.update({ catalogMirrorUrl: mirror })
+      if (!saved) {
+        toast({ title: t('models.metadata.catalogMirrorInvalid'), variant: 'destructive' })
+        return
+      }
+      setMirrorUrl(mirror)
+      toast({ title: t('models.metadata.catalogMirrorSaved') })
+    } finally {
+      setMirrorSaving(false)
+    }
+  }, [mirrorUrl, t, toast])
+
   const refreshCatalogSource = useCallback(
     async (source: CatalogSourceId) => {
       if (!window.electronAPI?.providers?.refreshCatalog) return
@@ -621,6 +575,9 @@ export function ModelMetadataPanel() {
       try {
         const result = await window.electronAPI.providers.refreshCatalog(source)
         setCatalogStatuses(result.statuses)
+        if (result.attempts && result.attempts.length > 0) {
+          setCatalogAttempts((current) => ({ ...current, [source]: result.attempts }))
+        }
         if (result.success) {
           setCatalogErrors((current) => {
             if (!current[source]) return current
@@ -630,7 +587,9 @@ export function ModelMetadataPanel() {
           })
           toast({
             title: t('models.metadata.catalogRefreshDone'),
-            description: CATALOG_SOURCE_META[source].label,
+            description: result.usedEndpoint
+              ? `${CATALOG_SOURCE_META[source].label} · ${result.usedEndpoint}`
+              : CATALOG_SOURCE_META[source].label,
           })
         } else {
           const message = result.error ?? ''
@@ -718,7 +677,6 @@ export function ModelMetadataPanel() {
     // 关闭/Esc 不等待长请求：任务在主进程继续，重新打开会回显。
     setDialog(null)
     setForce(false)
-    setProgress({ done: 0, total: 0 })
   }, [])
 
   const describeResult = useCallback(
@@ -826,172 +784,141 @@ export function ModelMetadataPanel() {
     }
   }, [])
 
-  /** 批量预演：标准库候选是本地快照读取，不联网。 */
-  const openBatch = useCallback(async () => {
-    if (!report) return
-    // 关闭后重新打开时，回显正在执行/刚结束的同一批任务，而不是重新预演。
-    if (runningModeRef.current === 'batch' && batchItemsRef.current.length > 0) {
-      setDialog({ mode: 'batch', items: batchItemsRef.current, preparing: false })
-      return
-    }
-    const rows = report.queue.slice(0, BATCH_LIMIT)
-    setDialog({ mode: 'batch', items: [], preparing: true })
-    const api = window.electronAPI?.providers
-    const items = await Promise.all(
-      rows.map(async (row) => {
-        if (!api?.getCatalogCandidates) return buildBatchPlan(row, null)
-        try {
-          return buildBatchPlan(row, await api.getCatalogCandidates(row.providerId, row.displayName))
-        } catch {
-          return buildBatchPlan(row, null)
-        }
-      }),
-    )
-    batchItemsRef.current = items
-    setDialog({ mode: 'batch', items, preparing: false })
-  }, [report])
-
-  const patchBatchItem = useCallback((index: number, patch: Partial<BatchModelPlan>) => {
-    batchItemsRef.current = batchItemsRef.current.map((item, itemIndex) =>
-      itemIndex === index ? { ...item, ...patch } : item,
-    )
-    setDialog((current) =>
-      current?.mode === 'batch'
-        ? { ...current, items: batchItemsRef.current }
-        : current,
-    )
-  }, [])
-
   const cancelActiveProbe = useCallback(async () => {
     const jobId = jobSnapshot?.jobId
     if (!jobId || !window.electronAPI?.providers?.cancelProbe) return
     await window.electronAPI.providers.cancelProbe(jobId)
   }, [jobSnapshot?.jobId])
 
-  const handleCancelBatch = useCallback(() => {
-    batchCancelRef.current = true
-    setBatchPaused(false)
-    batchPauseRef.current = false
-    void cancelActiveProbe()
-  }, [cancelActiveProbe])
-
-  const handleRunBatch = useCallback(async () => {
-    if (!dialog || dialog.mode !== 'batch' || dialog.preparing) return
+  // 关闭面板后任务仍在主进程跑；重新打开页面时回读最近一次任务快照。
+  useEffect(() => {
     const api = window.electronAPI?.providers
-    if (!api?.probeModel) return
-    const items = dialog.items
-    const selectedCount = items.filter((item) => item.selected).length
-    if (selectedCount === 0) return
-    runningModeRef.current = 'batch'
-    batchCancelRef.current = false
-    batchPauseRef.current = false
-    setBatchPaused(false)
-    setRunning(true)
-    setProgress({ done: 0, total: selectedCount })
-    let done = 0
-    let success = 0
-    let skipped = 0
-    let failed = 0
-    let cancelled = false
+    if (!api?.getCatalogBatchJobs) return
+    void api
+      .getCatalogBatchJobs()
+      .then((jobs) => {
+        if (jobs.length > 0) setBatchSnapshot(jobs[0])
+      })
+      .catch(() => undefined)
+  }, [])
 
-    for (let index = 0; index < items.length; index++) {
-      if (batchCancelRef.current) {
-        cancelled = true
-        break
-      }
-      while (batchPauseRef.current && !batchCancelRef.current) {
-        await new Promise((resolve) => setTimeout(resolve, 250))
-      }
-      if (batchCancelRef.current) {
-        cancelled = true
-        break
-      }
-      const item = items[index]
-      if (!item.selected) {
-        patchBatchItem(index, { status: 'skipped' })
-        skipped += 1
-        continue
-      }
+  useEffect(() => {
+    const api = window.electronAPI?.providers
+    if (!api?.onCatalogBatchProgress) return
+    return api.onCatalogBatchProgress((snapshot) => setBatchSnapshot(snapshot))
+  }, [])
 
-      patchBatchItem(index, { status: 'matching', error: undefined })
-      let adopted = 0
-      let measured = 0
-      let deferred = 0
-      let probeError: string | undefined
-      try {
-        if (item.catalogId) {
-          for (const field of item.adoptFields) {
-            if (batchCancelRef.current) break
-            const response = await api.adoptCatalogField(
-              item.row.providerId,
-              item.row.displayName,
-              item.catalogId,
-              field,
-            )
-            if (!response.success) throw new Error(response.error ?? '采用标准库字段失败')
-            adopted += 1
-          }
-        }
-        if (!batchCancelRef.current && item.scopes.length > 0) {
-          patchBatchItem(index, { status: 'probing' })
-          for (const scope of item.scopes) {
-            if (batchCancelRef.current) break
-            while (batchPauseRef.current && !batchCancelRef.current) {
-              await new Promise((resolve) => setTimeout(resolve, 250))
-            }
-            if (batchCancelRef.current) break
-            const response = await api.probeModel(
-              item.row.providerId,
-              item.row.displayName,
-              scope,
-              false,
-            )
-            if (response.success && response.result?.status === 'measured') measured += 1
-            else if (response.result?.status === 'skipped') deferred += 1
-            else probeError = response.error ?? response.result?.reason ?? probeError
-          }
-        }
-        if (batchCancelRef.current) {
-          cancelled = true
-          break
-        }
-        if (adopted === 0 && measured === 0 && deferred === 0) {
-          patchBatchItem(index, { status: 'skipped' })
-          skipped += 1
-        } else if (adopted > 0 || measured > 0) {
-          patchBatchItem(index, { status: 'done', error: probeError })
-          success += 1
-        } else {
-          patchBatchItem(index, { status: 'failed', error: probeError })
-          failed += 1
-        }
-      } catch (cause) {
-        patchBatchItem(index, {
-          status: 'failed',
-          error: cause instanceof Error ? cause.message : String(cause),
-        })
-        failed += 1
-      }
-      done += 1
-      setProgress({ done, total: selectedCount })
-      await load()
+  // 批量结束后刷新待标注队列与快照元数据；同一任务只刷一次。
+  const batchRefreshedRef = useRef<string | null>(null)
+  useEffect(() => {
+    const snapshot = batchSnapshot
+    if (!snapshot) return
+    if (snapshot.status !== 'done' && snapshot.status !== 'cancelled' && snapshot.status !== 'failed') {
+      return
     }
+    if (batchRefreshedRef.current === snapshot.jobId) return
+    batchRefreshedRef.current = snapshot.jobId
+    void load()
+    void loadCatalog()
+  }, [batchSnapshot, load, loadCatalog])
 
-    setRunning(false)
-    runningModeRef.current = null
-    batchCancelRef.current = false
-    setProgress({ done: 0, total: 0 })
-    toast({
-      title: cancelled ? t('models.metadata.batchCancelled') : t('models.metadata.batchDone'),
-      description: t('models.metadata.batchSummary', {
-        success,
-        skipped,
-        failed,
-        cancelled: cancelled ? 1 : 0,
-      }),
-      ...(failed > 0 ? { variant: 'destructive' as const } : {}),
-    })
-  }, [dialog, load, patchBatchItem, t, toast])
+  const startBatch = useCallback(
+    async (probe: boolean, retryFailedOf?: string) => {
+      const api = window.electronAPI?.providers
+      if (!api?.startCatalogBatch) return
+      setBatchStarting(true)
+      try {
+        const result = await api.startCatalogBatch({ probe, retryFailedOf })
+        if (!result.success || !result.snapshot) {
+          toast({
+            title: t('models.metadata.batchFailed'),
+            description: result.error ?? t('models.metadata.batchNoTargets'),
+            variant: 'destructive',
+          })
+          return
+        }
+        setBatchSnapshot(result.snapshot)
+        setBatchConfirmOpen(false)
+        setBatchDialogOpen(true)
+      } catch (cause) {
+        toast({
+          title: t('models.metadata.batchFailed'),
+          description: cause instanceof Error ? cause.message : String(cause),
+          variant: 'destructive',
+        })
+      } finally {
+        setBatchStarting(false)
+      }
+    },
+    [t, toast],
+  )
+
+  /**
+   * 主入口：有进行中/暂停的任务就接着看它；否则直接开跑。
+   * 只有打开「同时执行探测」时才先取一次合计预估并确认一次。
+   */
+  const openBatch = useCallback(async () => {
+    const api = window.electronAPI?.providers
+    if (!api) return
+    try {
+      const jobs = await api.getCatalogBatchJobs?.()
+      const active = jobs?.find(
+        (job) => job.status === 'running' || job.status === 'paused',
+      )
+      if (active) {
+        setBatchSnapshot(active)
+        setBatchDialogOpen(true)
+        return
+      }
+    } catch {
+      // 回读失败就按新任务处理。
+    }
+    if (!probeWithBatch) {
+      await startBatch(false)
+      return
+    }
+    setBatchStarting(true)
+    try {
+      const estimate = await api.estimateCatalogBatch?.()
+      if (!estimate) return
+      setBatchEstimate(estimate)
+      setBatchConfirmOpen(true)
+    } finally {
+      setBatchStarting(false)
+    }
+  }, [probeWithBatch, startBatch])
+
+  const pauseBatch = useCallback(async () => {
+    const api = window.electronAPI?.providers
+    const jobId = batchSnapshot?.jobId
+    if (!api?.pauseCatalogBatch || !jobId) return
+    await api.pauseCatalogBatch(jobId)
+  }, [batchSnapshot?.jobId])
+
+  const resumeBatch = useCallback(async () => {
+    const api = window.electronAPI?.providers
+    const jobId = batchSnapshot?.jobId
+    if (!api?.resumeCatalogBatch || !jobId) return
+    await api.resumeCatalogBatch(jobId)
+  }, [batchSnapshot?.jobId])
+
+  const cancelBatch = useCallback(async () => {
+    const api = window.electronAPI?.providers
+    const jobId = batchSnapshot?.jobId
+    if (!api?.cancelCatalogBatch || !jobId) return
+    await api.cancelCatalogBatch(jobId)
+  }, [batchSnapshot?.jobId])
+
+  const batchActive = batchSnapshot !== null
+    && (batchSnapshot.status === 'running' || batchSnapshot.status === 'paused')
+  const batchRunning = batchSnapshot !== null && batchSnapshot.status === 'running'
+
+  // 批量进度条的秒表：主进程只在阶段变化时推送快照。
+  useEffect(() => {
+    if (!batchActive) return
+    const timer = setInterval(() => setTick((current) => current + 1), 1000)
+    return () => clearInterval(timer)
+  }, [batchActive])
 
   /** 弹窗当前任务：只显示与单模型弹窗匹配的进度。 */
   const activeJob = jobSnapshot
@@ -1038,8 +965,18 @@ export function ModelMetadataPanel() {
     ...report.coverage[attribute],
     gap: report.coverageGaps[attribute],
   }))
-  const batchCandidates = report.queue.slice(0, BATCH_LIMIT)
-  const batchPlanTotals = dialog?.mode === 'batch' ? planTotalsOf(dialog.items) : { models: 0, fields: 0, requests: 0, tokens: 0 }
+  const batchAvailable = report.queue.length > 0
+  const batchElapsedMs = batchSnapshot
+    ? (batchActive
+      ? Math.max(batchSnapshot.elapsedMs, Date.now() - new Date(batchSnapshot.startedAt).getTime())
+      : batchSnapshot.elapsedMs)
+    : 0
+  const batchPercent = batchSnapshot && batchSnapshot.totalModels > 0
+    ? Math.min(100, Math.round((batchSnapshot.processedModels / batchSnapshot.totalModels) * 100))
+    : 0
+  const batchBackoffSeconds = batchSnapshot?.backoffUntil
+    ? Math.max(0, Math.ceil((new Date(batchSnapshot.backoffUntil).getTime() - Date.now()) / 1000))
+    : 0
 
   return (
     <div className="space-y-6">
@@ -1049,22 +986,46 @@ export function ModelMetadataPanel() {
             <CardTitle>{t('models.metadata.coverageTitle')}</CardTitle>
             <CardDescription>{t('models.metadata.coverageDesc')}</CardDescription>
           </div>
-          <div className="flex shrink-0 flex-wrap items-center gap-2">
-            {batchCandidates.length > 0 && (
-              <Button
-                variant="secondary"
-                size="sm"
-                disabled={running && runningModeRef.current !== 'batch'}
-                onClick={() => void openBatch()}
-              >
-                <Radar className="mr-2 h-4 w-4" />
-                {t('models.metadata.batchProbe')}
-              </Button>
+          <div className="flex shrink-0 flex-col items-end gap-2">
+            {batchAvailable && (
+              <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={probeWithBatch}
+                  disabled={batchActive}
+                  onChange={(event) => setProbeWithBatch(event.target.checked)}
+                />
+                <span className="text-right">
+                  <span className="font-medium text-foreground">
+                    {t('models.metadata.batchProbeToggle')}
+                  </span>
+                  <span className="block">{t('models.metadata.batchProbeToggleHint')}</span>
+                </span>
+              </label>
             )}
-            <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
-              <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-              {t('models.metadata.refresh')}
-            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              {batchAvailable && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={batchStarting}
+                  onClick={() => void openBatch()}
+                >
+                  {batchStarting || (batchActive && batchRunning) ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <Radar className="mr-2 h-4 w-4" />
+                  )}
+                  {batchActive
+                    ? t('models.metadata.batchViewProgress')
+                    : t('models.metadata.batchAll')}
+                </Button>
+              )}
+              <Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}>
+                <RefreshCw className={`mr-2 h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                {t('models.metadata.refresh')}
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -1127,6 +1088,13 @@ export function ModelMetadataPanel() {
                           {t('models.metadata.catalogNotFetched')}
                         </Badge>
                       )}
+                      {status?.builtin && (
+                        <Badge variant="outline" className="text-info">
+                          {t('models.metadata.catalogBuiltinBadge', {
+                            date: formatDate(status.fetchedAt),
+                          })}
+                        </Badge>
+                      )}
                     </div>
                     <div className="break-all text-[11px] text-muted-foreground">
                       {status?.sourceUrl ?? meta.sourceUrl}
@@ -1148,9 +1116,13 @@ export function ModelMetadataPanel() {
                 {status && (
                   <div className="mt-2 space-y-0.5 text-[11px] text-muted-foreground">
                     <div>
-                      {t('models.metadata.catalogFetchedAt', {
-                        time: new Date(status.fetchedAt).toLocaleString(),
-                      })}
+                      {status.builtin
+                        ? t('models.metadata.catalogBuiltinFetchedAt', {
+                            date: formatDate(status.fetchedAt),
+                          })
+                        : t('models.metadata.catalogFetchedAt', {
+                            time: new Date(status.fetchedAt).toLocaleString(),
+                          })}
                     </div>
                     <div>{t('models.metadata.catalogLicense', { license: status.license })}</div>
                     <div>
@@ -1163,11 +1135,70 @@ export function ModelMetadataPanel() {
                     </div>
                   </div>
                 )}
+                {source === 'litellm' && (
+                  <div className="mt-2 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        className="h-8 min-w-0 flex-1 rounded-md border bg-background px-2 text-xs"
+                        value={mirrorUrl}
+                        placeholder="https://example.com/model_prices_and_context_window.json"
+                        onChange={(event) => setMirrorUrl(event.target.value)}
+                      />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={mirrorSaving}
+                        onClick={() => void saveMirrorUrl()}
+                      >
+                        {mirrorSaving ? (
+                          <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                        ) : null}
+                        {t('models.metadata.catalogMirrorSave')}
+                      </Button>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      {t('models.metadata.catalogMirrorHint')}
+                    </p>
+                  </div>
+                )}
+                {catalogAttempts[source] && catalogAttempts[source]!.length > 0 && (
+                  <div className="mt-2 space-y-0.5 rounded-md border bg-muted/30 px-2 py-1 text-[11px]">
+                    <div className="font-medium text-muted-foreground">
+                      {t('models.metadata.catalogEndpointAttempts')}
+                    </div>
+                    {catalogAttempts[source]!.map((attempt) => (
+                      <div key={attempt.url} className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-medium">
+                          {t(`models.metadata.catalogEndpoint_${attempt.label}`)}
+                        </span>
+                        <span>
+                          {attempt.status !== undefined
+                            ? `HTTP ${attempt.status}`
+                            : t('models.metadata.catalogEndpointFailed')}
+                        </span>
+                        {attempt.errorKind && (
+                          <span>
+                            {t(`models.metadata.catalogErrorKind_${attempt.errorKind}`)}
+                          </span>
+                        )}
+                        <span>{formatDuration(attempt.elapsedMs)}</span>
+                        {attempt.bytes !== undefined && <span>{attempt.bytes} B</span>}
+                        <span className="break-all text-muted-foreground">{attempt.url}</span>
+                        {attempt.error && <span className="text-destructive">{attempt.error}</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {catalogErrors[source] && (
                   <div className="mt-2 rounded-md border border-destructive/40 bg-destructive/5 px-2 py-1 text-[11px] text-destructive">
                     {t('models.metadata.catalogSourceError', {
                       error: catalogErrors[source] ?? '',
                     })}
+                    {status?.builtin
+                      ? ` · ${t('models.metadata.catalogUsingBuiltin', {
+                          date: formatDate(status.fetchedAt),
+                        })}`
+                      : ''}
                   </div>
                 )}
               </div>
@@ -1239,7 +1270,7 @@ export function ModelMetadataPanel() {
                           <Button
                             variant="outline"
                             size="sm"
-                            disabled={running}
+                            disabled={running || batchActive}
                             onClick={() => setCatalogDialog(row)}
                           >
                             <Database className="mr-2 h-4 w-4" />
@@ -1248,7 +1279,7 @@ export function ModelMetadataPanel() {
                           <Button
                             variant="outline"
                             size="sm"
-                            disabled={running && (runningModeRef.current === 'batch' || probing !== key)}
+                            disabled={batchActive || (running && probing !== key)}
                             onClick={() => void openSingle(row)}
                           >
                             {probing === key ? (
@@ -1444,145 +1475,269 @@ export function ModelMetadataPanel() {
             </>
           )}
 
-          {dialog?.mode === 'batch' && (
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={batchDialogOpen && batchSnapshot !== null}
+        onOpenChange={(open) => (!open ? setBatchDialogOpen(false) : undefined)}
+      >
+        <DialogContent className="max-w-xl">
+          {batchSnapshot && (
             <>
               <DialogHeader>
-                <DialogTitle>{t('models.metadata.batchTitle')}</DialogTitle>
+                <DialogTitle>{t('models.metadata.batchProgressTitle')}</DialogTitle>
                 <DialogDescription>
-                  {t('models.metadata.batchDesc', {
-                    requests: batchPlanTotals.requests,
-                    tokens: formatTokens(batchPlanTotals.tokens),
-                  })}
+                  {t(`models.metadata.batchPhase_${batchSnapshot.phase}`)}
+                  {batchSnapshot.status === 'paused'
+                    ? ` · ${t('models.metadata.batchPausedLabel')}`
+                    : ''}
                 </DialogDescription>
               </DialogHeader>
-              {dialog.preparing ? (
-                <div className="flex items-center gap-2 rounded-md border p-4 text-sm text-muted-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  {t('models.metadata.batchPreparing')}
+
+              <div className="space-y-3 text-sm">
+                <div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span>
+                      {t('models.metadata.batchProcessed', {
+                        done: batchSnapshot.processedModels,
+                        total: batchSnapshot.totalModels,
+                        percent: batchPercent,
+                      })}
+                    </span>
+                    <span className="tabular-nums text-muted-foreground">
+                      {t('models.metadata.batchElapsed', { time: formatDuration(batchElapsedMs) })}
+                    </span>
+                  </div>
+                  <div className="mt-1 h-1.5 w-full overflow-hidden rounded bg-muted">
+                    <div
+                      className="h-full bg-info transition-all"
+                      style={{ width: `${batchPercent}%` }}
+                    />
+                  </div>
+                  <div className="mt-1 flex flex-wrap justify-between gap-2 text-xs text-muted-foreground">
+                    <span>
+                      {t('models.metadata.batchCurrentModel')}
+                      {' · '}
+                      <span className="font-medium text-foreground">
+                        {batchSnapshot.currentModel ?? '—'}
+                      </span>
+                      {batchSnapshot.currentStatus
+                        ? ` · ${t(`models.metadata.batchStatus_${batchSnapshot.currentStatus}`)}`
+                        : ''}
+                    </span>
+                    <span className="tabular-nums">
+                      {t('models.metadata.batchEta', {
+                        time: batchSnapshot.estimatedRemainingMs === undefined
+                          ? '—'
+                          : formatDuration(batchSnapshot.estimatedRemainingMs),
+                      })}
+                    </span>
+                  </div>
                 </div>
-              ) : (
-                <>
-                  <div className="space-y-2 rounded-md border p-3 text-sm">
-                    <div className="flex justify-between">
-                      <span>
-                        {t('models.metadata.batchModels', {
-                          selected: batchPlanTotals.models,
-                          total: dialog.items.length,
-                        })}
-                      </span>
-                      <span className="text-muted-foreground">
-                        {t('models.metadata.batchFields', { count: batchPlanTotals.fields })}
-                        {' · '}
-                        {t('models.metadata.probeRequests', { count: batchPlanTotals.requests })}
-                        {' · '}
-                        {t('models.metadata.probeTokens', { tokens: formatTokens(batchPlanTotals.tokens) })}
-                      </span>
+
+                <div className="grid grid-cols-3 gap-2 rounded-md border p-3 text-center">
+                  <div>
+                    <div className="text-lg font-semibold text-success">{batchSnapshot.success}</div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {t('models.metadata.batchSuccess')}
                     </div>
-                    <p className="text-xs text-muted-foreground">{t('models.metadata.batchSkipped')}</p>
-                    {running && (
-                      <p className="text-xs text-info">
-                        {t('models.metadata.batchRunning', { done: progress.done, total: progress.total })}
-                      </p>
-                    )}
                   </div>
-                  <div className="max-h-72 space-y-1 overflow-y-auto rounded-md border p-2">
-                    {dialog.items.map((item, index) => (
-                      <div key={`${item.row.providerId}:${item.row.displayName}`} className="rounded border p-2 text-xs">
-                        <div className="flex items-start gap-2">
-                          <input
-                            type="checkbox"
-                            className="mt-1"
-                            checked={item.selected}
-                            disabled={running}
-                            onChange={(event) => patchBatchItem(index, { selected: event.target.checked })}
-                          />
-                          <div className="min-w-0 flex-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="truncate font-medium">{item.row.displayName}</span>
-                              {item.confidence ? (
-                                <span
-                                  className={
-                                    item.confidence === 'exact'
-                                      ? 'rounded bg-success/10 px-1.5 text-success'
-                                      : item.confidence === 'alias'
-                                        ? 'rounded bg-warning/10 px-1.5 text-warning'
-                                        : 'rounded bg-muted px-1.5 text-muted-foreground'
-                                  }
-                                >
-                                  {t(`models.metadata.batchConfidence_${item.confidence}`)}
-                                </span>
-                              ) : (
-                                <span className="rounded bg-muted px-1.5 text-muted-foreground">
-                                  {t('models.metadata.batchConfidence_none')}
-                                </span>
-                              )}
-                              <span className="text-muted-foreground">
-                                {t('models.metadata.batchItemFields', { count: item.adoptFields.length })}
-                                {' · '}
-                                {t('models.metadata.batchItemScopes', { count: item.scopes.length })}
-                              </span>
-                            </div>
-                            {(item.confidence === 'alias' || item.confidence === 'family') && (
-                              <p className="mt-1 text-warning">
-                                {t(
-                                  item.confidence === 'alias'
-                                    ? 'models.metadata.batchAliasHint'
-                                    : 'models.metadata.batchFamilyHint',
-                                )}
-                              </p>
-                            )}
-                            {item.status !== 'pending' && (
-                              <p className={`mt-1 ${item.status === 'failed' ? 'text-destructive' : 'text-muted-foreground'}`}>
-                                {t(BATCH_STATUS_LABEL_KEYS[item.status])}
-                                {item.error ? ` · ${item.error}` : ''}
-                              </p>
-                            )}
-                          </div>
-                        </div>
+                  <div>
+                    <div className="text-lg font-semibold">{batchSnapshot.skipped}</div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {t('models.metadata.batchSkippedCount')}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-lg font-semibold text-destructive">{batchSnapshot.failed}</div>
+                    <div className="text-[11px] text-muted-foreground">
+                      {t('models.metadata.batchFailedCount')}
+                    </div>
+                  </div>
+                </div>
+
+                {batchSnapshot.skippedDisabled > 0 && (
+                  <div className="text-xs text-muted-foreground">
+                    {t('models.metadata.batchSkippedDisabled', {
+                      count: batchSnapshot.skippedDisabled,
+                    })}
+                  </div>
+                )}
+
+                <div className="space-y-1 text-xs text-muted-foreground">
+                  <div>
+                    {t('models.metadata.batchAdopted', {
+                      fields: batchSnapshot.adoptedFields,
+                      exact: batchSnapshot.exactAdoptedModels,
+                      alias: batchSnapshot.aliasAdoptedModels.length,
+                    })}
+                  </div>
+                  {batchSnapshot.measuredFields > 0 && (
+                    <div>
+                      {t('models.metadata.batchMeasuredFields', {
+                        count: batchSnapshot.measuredFields,
+                      })}
+                    </div>
+                  )}
+                  {batchSnapshot.aliasAdoptedModels.length > 0 && (
+                    <div className="break-all">
+                      {t('models.metadata.batchAliasAdopted', {
+                        models: batchSnapshot.aliasAdoptedModels.slice(0, 8).join('、'),
+                      })}
+                    </div>
+                  )}
+                  {batchSnapshot.familyCandidates > 0 && (
+                    <div>
+                      {t('models.metadata.batchFamilyCandidates', {
+                        count: batchSnapshot.familyCandidates,
+                      })}
+                    </div>
+                  )}
+                  {batchSnapshot.probeEnabled && (
+                    <div>
+                      {t('models.metadata.batchProbeUsage', {
+                        sent: batchSnapshot.requestsSent,
+                        limit: batchSnapshot.requestLimit,
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {batchBackoffSeconds > 0 && batchSnapshot.status === 'running' && (
+                  <div className="rounded-md border border-warning/40 bg-warning/5 px-2 py-1 text-xs text-warning">
+                    {t('models.metadata.batchBackoff', { seconds: batchBackoffSeconds })}
+                  </div>
+                )}
+
+                {batchSnapshot.lastError && (
+                  <div className="rounded-md border border-destructive/40 bg-destructive/5 px-2 py-1 text-xs text-destructive">
+                    {batchSnapshot.lastError}
+                  </div>
+                )}
+
+                {batchSnapshot.failedModels.length > 0
+                  && (batchSnapshot.status === 'done'
+                    || batchSnapshot.status === 'cancelled'
+                    || batchSnapshot.status === 'failed') && (
+                    <div className="space-y-0.5 rounded-md border p-2 text-xs">
+                      <div className="font-medium">
+                        {t('models.metadata.batchFailedList')}
                       </div>
-                    ))}
-                  </div>
-                </>
-              )}
+                      {batchSnapshot.failedModels.slice(0, 8).map((failure) => (
+                        <div key={`${failure.providerId}:${failure.displayName}`} className="flex flex-wrap gap-1.5">
+                          <span className="font-medium">{failure.displayName}</span>
+                          {failure.error && (
+                            <span className="break-all text-destructive">{failure.error}</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+              </div>
+
               <DialogFooter>
-                {' '}
-                {running && (
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      batchPauseRef.current = !batchPauseRef.current
-                      setBatchPaused(batchPauseRef.current)
-                    }}
-                  >
-                    {batchPaused
-                      ? t('models.metadata.batchResume')
-                      : t('models.metadata.batchPause')}
+                {batchSnapshot.status === 'running' && (
+                  <Button variant="outline" onClick={() => void pauseBatch()}>
+                    {t('models.metadata.batchPause')}
                   </Button>
                 )}
-                <Button variant="ghost" onClick={closeDialog}>
+                {batchSnapshot.status === 'paused' && (
+                  <Button variant="outline" onClick={() => void resumeBatch()}>
+                    {t('models.metadata.batchResume')}
+                  </Button>
+                )}
+                {batchActive && (
+                  <Button variant="destructive" onClick={() => void cancelBatch()}>
+                    {t('models.metadata.batchCancelRun')}
+                  </Button>
+                )}
+                {!batchActive
+                  && batchSnapshot.failedModels.length > 0
+                  && batchSnapshot.status !== 'failed'
+                  && (
+                    <Button
+                      variant="outline"
+                      disabled={batchStarting}
+                      onClick={() => void startBatch(batchSnapshot.probeEnabled, batchSnapshot.jobId)}
+                    >
+                      <RotateCcw className="mr-2 h-4 w-4" />
+                      {t('models.metadata.batchRetryFailed')}
+                    </Button>
+                  )}
+                <Button variant="ghost" onClick={() => setBatchDialogOpen(false)}>
                   {t('models.metadata.probeClose')}
                 </Button>
-                {running && (
-                  <Button variant="destructive" onClick={handleCancelBatch}>
-                    {t('models.metadata.probeStop')}
-                  </Button>
-                )}
-                {!running && (
-                  <Button
-                    onClick={() => void handleRunBatch()}
-                    disabled={
-                      dialog.preparing
-                      || batchPlanTotals.models === 0
-                      || (batchPlanTotals.fields === 0 && batchPlanTotals.requests === 0)
-                    }
-                  >
-                    <Radar className="mr-2 h-4 w-4" />
-                    {t('models.metadata.batchStart')}
-                  </Button>
-                )}
               </DialogFooter>
             </>
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={batchConfirmOpen && batchEstimate !== null}
+        onOpenChange={(open) => (!open ? setBatchConfirmOpen(false) : undefined)}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('models.metadata.batchConfirmTitle')}</DialogTitle>
+            <DialogDescription>{t('models.metadata.batchConfirmDesc')}</DialogDescription>
+          </DialogHeader>
+          {batchEstimate && (
+            <div className="space-y-1 rounded-md border p-3 text-sm">
+              <div>
+                {t('models.metadata.batchModels', {
+                  selected: batchEstimate.models,
+                  total: batchEstimate.models + batchEstimate.skippedDisabled,
+                })}
+              </div>
+              {batchEstimate.skippedDisabled > 0 && (
+                <div className="text-xs text-muted-foreground">
+                  {t('models.metadata.batchSkippedDisabled', {
+                    count: batchEstimate.skippedDisabled,
+                  })}
+                </div>
+              )}
+              <div className="text-xs text-muted-foreground">
+                {t('models.metadata.batchFields', { count: batchEstimate.fields })}
+                {' · '}
+                {t('models.metadata.batchMatchBreakdown', {
+                  exact: batchEstimate.exactModels,
+                  alias: batchEstimate.aliasModels,
+                  family: batchEstimate.familyCandidates,
+                })}
+              </div>
+              <div>
+                {t('models.metadata.batchProbeModels', { count: batchEstimate.probeModels })}
+              </div>
+              <div>
+                {t('models.metadata.probeRequests', { count: batchEstimate.requests })}
+                {' · '}
+                {t('models.metadata.probeTokens', {
+                  tokens: formatTokens(batchEstimate.tokens),
+                })}
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                {t('models.metadata.batchConfirmOnce')}
+              </p>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setBatchConfirmOpen(false)}>
+              {t('models.metadata.batchConfirmCancel')}
+            </Button>
+            <Button
+              disabled={batchStarting}
+              onClick={() => void startBatch(true)}
+            >
+              {batchStarting ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Radar className="mr-2 h-4 w-4" />
+              )}
+              {t('models.metadata.batchConfirmStart')}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

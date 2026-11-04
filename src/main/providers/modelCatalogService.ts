@@ -5,11 +5,12 @@
  * 是 `refreshCatalog(source)`，只能由用户点击触发。刷新失败时旧快照原样保留。
  */
 import { createHash } from 'crypto'
+import { lookup } from 'dns/promises'
 import {
   CATALOG_SOURCE_META,
+  catalogEndpointPlan,
   catalogFieldValue,
   catalogIndexFromStore,
-  catalogSnapshotStatuses,
   adoptionsForModel,
   matchCatalogEntries,
   removeCatalogAdoptions,
@@ -19,6 +20,7 @@ import {
   type CatalogAdoptionField,
   type CatalogCandidatesResult,
   type CatalogEntry,
+  type CatalogRefreshEndpointAttempt,
   type CatalogRefreshErrorKind,
   type CatalogRefreshResult,
   type CatalogSnapshotStatus,
@@ -27,7 +29,12 @@ import {
 } from '../../shared/modelCatalog.ts'
 import { storeManager } from '../store/store.ts'
 import { parseCatalogPayload } from './modelCatalogParsers.ts'
-import { readCatalogStore, writeCatalogSnapshot } from './modelCatalogStore.ts'
+import {
+  readCatalogStore,
+  readEffectiveCatalogStatuses,
+  readEffectiveCatalogStore,
+  writeCatalogSnapshot,
+} from './modelCatalogStore.ts'
 
 /**
  * LiteLLM 的原始文件约 3.2 MB（4,500+ 条）；慢链路下 30s 不够，给 60s。
@@ -36,6 +43,97 @@ import { readCatalogStore, writeCatalogSnapshot } from './modelCatalogStore.ts'
 const FETCH_TIMEOUT_MS = 60_000
 /** 失败时把响应体前 200 字符带进错误信息，便于区分代理页/限流页/真 JSON。 */
 const ERROR_BODY_SNIPPET = 200
+/**
+ * 响应体上限：源文件约 3.3 MB，8 MB 足够覆盖上游增长，同时挡住
+ * 被劫持/镜像返回的超大文件把内存打满。
+ */
+const MAX_CATALOG_BYTES = 8 * 1024 * 1024
+/** 手动跟随重定向的跳数上限（GitHub raw 到 CDN 通常 1–2 跳）。 */
+const MAX_CATALOG_REDIRECTS = 5
+
+/**
+ * SSRF 面：镜像地址是用户输入的，且重定向目标不受我们控制。
+ * 结论：所有端点（含每一跳重定向）只接受 https；拒绝环回、链路本地与私网地址
+ * （IPv4 + IPv6 字面量与 DNS 解析结果都查）；响应体硬上限 8 MB。
+ */
+function isPrivateHost(hostname: string): boolean {
+  const host = hostname.trim().toLowerCase()
+  if (host === '' || host === 'localhost' || host === '0.0.0.0' || host === '::1') return true
+  if (host.startsWith('127.') || host.startsWith('10.')) return true
+  if (host.startsWith('192.168.')) return true
+  const v4 = /^172\.(\d{1,3})\./.exec(host)
+  if (v4 && Number(v4[1]) >= 16 && Number(v4[1]) <= 31) return true
+  if (host === '169.254.169.254' || host.startsWith('169.254.')) return true
+  // IPv6 私网/链路本地：::1、fc00::/7、fe80::/10
+  if (host.startsWith('fc') || host.startsWith('fd') || host.startsWith('fe80:')) return true
+  return false
+}
+
+async function assertSafeCatalogUrl(raw: string): Promise<URL> {
+  const url = new URL(raw)
+  if (url.protocol !== 'https:') throw new Error('端点必须使用 https')
+  if (isPrivateHost(url.hostname)) throw new Error(`拒绝私网/环回地址：${url.hostname}`)
+  // 域名可能解析到私网地址：字面量检查不够，必须看实际解析结果。
+  const resolved = await lookup(url.hostname, { all: true, verbatim: true })
+  for (const entry of resolved) {
+    if (isPrivateHost(entry.address)) {
+      throw new Error(`域名解析到私网/环回地址：${entry.address}`)
+    }
+  }
+  return url
+}
+
+/** 逐跳手动跟随重定向，每一跳都重新做协议/地址校验。 */
+async function fetchCatalogEndpoint(url: string): Promise<Response> {
+  let current = url
+  for (let hop = 0; hop <= MAX_CATALOG_REDIRECTS; hop += 1) {
+    await assertSafeCatalogUrl(current)
+    const response = await fetch(current, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      redirect: 'manual',
+      headers: {
+        accept: 'application/json',
+        'user-agent': 'ModelPort model-catalog refresh (manual)',
+      },
+    })
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get('location')
+      await response.body?.cancel()
+      if (!location) throw new Error(`HTTP ${response.status} 重定向缺少 Location`)
+      current = new URL(location, current).toString()
+      continue
+    }
+    return response
+  }
+  throw new Error(`重定向超过 ${MAX_CATALOG_REDIRECTS} 跳`)
+}
+
+/** 流式读取并累计字节，超过上限立即取消，避免把超大响应读进内存。 */
+async function readCatalogBody(response: Response): Promise<{ text: string; bytes: number }> {
+  const declared = Number(response.headers.get('content-length') ?? '0')
+  if (declared > MAX_CATALOG_BYTES) {
+    await response.body?.cancel()
+    throw new Error(`响应体过大：${declared} 字节（上限 ${MAX_CATALOG_BYTES}）`)
+  }
+  if (!response.body) {
+    const text = await response.text()
+    return { text, bytes: Buffer.byteLength(text, 'utf8') }
+  }
+  const reader = response.body.getReader()
+  const chunks: Buffer[] = []
+  let bytes = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    bytes += value.byteLength
+    if (bytes > MAX_CATALOG_BYTES) {
+      await reader.cancel()
+      throw new Error(`响应体过大：超过 ${MAX_CATALOG_BYTES} 字节上限`)
+    }
+    chunks.push(Buffer.from(value))
+  }
+  return { text: Buffer.concat(chunks).toString('utf8'), bytes }
+}
 
 function sha256(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex')
@@ -68,99 +166,142 @@ function classifyFetchError(error: unknown): { kind: CatalogRefreshErrorKind; me
   return { kind: 'unknown', message: String(error) }
 }
 
-function failure(
-  kind: CatalogRefreshErrorKind,
-  error: string,
-  startedAt: number,
-  statuses: CatalogSnapshotStatus[],
-): CatalogRefreshResult {
-  return { success: false, errorKind: kind, error, statuses, elapsedMs: Date.now() - startedAt }
-}
-
 /**
- * 刷新一个来源。成功才写盘；任何失败（网络、HTTP 非 2xx、JSON 损坏、解析为空）
- * 都返回 `success:false`，磁盘上的旧快照保持不变，界面提示「保留上一份数据」。
+ * 刷新一个来源：按主端点 → jsDelivr → 用户镜像的顺序逐个尝试，任一成功即停。
+ *
+ * 每个端点单独记录耗时与错误类型（全部失败时一并返回，界面能区分
+ * 「全都不可达」与「某个端点挂了」）。成功才写盘；任何失败都保留旧快照，
+ * 从未成功刷新过时界面仍显示内置快照。
  *
  * 三个来源彼此独立：只覆盖被刷新的来源，另一个来源失败不会清掉这里的快照。
  */
-export async function refreshCatalog(source: CatalogSourceId): Promise<CatalogRefreshResult> {
+export async function refreshCatalog(
+  source: CatalogSourceId,
+  options?: { mirrorUrl?: string },
+): Promise<CatalogRefreshResult> {
   const meta = CATALOG_SOURCE_META[source]
   const startedAt = Date.now()
-  try {
-    const response = await fetch(meta.sourceUrl, {
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      // raw.githubusercontent 会 301/302 到 CDN；显式跟随，避免把重定向当成失败。
-      redirect: 'follow',
-      headers: {
-        accept: 'application/json',
-        'user-agent': 'ModelPort model-catalog refresh (manual)',
-      },
-    })
-    if (!response.ok) {
-      let detail = ''
-      try {
-        detail = snippetOf(await response.text())
-      } catch {
-        // 读响应体失败不影响「HTTP 非 2xx」这个结论。
-      }
-      return failure(
-        'http',
-        `HTTP ${response.status} ${response.statusText}${detail ? `：${detail}` : ''}`,
-        startedAt,
-        catalogSnapshotStatuses(await readCatalogStore()),
-      )
+  const endpoints = catalogEndpointPlan(source, options?.mirrorUrl)
+  const attempts: CatalogRefreshEndpointAttempt[] = []
+  let lastKind: CatalogRefreshErrorKind = 'unknown'
+  let lastError = ''
+
+  for (const endpoint of endpoints) {
+    const attemptStartedAt = Date.now()
+    const base = {
+      url: endpoint.url,
+      label: endpoint.label,
+      elapsedMs: 0,
     }
-    const text = await response.text()
-    let raw: unknown
     try {
-      raw = JSON.parse(text)
+      const response = await fetchCatalogEndpoint(endpoint.url)
+      if (!response.ok) {
+        let detail = ''
+        try {
+          detail = snippetOf((await readCatalogBody(response)).text)
+        } catch {
+          // 读响应体失败不影响「HTTP 非 2xx」这个结论。
+        }
+        const message = `HTTP ${response.status} ${response.statusText}${detail ? `：${detail}` : ''}`
+        attempts.push({
+          ...base,
+          status: response.status,
+          errorKind: 'http',
+          error: message,
+          elapsedMs: Date.now() - attemptStartedAt,
+        })
+        lastKind = 'http'
+        lastError = message
+        continue
+      }
+      const body = await readCatalogBody(response)
+      let raw: unknown
+      try {
+        raw = JSON.parse(body.text)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        const detail = `响应不是合法 JSON（${body.bytes} 字节）：${message}`
+        attempts.push({
+          ...base,
+          status: response.status,
+          errorKind: 'parse',
+          error: detail,
+          elapsedMs: Date.now() - attemptStartedAt,
+          bytes: body.bytes,
+        })
+        lastKind = 'parse'
+        lastError = detail
+        continue
+      }
+      const entries = parseCatalogPayload(source, raw)
+      if (entries.length === 0) {
+        const detail = '响应中没有可用的模型条目（保留上一份快照）'
+        attempts.push({
+          ...base,
+          status: response.status,
+          errorKind: 'empty',
+          error: detail,
+          elapsedMs: Date.now() - attemptStartedAt,
+          bytes: body.bytes,
+        })
+        lastKind = 'empty'
+        lastError = detail
+        continue
+      }
+      await writeCatalogSnapshot({
+        source,
+        sourceUrl: endpoint.url,
+        fetchedAt: new Date().toISOString(),
+        contentHash: sha256(body.text),
+        license: meta.license,
+        attribution: meta.attribution,
+        entries,
+      })
+      const bytes = body.bytes
+      attempts.push({
+        ...base,
+        status: response.status,
+        elapsedMs: Date.now() - attemptStartedAt,
+        bytes,
+      })
+      const statuses = await readEffectiveCatalogStatuses()
+      return {
+        success: true,
+        status: statuses.find((item) => item.source === source),
+        statuses,
+        attempts,
+        usedEndpoint: endpoint.url,
+        elapsedMs: Date.now() - startedAt,
+      }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      return failure(
-        'parse',
-        `响应不是合法 JSON（${text.length} 字节）：${message}`,
-        startedAt,
-        catalogSnapshotStatuses(await readCatalogStore()),
-      )
+      const classified = classifyFetchError(error)
+      attempts.push({
+        ...base,
+        errorKind: classified.kind,
+        error: classified.message,
+        elapsedMs: Date.now() - attemptStartedAt,
+      })
+      lastKind = classified.kind
+      lastError = classified.message
     }
-    const entries = parseCatalogPayload(source, raw)
-    if (entries.length === 0) {
-      return failure(
-        'empty',
-        '响应中没有可用的模型条目（保留上一份快照）',
-        startedAt,
-        catalogSnapshotStatuses(await readCatalogStore()),
-      )
-    }
-    const store = await writeCatalogSnapshot({
-      source,
-      sourceUrl: meta.sourceUrl,
-      fetchedAt: new Date().toISOString(),
-      contentHash: sha256(text),
-      license: meta.license,
-      attribution: meta.attribution,
-      entries,
-    })
-    return {
-      success: true,
-      status: catalogSnapshotStatuses(store).find((item) => item.source === source),
-      statuses: catalogSnapshotStatuses(store),
-      elapsedMs: Date.now() - startedAt,
-    }
-  } catch (error) {
-    const classified = classifyFetchError(error)
-    return failure(
-      classified.kind,
-      classified.message,
-      startedAt,
-      catalogSnapshotStatuses(await readCatalogStore()),
-    )
+  }
+
+  const summary = attempts
+    .map((attempt) => `${attempt.label}: ${attempt.error ?? 'failed'}`)
+    .join('; ')
+  return {
+    success: false,
+    errorKind: lastKind,
+    error: `全部端点均失败（${attempts.length} 个）：${summary || lastError}`,
+    statuses: await readEffectiveCatalogStatuses(),
+    attempts,
+    elapsedMs: Date.now() - startedAt,
   }
 }
 
 /** 当前快照元数据（不含 entries）；页面打开只读这一份，不联网。 */
 export async function getCatalogStatuses(): Promise<CatalogSnapshotStatus[]> {
-  return catalogSnapshotStatuses(await readCatalogStore())
+  return readEffectiveCatalogStatuses()
 }
 
 /**
@@ -172,13 +313,13 @@ export async function getCatalogCandidates(input: {
   displayName: string
   actualModelId: string
 }): Promise<CatalogCandidatesResult> {
-  const store = await readCatalogStore()
+  const { store } = await readEffectiveCatalogStore()
   const matches = matchCatalogEntries(catalogIndexFromStore(store), {
     modelId: input.actualModelId,
     displayName: input.displayName,
   })
   return {
-    statuses: catalogSnapshotStatuses(store),
+    statuses: await readEffectiveCatalogStatuses(),
     matches,
     adoptions: adoptionsForModel(
       storeManager.getCatalogAdoptions(),
@@ -212,12 +353,15 @@ export async function adoptCatalogField(input: {
 }): Promise<{ success: boolean; adoptions?: CatalogAdoption[]; error?: string }> {
   const provider = storeManager.getProviders().find((item) => item.id === input.providerId)
   if (!provider) return { success: false, error: '供应商不存在' }
-  const known =
-    provider.modelCapabilities?.[input.displayName] !== undefined ||
-    provider.modelMappings?.[input.displayName] !== undefined
+  // 归属判定必须与 `store.ts::setUserModelMark` 同一口径：目录是 `supportedModels` /
+  // `addedModels` / `fetchedModels` 的超集，只看 modelCapabilities/modelMappings 会把
+  // 只填 supportedModels 的自定义供应商整片判成“不属于”，批量采用便静默失败。
+  const known = storeManager
+    .getModelCatalogue(input.providerId)
+    .some((model) => model.displayName === input.displayName)
   if (!known) return { success: false, error: '模型不属于该供应商' }
 
-  const store = await readCatalogStore()
+  const { store } = await readEffectiveCatalogStore()
   const found = findEntry(store, input.catalogId)
   if (!found) return { success: false, error: '快照中找不到该条目，请先刷新标准库' }
   const value = sanitizeCatalogAdoptionValue(

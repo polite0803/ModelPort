@@ -312,6 +312,8 @@ export interface AppConfig {
   streamRepetitionGuard?: RepetitionGuardSettings
   /** Model mapping configuration */
   modelMappings: Record<string, ModelMapping>
+  /** 标准库（LiteLLM）的自定义镜像地址，仅 https；空/缺省表示不使用。 */
+  catalogMirrorUrl?: string
   /** UI theme */
   theme: Theme
   /** Auto start on boot */

@@ -88,6 +88,14 @@ export const IpcChannels = {
   PROVIDERS_GET_CATALOG_CANDIDATES: 'providers:getCatalogCandidates',
   PROVIDERS_ADOPT_CATALOG_FIELD: 'providers:adoptCatalogField',
   PROVIDERS_REVOKE_CATALOG_ADOPTION: 'providers:revokeCatalogAdoption',
+  // 全部补齐：主进程持有任务，界面只订阅进度
+  PROVIDERS_ESTIMATE_CATALOG_BATCH: 'providers:estimateCatalogBatch',
+  PROVIDERS_START_CATALOG_BATCH: 'providers:startCatalogBatch',
+  PROVIDERS_PAUSE_CATALOG_BATCH: 'providers:pauseCatalogBatch',
+  PROVIDERS_RESUME_CATALOG_BATCH: 'providers:resumeCatalogBatch',
+  PROVIDERS_CANCEL_CATALOG_BATCH: 'providers:cancelCatalogBatch',
+  PROVIDERS_GET_CATALOG_BATCH_JOBS: 'providers:getCatalogBatchJobs',
+  PROVIDERS_CATALOG_BATCH_PROGRESS: 'providers:catalogBatchProgress',
 
   AGGREGATE_LIST: 'aggregate:list',
   AGGREGATE_DETAIL: 'aggregate:detail',

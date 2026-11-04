@@ -183,6 +183,8 @@ export interface ModelProbeRunResult {
   estimatedInputTokens: number
   estimatedOutputTokens: number
   reason?: string
+  /** 失败分类：批量编排据此识别限流并退避。 */
+  errorKind?: ProbeFailureKind
   row?: ModelProbeRow
 }
 
@@ -252,7 +254,11 @@ export function planOutputProbe(input: {
   return planLadder('output', OUTPUT_PROBE_LADDER, input.hintTokens, input.hintSource)
 }
 
-/** 加长提示词：按目标 token 数生成 filler，只用于把输入推到某一档。 */
+/**
+ * GATEWAY-TEXT: probe-context — 上下文阶梯探测的 filler 提示词。
+ * 只随 `probe: true` 的探测请求发出，不进任何客户端会话；登记见
+ * `docs/AGENTS-full.md` §Gateway-Authored Text。
+ */
 export function buildContextProbePrompt(targetTokens: number): string {
   const safeTokens = Math.max(1, Math.floor(targetTokens))
   const unit = 'probe '
@@ -260,7 +266,10 @@ export function buildContextProbePrompt(targetTokens: number): string {
   return unit.repeat(repeat).trim()
 }
 
-/** 输出探测的提示词：要求持续输出，让 `max_tokens` 成为唯一停下的原因。 */
+/**
+ * GATEWAY-TEXT: probe-output — 输出探测的提示词，要求持续输出，让 `max_tokens`
+ * 成为唯一停下的原因。只进探测请求，不进客户端会话。
+ */
 export function buildOutputProbePrompt(): string {
   return 'Write the word "ok" repeated on a single line until you are stopped. Do not stop on your own.'
 }

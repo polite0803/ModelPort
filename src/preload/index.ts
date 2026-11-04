@@ -61,6 +61,11 @@ import type {
   CatalogSourceId,
 } from '../shared/modelCatalog.ts'
 import type {
+  CatalogBatchEstimate,
+  CatalogBatchSnapshot,
+  CatalogBatchStartResult,
+} from '../shared/modelCatalogBatch'
+import type {
   AggregateDetail,
   AggregateListResult,
   AggregateModelTestResult,
@@ -322,6 +327,37 @@ const providersAPI = {
       displayName,
       field,
     ),
+
+  /** 「全部补齐」预演：只读本地快照，不联网。 */
+  estimateCatalogBatch: (): Promise<CatalogBatchEstimate> =>
+    ipcRenderer.invoke(IpcChannels.PROVIDERS_ESTIMATE_CATALOG_BATCH),
+
+  /** 启动主进程批量任务；`probe` 是一次性开关，`retryFailedOf` 只重试失败项。 */
+  startCatalogBatch: (input: {
+    probe: boolean
+    retryFailedOf?: string
+  }): Promise<CatalogBatchStartResult> =>
+    ipcRenderer.invoke(IpcChannels.PROVIDERS_START_CATALOG_BATCH, input),
+
+  pauseCatalogBatch: (jobId: string): Promise<boolean> =>
+    ipcRenderer.invoke(IpcChannels.PROVIDERS_PAUSE_CATALOG_BATCH, jobId),
+
+  resumeCatalogBatch: (jobId: string): Promise<boolean> =>
+    ipcRenderer.invoke(IpcChannels.PROVIDERS_RESUME_CATALOG_BATCH, jobId),
+
+  cancelCatalogBatch: (jobId: string): Promise<boolean> =>
+    ipcRenderer.invoke(IpcChannels.PROVIDERS_CANCEL_CATALOG_BATCH, jobId),
+
+  getCatalogBatchJobs: (): Promise<CatalogBatchSnapshot[]> =>
+    ipcRenderer.invoke(IpcChannels.PROVIDERS_GET_CATALOG_BATCH_JOBS),
+
+  onCatalogBatchProgress: (
+    listener: (snapshot: CatalogBatchSnapshot) => void,
+  ): (() => void) => {
+    const handler = (_event: unknown, payload: CatalogBatchSnapshot): void => listener(payload)
+    ipcRenderer.on(IpcChannels.PROVIDERS_CATALOG_BATCH_PROGRESS, handler)
+    return () => ipcRenderer.removeListener(IpcChannels.PROVIDERS_CATALOG_BATCH_PROGRESS, handler)
+  },
 }
 
 const accountsAPI = {

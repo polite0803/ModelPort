@@ -31,6 +31,16 @@ import {
   revokeCatalogAdoption,
 } from '../providers/modelCatalogService'
 import type { CatalogAdoptionField, CatalogSourceId } from '../../shared/modelCatalog.ts'
+import {
+  cancelCatalogBatch,
+  estimateCatalogBatch,
+  getCatalogBatchJobs,
+  onCatalogBatchProgress,
+  pauseCatalogBatch,
+  resumeCatalogBatch,
+  startCatalogBatch,
+} from '../providers/modelCatalogBatchRunner'
+import type { CatalogBatchSnapshot } from '../../shared/modelCatalogBatch'
 import type { ProbeJobSnapshot, ProbeProgressEvent, ProbeScope } from '../../shared/modelProbe.ts'
 import { PROBE_TOTAL_TIMEOUT_MS } from '../../shared/modelProbe.ts'
 import { schedulerStatus, triggerModelListRefreshNow, configureModelListRefresh } from '../scheduler/modelListRefresh'
@@ -96,6 +106,21 @@ function broadcastConfigChanged(config: AppConfig): void {
   })
 }
 
+/** 「全部补齐」进度：主进程编排，任何窗口（含重开的）都收到同一份快照。 */
+function broadcastCatalogBatchProgress(snapshot: CatalogBatchSnapshot): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    // 窗口销毁与 webContents 销毁是两件事；两者都查，避免向已销毁的信道 send 抛错。
+    try {
+      if (win.isDestroyed() || win.webContents.isDestroyed()) continue
+      win.webContents.send(IpcChannels.PROVIDERS_CATALOG_BATCH_PROGRESS, snapshot)
+    } catch {
+      // 广播失败不能影响主进程批量任务的推进。
+    }
+  }
+}
+
+onCatalogBatchProgress(broadcastCatalogBatchProgress)
+
 /**
  * 存储层没起来时的可读错误（`routes:*` 用）：`storeManager` 的 CRUD 会直接抛，
  * IPC 边界不许把裸异常扔给 renderer —— 那条协议错误在界面上显示成一句英文栈提示，
@@ -128,19 +153,30 @@ const MAX_PROBE_JOBS = 20
 
 function broadcastProbeProgress(snapshot: ProbeJobSnapshot): void {
   for (const window of BrowserWindow.getAllWindows()) {
-    if (!window.isDestroyed()) {
+    try {
+      if (window.isDestroyed() || window.webContents.isDestroyed()) continue
       window.webContents.send(IpcChannels.PROVIDERS_PROBE_PROGRESS, snapshot)
+    } catch {
+      // 单个窗口发送失败不能中断探测进度推送。
     }
   }
 }
 
 function trimProbeJobs(): void {
-  while (probeJobs.size > MAX_PROBE_JOBS) {
-    const oldest = probeJobs.keys().next().value as string | undefined
-    if (oldest === undefined) return
-    const record = probeJobs.get(oldest)
-    if (record && record.snapshot.status === 'running') return
-    probeJobs.delete(oldest)
+  if (probeJobs.size <= MAX_PROBE_JOBS) return
+  const entries = [...probeJobs.entries()].sort((left, right) =>
+    left[1].snapshot.startedAt.localeCompare(right[1].snapshot.startedAt),
+  )
+  // 先删已结束的最旧任务；若上限仍然超出（所有记录都在跑），按上限强制收敛最旧记录。
+  // 收敛只移除“进度可查询性”，不 abort 真实请求 —— 结果是任务仍在后台跑完。
+  for (const [id, record] of entries) {
+    if (probeJobs.size <= MAX_PROBE_JOBS) break
+    if (record.snapshot.status === 'running') continue
+    probeJobs.delete(id)
+  }
+  for (const [id] of entries) {
+    if (probeJobs.size <= MAX_PROBE_JOBS) break
+    probeJobs.delete(id)
   }
 }
 
@@ -913,7 +949,9 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
     try {
       // 用户显式触发才联网；失败时 service 保留磁盘上的旧快照。
-      return await refreshCatalog(normalized)
+      return await refreshCatalog(normalized, {
+        mirrorUrl: storeManager.getConfig().catalogMirrorUrl,
+      })
     } catch (error) {
       console.error('[IPC] Failed to refresh model catalog:', error)
       return {
@@ -972,6 +1010,54 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
       }
     }
   )
+
+  ipcMain.handle(IpcChannels.PROVIDERS_ESTIMATE_CATALOG_BATCH, async () => {
+    try {
+      return await estimateCatalogBatch()
+    } catch (error) {
+      console.error('[IPC] Failed to estimate catalog batch:', error)
+      return {
+        models: 0,
+        fields: 0,
+        probeModels: 0,
+        requests: 0,
+        tokens: 0,
+        exactModels: 0,
+        aliasModels: 0,
+        familyCandidates: 0,
+        skippedDisabled: 0,
+      }
+    }
+  })
+
+  ipcMain.handle(
+    IpcChannels.PROVIDERS_START_CATALOG_BATCH,
+    async (_, input?: { probe?: boolean; retryFailedOf?: string }) => {
+      try {
+        return await startCatalogBatch({
+          probe: input?.probe === true,
+          ...(input?.retryFailedOf ? { retryFailedOf: input.retryFailedOf } : {}),
+        })
+      } catch (error) {
+        console.error('[IPC] Failed to start catalog batch:', error)
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'batch start failed',
+        }
+      }
+    }
+  )
+
+  ipcMain.handle(IpcChannels.PROVIDERS_PAUSE_CATALOG_BATCH, (_, jobId: string) =>
+    pauseCatalogBatch(jobId),
+  )
+  ipcMain.handle(IpcChannels.PROVIDERS_RESUME_CATALOG_BATCH, (_, jobId: string) =>
+    resumeCatalogBatch(jobId),
+  )
+  ipcMain.handle(IpcChannels.PROVIDERS_CANCEL_CATALOG_BATCH, (_, jobId: string) =>
+    cancelCatalogBatch(jobId),
+  )
+  ipcMain.handle(IpcChannels.PROVIDERS_GET_CATALOG_BATCH_JOBS, () => getCatalogBatchJobs())
 
   ipcMain.handle(IpcChannels.AGGREGATE_LIST, async () => {
     return aggregateProviderManager.list()

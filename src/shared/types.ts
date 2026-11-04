@@ -719,6 +719,11 @@ export interface AppConfig {
    */
   streamRepetitionGuard?: RepetitionGuardSettings
   modelMappings: Record<string, ModelMapping>
+  /**
+   * 标准库（LiteLLM）的自定义镜像地址，仅接受 https；空/缺省表示不使用。
+   * 可达性与可信度由用户自行承担，主端点与 jsDelivr 仍会先试。
+   */
+  catalogMirrorUrl?: string
   theme: Theme
   autoStart: boolean
   autoStartProxy: boolean

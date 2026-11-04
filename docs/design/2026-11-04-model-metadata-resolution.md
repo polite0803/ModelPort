@@ -177,11 +177,42 @@ coverage[attr] = { known: 已知的行数, total: 当前目录总行数, rate: k
   （`PROBE_TOTAL_TIMEOUT_MS`）。超时一律按 `inconclusive` 收敛，不无限等待；401/403、
   429、5xx、网络不可达与超时在弹窗里分别显示「鉴权失败 / 被限流 / 上游错误 / 网络不可达 /
   上游超时」，并给出重试入口。
-- **一键补全**：标注页对待标注模型提供统一入口。预演先读本地标准库候选（不联网），
-  列出模型数、预计采用字段数、探测请求条数与 token 合计，逐模型可勾选；`exact` 默认勾选，
-  `alias` 提示确认、`family` 默认不勾选。执行跨模型串行（并发 1）、可暂停/取消，逐模型
-  显示待处理/匹配中/探测中/已完成/跳过/失败，失败不中断整体，结束后汇总成功/跳过/失败。
-  采用仍逐字段写入 adoption ledger、可撤销；已声明字段（含人工标记）不进入候选采用列表。
+- **全部补齐（全自动批量）**：标注页只有一个「全部补齐」按钮，没有逐模型复选框、没有
+  分批确认。点击即开始；范围由主进程自动选取所有「未标注或部分标注」的模型，已声明字段
+  （人工标记、上游声明）不进入候选。面板里只有一个「同时执行探测」开关（默认关闭）；开启
+  时开始前一次性展示合计预估（探测请求条数与 token），确认后全程不再询问，关闭时零确认。
+  采用口径：`exact` 与 `alias` 自动采用并在结果里标记来源（alias 标「别名匹配」），
+  `family` 只记为候选、不自动采用；价格永不自动采用；采用仍逐字段可撤销，人工标记永不
+  被覆盖。跨模型并发 1，内部批大小 10 只作为节奏控制、对用户不可见；遇 429/限流对当前批
+  指数退避（2s 起、上限 30s），单模型失败记失败并继续下一个。
+- **编排在主进程**：批量任务是主进程持有的后台 job（`modelCatalogBatchRunner`），渲染层
+  只通过 `providers:getCatalogBatchJobs` 回读快照、通过 `providers:catalogBatchProgress`
+  单向订阅进度；关闭面板、切换页面、重新打开看到的是同一个进行中的任务。应用退出
+  （`before-quit`）先干净 abort，暂停等待者被唤醒，不留半写状态。同一时刻只允许一个
+  active job（running / paused）：并发点击「全部补齐」会被主进程拒绝并指回现有任务，
+  避免两个任务共享同一条全局串行探测队列。进度事件统一给出
+  `processed/total/percent`、当前模型、已用/预计剩余、成功/跳过/失败计数；
+  `measuredFields` 按**字段**计数（context / output 各算一项），`adoptedFields` 同样按字段；
+  `skippedDisabled` 表示计划阶段被过滤的模型数。
+- **范围过滤（与路由口径一致）**：只有「已启用（在 `getEffectiveModels` 里）且被至少一条
+  **可路由**路由引用」的模型进入批量计划。路由引用沿用候选池既有判定：`resolvePoolRoute`
+  成功、不在 `excludeModels`、且若 `pinModels` 非空则必须在其中；不另造一套匹配规则。
+  被过滤的模型在预演与汇总里显示「已停用 / 未被路由引用，跳过 N 个」，数字差异可见。
+  单模型「探测」按钮不受此过滤影响（用户显式针对某个模型仍可执行）。
+- **单模型三态**：`done`（全部成功或声明级跳过）/ `partial`（有成功也有失败）/
+  `failed`（全失败）。`partial` 保留 `error` 与 `errorKind`，进入失败清单并参与退避——
+  「context 成功、output 被 429/5xx/超时」不会被折叠成 done。采用失败的字段同样进失败
+  清单并在失败原因里带上字段与原因，不静默计成 skipped。
+- **失败与退避**：跨模型并发 1，内部批大小 10 只作为节奏控制、对用户不可见；遇
+  429/限流对当前批指数退避（`2s × 2^n`，上限 30s），非限流结果重置 streak；单模型失败
+  记失败并继续下一个。
+- **断点与幂等**：adoption 去重键统一为 `catalogAdoptionKey(providerId, displayName, field)`
+  （`shared/modelCatalog.ts` 一处实现），预演与执行、断点续跑都用它，不按 catalogId 判断。
+  取消/异常后再次点击「全部补齐」，按当前报表队列继续；已采用字段在计划阶段就被扣除，
+  已 `measured` 的探测事实不再进入计划，因此不会重复写 adoption、也不会重复发探测请求。
+  **真实限制**：失败清单与「仅重试失败项」依赖主进程内存记录（最多 20 条 job）；应用重启
+  后只能「重新执行全部补齐」，由 adoption/实测事实推导断点，不能按上次失败项精确重试。
+  预演同样读取 adoption ledger，保证「预演字段数」与实际执行会跳过的字段一致。
 
 
 ## 9. 标准库层（第 5 步）
@@ -224,8 +255,9 @@ interface CatalogStore {
   失败结果带 `errorKind`（`network` / `timeout` / `http` / `parse` / `empty`）与耗时：
   HTTP 非 2xx 附带响应体前 200 字符，网络失败带 `cause.code`，超时说明 60s 上限。
   界面按来源展示失败原因；单个来源失败不影响其它来源，也不会清空整份快照。
-- **LiteLLM 抓取口径**：原始文件约 3.2 MB、4,500+ 条；`raw.githubusercontent` 显式
-  `redirect: 'follow'` 并带产品 User-Agent，整体抓取超时 60s（慢链路余量）。
+- **LiteLLM 抓取口径**：原始文件约 3.2 MB、4,500+ 条；`raw.githubusercontent` 会 301/302
+  到 CDN，因此抓取改为 `redirect: 'manual'` 逐跳跟随（最多 5 跳），每一跳都重新校验
+  协议与地址；整体抓取超时 60s（慢链路余量）。
   解析只取 `mode` 为 `chat` / `vision` 的条目（缺失 `mode` 的老条目按对话模型保留）；
   键里的 provider 前缀只用于归属展示。`max_input_tokens` / `max_output_tokens`
   （老字段 `max_tokens`）按字段直取，不做「上下文减输出」之类的二次推断。
@@ -238,7 +270,50 @@ interface CatalogStore {
   换算显式固定：先按 `max / 1e6` 反推上限避免先乘后溢出，再乘 1e6 并保留 6 位小数；
   超上限的字段丢弃而不是截断成 10,000,000。
 
-### 9.2 匹配策略（三档 + 置信度）
+### 9.2 端点回退与内置兜底
+
+- **端点顺序**：主端点 → jsDelivr CDN → 用户在设置里配置的镜像
+  （`catalogMirrorUrl`，仅 https，默认空）。不在代码默认值里硬编码任何第三方镜像站。
+  逐个尝试、成功即停；每次刷新返回 `attempts[]`
+  （`url / label / status / errorKind / error / elapsedMs / bytes`），全部失败时一并展示，
+  用户能区分「全都不可达」还是「某个端点挂了」。
+- **先实测再定顺序**：2026-11-04 在本机逐一请求（见下表）；主端点与 jsDelivr 均返回
+  与主文件完全一致的 3,281,413 字节，因此备用顺序固定为
+  `raw.githubusercontent → cdn.jsdelivr`，用户镜像排最后。
+
+  | 端点 | 状态 | 耗时 | 字节 |
+  | --- | --- | --- | --- |
+  | `raw.githubusercontent.com`（主） | HTTP 200 | 553ms | 3,281,413 |
+  | `cdn.jsdelivr.net`（备） | HTTP 200 | 443ms | 3,281,413 |
+  | `fastly.jsdelivr.net`（诊断） | HTTP 200 | 470ms | 3,281,413 |
+  | `gcore.jsdelivr.net`（诊断，缓存偏旧） | HTTP 200 | 952ms | 3,190,018 |
+  | `api.github.com`（诊断） | HTTP 200 | 564ms | 6,400 |
+
+- **内置快照**：`scripts/build-builtin-catalog.mjs` 从可达端点抓取，按
+  `mode in (chat, vision)` 裁剪（丢弃 embedding / audio / image / TTS 等不参与对话补全的
+  条目），写出 `resources/catalog/litellm.json`，含
+  `sourceUrl / fetchedAt / contentHash / license / attribution` 与裁剪计数。
+  原始约 3.28 MB / 4,526 键 → 3,239 条 / 约 0.94 MB。`npm run build:builtin-catalog`
+  可在发布流程或 CI 执行；抓取失败只打印醒目告警、退出码 0，不中断构建，旧文件保持不动。
+- **发布流程接入**：`.github/workflows/release.yml` 在 `npm run build` **之前**执行
+  `npm run build:builtin-catalog`（`continue-on-error: true`），保证安装包携带当次抓取的
+  快照。失败策略：抓取失败但旧快照存在 → 日志记录「沿用旧快照」并继续；快照缺失 →
+  `::warning::` 明示「发布包将不含内置快照，离线场景无法补全」；`fetchedAt` 超过 90 天 →
+  `::warning::` 陈旧告警。普通 `npm run build` **不**依赖网络，本地断网构建不受影响。
+- **运行时读取**：打包后读 `process.resourcesPath/catalog/litellm.json`
+  （electron-builder `extraResources`），开发态回落 `resources/catalog/`。该文件仅首次
+  查询快照/候选时惰性加载并缓存，不参与启动路径。
+- **回退规则**：用户快照优先；某来源从未成功刷新过时使用内置快照，元数据带
+  `builtin: true`，界面标注「内置快照（YYYY-MM-DD）」。用户显式刷新失败**不清空任何数据**：
+  内置快照与上一份用户快照都保留，提示里说明当前实际使用的是哪一份。
+- **镜像校验**：地址写进 `config` 前经 `sanitizeCatalogMirrorUrl`（仅 https；空 = 不使用）；
+  界面明示可达性与可信度由用户自行承担。
+- **SSRF 结论**（镜像地址是用户输入、重定向目标不受控）：所有端点与每一跳重定向只接受
+  https；拒绝环节/链路本地/私网地址（`127.0.0.1`、`169.254.169.254`、`10/8`、
+  `172.16–31`、`192.168/16`，IPv6 的 `::1` / `fc00::/7` / `fe80::/10`），并检查 DNS
+  实际解析结果而非只看字面量；响应体硬上限 8 MB（流式累计，超限即取消）。
+
+### 9.3 匹配策略（三档 + 置信度）
 
 | 档位 | 规则 | 例子 |
 | --- | --- | --- |
@@ -249,11 +324,12 @@ interface CatalogStore {
 - 三档按上表顺序合并、同一 `entry` 只保留最高档；结果按 exact → alias → family 排序，
   最多返回 5 条。
 - **默认不自动采用**：界面列出候选与置信度徽标，用户必须逐字段点击「采用」；刷新快照
-  或打开页面本身不会改变任何模型的可路由能力。唯一的批量入口是用户点击「一键补全」后
-  在预演里确认：`exact` 默认勾选、`alias`/`family` 默认不勾选，采用仍按字段写入 ledger。
+  或打开页面本身不会改变任何模型的可路由能力。唯一的批量入口是用户点击「全部补齐」后
+  由主进程自动执行：`exact`/`alias` 自动采用（alias 在结果中标注来源），`family` 只作
+  候选，价格不参与自动采用；采用仍按字段写入 ledger。
 - 候选查询一次建索引（`buildCatalogIndex`），不为每条模型重扫全量快照。
 
-### 9.3 Adoption ledger（按字段采用、可撤销）
+### 9.4 Adoption ledger（按字段采用、可撤销）
 
 存放于 `data.json::catalogAdoptions`（用户决策，**不写 `userModelMarks`**，与手工标注
 语义分开，同步/快照刷新都不会擦除）：
@@ -280,7 +356,7 @@ interface CatalogAdoption {
 - 路由侧同样只消费 ledger（`autoRouter::capabilityHintsFor` → `catalogHint`）；快照里
   未被采用的候选值不会进入路由打分或过滤。
 
-### 9.4 许可、归属与口径
+### 9.5 许可、归属与口径
 
 - 快照卡片与候选对话框都展示来源、`sourceUrl`、`fetchedAt`、`contentHash`、`license`
   与 `attribution`；界面文案写明「第三方数据，仅作参考」。

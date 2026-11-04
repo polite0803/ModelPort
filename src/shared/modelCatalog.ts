@@ -107,6 +107,8 @@ export interface CatalogSnapshotStatus {
   license: string
   attribution: string
   entryCount: number
+  /** true = 用户从未成功刷新过，当前读的是随应用发布的内置快照。 */
+  builtin?: boolean
 }
 
 export const EMPTY_CATALOG_STORE: CatalogStore = { version: 1, snapshots: {} }
@@ -127,15 +129,79 @@ export type CatalogRefreshErrorKind =
   | 'empty'
   | 'unknown'
 
+/** 端点角色：主端点 / 公开 CDN 备用 / 用户自配镜像。 */
+export type CatalogEndpointLabel = 'primary' | 'jsdelivr' | 'mirror'
+
+/** 一次刷新里每个端点的实测结果；成功即停，失败继续下一个。 */
+export interface CatalogRefreshEndpointAttempt {
+  url: string
+  label: CatalogEndpointLabel
+  /** 拿到 HTTP 响应时的状态码；网络层失败没有该字段。 */
+  status?: number
+  errorKind?: CatalogRefreshErrorKind
+  error?: string
+  elapsedMs: number
+  bytes?: number
+}
+
 /** 刷新结果：失败时 `statuses` 仍是磁盘上的旧快照。 */
 export interface CatalogRefreshResult {
   success: boolean
   status?: CatalogSnapshotStatus
   statuses: CatalogSnapshotStatus[]
+  /** 逐端点诊断：全部失败时界面据此说明是「全都不可达」还是某个端点挂了。 */
+  attempts?: CatalogRefreshEndpointAttempt[]
+  /** 本次实际成功的端点 URL。 */
+  usedEndpoint?: string
   error?: string
   errorKind?: CatalogRefreshErrorKind
   /** 本次抓取耗时（毫秒）；失败时也返回，便于诊断是不是超时。 */
   elapsedMs?: number
+}
+
+/**
+ * 公开只读备用端点。只收录与主端点内容完全相同的数据分发通道，
+ * 不在代码里硬编码第三方镜像站；用户自己的镜像走 `catalogMirrorUrl`。
+ */
+export const CATALOG_ENDPOINT_FALLBACKS: Partial<
+  Record<CatalogSourceId, readonly { label: CatalogEndpointLabel; url: string }[]>
+> = {
+  litellm: [
+    {
+      label: 'jsdelivr',
+      url: 'https://cdn.jsdelivr.net/gh/BerriAI/litellm@main/model_prices_and_context_window.json',
+    },
+  ],
+}
+
+/**
+ * 自定义镜像地址校验：只接受 https；空字符串表示「不使用镜像」（合法）。
+ * 非法输入返回 undefined，由调用方拒绝保存。
+ */
+export function sanitizeCatalogMirrorUrl(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined
+  const value = raw.trim()
+  if (value.length === 0) return ''
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' ? url.toString() : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** 端点尝试顺序：主端点 → 公开备用 → 用户镜像（若已配置）。 */
+export function catalogEndpointPlan(
+  source: CatalogSourceId,
+  mirrorUrl?: string,
+): { label: CatalogEndpointLabel; url: string }[] {
+  const plan: { label: CatalogEndpointLabel; url: string }[] = [
+    { label: 'primary', url: CATALOG_SOURCE_META[source].sourceUrl },
+    ...(CATALOG_ENDPOINT_FALLBACKS[source] ?? []).map((entry) => ({ ...entry })),
+  ]
+  const mirror = sanitizeCatalogMirrorUrl(mirrorUrl)
+  if (mirror) plan.push({ label: 'mirror', url: mirror })
+  return plan
 }
 
 const MAX_CONTEXT_TOKENS = 100_000_000

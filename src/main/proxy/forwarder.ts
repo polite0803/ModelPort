@@ -358,7 +358,12 @@ export class RequestForwarder {
       }
 
       // 每模型 AIMD 准入：并发已满时不把请求继续压给同一家，交给换家循环。
-      const admission = accountRuntime.tryBeginAttempt(account.id, actualModel)
+      // 探测（`probe: true`）不占真实流量名额：阶梯探测单请求可能跑 30s，
+      // 若计入 AIMD，长探测会把正常请求的准入额度挤掉。探测自身由
+      // `modelProbeRunner` 的全局串行队列限制并发，不需要这一层。
+      const admission = isProbe
+        ? { ok: true as const }
+        : accountRuntime.tryBeginAttempt(account.id, actualModel)
       if (!admission.ok) {
         const message = 'Local per-model concurrency limit reached'
         const retryAfter = String(Math.max(1, Math.ceil(admission.retryAfterMs / 1000)))
@@ -402,8 +407,8 @@ export class RequestForwarder {
             success: false,
             clientAborted: request.signal?.aborted === true,
           })
+          accountRuntime.endAttempt(account.id, actualModel)
         }
-        accountRuntime.endAttempt(account.id, actualModel)
         attempts.push({
           providerId: provider.id,
           ...(provider.name === undefined ? {} : { providerName: provider.name }),
@@ -416,9 +421,8 @@ export class RequestForwarder {
         })
         continue
       }
-      accountRuntime.endAttempt(account.id, actualModel)
-
       if (!isProbe) {
+        accountRuntime.endAttempt(account.id, actualModel)
         accountRuntime.recordAttemptOutcome(account.id, actualModel, {
           success: result.success,
           ...(result.status === undefined ? {} : { status: result.status }),

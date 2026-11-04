@@ -9,6 +9,7 @@ import { UpdaterManager } from './updater'
 import { storeManager } from './store/store'
 import { aggregateProviderManager } from './providers/aggregate'
 import { primeModelProbeCache } from './providers/modelProbeStore'
+import { shutdownCatalogBatchJobs } from './providers/modelCatalogBatchRunner'
 import { detectHiddenLaunch, reconcileAutoStart } from './autostartHost'
 import { recordProcessCrash, setCrashLogWriter } from './logging/crashReporter'
 import { configureModelListRefresh } from './scheduler/modelListRefresh'
@@ -121,6 +122,8 @@ async function initializeApp(): Promise<void> {
 
   app.on('before-quit', () => {
     app.isQuitting = true
+    // 干净取消「全部补齐」：adoption 是整份台账原子写入，不会留下半写状态。
+    shutdownCatalogBatchJobs()
     // 停止统一调度器：清掉所有 setInterval，避免退出后定时器仍持有回调。
     scheduler.stop()
     trayManager?.destroy()

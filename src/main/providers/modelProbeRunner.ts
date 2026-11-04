@@ -4,8 +4,9 @@
  * 探测永远由用户点击触发；本模块不做任何定时/自动探测。所有探测共用一条
  * 串行队列（`createSerialTaskQueue`），所以同一模型串行、跨模型并发上限 1。
  *
- * 探测请求与真实流量隔离：`probe: true` 让 forwarder 跳过派发账本、AIMD、
- * Bandit 与冷却；请求日志行带 `kind: 'probe'`，统计口径不把它算进成功率。
+ * 探测请求与真实流量隔离：`probe: true` 让 forwarder 跳过派发账本、AIMD 准入
+ * （不占用真实请求的并发名额）、Bandit 与冷却；请求日志行带 `kind: 'probe'`，
+ * 统计口径不把它算进成功率。
  *
  * 上下文/输出用阶梯推进（见 `shared/modelProbe.ts`），429/401/403/5xx/网络/超时
  * 一律只记 `inconclusive`，绝不写成上限。
@@ -468,6 +469,11 @@ async function probeContext(input: {
       estimatedInputTokens: plan.estimatedInputTokens,
       estimatedOutputTokens: plan.estimatedOutputTokens,
       ...(verdict.reason ? { reason: verdict.reason } : {}),
+      ...(verdict.status === 'measured'
+        ? {}
+        : cancelled === 'timeout'
+          ? { errorKind: 'timeout' as const }
+          : lastFailureKind === undefined ? {} : { errorKind: lastFailureKind }),
       ...(recorded === undefined ? {} : { row: recorded }),
     },
   }
@@ -642,6 +648,11 @@ async function probeOutput(input: {
       estimatedInputTokens: plan.estimatedInputTokens,
       estimatedOutputTokens: plan.estimatedOutputTokens,
       ...(verdict.reason ? { reason: verdict.reason } : {}),
+      ...(verdict.status === 'measured'
+        ? {}
+        : cancelled === 'timeout'
+          ? { errorKind: 'timeout' as const }
+          : lastFailureKind === undefined ? {} : { errorKind: lastFailureKind }),
       ...(recorded === undefined ? {} : { row: recorded }),
     },
   }
@@ -773,6 +784,8 @@ async function probeCapability(input: {
   emitter.emit('awaiting', { tierIndex: 2, tierCount: 3 })
   // 工具：声明一个 no-op 工具，成功即代表上游接受 tools 字段。
   const toolsStart = Date.now()
+  // GATEWAY-TEXT: probe-capability — 能力探测的工具请求文本，只进 `probe: true` 的
+  // 探测请求，不进任何客户端会话。
   const { result: toolsResult } = await forwardProbe(
     {
       ...baseProbeRequest(input.actualModelId, `${requestId}-tools`, 'Reply with the single word ok.'),
@@ -831,6 +844,7 @@ async function probeCapability(input: {
   emitter.emit('tier', { tierIndex: 3, tierCount: 3 })
   emitter.emit('awaiting', { tierIndex: 3, tierCount: 3 })
   // 图片：1×1 PNG，成功即代表上游接受 image_url 内容块。
+  // GATEWAY-TEXT: probe-capability — 能力探测的图片请求文本，只进探测请求。
   const visionStart = Date.now()
   const { result: visionResult } = await forwardProbe(
     baseProbeRequest(input.actualModelId, `${requestId}-vision`, [
@@ -895,6 +909,7 @@ async function probeCapability(input: {
       estimatedInputTokens: plan.estimatedInputTokens,
       estimatedOutputTokens: plan.estimatedOutputTokens,
       ...(cancelled === undefined ? {} : { reason: abortReasonText(cancelled) }),
+      ...(cancelled === 'timeout' ? { errorKind: 'timeout' as const } : {}),
       row,
     },
   }

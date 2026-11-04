@@ -8,8 +8,10 @@ const {
   adoptionsForModel,
   buildCatalogIndex,
   catalogAdoptionHint,
+  catalogEndpointPlan,
   catalogFieldValue,
   catalogSnapshotStatuses,
+  sanitizeCatalogMirrorUrl,
   matchCatalogEntries,
   normalizeCatalogAlias,
   removeCatalogAdoptions,
@@ -325,4 +327,34 @@ test('来源集合与字段读取：三个来源都可匹配，缺失字段返�
   assert.equal(sanitizeCatalogEntry({ id: 'x', contextTokens: 100_000_001 }, 'litellm'), undefined)
   assert.equal(sanitizeCatalogEntry({ id: '' }, 'litellm'), undefined)
   assert.equal(sanitizeCatalogEntry({ id: 'x' }, 'litellm'), undefined)
+})
+
+test('端点回退：主端点 → jsDelivr → 用户镜像；仅接受 https', () => {
+  const litellm = catalogEndpointPlan('litellm')
+  assert.equal(litellm.length, 2)
+  assert.equal(litellm[0].label, 'primary')
+  assert.equal(litellm[0].url, 'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json')
+  assert.equal(litellm[1].label, 'jsdelivr')
+  assert.equal(
+    litellm[1].url,
+    'https://cdn.jsdelivr.net/gh/BerriAI/litellm@main/model_prices_and_context_window.json',
+  )
+
+  const withMirror = catalogEndpointPlan('litellm', '  https://mirror.example.com/litellm.json  ')
+  assert.equal(withMirror.length, 3)
+  assert.deepEqual(withMirror[2], {
+    label: 'mirror',
+    url: 'https://mirror.example.com/litellm.json',
+  })
+
+  // 非 https / 非法 URL / 空值都不产生镜像端点。
+  assert.equal(catalogEndpointPlan('litellm', 'http://mirror.example.com/litellm.json').length, 2)
+  assert.equal(catalogEndpointPlan('litellm', 'not a url').length, 2)
+  assert.equal(catalogEndpointPlan('litellm', '').length, 2)
+
+  assert.equal(sanitizeCatalogMirrorUrl(''), '')
+  assert.equal(sanitizeCatalogMirrorUrl(undefined), undefined)
+  assert.equal(sanitizeCatalogMirrorUrl(42), undefined)
+  assert.equal(sanitizeCatalogMirrorUrl('http://x'), undefined)
+  assert.equal(sanitizeCatalogMirrorUrl('https://x/a.json'), 'https://x/a.json')
 })

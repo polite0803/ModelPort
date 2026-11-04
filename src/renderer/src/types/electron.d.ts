@@ -72,6 +72,11 @@ import type {
   CatalogSourceId,
 } from '../../../shared/modelCatalog.ts'
 import type {
+  CatalogBatchEstimate,
+  CatalogBatchSnapshot,
+  CatalogBatchStartResult,
+} from '../../../shared/modelCatalogBatch'
+import type {
   ChannelAutoCheckinResult,
   ChannelCredits,
   ChannelModelsResult,
@@ -277,6 +282,18 @@ interface ProvidersAPI {
     displayName: string,
     field?: CatalogAdoptionField,
   ) => Promise<{ success: boolean; adoptions?: CatalogAdoption[]; error?: string }>
+  estimateCatalogBatch: () => Promise<CatalogBatchEstimate>
+  startCatalogBatch: (input: {
+    probe: boolean
+    retryFailedOf?: string
+  }) => Promise<CatalogBatchStartResult>
+  pauseCatalogBatch: (jobId: string) => Promise<boolean>
+  resumeCatalogBatch: (jobId: string) => Promise<boolean>
+  cancelCatalogBatch: (jobId: string) => Promise<boolean>
+  getCatalogBatchJobs: () => Promise<CatalogBatchSnapshot[]>
+  onCatalogBatchProgress: (
+    listener: (snapshot: CatalogBatchSnapshot) => void,
+  ) => () => void
 }
 
 interface AccountsAPI {

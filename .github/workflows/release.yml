@@ -80,6 +80,13 @@ jobs:
         env:
           ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
 
+      # 发布包必须携带“当次抓取”的内置快照：脚本失败会输出 ::warning:: 并以 0 退出，
+      # 保留已提交的旧快照；`continue-on-error` 再兜底脚本自身异常，不阻断发布。
+      # 普通 `npm run build` 不依赖网络，本地断网构建不受影响。
+      - name: Refresh built-in catalogue snapshot (release only)
+        continue-on-error: true
+        run: npm run build:builtin-catalog
+
       - name: Build application
         run: npm run build
 

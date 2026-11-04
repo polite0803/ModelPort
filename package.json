@@ -36,6 +36,7 @@
     "dev:win": "chcp 65001 && npm run build:channel-pack && electron-vite dev",
     "check:source-artifacts": "node scripts/check-source-artifacts.js",
     "build:channel-pack": "node scripts/build-channel-pack.mjs",
+    "build:builtin-catalog": "node scripts/build-builtin-catalog.mjs",
     "build": "npm run check:source-artifacts && npm run build:channel-pack && electron-vite build",
     "gate": "npm run build && tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json && node scripts/run-tests.mjs \"tests/**/*.test.ts\" \"tests/**/*.test.mjs\" \"tests/**/*.test.js\"",
     "preview": "electron-vite preview",
@@ -130,6 +131,13 @@
       {
         "from": "resources/channel-pack",
         "to": "channel-pack",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/catalog",
+        "to": "catalog",
         "filter": [
           "**/*"
         ]

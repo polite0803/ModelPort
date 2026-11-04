@@ -12,12 +12,21 @@ import { join } from 'node:path'
 
 const TAG = /GATEWAY-TEXT: ([a-z0-9-]+)/g
 
-function sourceTags(dir = 'src/main'): Set<string> {
+/**
+ * 扫描根必须覆盖**所有**可能写网关文本的进程内代码：主进程之外，
+ * `src/shared` 里的探测提示词同样会随请求发出（`probe-context` /
+ * `probe-output`）。新增注入点不登记时这条断言会红，这是刻意的。
+ */
+const SOURCE_ROOTS = ['src/main', 'src/shared'] as const
+
+function sourceTags(roots: readonly string[] = SOURCE_ROOTS): Set<string> {
   const found = new Set<string>()
-  for (const entry of readdirSync(dir, { recursive: true }) as string[]) {
-    if (!entry.endsWith('.ts')) continue
-    const text = readFileSync(join(dir, entry), 'utf8')
-    for (const match of text.matchAll(TAG)) found.add(match[1])
+  for (const dir of roots) {
+    for (const entry of readdirSync(dir, { recursive: true }) as string[]) {
+      if (!entry.endsWith('.ts')) continue
+      const text = readFileSync(join(dir, entry), 'utf8')
+      for (const match of text.matchAll(TAG)) found.add(match[1])
+    }
   }
   return found
 }
@@ -77,13 +86,21 @@ test('the scanner has power: both inventories are populated and disjoint', () =>
 })
 
 /**
- * 退役批落地后，活着的注入点只剩两条「不是替用户说话」的例外：
- * `ccr-sentinel`（压缩自身的取回指针）与 `liveness-ping`（不进任何对话的探针）。
- * 这一格是**精确集合**判据，不是下界：把退役的东西接回来、或者新加第三条，都要在这里红。
+ * 退役批落地后，活着的注入点只剩「不是替用户说话」的例外：
+ * `ccr-sentinel`（压缩自身的取回指针）、`liveness-ping`（不进任何对话的探针）
+ * 与三条能力探测提示词（`probe-context` / `probe-output` / `probe-capability`）。
+ * 这一格是**精确集合**判据，不是下界：把退役的东西接回来、或者新加第四条，都要在这里红。
  */
-test('only the two ruled exceptions still write gateway text', () => {
-  assert.deepEqual([...tags].sort(), ['ccr-sentinel', 'liveness-ping'])
-  assert.deepEqual([...documented].sort(), ['ccr-sentinel', 'liveness-ping'])
+test('only the ruled exceptions still write gateway text', () => {
+  const expected = [
+    'ccr-sentinel',
+    'liveness-ping',
+    'probe-capability',
+    'probe-context',
+    'probe-output',
+  ]
+  assert.deepEqual([...tags].sort(), expected)
+  assert.deepEqual([...documented].sort(), expected)
 })
 
 test('every retired site keeps its ledger entry and its commit', () => {

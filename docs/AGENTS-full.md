@@ -1284,7 +1284,7 @@ missing from its SAN (`proxy/tls.ts::loadTlsMaterial`).
 
 Ruling (2026-11-03, 用户拍板): the gateway writes **no** prompt text into a user's conversation. What is
 left below is the residue that survives that ruling because it is not a claim about the user's intent -
-a self-describing compression marker and a probe that never enters a conversation. Anything else must be
+a self-describing compression marker and probes that never enter a conversation. Anything else must be
 retired, not documented.
 
 Anything the gateway writes into an outbound request is a claim on the user's behalf, and it is
@@ -1297,6 +1297,9 @@ fails if a tagged site is missing from this table or a table row has no tag. Pro
 | --- | --- | --- | --- |
 | `ccr-sentinel` | appends `… N more items <<ccr:hash …_items_offloaded>>` / `[N lines compressed to M. Retrieve more: hash=…]` inside tool results | `9d07417` 2026-10-30, 刘小平 | compression that stays honest about itself: the marker is the retrieval pointer, and re-compressing a payload that already carries one is never correct. |
 | `liveness-ping` | `messages:[{role:'user',content:'ping'}]` with `max_tokens:1` | `ddc566a` 2026-10-30, 刘小平 | catalogue liveness probe; never part of a user conversation. |
+| `probe-context` | `buildContextProbePrompt()`: repeats `probe ` to push the input to a target token tier | `2026-11-04` 探测阶梯 | context-window ladder probe; carries `probe: true`, so it never enters a client conversation, never counts toward AIMD/Bandit, and is excluded from success statistics. |
+| `probe-output` | `Write the word "ok" repeated on a single line until you are stopped. Do not stop on your own.` | `2026-11-04` 探测阶梯 | output-cap ladder probe: asks the model to keep going so `max_tokens` is the only stop reason; same `probe: true` isolation. |
+| `probe-capability` | `Reply with the single word ok.` (tools) / `What color is this pixel? One word.` (vision) | `2026-11-04` 探测阶梯 | capability probe for `tools` / image input acceptance; same `probe: true` isolation. A one-pixel PNG rides the vision request, but the only authored text is the two short prompts above. |
 
 ### Retired, with the evidence that retired it
 

@@ -145,6 +145,19 @@ export class RequestLogManager {
     this.schedulePersist()
   }
 
+  /**
+   * 整表替换（备份导入用）。
+   *
+   * 走这个入口而不是直接写 `request-logs.ndjson`：管理器在内存里握着当前表，并在
+   * 防抖到期/退出时整份回写。绕过去写文件，下一次刷新就把它盖回旧内容 —— 用户会看到
+   * 「导入成功，但日志还是原来那些」。
+   */
+  replaceRequestLogs(entries: RequestLogEntry[]): void {
+    this.ensureInitialized()
+    this.requestLogs = trimRequestLogsToMaxEntries([...entries], this.config)
+    this.schedulePersist()
+  }
+
   getRequestLogStats(): RequestLogStats {
     this.ensureInitialized()
     const today = currentLocalDay()

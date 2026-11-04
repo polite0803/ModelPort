@@ -44,6 +44,7 @@ import {
 import type { AggregateCreditSnapshot, AggregateCreditSnapshots } from './types'
 import {
   sanitizeCatalogAdoptionLedger,
+  sanitizeCatalogMirrorUrl,
   type CatalogAdoption,
 } from '../../shared/modelCatalog.ts'
 import { localDayKey, recentLocalDays } from '../../shared/localDay'
@@ -565,6 +566,14 @@ class StoreManager {
     // 于是 API 会报「这一格存在」，改它却没有任何代码读。读侧摘掉。
     for (const retiredKey of ['toolCallingConfig', 'toolPromptConfig', 'trailingUserGuard', 'outputSteering']) {
       delete (normalized as unknown as Record<string, unknown>)[retiredKey]
+    }
+
+    // 镜像地址只接受 https；非法或非字符串一律丢弃（管理 API 不能报告一个没人读的值）。
+    const mirror = sanitizeCatalogMirrorUrl(rawConfig.catalogMirrorUrl)
+    if (mirror === undefined) {
+      delete normalized.catalogMirrorUrl
+    } else {
+      normalized.catalogMirrorUrl = mirror
     }
 
     return normalized
