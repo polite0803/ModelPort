@@ -31,6 +31,7 @@ import {
 } from './trae.js'
 import { jwtExpiresAtMs } from './credential-expiry.js'
 import { TRAE, type TraeProduct } from './trae-product.js'
+import { traeClientIdentity } from './client-identity.js'
 import {
   buildTraeLoginURL,
   exchangeTraeCallback,
@@ -560,7 +561,7 @@ export class TraeAuth extends Service {
       const response = await this.fetchImpl(`${host}${TRAE_USER_INFO_PATH}`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ ReqSource: 'IDE', IDEVersion: this.product.ideVersion }),
+        body: JSON.stringify({ ReqSource: 'IDE', IDEVersion: traeClientIdentity().appVersion }),
         signal: AbortSignal.timeout(TRAE_REQUEST_TIMEOUT_MS),
       })
       if (!response.ok) return undefined

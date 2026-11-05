@@ -17,7 +17,9 @@ const read = (path) => readFileSync(path, 'utf8')
 const detailComponent = read('src/renderer/src/components/aggregate/AggregateDetail.tsx')
 const channels = read('src/main/ipc/channels.ts')
 const handlers = read('src/main/ipc/handlers.ts')
-const preload = read('src/preload/index.ts')
+// 环 3 的载体从 `src/preload/index.ts` 搬进了 `src/shared/api.ts`（同一个方法表，
+// 桌面装配 ipcRenderer 线、浏览器装配 HTTP 线），所以这里读的是那张表本身。
+const preload = read('src/shared/api.ts')
 const manager = read('src/main/providers/aggregate/manager.ts')
 const gate = read('src/main/proxy/quota/gate.ts')
 const store = read('src/main/store/store.ts')
@@ -57,10 +59,10 @@ test('the five-state badge is untouched and the live row never feeds quotaViewOf
 // —— 环 2：IPC 通道名在三个地方拼得完全一样。
 test('the channel name is one string across the declaration, the handler and the bridge', () => {
   assert.match(channels, /AGGREGATE_QUERY_CREDITS: 'aggregate:queryCredits'/)
-  assert.match(handlers, /ipcMain\.handle\(IpcChannels\.AGGREGATE_QUERY_CREDITS, async \(_, id: string\)/)
+  assert.match(handlers, /registerMainHandler\(IpcChannels\.AGGREGATE_QUERY_CREDITS, async \(_, id: string\)/)
   assert.match(handlers, /aggregateProviderManager\.queryCredits\(id\)/, 'the handler forwards to the manager')
   assert.match(preload, /queryCredits: \(id: string\): Promise<AggregateCreditQueryResult>/)
-  assert.match(preload, /ipcRenderer\.invoke\(IpcChannels\.AGGREGATE_QUERY_CREDITS, id\)/)
+  assert.match(preload, /wire\.invoke\(IpcChannels\.AGGREGATE_QUERY_CREDITS, id\)/)
 })
 
 // —— 环 3：manager 复用了既有鉴权通路，URL 跟着用户配的 base 走。

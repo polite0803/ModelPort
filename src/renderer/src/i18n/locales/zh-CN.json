@@ -859,6 +859,10 @@
         "storage-not-ready": "数据存储未就绪，请重启应用后重试",
         "read-failed": "读取文件失败（可能过大或没有权限）",
         "write-failed": "写入文件失败",
+        "upload-unavailable": "这台网关没有上传导入接口（版本早于该功能）。升级网关，或把备份件放到那台机器上执行 node modelport-daemon.cjs --import-backup <路径>（口令走 stdin 或 MODELPORT_BACKUP_PASSWORD）。",
+    "desktop-only-restart": "无头网关由 systemd 托管，页面不能替它重启：干净退出在 Restart=on-failure 下不会被拉起，等于把网关关掉。请在该宿主执行 systemctl restart modelport。",
+    "restart-failed": "重启请求失败。",
+        "desktop-only-export": "这个网关跑在没有窗口的宿主上（WSL / 无头守护进程），那里没有保存对话框，界面里导不出备份。请在桌面端导出，或直接备份该宿主的 data.json 目录。",
         "bad-password": "口令错误",
         "apply-failed": "导入失败，已保留导入前的 data.json 副本"
       }
@@ -952,7 +956,22 @@
     "modelList": "模型列表",
     "modelMapping": "模型映射",
     "metadataTab": "标注覆盖",
+    "annotation": {
+      "title": "标注「{{model}}」",
+      "factsSection": "这一家已声明的参数（含出处）",
+      "catalogSection": "用第三方标准台账补全",
+      "markSection": "手工标注（优先级最高）",
+      "unavailable": "主进程未提供单模型元数据接口，请重启应用后再试。"
+    },
     "metadata": {
+      "batchScopeButton": "批量补全这一家",
+      "batchScopeTitle": "批量补全：{{scope}}",
+      "batchScopeDesc": "只处理这一家的模型，范围外的标注不受影响；标准库匹配不联网。",
+      "batchScopeNone": "本范围内没有可补全的模型：已停用，或未被任何启用的路由引用。",
+      "batchScopeProgressTitle": "这一家的补全进度",
+      "batchScopeDone": "这一家补全完成",
+      "batchScopeCancelled": "这一家补全已取消",
+      "batchScopeFailedStart": "这一家补全未能开始",
       "title": "模型元数据标注",
       "coverageTitle": "标注覆盖率",
       "coverageDesc": "每项属性已知行数占适用行数的比例（聚合与自定义行的倍率不适用，不计入缺口）；解析顺序：人工 > 上游声明 > 标准库 > 实测探测 > 家族规则 > 成本账本",
@@ -963,6 +982,12 @@
       "totalModels": "目录模型",
       "routingComplete": "关键属性完整",
       "routingIncomplete": "关键属性待补",
+      "gapKindAdoptable": "可补齐 {{count}}",
+      "gapKindMissingField": "条目缺该项 {{count}}",
+      "gapKindNoCandidate": "标准库无此模型 {{count}}",
+      "gapKindNotChat": "非对话模型 {{count}}",
+      "gapKindNotChatBadge": "非对话模型",
+      "gapKindNoCandidateBadge": "标准库无此模型",
       "fullyAnnotatedHint": "适用项全齐 {{count}}",
       "referenceAttribute": "参考",
       "notApplicable": "不适用 {{count}}",
@@ -1120,12 +1145,14 @@
       "catalogAttribution": "归属：{{attribution}}",
       "catalogHash": "内容指纹：{{hash}}",
       "catalogLicenseNotice": "标准库是第三方数据，仅作参考；价格按 USD / 1M tokens 展示，不参与路由、额度或权重计算，也不并入本项目的生成式价格旁表。",
-      "catalogComplete": "标准库补全",
+      "annotate": "标注",
       "catalogDialogTitle": "从标准库补全 {{model}}",
       "catalogDialogDesc": "候选按「精确 id → 归一化别名 → 家族」排序，默认不采用；每个字段单独采用，可随时撤销。",
       "catalogLoading": "正在匹配标准库…",
       "catalogFailed": "标准库操作失败",
       "catalogNoMatches": "当前快照里没有匹配的条目；可以先刷新快照，或该模型确实不在标准台账中。",
+      "catalogFieldAbsent": "该台账条目没有这一项，无法采用。",
+      "catalogSourcesNotFetched": "未抓取：{{sources}}。内置 LiteLLM 台账没有「推理」这一项，「输入模态」也只覆盖部分条目；要补这两项，请先到「标准模型库」卡片刷新这些来源，或改用手工标注 / 探测。",
       "catalogConfidenceExact": "精确 id",
       "catalogConfidenceAlias": "别名归一",
       "catalogConfidenceFamily": "家族启发",
@@ -1498,6 +1525,8 @@
         }
       },
       "models": {
+        "annotate": "标注",
+        "annotateHint": "查看这一家声明的参数，并用第三方标准台账逐字段补全",
         "title": "模型",
         "count": "{{total}} 个模型 · {{served}} 个启用",
         "search": "搜索模型",
@@ -1589,6 +1618,9 @@
       "unavailable": "渠道运行时未启动，暂时读不到这个开关"
     },
     "models": {
+      "annotate": "标注",
+      "annotateHint": "查看渠道声明的参数，并用第三方标准台账逐字段补全",
+      "annotateBlocked": "该模型已停用或已失效，不在供应商目录里，无法标注或采用",
       "title": "模型列表",
       "refresh": "在线更新模型",
       "refreshed": "模型已更新",
@@ -1605,6 +1637,32 @@
       "dead": "已失效",
       "empty": "还没有可用模型：先添加账号，再点「在线更新模型」"
     },
+    "identityRisk": {
+      "high": "身份风险高",
+      "medium": "身份风险中",
+      "low": "身份风险低"
+    },
+    "identityRiskTooltip": "该渠道以官方客户端身份发包：{{declared}}。上游客户端版本会持续变化，并可能据此把账号判定为「非官方渠道使用」并停止服务。",
+    "identityLive": {
+      "title": "当前生效",
+      "source": {
+        "env": "用户指定",
+        "official": "官方接口",
+        "local-install": "本机安装",
+        "fallback": "内置兜底"
+      },
+      "checkedAt": "核对于 {{time}}",
+      "badge": {
+        "fresh": "版本跟随官方",
+        "stale": "版本兜底，可能过期"
+      },
+      "badgeTooltip": "当前发包版本 v{{version}}（{{source}}，核对于 {{time}}）。{{state}}",
+      "badgeState": {
+        "fresh": "该值来自官方接口 / 本机安装 / 用户指定，官方客户端升级后会自动跟随。",
+        "stale": "该值来自代码内置常量（官方接口与本机安装都取不到），可能已落后于官方现役版本。"
+      }
+    },
+    "serviceStopped": "上游已停止服务",
     "refreshAccount": "刷新凭据",
     "refreshedAccount": "凭据已刷新",
     "refreshAccountFailed": "刷新凭据失败",
@@ -1651,5 +1709,17 @@
       "failed": "添加失败",
       "misconfigured": "这个渠道没有声明加账号的方法，无法从界面添加。"
     }
+  },
+  "connect": {
+    "title": "连接到 ModelPort 网关",
+    "subtitle": "这个页面是管理界面，网关本体作为无头服务运行。",
+    "secretLabel": "管理口令",
+    "submit": "连接",
+    "connecting": "正在连接…",
+    "unauthorized": "网关拒绝了这条管理口令。",
+    "unreachable": "连不上网关：{{message}}",
+    "daemonKeepsRunning": "关掉这个标签页不会停止网关，它会继续服务请求。",
+    "retrieving": "正在从系统密钥库取回这台网关的口令…",
+    "remembered": "在这个壳里，连接成功后口令会存进系统密钥库（只有当前 Windows 用户能解开）。换机器或换用户登录后会再问一次。"
   }
 }

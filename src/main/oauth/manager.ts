@@ -3,7 +3,7 @@
  * Manages authentication flows for providers, including local callback server and browser login
  */
 
-import { BrowserWindow, shell, app } from 'electron'
+import { getHost } from '../runtime/host'
 import http from 'http'
 import { EventEmitter } from 'events'
 import {
@@ -26,7 +26,6 @@ const DEFAULT_TIMEOUT = 300000 // 5 minutes
  */
 export class OAuthManager extends EventEmitter {
   private adapters: Map<string, BaseOAuthAdapter> = new Map()
-  private mainWindow: BrowserWindow | null = null
   private loginSeq = 0
   private currentLogin: {
     loginId: number
@@ -39,13 +38,6 @@ export class OAuthManager extends EventEmitter {
 
   constructor() {
     super()
-  }
-
-  /**
-   * Set main window reference
-   */
-  setMainWindow(window: BrowserWindow): void {
-    this.mainWindow = window
   }
 
   /**
@@ -62,9 +54,6 @@ export class OAuthManager extends EventEmitter {
         callbackPort: DEFAULT_CALLBACK_PORT,
       })
       
-      if (this.mainWindow) {
-        adapter.setMainWindow(this.mainWindow)
-      }
       
       adapter.setProgressCallback((event) => {
         this.emit('progress', event)
@@ -81,9 +70,7 @@ export class OAuthManager extends EventEmitter {
    * Send progress to renderer process
    */
   private sendProgressToRenderer(event: OAuthProgressEvent): void {
-    if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      this.mainWindow.webContents.send('oauth:progress', event)
-    }
+    getHost().push('oauth:progress', event)
   }
 
   /**
@@ -219,7 +206,7 @@ export class OAuthManager extends EventEmitter {
    * Open browser
    */
   async openBrowser(url: string): Promise<void> {
-    await shell.openExternal(url)
+    getHost().openExternal(url)
   }
 
   /**

@@ -13,9 +13,15 @@ test('a machine-bound key is only planned when the OS keystore exists', () => {
     planKeySetup({ keystoreAvailable: false, keyFileExists: false, dataFileExists: true }),
     'unencrypted',
   )
+  // `store.key` proves the file was sealed with a machine-bound key. A host without
+  // a keystore cannot open it, and "cannot open it" must not become "corrupted".
   assert.equal(
     planKeySetup({ keystoreAvailable: false, keyFileExists: true, dataFileExists: true }),
-    'unencrypted',
+    'sealed-unreadable',
+  )
+  assert.equal(
+    planKeySetup({ keystoreAvailable: false, keyFileExists: true, dataFileExists: false }),
+    'sealed-unreadable',
   )
 })
 

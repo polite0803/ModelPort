@@ -30,7 +30,7 @@ import { randomBytes } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ProviderAccountEntry } from './types.js'
 import { OPENCODE } from './opencode-product.js'
-import { newAccountFingerprint, nextFingerprintGeneration } from './opencode-auth.js'
+import { newAccountFingerprint } from './opencode-auth.js'
 import { normalizeProxy } from './opencode.js'
 import { buildProxyDispatcher } from './opencode-proxy.js'
 
@@ -59,14 +59,6 @@ export interface RpcOpencodeTestProxyResponse {
   country: string
   latencyMs: number
 }
-export interface RpcOpencodeRotateRequest {
-  accountId: string
-}
-export interface RpcOpencodeRotateResponse {
-  generation: number
-  projectId: string
-}
-
 /** 账号池的最小依赖面（结构化类型，避免绑定具体类）。 */
 export interface OpencodePoolLike {
   listAccountsByProvider(provider: string): Array<{ id: string; enabled: boolean; credentialRef: string }>
@@ -76,8 +68,6 @@ export interface OpencodePoolLike {
   addAccount(entry: ProviderAccountEntry): Promise<void>
   updateAccount(id: string, patch: Partial<ProviderAccountEntry>): Promise<void>
   setOpencodeProxy(accountId: string, proxy: string): Promise<void>
-  updateOpencodeFingerprintGeneration(accountId: string, generation: number): Promise<void>
-  opencodeFingerprintGenerationFor(accountId: string): number
 }
 
 /**
@@ -239,20 +229,10 @@ export async function handleOpencodeRpc(
               }
             }
 
-            case 'opencode.rotateFingerprint': {
-              const req = call.payload as RpcOpencodeRotateRequest
-              if (typeof req?.accountId !== 'string' || req.accountId.length === 0) {
-                return fail('缺少 accountId')
-              }
-              const current = pool.opencodeFingerprintGenerationFor(req.accountId)
-              // ⚠️ 用**当前代次**派生下一代的 projectId，接线层再按
-              // `deriveProjectId(api_key, generation)` 用池里的代次重算权威值。
-              // 这里返回的 projectId 只用于 UI 即时回显，不作为请求依据。
-              const next = nextFingerprintGeneration({ projectId: current === 0 ? 'anonymous' : String(current), generation: current })
-              await pool.updateOpencodeFingerprintGeneration(req.accountId, next.generation)
-              return done({ generation: next.generation, projectId: next.projectId } satisfies RpcOpencodeRotateResponse)
-            }
-
+            // `opencode.rotateFingerprint` 已退役（2026-11-05）：把一个账号的
+            // project id 换成另一份身份，是为了绕开上游按 project 计的计量。
+            // 不提供替代方法 —— 它就是不该存在。调用方会落到下面的
+            // `unknown method`。
             default:
               // ⚠️ 返回 `undefined`（不是错误信封）：方法不属于 opencode，
               // 让主 switch 继续匹配 —— 它自己的 `default` 会给出

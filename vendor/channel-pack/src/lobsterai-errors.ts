@@ -34,6 +34,11 @@ export type LobsteraiErrorKind =
   | 'soft-rate'
   /** 会话终止：refresh_token 被拒（40100 / 40101），只能重新登录。 */
   | 'session-dead'
+  /**
+   * Upstream stopped serving **this account** and told us why: use the official
+   * client. Terminal - retrying, rotating or re-logging in cannot recover it.
+   */
+  | 'service-stopped'
   /** 上游偶发 404。Go 侧短冷却且**不累计** errCount（防雪崩）。 */
   | 'not-found'
   /** 5xx 上游故障。 */
@@ -74,6 +79,27 @@ export const LOBSTERAI_SESSION_DEAD_MARKERS: readonly string[] = [
   '40100', '40101', 'token rejected', 'refresh token was rejected',
 ]
 
+/**
+ * Enforcement markers: the upstream refuses to serve this account any more and
+ * points at its official client. Observed body (user report, 2026-11-04):
+ * `账号已停止提供服务。请通过官方渠道使用有道龙虾；如有异议，请联…`
+ *
+ * Checked **before** every other class, including HTTP 402: an account-level
+ * stop is a stronger statement than a balance reading, and the same response
+ * can carry both (the credit markers would otherwise swallow it into
+ * `hard-credit` and rotate the identical conversation body onto other accounts).
+ *
+ * Deliberately narrow - `官方渠道` / `停止…服务` / `official channel` are what
+ * the upstream writes. Words like `forbidden` or `unauthorized` are left out
+ * because ordinary 403s carry them and a misfire here disables a working
+ * account.
+ */
+export const LOBSTERAI_SERVICE_STOPPED_MARKERS: readonly string[] = [
+  '停止提供服务', '已停止服务', '不再提供服务', '官方渠道',
+  'service has been stopped', 'stopped providing service', 'no longer provide',
+  'official channel', 'official app', 'account suspended', 'account disabled',
+]
+
 /** HTTP 402 Payment Required：最直接的「余额不足」信号。 */
 const HTTP_PAYMENT_REQUIRED = 402
 const HTTP_TOO_MANY_REQUESTS = 429
@@ -82,16 +108,18 @@ const HTTP_NOT_FOUND = 404
 /**
  * 按 HTTP 状态码 + 响应体判定错误类别。
  *
- * **判定顺序即优先级**（完全对齐 `classify.go:66-93`），不要重排：
+ * **判定顺序即优先级**（对齐 `classify.go:66-93`，只有第 1 条是本插件后加的
+ * 账号级终态），不要重排：
  *
- * 1. `402` → hard-credit（状态码最权威）
- * 2. body 含 hard 关键词 → hard-credit
- * 3. body 含 session-dead 标记 → session-dead
- * 4. `429` → soft-rate
- * 5. `404` → not-found
- * 6. `>= 500` → server
- * 7. `>= 400` → client
- * 8. 否则 none
+ * 1. body 含 service-stopped 标记 → service-stopped（账号级终态，先于状态码）
+ * 2. `402` → hard-credit（状态码最权威）
+ * 3. body 含 hard 关键词 → hard-credit
+ * 4. body 含 session-dead 标记 → session-dead
+ * 5. `429` → soft-rate
+ * 6. `404` → not-found
+ * 7. `>= 500` → server
+ * 8. `>= 400` → client
+ * 9. 否则 none
  *
  * 为什么 body 关键词要**排在状态码之前**（除 402）：实测上游用 400 + 中文
  * 「积分不足」表达余额耗尽，只按状态码会把这类错误误判成 `client`（可重试），
@@ -105,9 +133,17 @@ const HTTP_NOT_FOUND = 404
  * @param body - 响应体原文（JSON 或纯文本均可，只做子串匹配）
  */
 export function classifyLobsteraiError(status: number, body: string): LobsteraiErrorKind {
+  const lower = body.toLowerCase()
+  // An account-level stop outranks the status code: the same enforcement
+  // arrives as 403 on the chat lane and as HTTP 200 + an in-stream error frame
+  // on the credit lane. Anything below would file it as retryable and replay
+  // the identical conversation body onto the next accounts.
+  for (const marker of LOBSTERAI_SERVICE_STOPPED_MARKERS) {
+    if (lower.includes(marker.toLowerCase()) || body.includes(marker)) return 'service-stopped'
+  }
+
   if (status === HTTP_PAYMENT_REQUIRED) return 'hard-credit'
 
-  const lower = body.toLowerCase()
   for (const marker of LOBSTERAI_HARD_CREDIT_MARKERS) {
     // 英文走小写比较，中文走原文比较（中文无大小写，lower 后仍相等，属冗余保险）。
     if (lower.includes(marker.toLowerCase()) || body.includes(marker)) return 'hard-credit'
@@ -163,7 +199,7 @@ export function classifyLobsteraiStreamError(message: string): LobsteraiErrorKin
 /**
  * 该类别是否应当触发「换下一个账号」（而不是直接把错误抛给用户）。
  *
- * **除成功外的每一类都换号**，严格对齐 Go 的 `handler.go:218-243`：
+ * **除成功与 `service-stopped` 外的每一类都换号**，严格对齐 Go 的 `handler.go:218-243`：
  * 那个 switch 的**每一个分支都以 `continue` 结尾**（`ErrHardCredit`、
  * `ErrSoftRate`、`ErrSessionDead`、`ErrNotFound`、default 全是），
  * 也就是「任何非 2xx 都轮转到下一个账号」，最多换 `MaxRotate`(3) 次，
@@ -181,7 +217,11 @@ export function classifyLobsteraiStreamError(message: string): LobsteraiErrorKin
  * 本插件采纳前者（对齐 Go），不用后者（复用已有的 `modelRateLimits`）。
  */
 export function shouldRotateLobsteraiAccount(kind: LobsteraiErrorKind): boolean {
-  return kind !== 'none'
+  // `service-stopped` is the one class that must NOT rotate: the next account
+  // would receive the same conversation body, and if the upstream is enforcing
+  // client identity rather than accounting, that is how one flagged account
+  // turns into several.
+  return kind !== 'none' && kind !== 'service-stopped'
 }
 
 /**
@@ -212,4 +252,15 @@ export function recordsLobsteraiRateLimit(kind: LobsteraiErrorKind): boolean {
  */
 export function isLobsteraiTerminalError(kind: LobsteraiErrorKind): boolean {
   return kind === 'session-dead'
+}
+
+/**
+ * Did upstream say it will not serve **this account** any more?
+ *
+ * Distinct from {@link isLobsteraiTerminalError}: a dead session is recovered
+ * by logging in again, an account stop is not recovered by anything this app
+ * can do. The adapter uses this to park the account instead of re-trying it.
+ */
+export function isLobsteraiServiceStopped(kind: LobsteraiErrorKind): boolean {
+  return kind === 'service-stopped'
 }

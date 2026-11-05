@@ -12,9 +12,13 @@
  *    「备份」直接改供应商与账号表，绕过所有专用通道的校验。
  * 3. **落库前先留副本**。`data.json` 整份 copy 到 `data.pre-restore.<时间戳>.json`，
  *    导入是覆盖式操作，出错时用户至少还有一份可以人工换回的文件。
+ *
+ * 本文件不含 electron：文件对话框走 `runtime/host` 的 `desktop` 能力袋，版本走宿主。
+ * 于是无头宿主（WSL 守护进程）能调同一套采集/封装/落库引擎，只有「弹一个保存框」
+ * 这件事在它那侧不存在——那条路径由命令行显式给路径。
  */
 
-import { app, dialog, type BrowserWindow } from 'electron'
+import { getHost, requireDesktop } from '../runtime/host'
 import { copyFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -64,7 +68,7 @@ import {
 } from './sanitize.ts'
 
 /** 备份件上限。超过它的多半不是备份（日志导出、完整的请求体转储），直接拒绝读取。 */
-const MAX_BACKUP_BYTES = 256 * 1024 * 1024
+export const MAX_BACKUP_BYTES = 256 * 1024 * 1024
 /** 待导入件的存活时间：读进来却放着不管的文件不该无限期占内存。 */
 const PENDING_TTL_MS = 10 * 60 * 1000
 const MAX_PENDING = 4
@@ -82,7 +86,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 function previewOf(bundle: BackupBundle): BackupPreview {
-  return summarizeBackup(bundle, { platform: process.platform, appVersion: app.getVersion() })
+  return summarizeBackup(bundle, { platform: process.platform, appVersion: getHost().getVersion() })
 }
 
 function prunePending(now = Date.now()): void {
@@ -178,7 +182,7 @@ async function collectBundle(options: BackupExportOptions): Promise<BackupBundle
   return {
     format: BACKUP_FORMAT,
     version: BACKUP_VERSION,
-    appVersion: app.getVersion(),
+    appVersion: getHost().getVersion(),
     createdAt: new Date().toISOString(),
     platform: process.platform,
     scope,
@@ -188,10 +192,7 @@ async function collectBundle(options: BackupExportOptions): Promise<BackupBundle
 }
 
 /** 导出：采集 → 选保存位置 → 写盘（可选口令封装）。 */
-export async function exportBackup(
-  window: BrowserWindow | null,
-  options: BackupExportOptions,
-): Promise<BackupExportResult> {
+export async function exportBackup(options: BackupExportOptions): Promise<BackupExportResult> {
   let bundle: BackupBundle
   try {
     bundle = await collectBundle(options)
@@ -200,29 +201,18 @@ export async function exportBackup(
     return { canceled: false, error: 'storage-not-ready' }
   }
 
-  // `downloads` 在少数受管环境里拿不到；退回家目录，别让一次导出因为默认路径失败。
-  let defaultDirectory = app.getPath('home')
-  try {
-    defaultDirectory = app.getPath('downloads')
-  } catch {
-    // ignore: 用 home 兜底
-  }
-
-  const optionsForDialog = {
-    defaultPath: join(defaultDirectory, `modelport-backup-${fileStamp()}.json`),
-    filters: [{ name: 'ModelPort backup', extensions: ['json'] }],
-  }
-  const saveResult = window
-    ? await dialog.showSaveDialog(window, optionsForDialog)
-    : await dialog.showSaveDialog(optionsForDialog)
-  if (saveResult.canceled || !saveResult.filePath) return { canceled: true }
+  // 默认落点（下载目录，拿不到时回家目录）由宿主决定，见 electronHost 的 pickSavePath。
+  const target = await requireDesktop('export-backup').pickSavePath(
+    `modelport-backup-${fileStamp()}.json`,
+  )
+  if (target === null) return { canceled: true }
 
   const password = typeof options.password === 'string' ? options.password : ''
   const plaintext = JSON.stringify(bundle, null, 2)
   const payload = password === '' ? plaintext : JSON.stringify(sealBackup(plaintext, password), null, 2)
 
   try {
-    writeFileSync(saveResult.filePath, payload, { encoding: 'utf8', mode: 0o600 })
+    writeFileSync(target, payload, { encoding: 'utf8', mode: 0o600 })
   } catch (error) {
     console.error('[Backup] write failed:', error)
     return { canceled: false, error: 'write-failed' }
@@ -240,25 +230,21 @@ export async function exportBackup(
   })
   return {
     canceled: false,
-    filePath: saveResult.filePath,
+    filePath: target,
     bytes: Buffer.byteLength(payload, 'utf8'),
     preview,
     encrypted: password !== '',
   }
 }
 
-/** 选文件并读进主进程内存，返回一次性的导入句柄。 */
-export async function pickBackupFile(window: BrowserWindow | null): Promise<BackupPickResult> {
-  const optionsForDialog = {
-    properties: ['openFile' as const],
-    filters: [{ name: 'ModelPort backup', extensions: ['json'] }],
-  }
-  const openResult = window
-    ? await dialog.showOpenDialog(window, optionsForDialog)
-    : await dialog.showOpenDialog(optionsForDialog)
-  if (openResult.canceled || openResult.filePaths.length === 0) return { canceled: true }
-
-  const filePath = openResult.filePaths[0]
+/**
+ * Reads a backup file from an explicit path and stages it for import.
+ *
+ * This is the half of `pickBackupFile()` that has nothing to do with choosing a
+ * file, so a host with no dialog - the headless daemon - can drive the same engine
+ * instead of growing a second import implementation.
+ */
+export function stageBackupFile(filePath: string): BackupPickResult {
   let text: string
   try {
     if (statSync(filePath).size > MAX_BACKUP_BYTES) {
@@ -283,6 +269,14 @@ export async function pickBackupFile(window: BrowserWindow | null): Promise<Back
 
   pendingRestores.set(token, { bundle: parsed.bundle, createdAt: Date.now() })
   return { canceled: false, token, encrypted: false, preview: previewOf(parsed.bundle) }
+}
+
+/** 选文件并读进主进程内存，返回一次性的导入句柄。 */
+export async function pickBackupFile(): Promise<BackupPickResult> {
+  const filePath = await requireDesktop('pick-backup-file').pickOpenPath()
+  if (filePath === null) return { canceled: true }
+
+  return stageBackupFile(filePath)
 }
 
 /** 解开口令件；解出来的仍是同一份明文备份，走同一个解析器。 */
@@ -516,6 +510,5 @@ export async function applyBackup(token: string, mode: BackupMode): Promise<Back
 
 /** 导入后必须重启：供应商/账号是在启动时播种并镜像进运行时的，热替换等于让两套状态并存。 */
 export function restartApplication(): void {
-  app.relaunch()
-  app.quit()
+  requireDesktop('restart-application').restart()
 }

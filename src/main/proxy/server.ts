@@ -6,7 +6,8 @@
 import Koa, { type Context, type Next } from 'koa'
 import Router from '@koa/router'
 import bodyParser from 'koa-bodyparser'
-import { app } from 'electron'
+import { getHost } from '../runtime/host'
+import webRouter from './routes/web'
 import { randomUUID } from 'node:crypto'
 import { Server as HttpServer } from 'http'
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'https'
@@ -209,6 +210,15 @@ export class ProxyServer {
         return
       }
 
+      // The UI shell served by a headless host (WSL daemon) is public bytes: the
+      // document and its hashed assets contain no data, and every call the page makes
+      // still needs the management secret. A key here would have to travel in a URL,
+      // which is exactly what the no-`?api_key=` rule forbids.
+      if (ctx.path === '/ui' || ctx.path.startsWith('/ui/')) {
+        await next()
+        return
+      }
+
       const config = storeManager.getConfig()
       const providedKey = extractProvidedKey(ctx)
       const outcome = evaluateApiKeyAuth({ apiKeys: config.apiKeys, providedKey })
@@ -338,7 +348,7 @@ export class ProxyServer {
         name: 'ModelPort Proxy',
         // 运行期取版本：这里原来硬编码 `1.1.2`，与 package.json 的 1.4.x 已经差了一个
         // 大版本，排查时按这个数去对文档会直接对错。
-        version: app.getVersion(),
+        version: getHost().getVersion(),
         description: 'OpenAI (chat / completions / responses) + Anthropic API compatible proxy service',
         endpoints: [
           'POST /v1/chat/completions',
@@ -417,6 +427,11 @@ export class ProxyServer {
 
     this.app.use(this.router.routes())
     this.app.use(this.router.allowedMethods())
+
+    // Static UI, only when the host reports a web root (the headless daemon). Mounted
+    // after the API routers so `/` keeps answering with its JSON index.
+    this.app.use(webRouter.routes())
+    this.app.use(webRouter.allowedMethods())
 
     this.app.use(async (ctx) => {
       const routeError = buildRouteError({

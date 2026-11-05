@@ -859,6 +859,10 @@
         "storage-not-ready": "Storage is not ready; restart the app and retry",
         "read-failed": "Could not read the file (too large or no permission)",
         "write-failed": "Could not write the file",
+        "upload-unavailable": "This gateway has no upload-import route (it predates the feature). Upgrade the gateway, or copy the backup file onto that machine and run node modelport-daemon.cjs --import-backup <path> (password via stdin or MODELPORT_BACKUP_PASSWORD).",
+    "desktop-only-restart": "A headless gateway is supervised by systemd, so the page cannot restart it for you: a clean exit under Restart=on-failure is not brought back, which would leave the gateway down. Run systemctl restart modelport on that host.",
+    "restart-failed": "The restart request failed.",
+        "desktop-only-export": "This gateway runs on a host with no window (WSL / headless daemon), so there is no save dialog and the UI cannot export a backup. Export from the desktop app, or back up that host's data.json directory directly.",
         "bad-password": "Wrong password",
         "apply-failed": "Import failed; the pre-import data.json copy was kept"
       }
@@ -952,7 +956,22 @@
     "modelList": "Model List",
     "modelMapping": "Model Mapping",
     "metadataTab": "Annotation Coverage",
+    "annotation": {
+      "title": "Annotate {{model}}",
+      "factsSection": "What this source already declares (with provenance)",
+      "catalogSection": "Complete from third-party standard ledgers",
+      "markSection": "Manual annotation (highest priority)",
+      "unavailable": "The main process does not expose single-model metadata; restart the app and try again."
+    },
     "metadata": {
+      "batchScopeButton": "Complete this source",
+      "batchScopeTitle": "Bulk completion: {{scope}}",
+      "batchScopeDesc": "Only this source is touched; annotations elsewhere stay unchanged. Ledger matching itself sends no requests.",
+      "batchScopeNone": "Nothing to complete in this scope: the models are disabled or referenced by no enabled route.",
+      "batchScopeProgressTitle": "Bulk completion for this source",
+      "batchScopeDone": "Bulk completion finished for this source",
+      "batchScopeCancelled": "Bulk completion cancelled for this source",
+      "batchScopeFailedStart": "Bulk completion could not start for this source",
       "title": "Model metadata annotation",
       "coverageTitle": "Annotation coverage",
       "coverageDesc": "Known rows per attribute over the applicable rows (a multiplier does not exist for aggregate and custom rows, so those rows are not a gap); resolution order: manual > upstream declaration > model catalogue > probe > family rule > cost ledger",
@@ -963,6 +982,12 @@
       "totalModels": "Catalogue models",
       "routingComplete": "Routing attributes complete",
       "routingIncomplete": "Routing attributes missing",
+      "gapKindAdoptable": "Fillable {{count}}",
+      "gapKindMissingField": "Catalogue lacks the field {{count}}",
+      "gapKindNoCandidate": "Not in any catalogue {{count}}",
+      "gapKindNotChat": "Not a chat model {{count}}",
+      "gapKindNotChatBadge": "Not a chat model",
+      "gapKindNoCandidateBadge": "Not in catalogues",
       "fullyAnnotatedHint": "all applicable fields set: {{count}}",
       "referenceAttribute": "reference",
       "notApplicable": "n/a {{count}}",
@@ -1120,12 +1145,14 @@
       "catalogAttribution": "Attribution: {{attribution}}",
       "catalogHash": "Content hash: {{hash}}",
       "catalogLicenseNotice": "The standard catalogue is third-party data kept for reference; prices are shown in USD per 1M tokens and never feed routing, quota or weight calculations, nor the generated pricing sidecars.",
-      "catalogComplete": "Fill from catalogue",
+      "annotate": "Annotate",
       "catalogDialogTitle": "Fill {{model}} from the standard catalogue",
       "catalogDialogDesc": "Candidates are ranked exact id → normalized alias → family and are never adopted automatically; adopt each field individually and revoke at any time.",
       "catalogLoading": "Matching the standard catalogue…",
       "catalogFailed": "Catalogue operation failed",
       "catalogNoMatches": "No entry in the current snapshot matches this model; refresh the snapshot first, or the model is genuinely absent from the standard catalogues.",
+      "catalogFieldAbsent": "This catalogue entry carries no value for the field, so it cannot be adopted.",
+      "catalogSourcesNotFetched": "Not fetched: {{sources}}. The bundled LiteLLM table has no Reasoning values and only partial Input modalities; refresh these sources in the standard-library card above, or use manual marks / a probe instead.",
       "catalogConfidenceExact": "Exact id",
       "catalogConfidenceAlias": "Alias",
       "catalogConfidenceFamily": "Family",
@@ -1498,6 +1525,8 @@
         }
       },
       "models": {
+        "annotate": "Annotate",
+        "annotateHint": "Review what this source declares and complete it field by field from the third-party ledgers",
         "title": "Models",
         "count": "{{total}} models · {{served}} enabled",
         "search": "Search models",
@@ -1589,6 +1618,9 @@
       "unavailable": "The channel runtime is not running, so this switch cannot be read"
     },
     "models": {
+      "annotate": "Annotate",
+      "annotateHint": "Review what the channel declares and complete it field by field from the third-party ledgers",
+      "annotateBlocked": "This model is disabled or dead, so it is not in the provider catalogue and cannot be annotated",
       "title": "Models",
       "refresh": "Refresh online",
       "refreshed": "Models updated",
@@ -1606,6 +1638,32 @@
       "empty": "No models yet — add an account, then refresh online"
     },
     "refreshAccount": "Refresh credentials",
+    "identityRisk": {
+      "high": "Identity risk: high",
+      "medium": "Identity risk: medium",
+      "low": "Identity risk: low"
+    },
+    "identityRiskTooltip": "This channel presents a first-party client identity upstream: {{declared}}. Vendor clients keep changing versions, and the account may be stopped for non-official usage.",
+    "identityLive": {
+      "title": "Live identity",
+      "source": {
+        "env": "User-pinned",
+        "official": "Official API",
+        "local-install": "Local install",
+        "fallback": "Built-in fallback"
+      },
+      "checkedAt": "checked {{time}}",
+      "badge": {
+        "fresh": "tracks official",
+        "stale": "fallback, may be stale"
+      },
+      "badgeTooltip": "Requests currently carry v{{version}} ({{source}}, checked {{time}}). {{state}}",
+      "badgeState": {
+        "fresh": "The value comes from the official API / local install / user pin, and follows vendor client upgrades automatically.",
+        "stale": "The value comes from a built-in constant (official API and local install both unavailable); it may lag behind the current official release."
+      }
+    },
+    "serviceStopped": "Stopped by upstream",
     "refreshedAccount": "Credentials refreshed",
     "refreshAccountFailed": "Could not refresh credentials",
     "moveUp": "Move up",
@@ -1651,5 +1709,17 @@
       "failed": "Could not add the account",
       "misconfigured": "This channel declares no add-account method, so the UI cannot add one."
     }
+  },
+  "connect": {
+    "title": "Connect to ModelPort gateway",
+    "subtitle": "This page is the management UI; the gateway itself runs as a headless service.",
+    "secretLabel": "Management secret",
+    "submit": "Connect",
+    "connecting": "Connecting…",
+    "unauthorized": "The gateway rejected this management secret.",
+    "unreachable": "Cannot reach the gateway: {{message}}",
+    "daemonKeepsRunning": "Closing this tab does not stop the gateway; it keeps serving requests.",
+    "retrieving": "Retrieving this gateway's secret from the system keystore...",
+    "remembered": "In this shell, an accepted secret is stored in the system keystore (only the current Windows user can decrypt it). After moving to another machine or account it asks once more."
   }
 }

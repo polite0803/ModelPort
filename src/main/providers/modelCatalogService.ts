@@ -16,6 +16,7 @@ import {
   removeCatalogAdoptions,
   sanitizeCatalogAdoptionValue,
   upsertCatalogAdoption,
+  upstreamModelName,
   type CatalogAdoption,
   type CatalogAdoptionField,
   type CatalogCandidatesResult,
@@ -313,10 +314,12 @@ export async function getCatalogCandidates(input: {
   displayName: string
   actualModelId: string
 }): Promise<CatalogCandidatesResult> {
+  const provider = storeManager.getProviders().find((item) => item.id === input.providerId)
   const { store } = await readEffectiveCatalogStore()
   const matches = matchCatalogEntries(catalogIndexFromStore(store), {
     modelId: input.actualModelId,
-    displayName: input.displayName,
+    // 匹配用上游原名：`TRAE (字节) / GLM-5.1` 是网关自己拼的展示名，标准库里没有这种 id。
+    displayName: upstreamModelName(provider?.name, input.displayName),
   })
   return {
     statuses: await readEffectiveCatalogStatuses(),

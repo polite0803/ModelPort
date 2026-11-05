@@ -1,10 +1,11 @@
 /**
  * Credential Storage Module - Core Storage Implementation
- * Uses electron-store for persistent storage
- * Uses Electron's safeStorage API for sensitive data encryption
+ * Uses conf for persistent storage (same file format electron-store forwarded to)
+ * Seals strings through the host binding: the Electron keystore, or none on a headless daemon
  */
 
-import { app, safeStorage, BrowserWindow } from 'electron'
+import { getHost } from '../runtime/host'
+import type { RendererSink } from '../ipc/logBroadcast'
 import { homedir } from 'os'
 import { join } from 'path'
 import { copyFileSync, existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs'
@@ -100,11 +101,12 @@ import type { AppLogTrendPoint, AutoRoutingConfig } from '../../shared/types'
 import { AppLogManager } from '../appLogs/manager'
 import { QuotaLedger } from '../proxy/quota/ledger'
 import { syncBuiltinProvider } from './providerSync'
-import { syncAutoStart } from '../autostartHost'
 import { debugLog } from '../logging/debugLog'
 import type { AppLogFilter } from '../appLogs/types'
 
-// Dynamically import electron-store (ESM module)
+// Dynamically import conf (ESM module). `electron-store` is retired: it destructures
+// `{app, ipcMain, shell}` off `import electron` at module top level, so a headless
+// daemon cannot load it, and it only ever forwarded its options to `conf`.
 let Store: any = null
 
 /**
@@ -127,16 +129,17 @@ const CIPHERTEXT_PREFIX = 'v1:'
 class StoreManager {
   private store: StoreType | null = null
   private isInitialized: boolean = false
-  private mainWindow: BrowserWindow | null = null
+  private mainWindow: RendererSink | null = null
   private initializationError: Error | null = null
   private requestLogManager: RequestLogManager | null = null
   private appLogManager: AppLogManager | null = null
   private quotaLedger: QuotaLedger | null = null
   private encryptionKey: string | undefined = undefined
   private keyFilePath: string | null = null
+  private keystoreBlocked = false
   private dataFileExistedBeforeInit = false
 
-  setMainWindow(window: BrowserWindow | null): void {
+  setMainWindow(window: RendererSink | null): void {
     this.mainWindow = window
   }
 
@@ -166,20 +169,20 @@ class StoreManager {
     const storagePath = this.getStoragePath()
 
     try {
-      // `electron-store` 是 ESM 包，走动态 import。必须在 try **内部**：
+      // `conf` 是 ESM 包，走动态 import。必须在 try **内部**：
       // 打包产物不带 node_modules（build.files 排除了 `!node_modules/**/*`），
       // 依赖没被打进 bundle 时这里会抛 ERR_MODULE_NOT_FOUND；若发生在 try 之外，
       // initializationError 不会被记录，界面只能看到
       // "Storage not initialized, please call initialize() first" 这种无从下手的文案
       // （1.4.5 正是如此：electron-store 被 external 后打包应用必然走到这一步）。
       if (!Store) {
-        const module = await import('electron-store')
+        const module = await import('conf')
         Store = module.default
       }
 
       this.encryptionKey = this.resolveEncryptionKey(storagePath)
       this.store = new Store({
-        name: 'data',
+        configName: 'data',
         cwd: storagePath,
         defaults: this.getDefaultData(),
         encryptionKey: this.encryptionKey,
@@ -206,14 +209,14 @@ class StoreManager {
       
       // Never replace a data file that held real data: a wrong or missing key
       // would turn "cannot decrypt" into "silently wiped".
-      if (this.dataFileExistedBeforeInit && this.keyFilePath) {
+      if (this.dataFileExistedBeforeInit && (this.keyFilePath || this.keystoreBlocked)) {
         console.error(
           '[Store] Existing data.json could not be read. Move it aside manually to start over; refusing to replace it.',
         )
         throw this.initializationError
       }
 
-      // 依赖模块都没加载起来时（例如打包漏带 electron-store），备份/重建 data.json
+      // 依赖模块都没加载起来时（例如打包漏带 conf），备份/重建 data.json
       // 解决不了任何问题，只会把真实的 ERR_MODULE_NOT_FOUND 盖掉。直接抛出。
       if (!Store) throw this.initializationError
 
@@ -221,7 +224,7 @@ class StoreManager {
       try {
         await this.recoverFromCorruptedData(storagePath)
         this.store = new Store({
-          name: 'data',
+          configName: 'data',
           cwd: storagePath,
           defaults: this.getDefaultData(),
           encryptionKey: this.encryptionKey,
@@ -292,7 +295,7 @@ class StoreManager {
 
     let keystoreAvailable = false
     try {
-      keystoreAvailable = safeStorage.isEncryptionAvailable()
+      keystoreAvailable = getHost().sealer.isAvailable()
     } catch (error) {
       console.warn('[Store] OS keystore probe failed, falling back to unencrypted storage:', error)
     }
@@ -302,6 +305,16 @@ class StoreManager {
       keyFileExists: existsSync(keyPath),
       dataFileExists: this.dataFileExistedBeforeInit,
     })
+
+    if (plan === 'sealed-unreadable') {
+      this.keystoreBlocked = true
+      throw new Error(
+        'This data directory is sealed with a machine-bound key (store.key exists) but the host has no OS ' +
+          'keystore, so data.json cannot be opened here. Do not point a keystore-less host (WSL, a container) ' +
+          'at it: run this directory on a machine with a keystore, or move settings and credentials across with ' +
+          'the backup export/import rather than sharing the folder.',
+      )
+    }
 
     if (plan === 'unencrypted') {
       this.credentialsDegradedAtInit = true
@@ -323,14 +336,14 @@ class StoreManager {
 
   private readKeyFile(keyPath: string): string {
     const sealed = readFileSync(keyPath, 'utf8').trim()
-    const key = safeStorage.decryptString(Buffer.from(sealed, 'base64'))
+    const key = getHost().sealer.decryptString(Buffer.from(sealed, 'base64'))
     if (!key) throw new Error('store.key decrypted to an empty key')
     return key
   }
 
   private createKeyFile(keyPath: string): string {
     const key = randomBytes(32).toString('hex')
-    writeFileSync(keyPath, safeStorage.encryptString(key).toString('base64'), { mode: 0o600 })
+    writeFileSync(keyPath, getHost().sealer.encryptString(key).toString('base64'), { mode: 0o600 })
     return key
   }
 
@@ -384,7 +397,7 @@ class StoreManager {
   private canReadWith(dataPath: string, storagePath: string, key: string): boolean {
     try {
       const probe = new Store({
-        name: 'data',
+        configName: 'data',
         cwd: storagePath,
         defaults: {},
         encryptionKey: key,
@@ -407,7 +420,7 @@ class StoreManager {
     let snapshot: Record<string, unknown>
     try {
       const legacy = new Store({
-        name: 'data',
+        configName: 'data',
         cwd: storagePath,
         defaults: {},
         encryptionKey: StoreManager.LEGACY_ENCRYPTION_KEY,
@@ -432,7 +445,7 @@ class StoreManager {
 
     try {
       const rewritten = new Store({
-        name: 'data',
+        configName: 'data',
         cwd: storagePath,
         defaults: {},
         encryptionKey: key,
@@ -842,15 +855,15 @@ class StoreManager {
    * @returns 带 `v1:` 前缀的密文；密钥库不可用时按降级口径返回原明文
    */
   encryptData(data: string): string {
-    if (!safeStorage.isEncryptionAvailable()) {
+    if (!getHost().sealer.isAvailable()) {
       console.warn('[Store] System keychain unavailable - credentials will be stored unencrypted')
       this.warnPlaintextStorage('keystore-unavailable')
       return data
     }
     try {
-      const encrypted = Buffer.from(safeStorage.encryptString(data))
+      const encrypted = Buffer.from(getHost().sealer.encryptString(data))
       // Some keychains report available but fail to round-trip (headless Linux without libsecret)
-      if (safeStorage.decryptString(encrypted) !== data) {
+      if (getHost().sealer.decryptString(encrypted) !== data) {
         console.error('[Store] Encryption round-trip failed - credentials will be stored unencrypted')
         this.warnPlaintextStorage('roundtrip-failed')
         return data
@@ -872,9 +885,9 @@ class StoreManager {
    */
   decryptData(value: string): string | null {
     if (value.startsWith(CIPHERTEXT_PREFIX)) {
-      if (!safeStorage.isEncryptionAvailable()) return null
+      if (!getHost().sealer.isAvailable()) return null
       try {
-        return safeStorage.decryptString(Buffer.from(value.slice(CIPHERTEXT_PREFIX.length), 'base64'))
+        return getHost().sealer.decryptString(Buffer.from(value.slice(CIPHERTEXT_PREFIX.length), 'base64'))
       } catch (error) {
         console.error('Failed to decrypt data:', error)
         return null
@@ -883,7 +896,7 @@ class StoreManager {
     // 无前缀的旧值：先试一次「它是不是旧版密文」，解得开就按密文处理；解不开当明文。
     // 这条让 accounts 与独立存放的渠道包凭据在迁移完成前都还能用 —— 只给某一个文件
     // 写迁移会漏掉另一个。
-    if (safeStorage.isEncryptionAvailable()) {
+    if (getHost().sealer.isAvailable()) {
       const legacyPlain = this.tryDecryptUnprefixed(value)
       if (legacyPlain !== null) return legacyPlain
     }
@@ -961,7 +974,7 @@ class StoreManager {
         }
         const legacyPlain = this.tryDecryptUnprefixed(raw)
         const plaintext = legacyPlain === null ? raw : legacyPlain
-        if (safeStorage.isEncryptionAvailable()) {
+        if (getHost().sealer.isAvailable()) {
           credentials[field] = this.encryptData(plaintext)
           accountChanged = true
         } else {
@@ -987,9 +1000,9 @@ class StoreManager {
 
   /** 旧格式密文的试解：解得开返回明文，解不开（含"其实是明文"）返回 `null`。 */
   private tryDecryptUnprefixed(value: string): string | null {
-    if (!safeStorage.isEncryptionAvailable()) return null
+    if (!getHost().sealer.isAvailable()) return null
     try {
-      return safeStorage.decryptString(Buffer.from(value, 'base64'))
+      return getHost().sealer.decryptString(Buffer.from(value, 'base64'))
     } catch {
       return null
     }
@@ -1311,7 +1324,7 @@ class StoreManager {
    */
   private applyAutoStart(previous: AppConfig | undefined, next: AppConfig): void {
     if (previous !== undefined && previous.autoStart === next.autoStart) return
-    void syncAutoStart(next.autoStart).then(result => {
+    void getHost().syncLoginItem(next.autoStart).then(result => {
       // `skipped` 的两条都已在 `autostartHost` 里记了日志（开发态 / 无机制平台），
       // 这里不再重复告警；只有真写入时才确认一次，便于用户核对。
       if (result.applied) {

@@ -8,6 +8,7 @@
 import { existsSync, readFileSync, statSync } from 'fs'
 import { mkdir, readFile, rename, writeFile } from 'fs/promises'
 import { join } from 'path'
+import { hostResourceRoot } from '../runtime/host'
 import { storeManager } from '../store/store.ts'
 import {
   EMPTY_CATALOG_STORE,
@@ -67,7 +68,7 @@ export async function readCatalogStore(): Promise<CatalogStore> {
  * 两者都不存在时返回 undefined，功能退化为「尚未抓取」，而不是启动失败。
  */
 export function builtinCatalogSnapshotPath(): string | undefined {
-  const packagedRoot = (process as { resourcesPath?: string }).resourcesPath
+  const packagedRoot = hostResourceRoot()
   const candidates = [
     ...(packagedRoot ? [join(packagedRoot, 'catalog', 'litellm.json')] : []),
     join(process.cwd(), 'resources', 'catalog', 'litellm.json'),

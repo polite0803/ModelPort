@@ -9,6 +9,7 @@ import {
   Loader2,
   Plus,
   RefreshCw,
+  Tags,
   Ticket,
   Trash2,
   Undo2,
@@ -17,10 +18,13 @@ import {
 import type {
   ChannelAutoCheckin,
   ChannelCredits,
+  ChannelIdentityEntry,
   ChannelModelInfo,
   ChannelView,
 } from '../../../shared/channels'
-import { channelAddFlowOf } from '../../../shared/channels'
+import { channelAddFlowOf, channelModelDisplayName } from '../../../shared/channels'
+import { CatalogScopeBatchButton } from '@/components/models/CatalogScopeBatchButton'
+import { ModelAnnotationDialog } from '@/components/models/ModelAnnotationDialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
@@ -60,6 +64,13 @@ interface CredentialAddState {
 const POLL_INTERVAL_MS = 2500
 const POLL_TIMEOUT_MS = 5 * 60 * 1000
 
+/** 身份核对时间的本地短格式（`MM-DD HH:mm`）：徽标 tooltip 空间有限，日期不带年份。 */
+function formatIdentityTime(ms: number): string {
+  const date = new Date(ms)
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 export function Channels() {
   const { t } = useTranslation()
   const { toast } = useToast()
@@ -67,6 +78,9 @@ export function Channels() {
   const [channels, setChannels] = useState<ChannelView[]>([])
   const [credits, setCredits] = useState<Record<string, ChannelCredits | 'loading'>>({})
   const [models, setModels] = useState<Record<string, ChannelModelInfo[] | 'loading'>>({})
+  // 各渠道「下一笔请求实际会发」的客户端身份（B4）：版本、来源、核对时间。
+  // 读不到（worker 未起 / RPC 失败）就是空表，徽标退回纯声明文案，不报错打扰。
+  const [identity, setIdentity] = useState<Record<string, ChannelIdentityEntry>>({})
   const [openModels, setOpenModels] = useState<Record<string, boolean>>({})
   const [loading, setLoading] = useState(true)
   const [unavailable, setUnavailable] = useState<string | null>(null)
@@ -75,6 +89,15 @@ export function Channels() {
   const [autoCheckinBusy, setAutoCheckinBusy] = useState(false)
   const [login, setLogin] = useState<LoginState | null>(null)
   const [credentialAdd, setCredentialAdd] = useState<CredentialAddState | null>(null)
+  /**
+   * 标注对话框的目标行。存 `(channel, model)` 而不是算好的 displayName：
+   * 展示名由 `channelModelDisplayName` 现算，和主进程写目录用的是同一个函数，
+   * 抄一份字符串只会和目录漂移（漂移后每次标注都拿归属错误）。
+   */
+  const [annotateTarget, setAnnotateTarget] = useState<{
+    channel: ChannelView
+    model: ChannelModelInfo
+  } | null>(null)
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const autoCheckinTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loginRef = useRef<LoginState | null>(null)
@@ -97,6 +120,17 @@ export function Channels() {
 
   // 这个开关不属于某个渠道：一个开关管所有渠道，每个自然日只跑一次。
   // 跑一轮是后台任务，只有 running 时才追着看，跑完就停。
+  const loadIdentity = useCallback(async () => {
+    const result = await window.electronAPI.channels.rpc('identity.snapshot', {})
+    if (!result.ok) {
+      setIdentity({})
+      return
+    }
+    const value = result.value as { entries?: ChannelIdentityEntry[] } | undefined
+    const entries = Array.isArray(value?.entries) ? value.entries : []
+    setIdentity(Object.fromEntries(entries.map(entry => [entry.channel, entry])))
+  }, [])
+
   const loadAutoCheckin = useCallback(async () => {
     if (autoCheckinTimer.current !== null) {
       clearTimeout(autoCheckinTimer.current)
@@ -120,7 +154,8 @@ export function Channels() {
     setLoading(false)
     void loadCredits(result.channels)
     void loadAutoCheckin()
-  }, [loadAutoCheckin, loadCredits])
+    void loadIdentity()
+  }, [loadAutoCheckin, loadCredits, loadIdentity])
 
   useEffect(() => {
     void refresh()
@@ -531,11 +566,62 @@ export function Channels() {
                       {channel.name.slice(0, 1)}
                     </div>
                     <div className="min-w-0">
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className="truncate font-semibold">{channel.name}</span>
                         <Badge variant={connected ? 'secondary' : 'outline'}>
                           {connected ? t('channels.connected') : t('channels.notConnected')}
                         </Badge>
+                        {channel.upstreamIdentity !== undefined && (() => {
+                          // B4：徽标 tooltip 追加「当前生效身份」。快照读不到时
+                          // 保持纯声明文案 —— 展示是诊断增强，不是强依赖。
+                          const live = identity[channel.id]
+                          const liveText = live === undefined ? '' : ` ${t('channels.identityLive.title')}：v${live.version}（${t(`channels.identityLive.source.${live.source}`)}，${t('channels.identityLive.checkedAt', { time: formatIdentityTime(live.checkedAt) })}）${live.detail !== undefined ? ` · ${live.detail}` : ''}`
+                          return (
+                            <>
+                              <Badge
+                                variant="outline"
+                                className={
+                                  channel.upstreamIdentity.risk === 'high'
+                                    ? 'border-destructive text-destructive'
+                                    : channel.upstreamIdentity.risk === 'medium'
+                                      ? 'border-amber-500 text-amber-600'
+                                      : 'text-muted-foreground'
+                                }
+                                title={t('channels.identityRiskTooltip', {
+                                  declared: channel.upstreamIdentity.declared,
+                                }) + liveText}
+                              >
+                                {t(`channels.identityRisk.${channel.upstreamIdentity.risk}`)}
+                              </Badge>
+                              {/* 双色版本状态徽标：与「风险档」（本质冒用身份，不随修复变化）
+                                  区分开 —— 这里显示的是「发出去的版本号是否跟得上官方」。
+                                  绿 = official / local-install / env（受控来源，自动跟随升级）；
+                                  黄 = fallback（内置常量，可能落后于官方现役版）。快照读不到
+                                  （worker 崩 / 渠道不在快照）时不渲染，避免误导。 */}
+                              {live !== undefined && (() => {
+                                const stale = live.source === 'fallback'
+                                return (
+                                  <Badge
+                                    variant="outline"
+                                    className={stale ? 'border-amber-500 text-amber-600' : 'border-emerald-600 text-emerald-600'}
+                                    title={t('channels.identityLive.badgeTooltip', {
+                                      version: live.version,
+                                      source: t(`channels.identityLive.source.${live.source}`),
+                                      time: formatIdentityTime(live.checkedAt),
+                                      state: t(stale ? 'channels.identityLive.badgeState.stale' : 'channels.identityLive.badgeState.fresh'),
+                                    })}
+                                  >
+                                    <span
+                                      aria-hidden
+                                      className={`mr-1 inline-block size-2 rounded-full ${stale ? 'bg-amber-500' : 'bg-emerald-600'}`}
+                                    />
+                                    v{live.version} · {t(stale ? 'channels.identityLive.badge.stale' : 'channels.identityLive.badge.fresh')}
+                                  </Badge>
+                                )
+                              })()}
+                            </>
+                          )
+                        })()}
                       </div>
                       <div className="truncate text-xs text-muted-foreground">
                         {channel.vendor} · {t(`channels.loginKind.${channel.loginKind}`)}
@@ -636,6 +722,13 @@ export function Channels() {
                       <RefreshCw className={`mr-1 h-3.5 w-3.5${busy ? ' animate-spin' : ''}`} />
                       {t('channels.models.refresh')}
                     </Button>
+                    {/* 按本渠道批量补全：先估算再确认，范围只这一家 */}
+                    <CatalogScopeBatchButton
+                      providerId={channel.id}
+                      scopeLabel={channel.name}
+                      disabled={!connected}
+                      onFinished={() => void loadModels(channel)}
+                    />
                   </div>
 
                   {modelsOpen && (
@@ -681,6 +774,24 @@ export function Channels() {
                                     {t('channels.models.disabled')}
                                   </Badge>
                                 )}
+                                {/*
+                                  标注入口。停用/失效的模型不在供应商目录里（`syncProviders`
+                                  把它们排除在 supportedModels 之外），而手工标注与标准库采用
+                                  写入前都校验「这个名字在该供应商目录里」，所以这两类只能关掉
+                                  入口并说明原因 —— 放开就是一点击就吃一个归属错误。
+                                */}
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="shrink-0 px-1"
+                                  disabled={model.disabled || model.dead}
+                                  title={model.disabled || model.dead
+                                    ? t('channels.models.annotateBlocked')
+                                    : `${t('channels.models.annotate')} · ${t('channels.models.annotateHint')}`}
+                                  onClick={() => setAnnotateTarget({ channel, model })}
+                                >
+                                  <Tags className="h-3.5 w-3.5" />
+                                </Button>
                                 {model.dead
                                   ? (
                                     // 失效模型只能恢复、不能开关：它已经不在目录里了。
@@ -723,6 +834,14 @@ export function Channels() {
                     {channel.accounts.list.map((account, index) => (
                       <li key={account.id} className="flex items-center gap-2 rounded border px-2 py-1 text-sm">
                         <span className="min-w-0 flex-1 truncate">{account.nickname}</span>
+                        {account.serviceStopped !== undefined && (
+                          <span
+                            className="shrink-0 text-xs text-destructive"
+                            title={account.serviceStopped.text}
+                          >
+                            {t('channels.serviceStopped')}
+                          </span>
+                        )}
                         {account.expiresAt !== undefined && (
                           <span className="shrink-0 text-xs text-muted-foreground">
                             {new Date(account.expiresAt).toLocaleDateString()}
@@ -926,6 +1045,20 @@ export function Channels() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {annotateTarget && (
+        <ModelAnnotationDialog
+          providerId={annotateTarget.channel.id}
+          displayName={channelModelDisplayName(
+            annotateTarget.channel.name,
+            annotateTarget.channel.id,
+            annotateTarget.model,
+          )}
+          modelLabel={annotateTarget.model.name}
+          onClose={() => setAnnotateTarget(null)}
+          onChanged={() => void loadModels(annotateTarget.channel)}
+        />
+      )}
     </div>
   )
 }

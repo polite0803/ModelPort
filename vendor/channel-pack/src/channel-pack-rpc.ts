@@ -17,6 +17,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { clientIdentitySnapshot, forceIdentityRefresh, type ClientIdentitySnapshotEntry } from './client-identity.js'
 import { isSupportedProvider } from './channel-pack-store.js'
 import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { AccountPool } from './account-pool.js'
@@ -558,6 +559,17 @@ export async function collectClaimResults<TCredential = unknown, TProduct = unkn
   const results: RpcCreditsClaimAllResponse['results'] = []
   const outcomes: ClaimOutcome[] = []
   for (const entry of accounts) {
+    // An account the upstream refused to serve stays out of the automated
+    // passes: a daily claim is another authenticated request for the same
+    // non-official client, issued while nobody is watching. Keyed on
+    // `enabled === false` as well, so a user who switches the row back on has
+    // explicitly asked to try again and the claims resume with it.
+    if (entry.enabled === false && entry.serviceStopped !== undefined) {
+      const parked: ClaimOutcome = { kind: 'inactive', message: '上游已停止该账号服务，未发起签到' }
+      outcomes.push(parked)
+      results.push({ accountId: entry.id, nickname: entry.nickname, outcome: parked })
+      continue
+    }
     let outcome: ClaimOutcome
     try {
       const resolved = await deps.resolve(credentialRef(entry.credentialRef))
@@ -618,6 +630,19 @@ export async function collectCreditBalances<TCredential = unknown, TProduct = un
   const results: RpcCreditsBalancesResponse['accounts'] = []
   // 顺序查询，避免并发触发风控
   for (const entry of accounts) {
+    // Same avoidance as collectClaimResults. The row is still returned with a
+    // reason, because `balance: null` alone reads as "查询失败" on the panel -
+    // a different fact than "upstream will not serve this account".
+    if (entry.enabled === false && entry.serviceStopped !== undefined) {
+      results.push({
+        accountId: entry.id,
+        nickname: entry.nickname,
+        enabled: false,
+        balance: null,
+        error: '上游已停止该账号服务，未发起查询',
+      })
+      continue
+    }
     let balance: CreditBalance | null = null
     let error: string | undefined
     let extra: RpcCreditsBalanceExtra | undefined
@@ -2549,13 +2574,11 @@ function registerChannelPackEndpoints(
             // 判据只能是 status 端点的 `checked_in`。
             fetchStatus: (credential) =>
               fetchTraeCheckinStatus(credential as TraeCredential, TRAE, fetch),
-            claim: (credential, _product, entry) =>
+            claim: (credential, _product, _entry) =>
               claimTraeDailyCheckin(
                 credential as TraeCredential,
                 TRAE,
                 fetch,
-                pool.traeCheckinDeviceGenerationFor(entry.id),
-                (next) => pool.updateTraeCheckinDeviceGeneration(entry.id, next),
               ),
             warn: (msg) => ctx.logger?.warn?.(msg),
           })
@@ -4123,6 +4146,21 @@ function registerChannelPackEndpoints(
         }
         const value: RpcUsageAutoCheckinResponse = { autoCheckin: await autoCheckin.setEnabled(req.enabled) }
         return { ok: true, value }
+      }
+
+      case 'identity.snapshot': {
+        // B4：管理 API / 渠道页展示「当前生效身份」。只读、无 payload、无副作用；
+        // 静态身份的渠道（zcode/raccoon/loomy 等）没有动态状态，不进这份快照
+        // —— 它们的值仍由目录的 upstreamIdentity.declared 承载。
+        const entries: ClientIdentitySnapshotEntry[] = clientIdentitySnapshot()
+        return { ok: true, value: { entries } }
+      }
+
+      case 'identity.refresh': {
+        // B5 配套：强制重拉官方版本源（风控命中后由宿主触发，或管理接口手动调）。
+        // 返回刷新后的快照，调用方可以直接比对「刷新前后版本是否变化」。
+        const entries: ClientIdentitySnapshotEntry[] = await forceIdentityRefresh()
+        return { ok: true, value: { entries } }
       }
 
       default:

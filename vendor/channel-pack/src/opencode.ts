@@ -37,8 +37,6 @@ import { OPENCODE } from './opencode-product.js'
 export interface OpencodeFingerprint {
   /** 40 位小写 hex，与真实 CLI project id 同形。 */
   projectId: string
-  /** 轮换代次；+1 后 project id 整体变化。 */
-  generation: number
 }
 
 /** 账号凭据（存 `ctx.credentials`，不进 settings 明文）。 */
@@ -77,14 +75,17 @@ function randomBase62(length: number): string {
  * 派生 project id。
  *
  * @param identity  账号标识（接线层传 API key；匿名槽传固定串 `'anonymous'`）。
- * @param generation 轮换代次。
  *
  * 刻意**不**把 key 全文直接进哈希链的明文位置：identity 先过 SHA-256，
  * 再以 `git-remote:` 前缀走 SHA-1 —— 既复用真实 CLI 的派生外形，
  * 又使明文 key 片段不出现在任何可从 project id 反推的中间量。
+ *
+ * 2026-11-05 去掉了 `generation` 参数：此前允许把代次 +1 得到一份全新
+ * project id，用于在上游按 project 计量时「换一个身份再来」，属于绕计量。
+ * project id 现在只由账号身份决定，一个账号一份、恒定不变。
  */
-export function deriveProjectId(identity: string, generation: number): string {
-  const inner = createHash('sha256').update(`${identity} ${generation}`).digest('hex')
+export function deriveProjectId(identity: string): string {
+  const inner = createHash('sha256').update(identity).digest('hex')
   return createHash('sha1').update(`git-remote:opencode/${inner}`).digest('hex')
 }
 

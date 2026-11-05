@@ -57,6 +57,7 @@ import { registerAdapterIdempotent } from './llm-register-compat.js'
 import { translateReasoningEffort } from './reasoning-ladder.js'
 import { reportLedgerAccount } from './token-ledger.js'
 import { retryAfterMsFromResponse } from './retry-after.js'
+import { isAccountStoppedMessage } from './account-stop.js'
 
 /** 目录条目（远端与兜底共用的输出形状）。 */
 export interface OpencodeCatalogEntry extends OpencodeFallbackModel {}
@@ -449,6 +450,17 @@ export class OpencodeAdapter extends LlmAdapter {
       } catch (error) {
         if (delivered || error instanceof ModelQueuedError) throw error
         if (error instanceof LlmError && error.code === 'QUOTA_EXCEEDED') throw error
+
+        // Account-level stop: this is not a slot problem, so trying the next
+        // slot only repeats the request that just got refused.
+        const stoppedText = error instanceof Error ? error.message : String(error)
+        if (isAccountStoppedMessage(stoppedText)) {
+          throw new LlmError(
+            `opencode: 上游已停止为该通道服务（${stoppedText.slice(0, 200)}）`,
+            'AUTH',
+            { status: 403 },
+          )
+        }
 
         const info = classifyOpencodeFailure(error)
         if (info.kind === 'free_tier') {

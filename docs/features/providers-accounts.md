@@ -36,6 +36,7 @@ ModelPort 把上游分成三类，界面也对应三块：聚合目录、账号�
 - 渠道 worker 不能放进 asar：`resources/channel-pack` 通过 `extraResources` 复制，打包后从 `process.resourcesPath/channel-pack` 加载。spawn 必须带 `DSH_CHANNEL_PACK_STATE_DIR=<dataDir>`（否则写进用户真实 `~/.dsh`）与 `DSH_OPENAI_GATEWAY_ENABLED=0`（否则固定端口 8326 与第二个实例冲突）。
 - 账号渠道的宿主重试预算是**一次 500ms**；渠道包内部已经处理排队、额度与换号，宿主的额外重试只会重复解密历史与重打上游。该策略只允许降低调用方给的预算，不会抬高。
 - `opencode` 免费车道按出口 IP 限流，因此每个账号可单独配代理；403 表示客户端形状被拒，429 表示形状通过但该出口的匿名额度用尽，两者诊断含义不同。
+- 账号渠道卡片按渠道标注**上游客户端身份风险**（`ChannelDefinition.upstreamIdentity`：`declared` 是实际发出的身份串，`risk` 为 `high/medium/low`），只用于披露，悬停可看到原文。**本项目禁止把该身份对齐到官方当前客户端**——改 UA、版本号、身份块、指纹轮换，或实时拉官方版本号回填，都属于规避上游的访问控制；这些值不是可调配置。风险等级由审计结论钉住（`tests/channels/upstream-identity.test.ts`），不得被后续改动悄悄降级。〔v1.7.4 起〕
 - 自定义供应商端点必须是 `http://` 或 `https://`；`channel://` 只用于内部账号渠道占位。自定义与聚合参数**全部透传**，内置供应商才会静默丢弃不支持的采样参数。
 - 聚合额度旁车（`shared/aggregateQuota.ts`、`aggregatePricing.ts`、`aggregateCapabilities.ts`）只能由 `docs/data/**` 的回执重新生成，禁止手改产物；`undocumented` 是“没有公开上限”，不是“没有额度”，不参与候选淘汰。
 - 重置时间一律派生，不落库；`smart` / `pace` 算不出重置时退回 `fill-first` 顺序，耗尽额度的候选只作最后手段，不会被强选。
@@ -62,6 +63,8 @@ ModelPort 把上游分成三类，界面也对应三块：聚合目录、账号�
 | `dismissedAutoProviders` | `[]` | 用户删除过的免密自动开通条目 |
 
 模型发现结果写入 `userModelOverrides[providerId].fetchedModels` 与 `fetchedAt`，不写 `provider.supportedModels`；手工能力标注单独放在 `userModelMarks`，避免同步覆盖用户纠正。
+
+聚合渠道与账号渠道的模型列表每行都有「标注」入口，与「模型管理 › 元数据」共用同一个对话框（`components/models/ModelAnnotationDialog.tsx`）：先看这一家已声明的参数与出处，再逐字段采用第三方标准台账的值（写 `catalogAdoptions`），最后才手工覆盖（写 `userModelMarks`）。卡片头部另有一个按本渠道/本条目的批量补全，**必须先估算再确认**，探测开关默认关闭。渠道侧的 `disabled` / `dead` 模型不在供应商目录里，入口禁用 —— 手工标注与采用两侧写入前都校验「这个名字在该供应商目录里」。〔v1.7.3 起〕
 
 `modelListRefresh` 的周期在设置页按“天 / 周 / 月”选择，但落库仍是毫秒值；“月”档的毫秒值超过 `setInterval` 的 2^31-1 上限（约 24.8 天），必须走调度器的长周期实现，否则定时器会立刻触发。〔v1.7.0 起〕
 

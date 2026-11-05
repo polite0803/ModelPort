@@ -22,14 +22,20 @@ import {
 } from './modelProbe.ts'
 
 /**
- * 自动采用字段：价格只展示，绝不进入自动采用；`reasoning` 同样不自动采用。
+ * 自动采用字段：价格只展示，绝不进入自动采用。
  *
- * `reasoning` 是可逐字段手工采用的标准库字段（`CATALOG_ADOPTION_FIELDS` 里有它），但不进批量：
- * 它是 `hardFilterFailure` 的判据之一（`autoRouting.ts::needsReasoning` 命中时，`reasoning:'no'`
- * 的候选会被排除），而第三方台账对它的判断是**单点类比**——models.dev 报 `false` 常常只是
- * 「这张表按默认回答」。批量把这个值写进几千行，等于让一份社区表格获得「把模型从请求里
- * 筛掉」的权力；一次误判的代价是用户看不到那个模型，而不是一次次优路由。
- * 要这个效果就得由用户逐字段点「采用」，那是显式动作，且随时可撤销。
+ * `reasoning` 于 2026-11-04 由用户拍板放开（原裁定是只允许逐字段手工采用），两个方向都收，
+ * 但方向不同口径不同：
+ * - `yes` 是补强：`inferred` 级（家族规则 / 第三方旁表）可以被它覆盖；
+ * - `no` 是**排除性证据**，只在完全没有证据时写；行上已有任何已知值（含家族规则）就不动。
+ *   实测依据（2026-11-04，一个 980 行的真实目录）：models.dev 说 `no` 的 183 行里 183 行
+ *   没有相反证据，只有 8 行与家族规则冲突（deepseek-v3 / kimi-k2 那几族）；而由同一份
+ *   models.dev 生成的 93 条旁表里 `reasoning: 'yes'` 的 83 条，原文 0 条说 `no`。
+ *   原裁定担心的「社区台账的 false 只是按默认回答」在这份数据上不成立。
+ *
+ * 其余三道闸门不变：只有 exact / alias 匹配才自动采用（`highestAutoMatch`），
+ * family / fuzzy 永不采用；批量目标仍限「被至少一条启用路由引用」的模型；已声明字段
+ * （人工标记 / 上游声明 / 成本账本）永远不覆盖。
  */
 export const CATALOG_BATCH_AUTO_FIELDS: readonly CatalogAdoptionField[] = [
   'contextTokens',
@@ -37,6 +43,7 @@ export const CATALOG_BATCH_AUTO_FIELDS: readonly CatalogAdoptionField[] = [
   'modalities',
   'vision',
   'tools',
+  'reasoning',
 ] as const
 
 export type CatalogBatchAdoptionField = (typeof CATALOG_BATCH_AUTO_FIELDS)[number]
@@ -122,6 +129,11 @@ export interface CatalogBatchSnapshot {
   /** 计划阶段被过滤掉的停用 / 未被路由引用模型数。 */
   skippedDisabled: number
   probeEnabled: boolean
+  /**
+   * 本次任务的范围：供应商 id（渠道 / 聚合条目）。缺省表示全目录补齐。
+   * 进度面板靠它说明「这一轮只跑了 TRAE」，而不是让人以为全库补完了。
+   */
+  providerScope?: string
   /** 内部节奏：第几批 / 共几批，界面不展示。 */
   batchIndex: number
   batchTotal: number
@@ -142,6 +154,11 @@ export interface CatalogBatchStartInput {
   probe: boolean
   /** 仅重试上一任务的失败项；主进程按 jobId 查内存记录。 */
   retryFailedOf?: string
+  /**
+   * 范围收口：只处理该供应商（渠道 id / 聚合条目 id）的模型。
+   * 省略 = 全目录。估算与启动必须传同一个范围，否则确认弹窗里的数字与实际跑的不符。
+   */
+  providerId?: string
 }
 
 function isDeclaredFact(fact: Fact<unknown>): boolean {
@@ -158,8 +175,14 @@ function shouldProbeFact(fact: Fact<number>): boolean {
   return fact.confidence === 'inferred'
 }
 
-/** 条目是否真的带有这个字段（空值不算）。 */
-function entryHasField(match: CatalogMatch, field: CatalogBatchAdoptionField): boolean {
+/**
+ * 条目是否带有这个字段、且这个值可以进批量（空值不算）。
+ *
+ * `reasoning` 两个方向都可以进批量，但 `no` 还要再过一道「行上没有任何已知值」的闸门
+ * （见 `planCatalogBatchItem` 里的 `reasoningNoNeedsEmptySlot`）：它是排除性证据，
+ * 不能覆盖家族规则或旁表已经给出的 `yes`。
+ */
+function autoAdoptable(match: CatalogMatch, field: CatalogBatchAdoptionField): boolean {
   const entry = match.entry
   switch (field) {
     case 'contextTokens':
@@ -171,6 +194,8 @@ function entryHasField(match: CatalogMatch, field: CatalogBatchAdoptionField): b
     case 'vision':
     case 'tools':
       return entry[field] === 'yes' || entry[field] === 'no'
+    case 'reasoning':
+      return entry.reasoning === 'yes' || entry.reasoning === 'no'
     default:
       return false
   }
@@ -188,6 +213,8 @@ function rowDeclared(row: ModelMetadataRow, field: CatalogBatchAdoptionField): b
       return isDeclaredFact(row.vision)
     case 'tools':
       return isDeclaredFact(row.tools)
+    case 'reasoning':
+      return isDeclaredFact(row.reasoning)
     default:
       return true
   }
@@ -233,7 +260,11 @@ export function planCatalogBatchItem(
   if (auto) {
     for (const field of CATALOG_BATCH_AUTO_FIELDS) {
       if (rowDeclared(row, field)) continue
-      if (!entryHasField(auto, field)) continue
+      if (!autoAdoptable(auto, field)) continue
+      // `reasoning:'no'` 是排除性证据：只写进完全不知道的格子，不覆盖家族规则/旁表给出的 yes。
+      if (field === 'reasoning' && auto.entry.reasoning === 'no' && row.reasoning.state === 'known') {
+        continue
+      }
       // 去重键与 adoption ledger 共用 `catalogAdoptionKey`：断点续跑和预演都按
       // 「provider/model/field」判断，不按 catalogId 判断（换了匹配条目也不重复写）。
       if (adoptedKeys.has(catalogAdoptionKey(row.providerId, row.displayName, field))) continue

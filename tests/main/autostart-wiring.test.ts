@@ -8,8 +8,8 @@
  *    既无用又可能被安全软件拦；
  * 3. 写了但吞掉失败 —— 用户永远不知道为什么没生效。
  *
- * 断言放在源码文本层面：`storeManager` 的构造依赖 electron-store，本仓库的
- * 测试也不 mock electron，因此这里钉住「调用点是否存在、是否带变更短路」。
+ * 断言放在源码文本层面：`storeManager` 的初始化要真读盘、也要真写 OS，本仓库的
+ * 测试也不 mock electron，因此这里钉住「调用点是否存在、是否带变更短路」，以及
  */
 
 import { test } from 'node:test'
@@ -46,11 +46,20 @@ test('值没变时不碰操作系统（否则每次保存设置都会写注册�
 })
 
 test('写入失败只告警，绝不把一次设置保存变成错误', () => {
-  // `void syncAutoStart(...).catch(...)`：不 await、不上抛。
-  assert.match(store, /void syncAutoStart\(next\.autoStart\)/)
+  // `void getHost().syncLoginItem(...).catch(...)`：不 await、不上抛。
+  assert.match(store, /void getHost\(\)\.syncLoginItem\(next\.autoStart\)/)
   assert.match(store, /catch\(\(error: unknown\) => \{\s*console\.warn\(/, '失败必须留下日志')
 })
 
+
+test('Electron 宿主必须把 syncLoginItem 接到真正的 OS 写入', () => {
+  // 存储层现在只认宿主绑定；绑定若是空实现，「开关打开了但系统里没有登录项」会原样复发。
+  const electronHost = readFileSync('src/main/runtime/electronHost.ts', 'utf8')
+  assert.match(electronHost, /import \{ syncAutoStart \} from '\.\.\/autostartHost'/,
+    'electronHost 必须引进 autostartHost，否则 GUI 侧的登录项写入根本不存在')
+  assert.match(electronHost, /syncLoginItem: \(enabled\) => syncAutoStart\(enabled\)/,
+    'syncLoginItem 必须直接转调 syncAutoStart（带 enabled 参数）')
+})
 test('启动时对账，且判定窗口显示不读配置', () => {
   assert.match(main, /const launchHidden = detectHiddenLaunch\(\)/)
   assert.match(main, /showOnReady: !launchHidden/)

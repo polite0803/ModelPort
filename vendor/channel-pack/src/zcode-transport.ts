@@ -24,7 +24,7 @@
  * （逆向官方 `AccountProviderApiKeyResolver`），见 {@link fetchCodingPlanApiKey}。
  */
 
-import type { ZcodeCredential } from './zcode.js'
+import { ZCODE_APP_VERSION_FALLBACK, type ZcodeCredential } from './zcode.js'
 import { buildZcodeHeaders, zcodeMessagesUrl } from './zcode-upstream.js'
 
 /** ZCode 的两条上游通道。 */
@@ -211,8 +211,8 @@ function bizHeaders(token: string, credential: ZcodeCredential): Record<string, 
   return {
     Authorization: `Bearer ${token}`,
     'Content-Type': 'application/json',
-    'User-Agent': `ZCode/${credential.app_version ?? '3.14.4'}`,
-    'X-Platform': 'win32',
+    'User-Agent': `ZCode/${credential.app_version ?? ZCODE_APP_VERSION_FALLBACK}`,
+    'X-Platform': process.platform,
     ...(typeof credential.device_mid === 'string' && credential.device_mid.length > 0
       ? { 'X-Device-Mid': credential.device_mid }
       : {}),

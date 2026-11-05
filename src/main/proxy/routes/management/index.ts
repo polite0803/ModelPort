@@ -13,6 +13,10 @@ import statisticsRouter from './statistics'
 import proxyRouter from './proxy'
 import compressionRouter from './compression'
 import tlsRouter from './tls'
+import identityRouter from './identity'
+import rpcRouter from './rpc'
+import eventsRouter from './events'
+import backupRouter from './backup'
 
 export {
   configRouter,
@@ -25,6 +29,10 @@ export {
   proxyRouter,
   compressionRouter,
   tlsRouter,
+  identityRouter,
+  rpcRouter,
+  eventsRouter,
+  backupRouter,
 }
 
 export default [
@@ -38,4 +46,8 @@ export default [
   proxyRouter,
   compressionRouter,
   tlsRouter,
+  identityRouter,
+  rpcRouter,
+  eventsRouter,
+  backupRouter,
 ]

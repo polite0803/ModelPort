@@ -37,20 +37,6 @@ export interface ProviderAccountEntry {
   /** 每个模型的重置时间，key=模型ID（毫秒时间戳） */
   modelRateLimits?: Record<string, number>
   /**
-   * TRAE 签到设备轮换代次（仅 `trae` provider 使用）。
-   *
-   * 业务码 `9074`（签到人数过多）的限流范围是 **device_id 而非账号**：
-   * 命中后把代次 +1，即可由 `device_id` 派生出一个全新的签到设备号绕开它
-   * （见 `src/trae.ts` 的 `deriveCheckinDeviceId`）。
-   *
-   * 这里只存**整数代次**而不是新设备号本身：派生结果由
-   * `(credential.device_id, generation)` 唯一决定，故无需改写凭据本体
-   * （登录凭据里的 `device_id` 是设备指纹，动它会牵涉风控）。
-   *
-   * 缺省/0 = 使用凭据原始 `device_id`，既有账号行为完全不变。
-   */
-  traeCheckinDeviceGeneration?: number
-  /**
    * **opencode** 账号的出口代理（空/缺省 = 直连）。
    *
    * ⚠️ 代理是**账号维度**的：一个 NAT 后的多台 PC 共享同一出口 IP，而
@@ -63,19 +49,17 @@ export interface ProviderAccountEntry {
    */
   opencodeProxy?: string
   /**
-   * **opencode** 账号的指纹代次（见 `src/opencode.ts` 的 `deriveProjectId`）。
+   * Upstream has stopped serving this account and said so in the response body.
    *
-   * 只存**整数代次**而非指纹本体：project id 由 `(api_key, generation)`
-   * 唯一决定，用户点「轮换」时 +1 即可整体换一份新 project id，
-   * 无需让调用方拼哈希（与 `traeCheckinDeviceGeneration` 同款取舍）。
+   * Set by the LobsterAI adapter when a response classifies as `service-stopped`
+   * (the upstream tells us to use its official client). The account is disabled
+   * in the same write, so the pool stops selecting it and the daily claim /
+   * balance passes stop poking an account that is already under review.
    *
-   * ⚠️ 接线层必须**以本字段为权威**重新派生 project id（`max(本字段,
-   * 凭据内代次)`），不能直接透传凭据里的 `fingerprint` ——
-   * 否则代次涨了而 project id 不变，且不报错，是最难排查的一类静默失效。
-   *
-   * 缺省/0 = 用凭据里派生的初始指纹。
+   * `text` keeps the upstream wording verbatim: it is the only evidence of
+   * *which* enforcement hit this account, and a paraphrase would lose that.
    */
-  opencodeFingerprintGeneration?: number
+  serviceStopped?: { at: number; text: string }
 }
 
 /** 账号详细状态（返回给 Client 展示） */

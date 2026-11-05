@@ -37,6 +37,7 @@ import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
 import {
   classifyLobsteraiError,
   classifyLobsteraiStreamError,
+  isLobsteraiServiceStopped,
   recordsLobsteraiRateLimit,
   shouldRotateLobsteraiAccount,
   type LobsteraiErrorKind,
@@ -610,6 +611,18 @@ function buildLobsteraiFailure(input: LobsteraiFailureInput): LlmError {
     return new LlmError(`${prefix}（${detail}）`, 'QUOTA_EXCEEDED', { status })
   }
 
+  // Terminal and account-level: not a quota, not a dead session, and nothing a
+  // retry, a wait or a re-login recovers. The wording has to carry that, because
+  // every other branch here reads like a transient upstream failure.
+  if (kind === 'service-stopped') {
+    return new LlmError(
+      `lobsterai: 上游已停止为该账号服务（${detail}）；该账号已退出选号，`
+      + '重试、等待重置或重新登录都不会恢复它，请在官方客户端处理该账号或改用其他渠道。',
+      'AUTH',
+      { status: status >= 400 ? status : 403 },
+    )
+  }
+
   if (exhausted) {
     return new LlmError(
       `lobsterai: 模型 ${model} 所有账号均不可用（${detail}）`,
@@ -1003,6 +1016,22 @@ export class LobsteraiAdapter extends LlmAdapter {
     // 4. 发送请求（401/403 时刷新一次凭据后重试）
     let response = await this.send(credential, body, options)
     if (!response.ok && (response.status === 401 || response.status === 403)) {
+      // An account-level stop arrives on the same 403 door as an expired token,
+      // and the two need opposite handling: a token is worth refreshing, while
+      // re-sending a body the upstream already answered "we will not serve this
+      // account" - plus a refresh call on top of it - is more traffic against an
+      // account that is already under review.
+      const earlyBody = await response.text().catch(() => '')
+      if (classifyLobsteraiError(response.status, earlyBody) === 'service-stopped') {
+        await this.markAccountServiceStopped(currentAccountId, earlyBody)
+        throw buildLobsteraiFailure({
+          kind: 'service-stopped', status: response.status, text: earlyBody,
+          model: options.model, fromStream: false, exhausted: false,
+        })
+      }
+      // The rotation loop below never sees this response: either the refresh
+      // throws, or a fresh `send` replaces it. So `earlyBody` only needs to
+      // outlive the classification above.
       await this.options.refresh(undefined, 'auth')
       const refreshed = await this.options.resolveCredential(options.model)
       if (refreshed === undefined || refreshed.access_token.length === 0) {
@@ -1101,7 +1130,19 @@ export class LobsteraiAdapter extends LlmAdapter {
         )
       }
 
-      // 无账号池（或策略判定不该轮转）：如实报错，不做换号。
+      // Upstream said it will not serve this account at all. Park it durably and
+      // stop here. Before this class existed the signal left no trace: the pool
+      // kept ranking the stopped account first (nothing wrote a badge for a
+      // `client` kind), so every later client request poked it again - while the
+      // rotation below replayed the same conversation body onto other accounts.
+      if (isLobsteraiServiceStopped(lastKind)) {
+        await this.markAccountServiceStopped(currentAccountId, lastText)
+        throw buildLobsteraiFailure({
+          kind: lastKind, status: lastStatus, text: lastText,
+          model: options.model, fromStream: lastFromStream, exhausted: false,
+        })
+      }
+
       if (!this.options.accountPool || !shouldRotateLobsteraiAccount(lastKind)) {
         throw buildLobsteraiFailure({
           kind: lastKind, status: lastStatus, text: lastText,
@@ -1142,6 +1183,32 @@ export class LobsteraiAdapter extends LlmAdapter {
       credential = next.credential as LobsteraiCredential
       currentAccountId = next.entry.id
       response = await this.send(credential, body, options)
+    }
+  }
+
+  /**
+   * Take an account the upstream refuses to serve out of rotation, durably.
+   *
+   * `enabled: false` is what removes it from `getAvailableAccount`, and with it
+   * the balance gate and the catalogue precheck - both of which select through
+   * that same call. `serviceStopped` keeps the upstream wording so the panel can
+   * say *why* the row went grey rather than making the user choose between
+   * "you switched it off", "login expired" and "upstream stopped serving it".
+   *
+   * Best-effort on purpose: if the store write fails, the upstream's own error
+   * is still what the user sees. Replacing a real 403 with a local write error
+   * would hide the one piece of evidence that matters.
+   */
+  private async markAccountServiceStopped(accountId: string | undefined, text: string): Promise<void> {
+    if (accountId === undefined || accountId === '' || this.options.accountPool === undefined) return
+    const excerpt = text.length > 400 ? `${text.slice(0, 400)}…` : text
+    try {
+      await this.options.accountPool.updateAccount(accountId, {
+        enabled: false,
+        serviceStopped: { at: Date.now(), text: excerpt },
+      })
+    } catch {
+      // The account stays selectable; the thrown upstream error is unchanged.
     }
   }
 

@@ -21,14 +21,15 @@ import {
 } from '@/components/ui/table'
 import { useToast } from '@/hooks/use-toast'
 import { Database, Loader2, RefreshCw, Radar, RotateCcw } from 'lucide-react'
-import type { ModelMetadataReport, Fact, MetadataAttribute, ModelMetadataRow } from '@shared/modelMetadata'
+import type {
+  ModelMetadataReport,
+  Fact,
+  MetadataAttribute,
+  ModelGapKind,
+  ModelMetadataRow,
+} from '@shared/modelMetadata'
 import { METADATA_ATTRIBUTES, ROUTING_METADATA_ATTRIBUTES } from '@shared/modelMetadata'
 import type {
-  CatalogAdoptionField,
-  CatalogCandidatesResult,
-  CatalogEntry,
-  CatalogMatchConfidence,
-  CatalogPrice,
   CatalogRefreshEndpointAttempt,
   CatalogSnapshotStatus,
   CatalogSourceId,
@@ -38,10 +39,8 @@ import type {
   CatalogBatchSnapshot,
 } from '@shared/modelCatalogBatch'
 import {
-  CATALOG_ADOPTION_FIELDS,
   CATALOG_SOURCES,
   CATALOG_SOURCE_META,
-  catalogFieldValue,
   sanitizeCatalogMirrorUrl,
 } from '@shared/modelCatalog'
 import { familyRuleLayer } from '@shared/modelFamilyRules'
@@ -54,88 +53,14 @@ import {
   type ProbePlan,
   type ProbeScope,
 } from '@shared/modelProbe'
-
-const ATTRIBUTE_LABEL_KEYS: Record<MetadataAttribute, string> = {
-  modelType: 'models.metadata.attrModelType',
-  vision: 'models.metadata.attrVision',
-  tools: 'models.metadata.attrTools',
-  reasoning: 'models.metadata.attrReasoning',
-  modalities: 'models.metadata.attrModalities',
-  contextTokens: 'models.metadata.attrContextTokens',
-  maxOutputTokens: 'models.metadata.attrMaxOutputTokens',
-  weight: 'models.metadata.attrWeight',
-  free: 'models.metadata.attrFree',
-}
-
-const SOURCE_LABEL_KEYS: Record<string, string> = {
-  manual: 'models.metadata.sourceManual',
-  upstream: 'models.metadata.sourceUpstream',
-  catalog: 'models.metadata.sourceCatalog',
-  'family-rule': 'models.metadata.sourceFamilyRule',
-  probe: 'models.metadata.sourceProbe',
-  'cost-ledger': 'models.metadata.sourceCostLedger',
-  unclassified: 'models.metadata.sourceUnclassified',
-}
-
-const CONFIDENCE_LABEL_KEYS: Record<string, string> = {
-  declared: 'models.metadata.confidenceDeclared',
-  inferred: 'models.metadata.confidenceInferred',
-  measured: 'models.metadata.confidenceMeasured',
-}
-
-const SOURCE_TONE: Record<string, string> = {
-  manual: 'text-primary',
-  upstream: 'text-success',
-  catalog: 'text-info',
-  'family-rule': 'text-warning',
-  probe: 'text-info',
-  'cost-ledger': 'text-muted-foreground',
-}
-
-const CATALOG_CONFIDENCE_LABEL_KEYS: Record<CatalogMatchConfidence, string> = {
-  exact: 'models.metadata.catalogConfidenceExact',
-  alias: 'models.metadata.catalogConfidenceAlias',
-  family: 'models.metadata.catalogConfidenceFamily',
-  fuzzy: 'models.metadata.catalogConfidenceFuzzy',
-}
-
-const CATALOG_CONFIDENCE_TONE: Record<CatalogMatchConfidence, string> = {
-  exact: 'text-success',
-  alias: 'text-warning',
-  family: 'text-muted-foreground',
-  fuzzy: 'text-muted-foreground',
-}
-
-const CATALOG_FIELD_LABEL_KEYS: Record<CatalogAdoptionField, string> = {
-  contextTokens: 'models.metadata.attrContextTokens',
-  maxOutputTokens: 'models.metadata.attrMaxOutputTokens',
-  price: 'models.metadata.catalogFieldPrice',
-  modalities: 'models.metadata.attrModalities',
-  vision: 'models.metadata.attrVision',
-  tools: 'models.metadata.attrTools',
-  reasoning: 'models.metadata.attrReasoning',
-}
-
-/** 采用条目里每个字段的展示值；价格只以 USD / 1M tokens 说明，不换算。 */
-function formatCatalogValue(field: CatalogAdoptionField, value: unknown, t: (key: string) => string): string {
-  if (field === 'price') {
-    const price = value as CatalogPrice | undefined
-    if (!price) return '—'
-    const parts: string[] = []
-    if (price.inputPerMillion !== undefined) parts.push(`in $${price.inputPerMillion}`)
-    if (price.outputPerMillion !== undefined) parts.push(`out $${price.outputPerMillion}`)
-    return `${parts.join(' · ')} / 1M`
-  }
-  if (Array.isArray(value)) return value.length === 0 ? '—' : value.join(' + ')
-  if (value === 'yes') return t('models.metadata.catalogYes')
-  if (value === 'no') return t('models.metadata.catalogNo')
-  if (typeof value === 'number') return formatTokens(value)
-  return value === undefined ? '—' : String(value)
-}
-
-function entryValue(entry: CatalogEntry, field: CatalogAdoptionField): unknown {
-  return catalogFieldValue(entry, field)
-}
+import {
+  ATTRIBUTE_LABEL_KEYS,
+  FactCell,
+  formatDate,
+  formatTokens,
+  ModelAnnotationDialog,
+  SOURCE_LABEL_KEYS,
+} from './ModelAnnotationDialog'
 
 const STATUS_LABEL_KEYS: Record<string, string> = {
   measured: 'models.metadata.probeStatusMeasured',
@@ -164,45 +89,11 @@ const PROBE_FAILURE_LABEL_KEYS: Record<ProbeFailureKind, string> = {
   unknown: 'models.metadata.probeErrorUnknown',
 }
 
-function formatTokens(value: number): string {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value % 1_000_000 === 0 ? 0 : 1)}M`
-  if (value >= 1_000) return `${(value / 1_000).toFixed(value % 1_000 === 0 ? 0 : 1)}K`
-  return String(value)
-}
-
 function formatBound(atLeast?: number, below?: number): string {
   const parts: string[] = []
   if (atLeast !== undefined) parts.push(`≥${formatTokens(atLeast)}`)
   if (below !== undefined) parts.push(`<${formatTokens(below)}`)
   return parts.join(', ')
-}
-
-function FactCell({
-  fact,
-  t,
-}: {
-  fact: Fact<unknown>
-  t: (key: string) => string
-}) {
-  if (fact.state === 'unclassified') {
-    return <span className="text-xs text-muted-foreground">{t('models.metadata.unclassified')}</span>
-  }
-  const display = Array.isArray(fact.value)
-    ? fact.value.join(' + ')
-    : typeof fact.value === 'number'
-      ? formatTokens(fact.value)
-      : String(fact.value)
-  return (
-    <div className="flex flex-col gap-0.5">
-      <span className="text-sm">{display}</span>
-      <span className={`text-[11px] ${SOURCE_TONE[fact.source] ?? 'text-muted-foreground'}`}>
-        {t(SOURCE_LABEL_KEYS[fact.source] ?? 'models.metadata.sourceUnclassified')}
-        {fact.confidence !== 'declared'
-          ? ` · ${t(CONFIDENCE_LABEL_KEYS[fact.confidence] ?? '')}`
-          : ''}
-      </span>
-    </div>
-  )
 }
 
 function rowKey(providerId: string, displayName: string): string {
@@ -236,266 +127,11 @@ function planFor(row: ModelMetadataRow, scope: 'context' | 'output'): ProbePlan 
     : planOutputProbe({ hintTokens, hintSource })
 }
 
-function formatDate(iso: string): string {
-  return iso.slice(0, 10)
-}
-
 function formatDuration(ms: number): string {
   const totalSeconds = Math.max(0, Math.round(ms / 1000))
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60
   return minutes > 0 ? `${minutes}:${String(seconds).padStart(2, '0')}` : `${seconds}s`
-}
-
-/**
- * 标准库候选对话框：三档置信度只用于排序，永不自动采用。
- * 每个字段单独「采用」，「撤销」回到自动解析结果；刷新快照不在这个对话框里发生。
- */
-function CatalogDialog({
-  row,
-  onClose,
-  onChanged,
-}: {
-  row: ModelMetadataRow
-  onClose: () => void
-  onChanged: () => void
-}) {
-  const { t } = useTranslation()
-  const { toast } = useToast()
-  const [data, setData] = useState<CatalogCandidatesResult | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [busy, setBusy] = useState<string | null>(null)
-
-  const load = useCallback(async () => {
-    if (!window.electronAPI?.providers?.getCatalogCandidates) {
-      setLoading(false)
-      return
-    }
-    setLoading(true)
-    try {
-      const result = await window.electronAPI.providers.getCatalogCandidates(
-        row.providerId,
-        row.displayName,
-      )
-      setData(result)
-    } catch (cause) {
-      toast({
-        title: t('models.metadata.catalogFailed'),
-        description: cause instanceof Error ? cause.message : row.displayName,
-        variant: 'destructive',
-      })
-    } finally {
-      setLoading(false)
-    }
-  }, [row.displayName, row.providerId, t, toast])
-
-  useEffect(() => {
-    void load()
-  }, [load])
-
-  const adopt = useCallback(
-    async (entry: CatalogEntry, field: CatalogAdoptionField) => {
-      if (!window.electronAPI?.providers?.adoptCatalogField) return
-      setBusy(`${entry.catalogId}\u0000${field}`)
-      try {
-        const result = await window.electronAPI.providers.adoptCatalogField(
-          row.providerId,
-          row.displayName,
-          entry.catalogId,
-          field,
-        )
-        if (!result.success) {
-          toast({
-            title: t('models.metadata.catalogFailed'),
-            description: result.error ?? row.displayName,
-            variant: 'destructive',
-          })
-          return
-        }
-        setData((current) =>
-          current ? { ...current, adoptions: result.adoptions ?? current.adoptions } : current,
-        )
-        onChanged()
-        toast({
-          title: t('models.metadata.catalogAdopted'),
-          description: `${row.displayName} · ${t(CATALOG_FIELD_LABEL_KEYS[field])}`,
-        })
-      } finally {
-        setBusy(null)
-      }
-    },
-    [onChanged, row.displayName, row.providerId, t, toast],
-  )
-
-  const revoke = useCallback(
-    async (field?: CatalogAdoptionField) => {
-      if (!window.electronAPI?.providers?.revokeCatalogAdoption) return
-      setBusy(`revoke\u0000${field ?? 'all'}`)
-      try {
-        const result = await window.electronAPI.providers.revokeCatalogAdoption(
-          row.providerId,
-          row.displayName,
-          field,
-        )
-        if (!result.success) {
-          toast({
-            title: t('models.metadata.catalogFailed'),
-            description: result.error ?? row.displayName,
-            variant: 'destructive',
-          })
-          return
-        }
-        setData((current) =>
-          current ? { ...current, adoptions: result.adoptions ?? current.adoptions } : current,
-        )
-        onChanged()
-        toast({ title: t('models.metadata.catalogRevoked'), description: row.displayName })
-      } finally {
-        setBusy(null)
-      }
-    },
-    [onChanged, row.displayName, row.providerId, t, toast],
-  )
-
-  return (
-    <Dialog open onOpenChange={(open) => (!open ? onClose() : undefined)}>
-      <DialogContent className="max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>{t('models.metadata.catalogDialogTitle', { model: row.displayName })}</DialogTitle>
-          <DialogDescription>{t('models.metadata.catalogDialogDesc')}</DialogDescription>
-        </DialogHeader>
-
-        {loading ? (
-          <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            {t('models.metadata.catalogLoading')}
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {data && data.adoptions.length > 0 && (
-              <section className="space-y-2 rounded-md border p-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium">{t('models.metadata.catalogAdoptedTitle')}</span>
-                  {data.adoptions.length > 1 && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      disabled={busy !== null}
-                      onClick={() => void revoke()}
-                    >
-                      {t('models.metadata.catalogRevokeAll')}
-                    </Button>
-                  )}
-                </div>
-                {data.adoptions.map((adoption) => (
-                  <div
-                    key={`${adoption.field}\u0000${adoption.catalogId}`}
-                    className="flex items-center justify-between gap-3 text-sm"
-                  >
-                    <div className="flex flex-col">
-                      <span>
-                        {t(CATALOG_FIELD_LABEL_KEYS[adoption.field])}
-                        {' · '}
-                        {formatCatalogValue(adoption.field, adoption.value, t)}
-                      </span>
-                      <span className="text-[11px] text-muted-foreground">
-                        {CATALOG_SOURCE_META[adoption.source].label}
-                        {' · '}
-                        <code>{adoption.catalogId}</code>
-                      </span>
-                    </div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      disabled={busy !== null}
-                      onClick={() => void revoke(adoption.field)}
-                    >
-                      {t('models.metadata.catalogRevoke')}
-                    </Button>
-                  </div>
-                ))}
-              </section>
-            )}
-
-            {data && data.matches.length === 0 ? (
-              <div className="rounded-md border p-6 text-center text-sm text-muted-foreground">
-                {t('models.metadata.catalogNoMatches')}
-              </div>
-            ) : (
-              <section className="space-y-3">
-                {(data?.matches ?? []).map((match) => {
-                  const entry = match.entry
-                  return (
-                    <div key={entry.catalogId} className="rounded-md border p-3">
-                      <div className="flex flex-wrap items-center gap-2 text-sm">
-                        <Badge variant="outline" className={CATALOG_CONFIDENCE_TONE[match.confidence]}>
-                          {t(CATALOG_CONFIDENCE_LABEL_KEYS[match.confidence])}
-                        </Badge>
-                        <code className="rounded bg-muted px-2 py-0.5">{entry.id}</code>
-                        {entry.provider && (
-                          <span className="text-xs text-muted-foreground">{entry.provider}</span>
-                        )}
-                        <span className="ml-auto text-xs text-muted-foreground">
-                          {CATALOG_SOURCE_META[entry.source].label}
-                        </span>
-                      </div>
-                      <div className="mt-3 space-y-1.5">
-                        {CATALOG_ADOPTION_FIELDS.map((field) => {
-                          const value = entryValue(entry, field)
-                          const adopted = data?.adoptions.find((item) => item.field === field)
-                          const same = adopted?.catalogId === entry.catalogId
-                          return (
-                            <div key={field} className="flex items-center justify-between gap-3 text-sm">
-                              <div className="flex flex-col">
-                                <span className="text-xs text-muted-foreground">
-                                  {t(CATALOG_FIELD_LABEL_KEYS[field])}
-                                  {field === 'price' && ` · ${t('models.metadata.catalogPriceHint')}`}
-                                </span>
-                                <span>{formatCatalogValue(field, value, t)}</span>
-                                {adopted && !same && (
-                                  <span className="text-[11px] text-warning">
-                                    {t('models.metadata.catalogAdoptedOther', { id: adopted.catalogId })}
-                                  </span>
-                                )}
-                              </div>
-                              {same ? (
-                                <Badge variant="outline" className="shrink-0 text-success">
-                                  {t('models.metadata.catalogAdoptedBadge')}
-                                </Badge>
-                              ) : (
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  className="shrink-0"
-                                  disabled={value === undefined || busy !== null}
-                                  onClick={() => void adopt(entry, field)}
-                                >
-                                  {busy === `${entry.catalogId}\u0000${field}` ? (
-                                    <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                                  ) : null}
-                                  {t('models.metadata.catalogAdopt')}
-                                </Button>
-                              )}
-                            </div>
-                          )
-                        })}
-                      </div>
-                    </div>
-                  )
-                })}
-              </section>
-            )}
-          </div>
-        )}
-
-        <DialogFooter>
-          <Button variant="ghost" onClick={onClose} disabled={busy !== null}>
-            {t('models.metadata.probeCancel')}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
 }
 
 export function ModelMetadataPanel() {
@@ -963,6 +599,13 @@ export function ModelMetadataPanel() {
 
   if (!report) return null
 
+  // 主进程老版本不带这个字段时按全零渲染，不让整页因为一次版本错位打不开。
+  const gapKinds: Record<ModelGapKind, number> = report.totals.routingIncompleteByKind ?? {
+    adoptable: 0,
+    'missing-field': 0,
+    'no-candidate': 0,
+    'not-chat': 0,
+  }
   const coverageRows = METADATA_ATTRIBUTES.map((attribute) => ({
     attribute,
     ...report.coverage[attribute],
@@ -1048,6 +691,12 @@ export function ModelMetadataPanel() {
             <div className="rounded-lg border p-3">
               <div className="text-xs text-muted-foreground">{t('models.metadata.routingIncomplete')}</div>
               <div className="text-2xl font-semibold text-warning">{report.totals.routingIncomplete}</div>
+              <div className="mt-1 space-y-0.5 text-[11px] text-muted-foreground">
+                <div>{t('models.metadata.gapKindAdoptable', { count: gapKinds.adoptable })}</div>
+                <div>{t('models.metadata.gapKindMissingField', { count: gapKinds['missing-field'] })}</div>
+                <div>{t('models.metadata.gapKindNoCandidate', { count: gapKinds['no-candidate'] })}</div>
+                <div>{t('models.metadata.gapKindNotChat', { count: gapKinds['not-chat'] })}</div>
+              </div>
             </div>
           </div>
 
@@ -1272,6 +921,16 @@ export function ModelMetadataPanel() {
                               {t('models.metadata.referenceOnlyBadge')}
                             </Badge>
                           )}
+                          {row.gapKind === 'not-chat' && (
+                            <Badge variant="outline" className="text-muted-foreground">
+                              {t('models.metadata.gapKindNotChatBadge')}
+                            </Badge>
+                          )}
+                          {row.gapKind === 'no-candidate' && (
+                            <Badge variant="outline" className="text-muted-foreground">
+                              {t('models.metadata.gapKindNoCandidateBadge')}
+                            </Badge>
+                          )}
                           {row.missing
                             .filter((attribute) => attribute !== 'contextTokens' && attribute !== 'maxOutputTokens')
                             .slice(0, 4)
@@ -1299,7 +958,7 @@ export function ModelMetadataPanel() {
                             onClick={() => setCatalogDialog(row)}
                           >
                             <Database className="mr-2 h-4 w-4" />
-                            {t('models.metadata.catalogComplete')}
+                            {t('models.metadata.annotate')}
                           </Button>
                           <Button
                             variant="outline"
@@ -1333,7 +992,7 @@ export function ModelMetadataPanel() {
       </Card>
 
       <Dialog open={dialog !== null} onOpenChange={(open) => (!open ? closeDialog() : undefined)}>
-        <DialogContent className="max-w-xl">
+        <DialogContent className="max-w-xl max-h-[85vh] overflow-y-auto">
           {dialog?.mode === 'single' && (
             <>
               <DialogHeader>
@@ -1507,7 +1166,7 @@ export function ModelMetadataPanel() {
         open={batchDialogOpen && batchSnapshot !== null}
         onOpenChange={(open) => (!open ? setBatchDialogOpen(false) : undefined)}
       >
-        <DialogContent className="max-w-xl">
+        <DialogContent className="max-w-xl max-h-[85vh] overflow-y-auto">
           {batchSnapshot && (
             <>
               <DialogHeader>
@@ -1767,8 +1426,9 @@ export function ModelMetadataPanel() {
       </Dialog>
 
       {catalogDialog && (
-        <CatalogDialog
-          row={catalogDialog}
+        <ModelAnnotationDialog
+          providerId={catalogDialog.providerId}
+          displayName={catalogDialog.displayName}
           onClose={() => setCatalogDialog(null)}
           onChanged={() => void load()}
         />

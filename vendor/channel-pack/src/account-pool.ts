@@ -6,6 +6,7 @@ import type { ChannelPackStore, ChannelPackState, ModelDisableMap, PermanentLock
 import { createPermanentLockStore } from './permanent-lock-store.js'
 import type { PermanentLockStore } from './permanent-lock-store.js'
 import { AccountBalanceGate, isBalanceGateEnabled } from './account-balance-gate.js'
+import { moveActiveFirst } from './active-account.js'
 import type {
   ProviderAccountEntry,
   ProviderAccountStatus,
@@ -488,7 +489,11 @@ export class AccountPool {
       const current = entry.enabled !== false
       if (current === enabled) return entry
       changed++
-      return { ...entry, enabled }
+      // Same rule as the per-account toggle: enabling is an explicit retry, so a
+      // previous "stopped by upstream" record does not outlive it.
+      return enabled
+        ? { ...entry, enabled, serviceStopped: undefined }
+        : { ...entry, enabled }
     })
     // 无实际变更不落盘：避免一次「没有任何改动」的开关操作产生文档重写。
     if (changed === 0) return 0
@@ -647,13 +652,20 @@ export class AccountPool {
   /** 更新账号部分字段 */
   async updateAccount(
     id: string,
-    patch: Partial<Pick<ProviderAccountEntry, 'nickname' | 'enabled' | 'expiresAt' | 'refreshable'>>,
+    patch: Partial<Pick<ProviderAccountEntry, 'nickname' | 'enabled' | 'expiresAt' | 'refreshable' | 'serviceStopped'>>,
   ): Promise<void> {
     const accounts = this.readAccounts()
     const idx = accounts.findIndex(a => a.id === id)
     if (idx === -1) throw new Error(`Account ${id} not found`)
     const next = [...accounts]
-    next[idx] = { ...next[idx], ...patch }
+    const merged: ProviderAccountEntry = { ...next[idx], ...patch }
+    // Switching a row back on is the user's explicit "try again", so the stop
+    // record goes with it - otherwise the row keeps saying "stopped by upstream"
+    // while the account is actually serving again. If upstream has not lifted
+    // the stop, the next request re-parks it and the record comes back with a
+    // fresh timestamp; the request log keeps the original wording either way.
+    if (patch.enabled === true) delete merged.serviceStopped
+    next[idx] = merged
     await this.writeAccounts(next)
   }
 
@@ -731,6 +743,9 @@ export class AccountPool {
       if (source !== undefined) next[accountIndex] = source
     })
     await this.writeAccounts(next)
+    // The user just redefined the order, so the old pin is no longer their
+    // intent: let the new first account take over on the next request.
+    this.activeAccounts.delete(provider)
     this.ctx.logger?.info?.(`[channel-pack] 已重排 ${provider} 账号顺序: ${orderedIds.join(', ')}`)
   }
 
@@ -929,6 +944,16 @@ export class AccountPool {
    * loomy / buddy 已有 selector 分档，不注册（避免双份余额请求）。
    */
   private readonly balanceGates = new Map<string, AccountBalanceGate>()
+  /**
+   * The account currently serving each channel.
+   *
+   * Kept across requests so a hand-over does not leave the channel on two
+   * accounts: while this one is eligible it stays first in `getAvailableAccount`
+   * no matter where manual order puts it; the pin only moves when the account is
+   * excluded (it just failed), disabled, or rate-limited. In-memory on purpose -
+   * after a restart the user's order is the right starting point again.
+   */
+  private readonly activeAccounts = new Map<string, string>()
 
   setBalanceGate(provider: string, gate: AccountBalanceGate): void {
     this.balanceGates.set(provider, gate)
@@ -963,7 +988,9 @@ export class AccountPool {
     //
     // 逐个尝试解析凭据，跳过占位/损坏条目（并记录原因，避免静默失败）
     const failures: string[] = []
-    for (const entry of candidates) {
+    // Sticky serving account: see `activeAccounts` and `moveActiveFirst`.
+    const ordered = moveActiveFirst(candidates, this.activeAccounts.get(provider))
+    for (const entry of ordered) {
       let resolved
       try {
         resolved = await this.ctx.credentials.resolve(credentialRef(entry.credentialRef))
@@ -980,7 +1007,10 @@ export class AccountPool {
         // 余额门控：确认为 0 的账号跳过；查询失败/超时返回 undefined → fail-open。
         const gate = this.balanceGates.get(provider)
         if (gate !== undefined && isBalanceGateEnabled(process.env.DSH_ACCOUNT_BALANCE_GATE)) {
-          const usable = await gate.usable(entry.id, credential)
+          // Hot path: read the cached reading and refresh in the background. An
+          // inline probe here would put one extra upstream call in front of every
+          // account pick (see `usableFromCache`).
+          const usable = gate.usableFromCache(entry.id, credential)
           if (usable === false) {
             failures.push(`${entry.id}: 余额为 0（余额门控跳过）`)
             continue
@@ -990,6 +1020,10 @@ export class AccountPool {
           this.ctx.logger?.warn?.(
             `[channel-pack] ${failures.length} 个 ${provider} 账号不可用，已跳过：${failures.join('; ')}`,
           )
+        }
+        if (this.activeAccounts.get(provider) !== entry.id) {
+          this.activeAccounts.set(provider, entry.id)
+          this.ctx.logger?.info?.(`[channel-pack] ${provider} 当前服务账号 → ${entry.id}`)
         }
         return { entry, credential }
       } catch (error) {
@@ -1085,40 +1119,6 @@ export class AccountPool {
   }
 
   /**
-   * 记录 TRAE 签到设备轮换代次（命中 9074 后由积分领取流程调用）。
-   *
-   * 与 {@link updateModelRateLimit} 同款：在**最新快照**上做局部合并后整体
-   * 写回，避免与并发的账号操作互相覆盖。
-   *
-   * 只接受比现值**更大**的代次，防止乱序/重复回调把代次写回小值而让同一个
-   * 被限流的设备号复活。
-   */
-  async updateTraeCheckinDeviceGeneration(accountId: string, generation: number): Promise<void> {
-    if (!Number.isFinite(generation) || generation <= 0) return
-    const accounts = this.readAccounts()
-    const idx = accounts.findIndex(a => a.id === accountId)
-    if (idx === -1) {
-      this.ctx.logger?.warn?.(
-        `[channel-pack] updateTraeCheckinDeviceGeneration: 账号 ${accountId} 不在账号列表中`,
-      )
-      return
-    }
-    const current = accounts[idx]!.traeCheckinDeviceGeneration ?? 0
-    if (generation <= current) return
-    const next = [...accounts]
-    next[idx] = { ...next[idx]!, traeCheckinDeviceGeneration: generation }
-    await this.writeAccounts(next)
-    this.ctx.logger?.info?.(`[channel-pack] 账号 ${accountId} 签到设备代次 → ${generation}`)
-  }
-
-  /** 读取 TRAE 签到设备轮换代次（未设置时为 0）。 */
-  traeCheckinDeviceGenerationFor(accountId: string): number {
-    const entry = this.readAccounts().find(a => a.id === accountId)
-    const value = entry?.traeCheckinDeviceGeneration
-    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0
-  }
-
-  /**
    * 设置/清除某 opencode 账号的出口代理。
    *
    * ⚠️ **空串是合法输入**（用户显式清除代理 → 回到「与其它无代理账号共享
@@ -1153,37 +1153,6 @@ export class AccountPool {
   opencodeProxyFor(accountId: string): string {
     const entry = this.readAccounts().find(a => a.id === accountId)
     return entry?.opencodeProxy ?? ''
-  }
-
-  /**
-   * 记录 opencode 指纹轮换代次。
-   *
-   * ⚠️ 只接受**比现值更大**的代次：乱序/重复回调把代次写回小值会让用户
-   * 以为已轮换、实际指纹没换（TRAE 同款判据，见 `updateTraeCheckinDeviceGeneration`）。
-   */
-  async updateOpencodeFingerprintGeneration(accountId: string, generation: number): Promise<void> {
-    if (!Number.isFinite(generation) || generation <= 0) return
-    const accounts = this.readAccounts()
-    const idx = accounts.findIndex(a => a.id === accountId)
-    if (idx === -1) {
-      this.ctx.logger?.warn?.(
-        `[channel-pack] updateOpencodeFingerprintGeneration: 账号 ${accountId} 不在账号列表中`,
-      )
-      return
-    }
-    const current = accounts[idx]!.opencodeFingerprintGeneration ?? 0
-    if (generation <= current) return
-    const next = [...accounts]
-    next[idx] = { ...next[idx]!, opencodeFingerprintGeneration: generation }
-    await this.writeAccounts(next)
-    this.ctx.logger?.info?.(`[channel-pack] 账号 ${accountId} 指纹代次 → ${generation}`)
-  }
-
-  /** 读取 opencode 指纹代次（未设置时为 0）。 */
-  opencodeFingerprintGenerationFor(accountId: string): number {
-    const entry = this.readAccounts().find(a => a.id === accountId)
-    const value = entry?.opencodeFingerprintGeneration
-    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0
   }
 
   /**

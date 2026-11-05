@@ -45,13 +45,14 @@ export type BadgeRpcResult<T> = { ok: true; value: T } | { ok: false; error: Bad
 export const DSH_CHANNEL_PACK_BADGE_TTL_MS = 'DSH_CHANNEL_PACK_BADGE_TTL_MS'
 
 /**
- * 默认缓存时长：**120 秒**。
+ * 默认缓存时长：**10 分钟**（2026-11-05 由 120 秒上调）。
  *
- * 取值依据：客户端 60s 轮询一次 ⇒ 每两轮只有一轮真的打上游；一次读取最坏是
- * 「账号数 × 一次 HTTP」，120s 对配额与风控都可接受，而读数的新鲜度对
- * 「现在该不该用这个模型」这个决策仍然够用（手动刷新可随时绕过）。
+ * 取值依据：面板每开一次就是「账号数 × 一次 HTTP」的真实上游请求，而这批
+ * 渠道的账号正是上游按「非官方客户端」处置的对象 —— 余额读数只是展示，
+ * 不值得每两分钟替用户去敲一遍。手动刷新随时可以绕过；缓存过期时读到的是
+ * 上一次的真实读数，不会编造。
  */
-export const BADGE_TTL_MS = 120_000
+export const BADGE_TTL_MS = 600_000
 
 /**
  * **全部账号都失败**时的缓存时长：15 秒。

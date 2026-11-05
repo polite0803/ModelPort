@@ -35,6 +35,12 @@ import type {
 
 type Step = 'idle' | 'export' | 'password' | 'preview' | 'done'
 
+/** Host-side facts that must not be reported as a failed file read. */
+const HOST_ERROR_KEYS: Record<string, string> = {
+  'desktop-only': 'desktop-only-export',
+  'upload-unavailable': 'upload-unavailable',
+}
+
 const WARNING_KEYS: Record<BackupWarningCode, string> = {
   'no-credentials': 'settings.backup.warnNoCredentials',
   'credentials-unreadable': 'settings.backup.warnCredentialsUnreadable',
@@ -102,6 +108,39 @@ export function DataBackup() {
     resetState()
   }
 
+  /**
+   * A failure that is a fact about the host or the gateway gets its own sentence. Blaming
+   * the operator's file for a capability the machine does not have is how 导入备份 on WSL
+   * read as 「文件过大或没有权限」; everything that is genuinely a read/write failure keeps
+   * the original copy.
+   */
+  const backupErrorText = (cause: unknown, fallbackKey: string): string => {
+    const code = (cause as { code?: string } | null)?.code
+    const hostKey = code === undefined ? undefined : HOST_ERROR_KEYS[code]
+    return t(`settings.backup.error.${hostKey ?? fallbackKey}`)
+  }
+
+  /**
+   * Restart is the one action a headless gateway will not perform for the page: the process
+   * is supervised, and a clean exit under `Restart=on-failure` would leave the gateway down
+   * instead of bringing it back. `void`-ing the call made the button a silent no-op on WSL,
+   * so the failure is named here together with the command that actually works.
+   */
+  const handleRestart = async (): Promise<void> => {
+    try {
+      await window.electronAPI?.backup?.restart()
+    } catch (cause) {
+      const hostFact = (cause as { code?: string } | null)?.code === 'desktop-only'
+      toast({
+        title: t('common.error'),
+        description: t(
+          hostFact ? 'settings.backup.error.desktop-only-restart' : 'settings.backup.error.restart-failed',
+        ),
+        variant: 'destructive',
+      })
+    }
+  }
+
   const handleExport = async () => {
     if (!api) return
     if (encrypt && password !== passwordConfirm) {
@@ -140,8 +179,8 @@ export function DataBackup() {
         }),
       })
       resetState()
-    } catch {
-      toast({ title: t('common.error'), description: t('settings.backup.error.write-failed'), variant: 'destructive' })
+    } catch (cause) {
+      toast({ title: t('common.error'), description: backupErrorText(cause, 'write-failed'), variant: 'destructive' })
       setBusy(false)
     }
   }
@@ -175,8 +214,8 @@ export function DataBackup() {
       setMode('replace')
       setStep('preview')
       setBusy(false)
-    } catch {
-      toast({ title: t('common.error'), description: t('settings.backup.error.read-failed'), variant: 'destructive' })
+    } catch (cause) {
+      toast({ title: t('common.error'), description: backupErrorText(cause, 'read-failed'), variant: 'destructive' })
       setBusy(false)
     }
   }
@@ -539,7 +578,7 @@ export function DataBackup() {
             <Button variant="outline" onClick={resetState}>
               {t('settings.backup.later')}
             </Button>
-            <Button className="flex items-center gap-2" onClick={() => void window.electronAPI?.backup?.restart()}>
+            <Button className="flex items-center gap-2" onClick={() => void handleRestart()}>
               <RotateCw className="h-4 w-4" />
               {t('settings.backup.restartNow')}
             </Button>

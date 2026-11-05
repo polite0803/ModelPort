@@ -56,6 +56,7 @@ import {
 } from './cline-product.js'
 import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
 import { applyModelsDevCatalog, makeClineModelsDevLoader, type ClineModelsDevEntry } from './cline-models-dev.js'
+import { isAccountStoppedMessage, parkStoppedAccount } from './account-stop.js'
 import { parseClineRouting } from './cline-routing.js'
 import { recordClineRequest } from './cline-request-log.js'
 import {
@@ -613,6 +614,14 @@ export class ClineAdapter extends LlmAdapter {
     let response = await this.send(credential, body, options)
     if (!response.ok && (response.status === 401 || response.status === 403)) {
       const forbiddenText = await response.text().catch(() => '')
+      if (isAccountStoppedMessage(forbiddenText)) {
+        await parkStoppedAccount(this.options.accountPool, currentAccountId, forbiddenText)
+        throw new LlmError(
+          `cline: 上游已停止为该账号服务（${errorDetail(forbiddenText)}）`,
+          'AUTH',
+          { status: response.status },
+        )
+      }
       if (isClineRegionForbidden(response.status, forbiddenText)) {
         throw new LlmError(
           `cline: ${errorDetail(forbiddenText)}`,
@@ -636,6 +645,14 @@ export class ClineAdapter extends LlmAdapter {
     // 也值得换号 —— 两者都用状态码 429 / 402 + 文案判定。
     if (!response.ok) {
       let errorText = await response.text().catch(() => '')
+      if (isAccountStoppedMessage(errorText)) {
+        await parkStoppedAccount(this.options.accountPool, currentAccountId, errorText)
+        throw new LlmError(
+          `cline: 上游已停止为该账号服务（${errorDetail(errorText)}）`,
+          'AUTH',
+          { status: response.status },
+        )
+      }
       const shouldRotate = isClineRotatableFailure(response.status, errorText)
       if (this.options.accountPool !== undefined && shouldRotate) {
         const tried = new Set<string>()
@@ -685,6 +702,14 @@ export class ClineAdapter extends LlmAdapter {
             return
           }
           errorText = await response.text().catch(() => '')
+          if (isAccountStoppedMessage(errorText)) {
+            await parkStoppedAccount(this.options.accountPool, currentAccountId, errorText)
+            throw new LlmError(
+              `cline: 上游已停止为该账号服务（${errorDetail(errorText)}）`,
+              'AUTH',
+              { status: response.status },
+            )
+          }
           if (!isClineRotatableFailure(response.status, errorText)) break
         }
         // 循环退出前最后失败的那个账号（见 markLimited 的注释）。

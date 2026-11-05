@@ -169,13 +169,15 @@ interface FilteredTargets {
   /** 停用或未被任何路由引用、未进入计划的模型数。 */
   skippedDisabled: number
 }
-
 /**
  * 「被至少一条路由引用」沿用项目既有候选池口径：路由可路由（`resolvePoolRoute` 成功），
  * 且没有被 `pinModels` 之外 / `excludeModels` 排除。`includeModels` 只能从基底里取回，
  * 因此不额外放行。
  */
-function filterBatchTargets(rows: readonly ModelMetadataRow[]): FilteredTargets {
+function filterBatchTargets(
+  rows: readonly ModelMetadataRow[],
+  providerId?: string,
+): FilteredTargets {
   const configRoutes = storeManager.getConfig().routes
   const routes = enabledModelRoutes(configRoutes)
   const enabledByProvider = new Map<string, Set<string>>()
@@ -211,6 +213,9 @@ function filterBatchTargets(rows: readonly ModelMetadataRow[]): FilteredTargets 
   const targets: ModelMetadataRow[] = []
   let skippedDisabled = 0
   for (const row of rows) {
+    // 范围收口在两道闸门之前：`skippedDisabled` 说的是「本范围内被跳过的」，
+    // 混进别家的行数会让确认弹窗里的数字对不上用户点的那一家。
+    if (providerId !== undefined && row.providerId !== providerId) continue
     if (!enabledNames(row.providerId).has(row.displayName)) {
       skippedDisabled += 1
       continue
@@ -527,10 +532,13 @@ async function runJob(record: BatchJobRecord): Promise<void> {
  * 预演：只读本地快照与当前标注，不联网。
  * 只有用户打开「同时执行探测」时才调用。已有 adoption 在计划阶段就扣除，
  * 因此预演字段数与实际执行会跳过的字段一致。
+ *
+ * `providerId` 给定时范围收到这一家（渠道页 / 聚合条目页的批量入口），
+ * 报表也只算这一家。
  */
-export async function estimateCatalogBatch(): Promise<CatalogBatchEstimate> {
-  const report = await getModelMetadataReport()
-  const filtered = filterBatchTargets(report.queue)
+export async function estimateCatalogBatch(providerId?: string): Promise<CatalogBatchEstimate> {
+  const report = await getModelMetadataReport(Date.now(), providerId)
+  const filtered = filterBatchTargets(report.queue, providerId)
   // 预演与执行读同一道闸门（`applyProbeGate`），差别只是预演期间不会有人写终局。
   const snapshot = buildProbeGateSnapshot()
   const items = []
@@ -566,8 +574,8 @@ export async function startCatalogBatch(
     }
   }
 
-  const report = await getModelMetadataReport()
-  const filtered = filterBatchTargets(report.queue)
+  const report = await getModelMetadataReport(Date.now(), input.providerId)
+  const filtered = filterBatchTargets(report.queue, input.providerId)
   let targets = filtered.targets
   let skippedDisabled = filtered.skippedDisabled
   if (input.retryFailedOf) {
@@ -583,12 +591,18 @@ export async function startCatalogBatch(
   if (targets.length === 0) {
     return {
       success: false,
-      error: input.retryFailedOf ? '失败模型已不在待标注队列' : '没有待补齐的模型',
+      error: input.retryFailedOf
+        ? '失败模型已不在待标注队列'
+        : input.providerId
+          // 范围版要说清「为什么这一家没有活可干」，否则用户只看到一个失败、没有原因。
+          ? '该供应商没有待补齐的模型（已停用或未被任何启用路由引用的模型不进入计划）'
+          : '没有待补齐的模型',
     }
   }
 
   const now = new Date().toISOString()
-  const estimate = input.probe ? await estimateCatalogBatch() : undefined
+  // 估算必须带同一个范围：否则确认弹窗按本家算的请求数、执行按全库的预算扣。
+  const estimate = input.probe ? await estimateCatalogBatch(input.providerId) : undefined
   const snapshot: CatalogBatchSnapshot = {
     jobId: randomUUID(),
     status: 'running',
@@ -610,6 +624,7 @@ export async function startCatalogBatch(
     failedModels: [],
     skippedDisabled,
     probeEnabled: input.probe,
+    ...(input.providerId === undefined ? {} : { providerScope: input.providerId }),
     batchIndex: 0,
     batchTotal: Math.ceil(targets.length / CATALOG_BATCH_SIZE),
     requestsSent: 0,

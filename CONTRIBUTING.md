@@ -67,8 +67,8 @@ Two environment caveats, documented in `AGENTS.md`:
   the builder instead of hand-editing the output.
 - **Built-in provider config lives in code.** Runtime changes to builtin `apiEndpoint`, paths,
   model lists, mappings, headers and credential fields are overwritten on startup.
-- **Do not commit build output or local scratch.** `dist/`, `out/`, `output/`, `dist-nsis-try/`,
-  `*.tsbuildinfo`, logs and local caches are ignored; keep them out of commits.
+- **Do not commit build output or local scratch.** `dist/`, `dist-shell/`, `out/`, `output/`,
+  `dist-nsis-try/`, `*.tsbuildinfo`, logs and local caches are ignored; keep them out of commits.
 - **Keep pull requests focused.** Separate refactors from behavior changes, and avoid drive-by
   rewrites of files you do not need to touch.
 

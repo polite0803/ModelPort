@@ -3,7 +3,7 @@
  * Pure helpers: the Electron/safeStorage IO lives in store.ts, these do not touch it.
  */
 
-export type KeyPlan = 'unencrypted' | 'reuse' | 'migrate' | 'create'
+export type KeyPlan = 'unencrypted' | 'reuse' | 'migrate' | 'create' | 'sealed-unreadable'
 
 export interface KeyPlanInput {
   keystoreAvailable: boolean
@@ -13,12 +13,19 @@ export interface KeyPlanInput {
 
 /**
  * - `unencrypted`: no OS keystore, so there is no key to bind to the machine
+ * - `sealed-unreadable`: `store.key` proves the data file was written under a
+ *   machine-bound key, but this host has no keystore to open it with
  * - `reuse`: a key file already exists for this install
  * - `migrate`: a data file exists but predates the key file (fixed-key era)
  * - `create`: fresh install
  */
 export function planKeySetup(input: KeyPlanInput): KeyPlan {
-  if (!input.keystoreAvailable) return 'unencrypted'
+  if (!input.keystoreAvailable) {
+    // Reading a sealed file without its keystore yields a parse error, which the
+    // caller would otherwise classify as "corrupted data" and back up - leaving an
+    // empty store where someone's credentials were. Refuse instead.
+    return input.keyFileExists ? 'sealed-unreadable' : 'unencrypted'
+  }
   if (input.keyFileExists) return 'reuse'
   return input.dataFileExists ? 'migrate' : 'create'
 }

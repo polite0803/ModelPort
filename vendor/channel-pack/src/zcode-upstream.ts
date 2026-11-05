@@ -93,8 +93,10 @@ export function buildZcodeHeaders(
     'X-Client-Language': 'zh-CN',
     'X-Client-Timezone': 'Asia/Shanghai',
     'X-Device-Mid': credential.device_mid,
-    'X-Platform': 'win32',
-    'X-Os-Category': 'windows',
+    'X-Platform': process.platform,
+    'X-Os-Category': process.platform === 'win32'
+      ? 'windows'
+      : process.platform === 'darwin' ? 'macos' : 'linux',
     'anthropic-version': '2023-06-01',
   }
   if (options.json !== false) headers['Content-Type'] = 'application/json'

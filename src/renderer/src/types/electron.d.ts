@@ -56,7 +56,7 @@ import type {
   BackupPickResult,
   BackupUnlockResult,
 } from '../../../shared/backup'
-import type { ModelMetadataReport } from '../../../shared/modelMetadata'
+import type { ModelMetadata, ModelMetadataReport } from '../../../shared/modelMetadata'
 import type {
   ModelProbeRunResult,
   ProbeJobSnapshot,
@@ -244,6 +244,11 @@ interface ProvidersAPI {
   }>
   /** 元数据解析报表：覆盖率 + 待标注队列（按调用量排序）。 */
   getModelMetadata: () => Promise<ModelMetadataReport | { success: false; error: string }>
+  /** 单个模型的解析结果（逐模型标注入口用）。模型不在目录里时 `success: false`。 */
+  getModelMetadataOne: (
+    providerId: string,
+    displayName: string,
+  ) => Promise<{ success: true; metadata: ModelMetadata } | { success: false; error: string }>
   /** 手动探测一个模型（一次点击一条阶梯；打开页面不会自动触发）。 */
   probeModel: (
     providerId: string,
@@ -282,10 +287,13 @@ interface ProvidersAPI {
     displayName: string,
     field?: CatalogAdoptionField,
   ) => Promise<{ success: boolean; adoptions?: CatalogAdoption[]; error?: string }>
-  estimateCatalogBatch: () => Promise<CatalogBatchEstimate>
+  /** 预演合计：只读本地快照与当前标注，不联网。`providerId` 给定时只统计这一家。 */
+  estimateCatalogBatch: (providerId?: string) => Promise<CatalogBatchEstimate>
   startCatalogBatch: (input: {
     probe: boolean
     retryFailedOf?: string
+    /** 范围收口到该供应商（渠道 id / 聚合条目 id）；省略 = 全目录。 */
+    providerId?: string
   }) => Promise<CatalogBatchStartResult>
   pauseCatalogBatch: (jobId: string) => Promise<boolean>
   resumeCatalogBatch: (jobId: string) => Promise<boolean>

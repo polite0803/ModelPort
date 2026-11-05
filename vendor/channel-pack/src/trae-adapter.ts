@@ -41,6 +41,7 @@ import {
 } from './trae.js'
 import { TRAE, type TraeFallbackModel, type TraeProduct } from './trae-product.js'
 import { classifyTraeError, recordsTraeRateLimit, shouldRotateTraeAccount } from './trae-errors.js'
+import { isAccountStoppedMessage, parkStoppedAccount } from './account-stop.js'
 import { normalizeHarnessMessages } from './message-shape.js'
 import { createBlankReasoningSuppressor, createReasoningLoopDetector, hasUsableToolName, isProseTruncatedByStopString, isReasoningLoopGuardEnabled, isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, reasoningLoopFailure, resolveEmptyResponseReason, resolveToolPairing, splitThinkTaggedContent, stripBareThinkCloseTagIfEnabled, stripCourseLeakFromHistoryContent, stripCourseLeakIfEnabled } from './sse.js'
 import {
@@ -195,14 +196,6 @@ const TRAE_ROTATABLE_STREAM_ERROR = 'TRAE_ROTATABLE_STREAM_ERROR'
 function isRotatableStreamError(code: number): boolean {
   return code === 1005 || code === 4008 || code === 4011
 }
-
-/**
- * 机器指纹轮换间隔（每 N 次请求换一代，仅在显式启用时生效）。
- *
- * 对齐 `Trae2api-cn/src/trae_client.py:220` 的 `max_uses = 3 + rand(0,2)`：
- * 即每 3~5 次请求换一次。这里取固定 4 次，避免引入随机性导致测试不可复现。
- */
-const TRAE_MACHINE_ID_ROTATE_EVERY = 4
 
 /**
  * TRAE 适配器选项。
@@ -605,11 +598,6 @@ export class TraeAdapter extends LlmAdapter {
   private remoteMeta: ReadonlyMap<string, TraeRemoteModel> = new Map()
   /** 产品级兜底模型索引。 */
   private readonly fallbackIndex: ReadonlyMap<string, TraeFallbackModel>
-  /**
-   * 已发起的 chat 请求计数（仅在启用机器指纹轮换时使用，见
-   * {@link TraeAdapter.machineIdGeneration}）。
-   */
-  private sendCount = 0
 
   constructor(private readonly options: TraeAdapterOptions) {
     super()
@@ -1073,6 +1061,17 @@ export class TraeAdapter extends LlmAdapter {
       let lastStatus = response.status
       let lastKind = classifyTraeError(response.status, errorText)
 
+      // Account-level stop: park it and stop here. Rotation would hand the same
+      // body to the next accounts, and the pool would keep this one first.
+      if (isAccountStoppedMessage(errorText)) {
+        await parkStoppedAccount(this.options.accountPool, currentAccountId, errorText)
+        throw new LlmError(
+          `trae: 上游已停止为该账号服务（${errorText.slice(0, 200)}）；该账号已退出选号，重试与等待都不会恢复`,
+          'AUTH',
+          { status: response.status },
+        )
+      }
+
       if (this.options.accountPool && shouldRotateTraeAccount(lastKind)) {
         const tried = new Set<string>()
         if (currentAccountId) tried.add(currentAccountId)
@@ -1101,6 +1100,14 @@ export class TraeAdapter extends LlmAdapter {
           errorText = await response.text().catch(() => '')
           lastStatus = response.status
           lastKind = classifyTraeError(response.status, errorText)
+          if (isAccountStoppedMessage(errorText)) {
+            await parkStoppedAccount(this.options.accountPool, currentAccountId, errorText)
+            throw new LlmError(
+              `trae: 上游已停止为该账号服务（${errorText.slice(0, 200)}）`,
+              'AUTH',
+              { status: response.status },
+            )
+          }
           if (!shouldRotateTraeAccount(lastKind)) break
         }
         throw new LlmError(
@@ -1205,9 +1212,8 @@ export class TraeAdapter extends LlmAdapter {
     body: string,
     options: GenerateOptions,
   ): Promise<Response> {
-    this.sendCount += 1
     const headers = new Headers(
-      traeSOLOHeaders(credential, this.product, true, this.machineIdGeneration()),
+      traeSOLOHeaders(credential, this.product, true),
     )
     try {
       return await this.fetchImpl(`${this.product.agentHost}/api/agent/v3/llm_utils_chat`, {
@@ -1223,21 +1229,6 @@ export class TraeAdapter extends LlmAdapter {
       }
       throw error
     }
-  }
-
-  /**
-   * 当前应使用的机器指纹代次。
-   *
-   * **默认恒为 0（不轮换）** —— 只有显式设置
-   * `DSH_TRAE_ROTATE_MACHINE_ID=1` 时才按每 4 次请求递增一代。
-   *
-   * 默认关闭的原因见 {@link deriveRotatingMachineId}：轮换能降低端点风控，
-   * 但会让设备身份漂移，与「machine_id 登录后绝不变」的既定约束冲突。
-   * 该开关是出现集中 401/风控时的第一个可尝试手段。
-   */
-  private machineIdGeneration(): number {
-    if (process.env.DSH_TRAE_ROTATE_MACHINE_ID !== '1') return 0
-    return Math.floor(this.sendCount / TRAE_MACHINE_ID_ROTATE_EVERY)
   }
 
   /**

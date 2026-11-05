@@ -44,6 +44,7 @@ import {
 } from './buddy.js'
 import type { BuddyAccount, BuddyCredential, BuddyRemoteModel, BuddyToken } from './buddy.js'
 import { CODEBUDDY, type BuddyProduct } from './product.js'
+import { workbuddyClientVersion } from './client-identity.js'
 
 /** 在浏览器中打开登录 URL；永不抛出（失败时打印 URL 供手动打开）。 */
 export type OpenBrowser = (url: string) => void
@@ -539,8 +540,11 @@ export function decorateLoginUrl(authUrl: string, product: BuddyProduct): string
   if (!product.appendSessionParams) return authUrl
   try {
     const url = new URL(authUrl)
-    if (product.pluginVersion !== undefined && product.pluginVersion.length > 0) {
-      url.searchParams.set('version', product.pluginVersion)
+    const pluginVersion = product.id === 'workbuddy'
+      ? workbuddyClientVersion().version
+      : product.pluginVersion
+    if (pluginVersion !== undefined && pluginVersion.length > 0) {
+      url.searchParams.set('version', pluginVersion)
     }
     url.searchParams.set('loginSessionId', crypto.randomUUID())
     return url.toString()

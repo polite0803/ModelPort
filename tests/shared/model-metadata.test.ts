@@ -7,9 +7,11 @@ const {
   REFERENCE_METADATA_ATTRIBUTES,
   ROUTING_METADATA_ATTRIBUTES,
   buildUnclassifiedQueue,
+  classifyModelGap,
   computeMetadataCoverage,
   deriveModelType,
   isAttributeApplicable,
+  isNonChatModel,
   isRoutingComplete,
   mergeModelMetadata,
   metadataSourceRank,
@@ -356,4 +358,49 @@ test('家族规则：带 provider 前缀也能命中，未命中返回 undefined
   for (const rule of MODEL_FAMILY_RULES) {
     assert.ok(rule.evidence.length > 0, `${rule.id} 必须写明依据`)
   }
+})
+
+test('非对话模型是窄口径：图像/向量/重排/TTS 才算，音频对话与翻译仍算对话模型', () => {
+  for (const id of [
+    'qwen3.7-text-embedding-flash',
+    'qwen3.7-text-rerank',
+    'qwen-image-2.1-pro',
+    'black-forest-labs/FLUX.1-schnell',
+    'stable-diffusion-xl-base-v10',
+    'nvr-tts-it-it',
+  ]) {
+    assert.equal(isNonChatModel(id), true, `${id} 应判为非对话模型`)
+  }
+  // 宁可漏判也不误判：音频对话、实时语音、翻译、omni 都仍按对话模型计。
+  for (const id of [
+    'qwen-audio-3.1-realtime-flash',
+    'qwen3.8-omni-flash-realtime',
+    'qwen3.8-livetranslate-flash-realtime',
+    'qwen-mt-uni',
+    'glm-5.2',
+    'DeepSeek-V4.1-Flash',
+    'gpt-4o',
+  ]) {
+    assert.equal(isNonChatModel(id), false, `${id} 不应被判成非对话模型`)
+  }
+})
+
+test('缺口分桶优先级：不适用 > 能补 > 库里有但缺项 > 库里没有', () => {
+  assert.equal(
+    classifyModelGap({ modelId: 'qwen-image-2.1-pro', hasAutoMatch: true, canFillAny: true }),
+    'not-chat',
+    '不适用优先于一切：给图像模型算「关键属性」没有意义',
+  )
+  assert.equal(
+    classifyModelGap({ modelId: 'glm-5.2', hasAutoMatch: true, canFillAny: true }),
+    'adoptable',
+  )
+  assert.equal(
+    classifyModelGap({ modelId: 'glm-5.2', hasAutoMatch: true, canFillAny: false }),
+    'missing-field',
+  )
+  assert.equal(
+    classifyModelGap({ modelId: 'Qoder / Ultimate', hasAutoMatch: false, canFillAny: false }),
+    'no-candidate',
+  )
 })

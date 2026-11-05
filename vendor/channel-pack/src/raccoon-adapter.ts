@@ -37,6 +37,7 @@ import { settingsNamespaceFor } from './settings-compat.js'
 import { nextUtc8DayStartMs } from './model-queue.js'
 import { isRaccoonExpired, type RaccoonCredential } from './raccoon.js'
 import { isRaccoonRateLimitError, RACCOON_RATE_LIMIT_COOLDOWN_MS } from './raccoon-rate-limit.js'
+import { isAccountStoppedMessage, parkStoppedAccount } from './account-stop.js'
 import {
   RACCOON,
   RACCOON_DEFAULT_EFFORT,
@@ -501,6 +502,14 @@ export class RaccoonAdapter extends LlmAdapter {
         }
         if (!response.ok) {
           const errorText = await response.text().catch(() => '')
+          if (isAccountStoppedMessage(errorText)) {
+            await parkStoppedAccount(this.options.accountPool, accountId, errorText)
+            throw new LlmError(
+              `raccoon: 上游已停止为该账号服务（${errorDetail(errorText)}）`,
+              'AUTH',
+              { status: response.status },
+            )
+          }
           let quota = response.status === 402
           try { quota ||= isQuotaError(JSON.parse(errorText)) } catch {}
           if (quota) {

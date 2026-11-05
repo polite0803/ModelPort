@@ -955,7 +955,7 @@ test('风控类 400 在日志里记成 failover，而不是 fatal', () => {
   // 判据与换家分支必须同源：`kind` 说 fatal 而循环其实往下试了下一家，
   // 日志就会把「这一家被风控」和「客户端请求写错」写成同一件事。
   const failure = describeAttemptFailure({
-    candidate: 'WorkBuddy (腾讯) / Hy3',
+    candidate: 'WorkBuddy (国际版) / Hy3',
     error: 'workbuddy: 请求被拦截，请重新发送 request illegal',
     status: 400,
   })

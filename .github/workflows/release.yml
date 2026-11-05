@@ -104,9 +104,32 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
 
+      # 壳：同一次 Release 的第二个 Windows 产物。刻意**不用** `--publish=always`——
+      # electron-builder 的 Windows 更新描述文件名固定 `latest.yml`，两个产品都发就会互相
+      # 覆盖，主程序的自动更新会开始下载壳的二进制。所以这里只构建，再用 gh 传 exe 本体，
+      # 一个 yml 都不上传（壳也不带 electron-updater）。
+      - name: Build and upload the Windows shell (no updater metadata)
+        if: matrix.os == 'windows-latest' && matrix.arch == 'x64'
+        run: |
+          npx electron-builder -c electron-builder.shell.yml --win --x64
+          gh release upload "${{ github.ref_name }}" dist-shell/ModelPort-Shell-*-*-setup.exe --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
+
       - name: Build and Publish (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: npx electron-builder --linux --${{ matrix.arch }} --publish=always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
+
+      # 无头守护进程：给 WSL / 容器 / 没有显示环境的 Linux 主机。产物是 tar.gz
+      # （bundle + resources + renderer + systemd unit 模板），不带 Electron 运行时。
+      - name: Package and upload the headless daemon
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          npm run build:daemon
+          gh release upload "${{ github.ref_name }}" dist/modelport-daemon-*-${{ matrix.arch }}.tar.gz --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

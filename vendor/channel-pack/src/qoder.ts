@@ -9,6 +9,7 @@
 
 import { createHash, randomUUID, randomBytes } from 'node:crypto'
 import type { QoderProduct } from './qoder-product.js'
+import { qoderClientVersion } from './client-identity.js'
 
 /** 单次 HTTP 请求超时（毫秒）。 */
 export const QODER_REQUEST_TIMEOUT_MS = 30_000
@@ -311,7 +312,7 @@ export function qoderChatHeaders(
     'Content-Type': 'application/json',
     'X-Request-ID': requestId,
     'X-Session-ID': sessionId,
-    'User-Agent': `${product.userAgentPrefix}/1.0.0`,
+    'User-Agent': `${product.userAgentPrefix}/${qoderClientVersion(product.id === 'qodercn' ? 'qodercn' : 'qoder').version}`,
   }
 }
 

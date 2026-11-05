@@ -14,6 +14,7 @@ import { detectHiddenLaunch, reconcileAutoStart } from './autostartHost'
 import { recordProcessCrash, setCrashLogWriter } from './logging/crashReporter'
 import { configureModelListRefresh } from './scheduler/modelListRefresh'
 import { scheduler } from './scheduler/Scheduler'
+import { bindElectronHost } from './runtime/electronHost'
 
 // Keep the Electron profile directory stable across product renames.
 // safeStorage seals store.key and every stored credential against this profile
@@ -21,6 +22,11 @@ import { scheduler } from './scheduler/Scheduler'
 // entry tied to it), so deriving it from package.json's `name` would make an
 // existing install unreadable the moment the package is renamed.
 app.setPath('userData', join(app.getPath('appData'), 'modelport'))
+
+// One seam between the gateway and the process it runs in. The headless daemon
+// (src/main/daemon/entry.ts) binds a Node host instead; after this call nothing
+// under proxy/, providers/ or store/ needs to know which host it got.
+bindElectronHost()
 
 // 数据目录迁移（Chat2API → ModelPort）：两处持久化位置都整体搬进新名字，
 // 跑在任何 store/opencode/压缩缓存初始化之前，保证后续读到的都是新路径。
@@ -151,6 +157,11 @@ async function setupApp(): Promise<void> {
   })
 
   await registerIpcHandlers(mainWindow)
+
+  // The updater is the remaining desktop-only registration: it reports into a window.
+  // Backup channels moved into `registerIpcHandlers` so a headless host gets them too -
+  // the dialog-backed ones answer `desktop-only` there instead of vanishing.
+  UpdaterManager.getInstance().initialize(mainWindow)
 
   // 探测读数的内存快照必须在任何选号发生之前灌好：sidecar 是异步 JSON，而
   // `autoRouter::select` 同步执行，热路径里读不了盘。存储不可用时保持空表 ——

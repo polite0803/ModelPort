@@ -86,19 +86,39 @@ test('exact/alias 自动采用字段，family 不采用；价格永不在自动�
   assert.deepEqual(family.probeScopes, ['context', 'output'])
 })
 
-test('reasoning 可逐字段手工采用，但不进批量：第三方单点判断不该替用户筛掉候选', () => {
-  const match: CatalogMatch = {
+test('reasoning 两个方向都进批量；no 只在完全没证据时写', () => {
+  const yes: CatalogMatch = {
     confidence: 'exact',
-    entry: entry({ id: 'o4-mini', reasoning: 'no', tools: 'yes', contextTokens: 200000 }),
+    entry: entry({ id: 'o4-mini', reasoning: 'yes', tools: 'yes', contextTokens: 200000 }),
   }
-  const plan = planCatalogBatchItem(row(), [match])
-  assert.deepEqual(plan.adoptFields, ['contextTokens', 'tools'])
-  assert.ok(
-    !plan.adoptFields.includes('reasoning' as never),
-    'reasoning 是 hardFilterFailure 的判据，误报的代价是模型从请求里消失，不是一次次优路由',
+  const yesPlan = planCatalogBatchItem(row(), [yes])
+  assert.ok(yesPlan.adoptFields.includes('reasoning'), 'yes 方向进批量，推理模型不再永远缺一格')
+  assert.ok(CATALOG_BATCH_AUTO_FIELDS.includes('reasoning'))
+
+  // 完全不知道时，no 就是证据（实测 980 行里 183 行属于这一类，且没有任何相反证据）。
+  const no: CatalogMatch = {
+    confidence: 'exact',
+    entry: entry({ id: 'o4-mini', reasoning: 'no', tools: 'yes' }),
+  }
+  assert.ok(planCatalogBatchItem(row(), [no]).adoptFields.includes('reasoning'))
+
+  // 排除性证据不得压过正面证据：家族规则/旁表已说 yes 时，no 不覆盖。
+  const fromFamily = planCatalogBatchItem(
+    row({ reasoning: known('yes', 'inferred', 'family-rule') }),
+    [no],
   )
-  assert.ok(!CATALOG_BATCH_AUTO_FIELDS.includes('reasoning' as never))
-  // 但它仍是合法的手工采用字段：候选对话框里由用户逐字段点「采用」，随时可撤销。
+  assert.ok(!fromFamily.adoptFields.includes('reasoning'), 'no 只写进空着的格子')
+
+  // 反方向可以补强：inferred 的 no 允许被台账的 yes 覆盖。
+  const upgraded = planCatalogBatchItem(
+    row({ reasoning: known('no', 'inferred', 'family-rule') }),
+    [yes],
+  )
+  assert.ok(upgraded.adoptFields.includes('reasoning'))
+
+  // 已声明级两个方向都不动。
+  assert.ok(!planCatalogBatchItem(row({ reasoning: known('no', 'declared') }), [yes]).adoptFields.includes('reasoning'))
+  assert.ok(!planCatalogBatchItem(row({ reasoning: known('yes', 'declared') }), [no]).adoptFields.includes('reasoning'))
   assert.ok(CATALOG_ADOPTION_FIELDS.includes('reasoning'))
 })
 

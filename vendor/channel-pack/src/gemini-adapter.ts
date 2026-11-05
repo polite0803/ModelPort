@@ -71,6 +71,7 @@ import {
 } from './gemini-models.js'
 import { consumeGeminiSse, translateGeminiRequest } from './gemini-messages.js'
 import { persistGeminiProject, resolveGeminiProject } from './gemini-project.js'
+import { isAccountStoppedMessage, parkStoppedAccount } from './account-stop.js'
 import {
   GEMINI_ACCESS_GATE_ERROR_CODE,
   classifyGeminiAccessGate,
@@ -779,6 +780,14 @@ export class GeminiAdapter extends LlmAdapter {
         const text = await response.text().catch(() => '')
         lastFailure = { status: response.status, text }
         const status = response.status
+        if (isAccountStoppedMessage(text)) {
+          await parkStoppedAccount(this.options.accountPool, currentAccountId, text)
+          throw new LlmError(
+            `gemini: 上游已停止为该账号服务（${text.slice(0, 200)}）`,
+            'AUTH',
+            { status },
+          )
+        }
 
         // 0. **确定性闸门**（出口地区不受支持 / 个人版这条线已停服 / 账号无许可）
         // → 立刻失败，不换端点也不换号。

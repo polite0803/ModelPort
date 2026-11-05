@@ -35,6 +35,8 @@ import {
   type TraeUserInfoResult,
 } from './trae.js'
 import type { TraeProduct } from './trae-product.js'
+import { version as osVersion } from 'node:os'
+import { traeClientIdentity } from './client-identity.js'
 
 /** 回调端口：TRAE 默认 18080（被占用时自动回退随机端口，见 `listenWithFallback`）。 */
 const TRAE_CALLBACK_PORT = 18080
@@ -119,8 +121,8 @@ export function buildTraeLoginURL(
     x_machine_id: machineId,
     x_device_brand: 'PC',
     x_device_type: 'PC',
-    x_os_version: '1.0',
-    x_app_version: product.ideVersion,
+    x_os_version: osVersion() || '1.0',
+    x_app_version: traeClientIdentity().appVersion,
     x_app_type: 'stable',
   })
   return `${product.consoleHost}/authorization?${params.toString()}`
@@ -419,7 +421,7 @@ export async function exchangeTraeCallback(
     const userInfoResp = await fetcher(`${product.oauthHost}${TRAE_USER_INFO_PATH}`, {
       method: 'POST',
       headers: uHeaders,
-      body: JSON.stringify({ ReqSource: 'IDE', IDEVersion: product.ideVersion }),
+      body: JSON.stringify({ ReqSource: 'IDE', IDEVersion: traeClientIdentity().appVersion }),
       signal: AbortSignal.timeout(TRAE_REQUEST_TIMEOUT_MS),
     })
     if (userInfoResp.ok) {

@@ -37,6 +37,7 @@ import {
 } from './buddy.js'
 import type { BuddyCredential, BuddyRemoteModel } from './buddy.js'
 import { CODEBUDDY, resolveUserAgent, type BuddyFallbackModel, type BuddyProduct } from './product.js'
+import { codebuddyClientVersion, workbuddyClientVersion } from './client-identity.js'
 import { normalizeHarnessMessages } from './message-shape.js'
 import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
 import { createBlankReasoningSuppressor, createReasoningLoopDetector, hasUsableToolName, isProseTruncatedByStopString, isReasoningLoopGuardEnabled, isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, reasoningLoopFailure, resolveEmptyResponseReason, resolveToolPairing, splitThinkTaggedContent, stripBareThinkCloseTagIfEnabled, stripCourseLeakFromHistoryContent, stripCourseLeakIfEnabled } from './sse.js'
@@ -44,6 +45,7 @@ import {
   registerAdapterIdempotent,
 } from './llm-register-compat.js'
 import { reportLedgerAccount } from './token-ledger.js'
+import { isAccountStoppedMessage, parkStoppedAccount } from './account-stop.js'
 
 /**
  * CodeBuddy（中国版）的 chat completions 基址。
@@ -712,6 +714,15 @@ function resolveChunkTimeoutMs(): number {
  * 换号只会白烧掉「还有额度」的账号，正是本次要修的缺陷。
  */
 const BUDDY_SATURATION_MAX_RETRIES = 2
+/**
+ * Upper bound on accounts tried inside one request.
+ *
+ * The quota loop used to be `for (;;)` until the pool ran dry: with ten
+ * accounts that is ten submissions of the same conversation body, which is the
+ * exact pattern upstreams read as pooling. Three matches every other channel's
+ * rotation budget.
+ */
+const BUDDY_MAX_ROTATE = 3
 
 /**
  * 饱和重试的基准间隔（毫秒），按次数**线性**递增（2s → 4s）。
@@ -922,8 +933,8 @@ export class BuddyAdapter extends LlmAdapter {
    * 直接回退到本适配器所属产品的 id，避免
    * `undefined.toUpperCase is not a function` 在客户端炸开。
    *
-   * 展示名同样来自产品配置：CodeBuddy 为 'CodeBuddy (腾讯)'，
-   * WorkBuddy 为 'WorkBuddy'。
+   * 展示名同样来自产品配置：国内版为 'WorkBuddy (国内版)'，
+   * 国际版为 'WorkBuddy (国际版)'。
    */
   providerInfo(provider: string): LlmProviderInfo {
     const id = typeof provider === 'string' && provider.length > 0 ? provider : this.product.id
@@ -1507,6 +1518,14 @@ export class BuddyAdapter extends LlmAdapter {
           // 必须**先于**「仅 401/403 才继续」的判据检查，否则会被当成普通 403
           // 之外的错误而 break，退回到「只试一个账号」的老问题。
           const rotatedBody = await response.clone().text().catch(() => '')
+          if (isAccountStoppedMessage(rotatedBody)) {
+            await parkStoppedAccount(this.options.accountPool, currentAccountId, rotatedBody)
+            throw new LlmError(
+              `${this.product.id}: 上游已停止为该账号服务（${errorDetail(rotatedBody)}）`,
+              'AUTH',
+              { status: response.status },
+            )
+          }
           if (isContentRejection(rotatedBody)) {
             sawContentRejection = true
             rejectionStatus = response.status
@@ -1583,7 +1602,14 @@ export class BuddyAdapter extends LlmAdapter {
     }
     if (!response.ok) {
       let errorText = await response.text().catch(() => '')
-      // ⚠️⚠️ **模型饱和必须**先于**限流分支判定**（真实缺陷，2026-10-05）
+      if (isAccountStoppedMessage(errorText)) {
+        await parkStoppedAccount(this.options.accountPool, currentAccountId, errorText)
+        throw new LlmError(
+          `${this.product.id}: 上游已停止为该账号服务（${errorDetail(errorText)}）；该账号已退出选号`,
+          'AUTH',
+          { status: response.status },
+        )
+      }      // ⚠️⚠️ **模型饱和必须**先于**限流分支判定**（真实缺陷，2026-10-05）
       //
       // `14003 model busy` **也是 HTTP 429**，而 `isRateLimited` 对 429
       // **无条件返回 true** —— 若先走下面的限流分支，就会给每个账号写一条
@@ -1673,7 +1699,7 @@ export class BuddyAdapter extends LlmAdapter {
          */
         const rateLimitMarked = new Set<string>()
 
-        for (;;) {
+        for (let round = 0; round < BUDDY_MAX_ROTATE; round++) {
           // 先给**当前**账号记限流标记（UI 据「限额重置」徽章展示；它也是
           // 「重测 / 重置」两条人工解禁路径的唯一依据）。
           //
@@ -1715,6 +1741,14 @@ export class BuddyAdapter extends LlmAdapter {
             return
           }
           errorText = await response.text().catch(() => '')
+          if (isAccountStoppedMessage(errorText)) {
+            await parkStoppedAccount(this.options.accountPool, currentAccountId, errorText)
+            throw new LlmError(
+              `${this.product.id}: 上游已停止为该账号服务（${errorDetail(errorText)}）`,
+              'AUTH',
+              { status: response.status },
+            )
+          }
           // ① 安全策略拦截（11140）：按账号生效，继续换号（与认证路径同语义）。
           //    判据必须**先于**下面的「非限流即抛」，否则会退回「只试一个账号」。
           if (isContentRejection(errorText)) {
@@ -1792,7 +1826,15 @@ export class BuddyAdapter extends LlmAdapter {
     headers.set('X-Agent-Purpose', 'conversation')
     headers.set('X-IDE-Name', this.product.attributionName)
     headers.set('X-IDE-Type', this.product.attributionName)
-    headers.set('X-IDE-Version', this.product.clientVersion)
+    // WorkBuddy / CodeBuddy 的客户端版本随官方安装升级。
+    headers.set(
+      'X-IDE-Version',
+      this.product.id === 'workbuddy'
+        ? workbuddyClientVersion().version
+        : this.product.id === 'buddy'
+          ? codebuddyClientVersion().version
+          : this.product.clientVersion,
+    )
     headers.set(HTTP_HEADER_PRODUCT, this.product.attributionName)
     // User-Agent 按模型族分档：不同模型线归属不同客户端形态，后台据此分列。
     // 必须用 set 覆盖（attributionHeaders() 注入的框架 UA 键为小写，

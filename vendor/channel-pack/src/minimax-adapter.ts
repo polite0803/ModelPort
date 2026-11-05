@@ -47,6 +47,7 @@ import type { AccountPool } from './account-pool.js'
 import { httpErrorCode, collectImages, requiredArgsToolsOption } from './openai-compat.js'
 import { MINIMAX, MINIMAX_INFER_PATH, type MinimaxProduct } from './minimax-product.js'
 import { minimaxInferHeaders } from './minimax.js'
+import { isAccountStoppedMessage, parkStoppedAccount } from './account-stop.js'
 import {
   registerAdapterIdempotent,
 } from './llm-register-compat.js'
@@ -441,6 +442,17 @@ export class MinimaxAdapter extends LlmAdapter {
     }
     if (!response.ok) {
       const text = await response.text().catch(() => '')
+      if (isAccountStoppedMessage(text)) {
+        const stoppedId = await this.options.accountPool?.findAccountIdByCredential(
+          this.product.id, credential.access_token,
+        )
+        await parkStoppedAccount(this.options.accountPool, stoppedId, text)
+        throw new LlmError(
+          `minimax: 上游已停止为该账号服务（${text.slice(0, 200)}）`,
+          'AUTH',
+          { status: response.status },
+        )
+      }
       // ⚠️ 402 是**余额不足**，必须原样透出 —— 它是最常见的真实失败，
       // 归成 SERVER/AUTH 会让用户看不到「去充值」这个唯一有效动作。
       const code = response.status === 402 ? 'QUOTA_EXCEEDED' : httpErrorCode(response.status)

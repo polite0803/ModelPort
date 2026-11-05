@@ -71,6 +71,8 @@
 | [`plan/PLAN-newapi-parity.md`](plan/PLAN-newapi-parity.md) | 与 new-api 的入向协议、错误语义差异对照及修正计划 | v1.5.2 | 历史记录 | 2026-11-02 |
 | [`plan/PLAN-workbuddy-adaptation.md`](plan/PLAN-workbuddy-adaptation.md) | WorkBuddy/CodeBuddy 渠道（v2.5.1 快照）的适配清单与落地记录 | v1.6.1 | 历史记录 | 2026-11-03 |
 | [`plan/PLAN-next-dev-code-tasks.md`](plan/PLAN-next-dev-code-tasks.md) | 三条活跃线的剩余项拆解、落点与验收判据 | v1.6.1 | 历史记录 | 2026-11-03 |
+| [`plan/PLAN-channel-identity-alignment.md`](plan/PLAN-channel-identity-alignment.md) | 13 个账号渠道的客户端身份头与实际发包对齐、版本号自动更新机制 | v1.6.2 | 实施中 | 2026-11-05 |
+| [`plan/PLAN-wsl-headless-daemon-and-shell.md`](plan/PLAN-wsl-headless-daemon-and-shell.md) | WSL 无头守护进程、管理面走网络与 Windows 原生壳的四阶段改造 | v1.8.0 | 实施中 | 2026-11-05 |
 | [`plan/2026-05-26-in-app-update.md`](plan/2026-05-26-in-app-update.md) | 应用内更新的任务拆解与测试计划 | v1.3.0 | 历史记录 | 2026-05-26 |
 | [`plan/2026-05-27-modelport-tool-testing-skills.md`](plan/2026-05-27-modelport-tool-testing-skills.md) | 工具调用测试技能集的目录、脚本与验收计划 | v1.3.0 | 历史记录 | 2026-05-27 |
 
@@ -96,6 +98,7 @@
 | [`features/https-certificate-trust.md`](features/https-certificate-trust.md) | HTTPS 与证书信任：8443 TLS 监听、托管自签与自带 PEM 两种来源、SAN 覆盖、系统信任库与 Node 客户端的 `NODE_EXTRA_CA_CERTS` 通路 | v1.7.3 | 现行 | 2026-11-04 |
 | [`features/logging-diagnostics.md`](features/logging-diagnostics.md) | 日志与诊断：请求行的尝试/`streamTrace` 读数、错误保留下限、脱敏与截断、`X-ModelPort-Trace` 与诊断包导出 | v1.7.3 | 现行 | 2026-11-04 |
 | [`features/providers-accounts.md`](features/providers-accounts.md) | 渠道与账号：聚合目录（89 条 / 570 模型）、账号渠道、自定义供应商三类的记录来源、凭据与清单归属 | v1.7.3 | 现行 | 2026-11-04 |
+| [`features/wsl-daemon.md`](features/wsl-daemon.md) | 无头守护进程与远程管理：三种运行形态、WSL 安装与 systemd 常驻、`--init-host` / `--import-backup`、管理面 RPC/SSE/`/ui` 的鉴权口径与不变量 | v1.8.0 | 现行 | 2026-11-06 |
 
 ## 参考与旁支目录
 

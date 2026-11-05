@@ -63,6 +63,9 @@ import {
   type QueueInfo,
 } from './model-queue.js'
 import { looksLikePlanGate, planGateMessage } from './qoder-plan-gate.js'
+import { isAccountStoppedMessage, parkStoppedAccount } from './account-stop.js'
+/** Accounts tried per request. `switchAccountOnQuota` used to walk the whole pool. */
+const QODER_MAX_ROTATE = 3
 import {
   deriveQoderSessionId,
   firstUserTextOf,
@@ -1110,6 +1113,14 @@ export class QoderAdapter extends LlmAdapter {
         // ⚠️ 必须**先读体再判断**，且 body 只能读一次 —— 排队信息就藏在
         // `message` 那个 JSON 字符串里（见 `parseQoderQueueError`）。
         const errorText = await response.text().catch(() => '')
+        if (isAccountStoppedMessage(errorText)) {
+          await parkStoppedAccount(this.options.accountPool, activeAccountId, errorText)
+          throw new LlmError(
+            `qoder: 上游已停止为该账号服务（${errorText.slice(0, 200)}）`,
+            'AUTH',
+            { status: response.status },
+          )
+        }
         const queueInfo = parseQoderQueueError(errorText)
 
         if (queueInfo !== undefined) {
@@ -1209,6 +1220,11 @@ export class QoderAdapter extends LlmAdapter {
         try {
           step = await iterator.next()
         } catch (error) {
+          const stopText = error instanceof Error ? error.message : String(error)
+          if (isAccountStoppedMessage(stopText)) {
+            await parkStoppedAccount(this.options.accountPool, activeAccountId, stopText)
+            throw error
+          }
           if (error instanceof ModelQueuedError) {
             // 已向下游发出片段后不能重放排队请求，避免重复正文或工具调用。
             if (emittedAnyChunk) throw error
@@ -1279,6 +1295,8 @@ export class QoderAdapter extends LlmAdapter {
   ): Promise<{ credential: QoderCredential; accountId: string } | undefined> {
     const pool = this.options.accountPool
     if (pool === undefined) return undefined
+    // Same ceiling as every other channel: the pool size is not a retry budget.
+    if (tried.size >= QODER_MAX_ROTATE) return undefined
 
     // ① 记录「本账号 + 本模型」受限到 UTC+8 当日 24:00。
     //

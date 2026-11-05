@@ -7,10 +7,12 @@ const {
   EMPTY_CATALOG_STORE,
   adoptionsForModel,
   buildCatalogIndex,
+  adoptableFieldCount,
   catalogAdoptionHint,
   catalogEndpointPlan,
   catalogFieldValue,
   catalogSnapshotStatuses,
+  checkCatalogCoverage,
   sanitizeCatalogMirrorUrl,
   matchCatalogEntries,
   normalizeCatalogAlias,
@@ -22,6 +24,7 @@ const {
   sanitizeCatalogSnapshot,
   sanitizeCatalogStore,
   upsertCatalogAdoption,
+  upstreamModelName,
   fuzzyMatchEntries,
 } = await import('../../src/shared/modelCatalog.ts')
 const { parseLiteLLM, parseModelsDev, parseOpenRouter } = await import(
@@ -421,4 +424,123 @@ test('模糊匹配：基于 bigram 相似度的模型名称匹配', () => {
   const closeMatch = fuzzyMatchEntries(index, { modelId: 'gpt-4o-2024' })
   // May or may not match depending on similarity threshold
   assert.ok(Array.isArray(closeMatch), 'fuzzyMatchEntries 返回应为数组')
-})})
+})
+})
+
+// 复现 2026-11-04 远程网关实测：`lobsterai/deepseek-v4-flash` 在内置 LiteLLM 台账里有
+// 24 条同名别名条目，全部没有 `reasoning`；弹窗只取 5 条候选，旧排序在同一置信度内按
+// `catalogId` 字典序排，`litellm:` 永远压住 `models.dev:`，唯一带推理的那条连名额都拿不到。
+test('同置信度内信息量高的候选不得被字典序挤出名额', () => {
+  const crowded = Array.from({ length: 6 }, (_, i) => entry({
+    id: `vendor-${i}/deepseek-v4-flash`,
+    catalogId: `litellm:vendor-${i}:deepseek-v4-flash`,
+    source: 'litellm',
+    contextTokens: 131072,
+    maxOutputTokens: 8192,
+    vision: 'no',
+    tools: 'yes',
+  }))
+  const withReasoning = entry({
+    id: 'router/deepseek-v4-flash',
+    catalogId: 'openrouter:deepseek:deepseek-v4-flash',
+    source: 'openrouter',
+    contextTokens: 1000000,
+    maxOutputTokens: 65536,
+    modalities: ['text'],
+    vision: 'no',
+    tools: 'yes',
+    reasoning: 'yes',
+  })
+  const index = buildCatalogIndex([...crowded, withReasoning])
+
+  assert.equal(adoptableFieldCount(withReasoning), 6, '六项路由能力齐全')
+  assert.equal(adoptableFieldCount(crowded[0]), 4, 'LiteLLM 形状缺推理与输入模态')
+
+  const shown = matchCatalogEntries(index, {
+    modelId: 'lobsterai/deepseek-v4-flash',
+    displayName: 'LobsterAI (有道) / deepseek-v4-flash',
+  })
+  assert.equal(shown.length, 5, '默认仍只给 5 个候选名额')
+  assert.ok(
+    shown.some((match) => match.entry.catalogId === withReasoning.catalogId),
+    '带 reasoning 的候选必须进名额，否则弹窗里「推理」永远是无值 + 灰按钮',
+  )
+  // 夹具故意用 OpenRouter（在来源清单里排最后）：只有「信息量优先」这一条能把它顶到
+  // 第一位；撤掉那条就退回来源顺序与字典序，5 个名额重新被 LiteLLM 占满。
+  assert.equal(shown[0].entry.catalogId, withReasoning.catalogId, '同置信度内先给信息量高的')
+  assert.ok(shown.every((match) => match.confidence === 'alias'), '信息量排序不得跨越置信度档位')
+})
+
+test('价格不计入候选信息量，只带价格的条目不得挤掉带能力的条目', () => {
+  const priceOnly = entry({
+    id: 'cheap-model',
+    catalogId: 'openrouter::cheap-model',
+    source: 'openrouter',
+    price: { inputPerMillion: 1, currency: 'USD' },
+  })
+  const capable = entry({
+    id: 'capable-model',
+    catalogId: 'litellm::capable-model',
+    source: 'litellm',
+    contextTokens: 8192,
+  })
+  assert.equal(adoptableFieldCount(priceOnly), 0, 'price 不是路由能力，不算信息量')
+  assert.equal(adoptableFieldCount(capable), 1)
+})
+
+test('匹配用上游原名：网关自己拼的「供应商名 / 名」前缀必须先剥掉', () => {
+  assert.equal(upstreamModelName('TRAE (字节)', 'TRAE (字节) / GLM-5.1'), 'GLM-5.1')
+  assert.equal(
+    upstreamModelName('LobsterAI (有道)', 'LobsterAI (有道) / deepseek-v4-flash'),
+    'deepseek-v4-flash',
+  )
+  // 没有这个前缀（聚合/自定义供应商、用户自定义名）原样返回
+  assert.equal(upstreamModelName('Some Provider', 'gpt-4o'), 'gpt-4o')
+  assert.equal(upstreamModelName(undefined, 'TRAE (字节) / GLM-5.1'), 'TRAE (字节) / GLM-5.1')
+  // 只剥开头那一段，上游名里自带的 `/` 不动
+  assert.equal(upstreamModelName('P', 'P / deepseek-ai/DeepSeek-V4'), 'deepseek-ai/DeepSeek-V4')
+})
+
+test('剥掉前缀后 exact 档命中回来：拼好的展示名只能落到 alias', () => {
+  const index = buildCatalogIndex([
+    entry({ id: 'GLM-5.1', catalogId: 'models.dev:zhipu:GLM-5.1', reasoning: 'yes', contextTokens: 200000 }),
+  ])
+  const composed = matchCatalogEntries(index, {
+    modelId: 'trae/qmodel_51',
+    displayName: 'TRAE (字节) / GLM-5.1',
+  })
+  assert.equal(composed[0]?.confidence, 'alias', '拼好的展示名不是标准库里的 id，最高只能到别名档')
+
+  const upstream = matchCatalogEntries(index, {
+    modelId: 'trae/qmodel_51',
+    displayName: upstreamModelName('TRAE (字节)', 'TRAE (字节) / GLM-5.1'),
+  })
+  assert.equal(upstream[0]?.confidence, 'exact', '用上游原名才能拿到 exact 档')
+  assert.equal(upstream[0]?.entry.catalogId, 'models.dev:zhipu:GLM-5.1')
+})
+
+test('覆盖判据只认 exact/alias：family 不算「可补」，界面不能承诺批量不做的事', () => {
+  const index = buildCatalogIndex([
+    entry({ id: 'glm-5.2', catalogId: 'models.dev:zhipu:glm-5.2', reasoning: 'yes', contextTokens: 200000 }),
+    entry({ id: 'claude-sonnet-4-20250514', catalogId: 'models.dev:anthropic:claude-sonnet-4', contextTokens: 200000 }),
+  ])
+  // exact 命中、缺的字段候选有值 → 可补齐
+  assert.deepEqual(
+    checkCatalogCoverage(index, { modelId: 'glm-5.2', displayName: 'GLM / glm-5.2', missing: ['reasoning', 'contextTokens'] }),
+    { hasAutoMatch: true, canFillAny: true },
+  )
+  // 库里有这条、但缺的那一项候选也没有 → 不算可补
+  assert.deepEqual(
+    checkCatalogCoverage(index, { modelId: 'glm-5.2', displayName: 'glm-5.2', missing: ['modalities'] }),
+    { hasAutoMatch: true, canFillAny: false },
+  )
+  // 只有 family 档候选（claude 家族）→ 没有 exact/alias，不能算「库里能补」
+  assert.deepEqual(
+    checkCatalogCoverage(index, { modelId: 'claude-3-opus', displayName: 'claude-3-opus', missing: ['contextTokens'] }),
+    { hasAutoMatch: false, canFillAny: false },
+  )
+  assert.deepEqual(
+    checkCatalogCoverage(index, { modelId: 'qoder/ultimate', displayName: 'Qoder / Ultimate', missing: ['tools'] }),
+    { hasAutoMatch: false, canFillAny: false },
+  )
+})

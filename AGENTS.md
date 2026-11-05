@@ -21,13 +21,15 @@ Runs on macOS, Windows, Linux.
 ```bash
 npm run dev  /  npm run dev:win      # development
 npm run build                        # electron-vite build + source-artifact guard
-npm run gate                         # what CI runs: build + tsc x2 + full suite
+npm run build:daemon                 # headless Node bundle (out/daemon) for non-Electron hosts, e.g. WSL
+npm run gate                         # what CI runs: build + build:daemon + tsc x2 + full suite
 ```
 
 `npm run gate` is the only acceptable proof of "done":
 
 ```bash
 npm run build
+npm run build:daemon                       # out/daemon/modelport-daemon.cjs + its resource tree
 npx tsc --noEmit -p tsconfig.json        # renderer + shared
 npx tsc --noEmit -p tsconfig.node.json   # main + preload + shared
 node --test "tests/\*\*/\*.test.ts" "tests/\*\*/\*.test.mjs" "tests/\*\*/\*.test.js"
@@ -71,7 +73,10 @@ src/
 │   ├── channelPack/ # vendored pack host: worker.ts + compat shims + bridge.ts
 │   ├── providers/   # builtin/ (one file per provider), aggregate/ (registry+manager),
 │   │                #   accountChannels/, custom.ts, modelListSource.ts, modelCatalog.ts
-│   ├── store/       # electron-store: store.ts, types.ts, config.ts, keyMigration.ts
+│   ├── store/       # conf-backed storage: store.ts, types.ts, config.ts, keyMigration.ts
+│   ├── runtime/     # host bindings: host.ts (the only electron-aware seam), electronHost.ts
+│   ├── daemon/      # entry.ts - the headless Node host (WSL), no window, no tray, no updater
+│   ├── shell/       # Windows-native client: window + tray + address book (loads a remote /ui/)
 │   └── tray/
 ├── preload/         # context bridge
 ├── renderer/        # React UI: components, pages, stores (Zustand), i18n (en-US, zh-CN)
@@ -159,7 +164,7 @@ Data / store:
 
 * Data lives in `\~/.modelport/`; the Electron profile is **pinned** to `<appData>/modelport` by
 `app.setPath('userData', …)`. Do not unpin it - `safeStorage` seals `store.key` against that path.
-* `data.json` is a single electron-store file (config, providers, accounts, sessions, statistics,
+* `data.json` is a single conf file (config, providers, accounts, sessions, statistics,
 logs). `userModelMarks` (manual capability hints) stays out of `userModelOverrides` so a model sync
 cannot erase a user correction.
 * Startup `initializeDefaultProviders()` force-overwrites a builtin's `apiEndpoint`, `chatPath`,
@@ -168,6 +173,49 @@ deletes builtins whose id no longer exists. Edit builtin config in
 `src/main/providers/builtin/<provider>.ts` only; UI edits to those fields are discarded on restart.
 (There is currently no builtin to edit - `builtinProviders` has been empty since the OpenCode runtime
 retirement.)
+
+Host boundary (`docs/plan/PLAN-wsl-headless-daemon-and-shell.md`):
+
+* The gateway runs in two hosts: the Electron main process and a headless Node daemon (`src/main/daemon/entry.ts`,
+WSL and friends). Everything host-specific is reached through `src/main/runtime/host.ts` - version, resource root,
+`openExternal`, login-item sync, and the credential sealer. **Nothing under `proxy/`, `providers/`, `store/`,
+`scheduler/` or `channelPack/` may import `electron`** (fenced by `tests/build/daemon-bundle.test.ts`, which also
+checks the built bundle: esbuild will inline the electron launcher stub and the crash only appears on the target
+machine). `store.ts` uses `conf` directly because `electron-store` destructures `{app, ipcMain}` at module top level.
+* A `store.key` proves `data.json` was sealed with a machine-bound key. On a host with no OS keystore the plan is
+`sealed-unreadable`: `initialize()` throws and the file is left alone. Never route that through the corrupted-data
+backup - renaming `data.json` reads to the user as "my providers disappeared".
+* Two surfaces reach the gateway without a desktop window. `/v1/management/rpc` (and `/events`) is authenticated by
+the management secret, and its callable set is **the handler registry minus two install-level channels**
+(`app:installUpdate`, `app:downloadUpdate`) - do not hand-maintain a second list, that is how the two surfaces drift.
+`/ui` serves the built renderer on hosts that report a `getWebRoot()` and is exempt from the API-key gate like `/`
+and `/health`: the document contains no data, and a key would have to travel in a URL, which the no-`?api_key=`
+rule forbids. `/` still returns its JSON index; the UI is `/ui/` (trailing slash - the build emits relative asset
+URLs and koa-router needs `strict` to keep `/ui` from looping onto itself).
+* Backup import has three entries and **one engine**: the desktop dialog, `--import-backup <path>`,
+  and the remote page's browser picker (`POST /v1/management/backup/stage`). All three land on
+  `backup/service.ts::stageBackupFile()` - a fourth importer is how the format checks, the sealed-file
+  path and the one-shot token start to disagree per host. The upload route generates its own filename
+  inside the data directory (the client never names a path), caps the stream while it arrives, and
+  deletes the file before responding; export has **no** headless entry and says so in the UI rather
+  than pretending to write a file it cannot reach.
+* The management secret's lifetime depends on the client, and neither may go plaintext. A browser
+  tab keeps it in `sessionStorage` and forgets on close; the Windows shell seals it with
+  `safeStorage` (DPAPI, current user) into `secrets.json` 0600, one row per gateway origin, and
+  only after the gateway accepted it. With no keystore the store **refuses to write** - the UI
+  keeps asking, which is the honest failure; a copy of that file under another user or machine
+  decrypts to nothing and reports `unreadable`, never `none`. `gateways.json` stays credential-free.
+* One release ships three kinds of artifacts: the desktop installers, `dist/modelport-daemon-<ver>-<arch>.tar.gz`
+(`scripts/build-daemon.mjs`: bundle + `resources/` + `renderer/` + a systemd unit template), and
+`ModelPort-Shell-<ver>-x64-setup.exe` from `electron-builder.shell.yml`. Two rules there are load-bearing:
+the daemon bundle must inline every runtime dependency (the tarball carries no `node_modules` either - same
+1.4.5 failure mode as the asar, and `npm run gate` builds it so the fences cannot go stale), and the shell
+publishes **no** `latest.yml`: electron-builder names the Windows update metadata the same for both products,
+so a second `--publish=always` would make the main app's auto-updater download the shell binary. The CI step
+therefore builds the shell and uploads the exe with `gh release upload`.
+* Persistence on a headless host needs a **system-scope** enabled unit: a `systemctl --user` service dies with
+the login session that started it, and the WSL distro itself is reclaimed once the last client exits, so the
+gateway would silently stop between boots.
 
 Logging / diagnostics:
 

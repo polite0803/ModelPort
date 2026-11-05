@@ -1,10 +1,11 @@
-import { ipcMain, app, BrowserWindow, dialog, shell } from 'electron'
+import type { RendererSink } from './logBroadcast'
+import { registerMainHandler } from './registry'
+import { getHost, requireDesktop } from '../runtime/host'
 import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
 import axios from 'axios'
 import { IpcChannels } from './channels'
-import { registerBackupHandlers } from '../backup/ipc'
-import { installTrustedSenderGuard } from './trustedSender'
+import { registerBackupHandlers } from '../backup/ipc.ts'
 import { storeManager } from '../store/store'
 import { applyAnthropicRoutes, planAnthropicRoutes } from '../store/anthropicRoutes'
 import type {
@@ -21,7 +22,7 @@ import type { AggregateSaveInput } from '../../shared/aggregate'
 import { getBuiltinProviders, getBuiltinProvider } from '../providers/builtin'
 import { oauthManager } from '../oauth/manager'
 import { fetchProviderModels } from '../providers/modelCatalog'
-import { getModelMetadataReport } from '../providers/modelMetadataService'
+import { getModelMetadataReport, getResolvedModelMetadata } from '../providers/modelMetadataService'
 import { runModelCapabilityProbe } from '../providers/modelProbeRunner'
 import {
   adoptCatalogField,
@@ -57,12 +58,9 @@ import { autoRouter } from '../proxy/autoRouter'
 import type { RoutePreviewResult, RoutePreviewSample } from '../proxy/autoRouter'
 import { proxyStatusManager } from '../proxy/status'
 import { sessionManager } from '../proxy/sessionManager'
-import { TrayManager } from '../tray/TrayManager'
 import { ConfigManager } from '../store/config'
 import { generateManagementSecret } from '../proxy/middleware/managementAuth'
-import { UpdaterManager } from '../updater'
 import { buildRequestDiagnosticBundle } from '../logging/diagnosticBundle'
-import { setTitleBarTheme } from '../window/manager'
 import type { Provider, Account, ProxyStatus, ProviderCheckResult, OAuthResult, AuthType, CredentialField, LogLevel, LogEntry, ProviderVendor, ModelRoute, ModelCapabilityHint } from '../../shared/types'
 import type { RouteListResult, RouteMutationResult, RouteRemovalResult, RoutePoolSizesResult } from '../../shared/modelRouteName'
 import type { SessionConfig, SessionRecord, ManagementApiConfig, AppConfig } from '../store/types'
@@ -71,7 +69,6 @@ import type { TlsStatus, TlsTrustResult } from '../../shared/types'
 import type { ProviderType } from '../oauth/types'
 import type { ModelsFetchFailure } from '../store/types'
 
-const updaterManager = UpdaterManager.getInstance()
 
 /**
  * 聚合同步的失败原因 → 供应商卡片那套 ModelsFetchFailure。
@@ -99,24 +96,12 @@ function aggregateSyncFailureReason(reason?: string): ModelsFetchFailure {
  * UI 收到就把整份配置（含路由表）换掉，不需要重读、也不需要重启代理。
  */
 function broadcastConfigChanged(config: AppConfig): void {
-  BrowserWindow.getAllWindows().forEach((win) => {
-    if (!win.isDestroyed()) {
-      win.webContents.send(IpcChannels.CONFIG_CHANGED, config)
-    }
-  })
+  getHost().push(IpcChannels.CONFIG_CHANGED, config)
 }
 
 /** 「全部补齐」进度：主进程编排，任何窗口（含重开的）都收到同一份快照。 */
 function broadcastCatalogBatchProgress(snapshot: CatalogBatchSnapshot): void {
-  for (const win of BrowserWindow.getAllWindows()) {
-    // 窗口销毁与 webContents 销毁是两件事；两者都查，避免向已销毁的信道 send 抛错。
-    try {
-      if (win.isDestroyed() || win.webContents.isDestroyed()) continue
-      win.webContents.send(IpcChannels.PROVIDERS_CATALOG_BATCH_PROGRESS, snapshot)
-    } catch {
-      // 广播失败不能影响主进程批量任务的推进。
-    }
-  }
+  getHost().push(IpcChannels.PROVIDERS_CATALOG_BATCH_PROGRESS, snapshot)
 }
 
 onCatalogBatchProgress(broadcastCatalogBatchProgress)
@@ -152,14 +137,7 @@ const probeJobs = new Map<string, ProbeJobRecord>()
 const MAX_PROBE_JOBS = 20
 
 function broadcastProbeProgress(snapshot: ProbeJobSnapshot): void {
-  for (const window of BrowserWindow.getAllWindows()) {
-    try {
-      if (window.isDestroyed() || window.webContents.isDestroyed()) continue
-      window.webContents.send(IpcChannels.PROVIDERS_PROBE_PROGRESS, snapshot)
-    } catch {
-      // 单个窗口发送失败不能中断探测进度推送。
-    }
-  }
+  getHost().push(IpcChannels.PROVIDERS_PROBE_PROGRESS, snapshot)
 }
 
 function trimProbeJobs(): void {
@@ -180,9 +158,7 @@ function trimProbeJobs(): void {
   }
 }
 
-export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Promise<void> {
-  // 先装来源校验，再登记任何 handler：所有通道都在它的保护下注册。
-  installTrustedSenderGuard()
+export async function registerIpcHandlers(mainWindow: RendererSink | null): Promise<void> {
   let storageReady = true
   try {
     await storeManager.initialize()
@@ -193,23 +169,21 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     storageReady = false
     console.error('[IPC] Failed to initialize storage:', error)
 
-    mainWindow?.webContents.send(IpcChannels.STORE_INIT_ERROR, {
+    getHost().push(IpcChannels.STORE_INIT_ERROR, {
       message: error instanceof Error ? error.message : 'Failed to initialize storage',
     })
   }
 
   storeManager.setMainWindow(mainWindow)
 
-  if (mainWindow) {
-    oauthManager.setMainWindow(mainWindow)
-    updaterManager.initialize(mainWindow)
-  }
 
+  // 备份的六条通道必须在**两个宿主**都注册：`apply` / `unlock` / `cancel` 是纯逻辑，
+  // 无头宿主缺了它们，远程界面的导入就会走完上传再在「应用」这一步 404。
+  // 真正需要窗口的是文件对话框与重启，它们由 `requireDesktop` 回答 `desktop-only`，
+  // 而不是让整组通道在网络面上不存在。
+  registerBackupHandlers()
   registerStoreRetryHandler(mainWindow)
 
-  // 完整备份（全部数据与配置）。与存储是否初始化成功无关地注册：失败时各 handler 会
-  // 返回 `storage-not-ready`，界面能显示原因，而不是「No handler registered」。
-  registerBackupHandlers(mainWindow)
 
   // Check if auto-start proxy is needed
   const config = storageReady ? storeManager.getConfig() : null
@@ -228,7 +202,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
           uptime: 0,
           connections: 0,
         }
-        mainWindow?.webContents.send(IpcChannels.PROXY_STATUS_CHANGED, status)
+        getHost().push(IpcChannels.PROXY_STATUS_CHANGED, status)
       } else {
         console.log('[App] Proxy service auto-start failed')
       }
@@ -237,7 +211,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   }
 
-  ipcMain.handle(IpcChannels.PROXY_START, async (_, port?: number): Promise<boolean> => {
+  registerMainHandler(IpcChannels.PROXY_START, async (_, port?: number): Promise<boolean> => {
     try {
       if (proxyServer.isRunning()) {
         console.log('Proxy server is already running')
@@ -258,8 +232,8 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
           uptime: 0,
           connections: 0,
         }
-        mainWindow?.webContents.send(IpcChannels.PROXY_STATUS_CHANGED, status)
-        TrayManager.getInstance().updateProxyStatus(true)
+        getHost().push(IpcChannels.PROXY_STATUS_CHANGED, status)
+        getHost().desktop?.notifyProxyStatus(true)
       }
       
       return success
@@ -269,7 +243,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.PROXY_STOP, async (): Promise<boolean> => {
+  registerMainHandler(IpcChannels.PROXY_STOP, async (): Promise<boolean> => {
     try {
       if (!proxyServer.isRunning()) {
         return true
@@ -285,8 +259,8 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
           uptime: proxyStatusManager.getRunningStatus().uptime,
           connections: 0,
         }
-        mainWindow?.webContents.send(IpcChannels.PROXY_STATUS_CHANGED, status)
-        TrayManager.getInstance().updateProxyStatus(false)
+        getHost().push(IpcChannels.PROXY_STATUS_CHANGED, status)
+        getHost().desktop?.notifyProxyStatus(false)
       }
       
       return success
@@ -296,7 +270,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.PROXY_GET_STATUS, async (): Promise<ProxyStatus> => {
+  registerMainHandler(IpcChannels.PROXY_GET_STATUS, async (): Promise<ProxyStatus> => {
     const isRunning = proxyServer.isRunning()
     const port = proxyStatusManager.getPort()
     const host = isRunning
@@ -311,7 +285,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.PROXY_GET_STATISTICS, async () => {
+  registerMainHandler(IpcChannels.PROXY_GET_STATISTICS, async () => {
     const stats = proxyStatusManager.getStatistics()
     return {
       totalRequests: stats.totalRequests,
@@ -326,11 +300,11 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.PROXY_RESET_STATISTICS, async (): Promise<void> => {
+  registerMainHandler(IpcChannels.PROXY_RESET_STATISTICS, async (): Promise<void> => {
     proxyStatusManager.resetStatistics()
   })
 
-  ipcMain.handle(IpcChannels.TLS_STATUS, async (): Promise<TlsStatus> => {
+  registerMainHandler(IpcChannels.TLS_STATUS, async (): Promise<TlsStatus> => {
     return getTlsStatus(storeManager.getConfig(), proxyServer.getHttpsRuntimeStatus())
   })
 
@@ -352,15 +326,15 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   }
 
-  ipcMain.handle(IpcChannels.TLS_INSTALL_TRUST, () => withTlsMaterial(installCertificateTrust))
+  registerMainHandler(IpcChannels.TLS_INSTALL_TRUST, () => withTlsMaterial(installCertificateTrust))
 
-  ipcMain.handle(IpcChannels.TLS_UNINSTALL_TRUST, () => withTlsMaterial(uninstallCertificateTrust))
+  registerMainHandler(IpcChannels.TLS_UNINSTALL_TRUST, () => withTlsMaterial(uninstallCertificateTrust))
 
-  ipcMain.handle(IpcChannels.CONFIG_GET, async () => {
+  registerMainHandler(IpcChannels.CONFIG_GET, async () => {
     return storeManager.getConfig()
   })
 
-  ipcMain.handle(IpcChannels.CONFIG_UPDATE, async (_, updates: Partial<AppConfig>) => {
+  registerMainHandler(IpcChannels.CONFIG_UPDATE, async (_, updates: Partial<AppConfig>) => {
     const current = storeManager.getConfig()
     // Only the HTTPS/proxy pair is checked here: the renderer writes through
     // this channel and used to skip `ConfigManager.validate` entirely, so an
@@ -408,7 +382,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
   // 名字/池策略校验全在 store 层（`storeManager.createRoute` 等 → `checkRouteName`
   // /`checkPoolStrategyIds`），这里不许长第二份口径。
 
-  ipcMain.handle(IpcChannels.ROUTES_LIST, async (): Promise<RouteListResult> => {
+  registerMainHandler(IpcChannels.ROUTES_LIST, async (): Promise<RouteListResult> => {
     try {
       return { ok: true, routes: storeManager.listModelRoutes() }
     } catch (error) {
@@ -416,7 +390,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(
+  registerMainHandler(
     IpcChannels.ROUTES_CREATE,
     async (_, input: Partial<ModelRoute> & { name: string }): Promise<RouteMutationResult> => {
       try {
@@ -430,7 +404,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     },
   )
 
-  ipcMain.handle(
+  registerMainHandler(
     IpcChannels.ROUTES_UPDATE,
     async (_, currentName: string, patch: Partial<ModelRoute>): Promise<RouteMutationResult> => {
       try {
@@ -444,7 +418,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     },
   )
 
-  ipcMain.handle(
+  registerMainHandler(
     IpcChannels.ROUTES_DELETE,
     async (_, name: string): Promise<RouteRemovalResult> => {
       try {
@@ -462,7 +436,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
    * 路由池预览。入参是**草稿**路由（还没保存的那份），所以不能从 store 读配置 ——
    * 用户要看到的是「按下保存后会怎样」。只读：不扣冷却、不请求上游、不写状态。
    */
-  ipcMain.handle(
+  registerMainHandler(
     IpcChannels.ROUTES_PREVIEW,
     async (_, route: ModelRoute, sample?: RoutePreviewSample): Promise<RoutePreviewResult> => {
       return autoRouter.preview(route, sample ?? {})
@@ -474,7 +448,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
    * 而 `routes:preview` 一次只折一条、还把逐行明细全带回来；这里一次采集折全表，只回
    * 数字。停用的路由也算 —— 它的池照样是那份配置折出来的，界面要说的是配置而不是「能不能用」。
    */
-  ipcMain.handle(
+  registerMainHandler(
     IpcChannels.ROUTES_POOL_SIZES,
     async (): Promise<RoutePoolSizesResult> => {
       try {
@@ -486,7 +460,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
   )
 
   /** 只读预览：会新增哪几条 Anthropic 可发现别名、哪些名字被什么挡住了。 */
-  ipcMain.handle(
+  registerMainHandler(
     IpcChannels.ANTHROPIC_DISCOVERY_PLAN,
     async (): Promise<AnthropicDiscoveryResult> => {
       try {
@@ -497,7 +471,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     },
   )
 
-  ipcMain.handle(
+  registerMainHandler(
     IpcChannels.ANTHROPIC_DISCOVERY_APPLY,
     async (): Promise<AnthropicRouteApplyResult> => {
       try {
@@ -512,7 +486,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     },
   )
 
-  ipcMain.handle(IpcChannels.STORE_GET, async (_, key: string): Promise<unknown> => {
+  registerMainHandler(IpcChannels.STORE_GET, async (_, key: string): Promise<unknown> => {
     if (key === 'logs') {
       return storeManager.getLogs()
     }
@@ -520,7 +494,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     return store?.get(key)
   })
 
-  ipcMain.handle(IpcChannels.STORE_SET, async (_, key: string, value: unknown): Promise<void> => {
+  registerMainHandler(IpcChannels.STORE_SET, async (_, key: string, value: unknown): Promise<void> => {
     if (key === 'logs') {
       storeManager.replaceLogs(Array.isArray(value) ? value as LogEntry[] : [])
       return
@@ -538,11 +512,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     // 就是这条链路真正在跑的那段代码。
     if (key === 'config') {
       const normalized = storeManager.setConfig(value)
-      BrowserWindow.getAllWindows().forEach((win) => {
-        if (!win.isDestroyed()) {
-          win.webContents.send(IpcChannels.CONFIG_CHANGED, normalized)
-        }
-      })
+      getHost().push(IpcChannels.CONFIG_CHANGED, normalized)
       proxyServer.revalidateSecurity()
       return
     }
@@ -556,7 +526,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     throw new Error(`store:set does not accept the key "${key}"`)
   })
 
-  ipcMain.handle(IpcChannels.STORE_DELETE, async (_, key: string): Promise<void> => {
+  registerMainHandler(IpcChannels.STORE_DELETE, async (_, key: string): Promise<void> => {
     if (key === 'logs') {
       storeManager.clearLogs()
       return
@@ -567,19 +537,19 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     throw new Error(`store:delete does not accept the key "${key}"`)
   })
 
-  ipcMain.handle(IpcChannels.STORE_CLEAR_ALL, async (): Promise<void> => {
+  registerMainHandler(IpcChannels.STORE_CLEAR_ALL, async (): Promise<void> => {
     storeManager.clearAll()
   })
 
-  ipcMain.handle(IpcChannels.PROVIDERS_GET_ALL, async (): Promise<Provider[]> => {
+  registerMainHandler(IpcChannels.PROVIDERS_GET_ALL, async (): Promise<Provider[]> => {
     return ProviderManager.getAll()
   })
 
-  ipcMain.handle(IpcChannels.PROVIDERS_GET_BUILTIN, async () => {
+  registerMainHandler(IpcChannels.PROVIDERS_GET_BUILTIN, async () => {
     return getBuiltinProviders()
   })
 
-  ipcMain.handle(IpcChannels.PROVIDERS_ADD, async (_, data: {
+  registerMainHandler(IpcChannels.PROVIDERS_ADD, async (_, data: {
     id?: string
     name: string
     type?: 'builtin' | 'custom'
@@ -593,15 +563,15 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     return CustomProviderManager.create(data)
   })
 
-  ipcMain.handle(IpcChannels.PROVIDERS_UPDATE, async (_, id: string, updates: Partial<Provider>): Promise<Provider | null> => {
+  registerMainHandler(IpcChannels.PROVIDERS_UPDATE, async (_, id: string, updates: Partial<Provider>): Promise<Provider | null> => {
     return ProviderManager.update(id, updates)
   })
 
-  ipcMain.handle(IpcChannels.PROVIDERS_DELETE, async (_, id: string): Promise<boolean> => {
+  registerMainHandler(IpcChannels.PROVIDERS_DELETE, async (_, id: string): Promise<boolean> => {
     return CustomProviderManager.delete(id)
   })
 
-  ipcMain.handle(IpcChannels.PROVIDERS_CHECK_STATUS, async (_, providerId: string): Promise<ProviderCheckResult> => {
+  registerMainHandler(IpcChannels.PROVIDERS_CHECK_STATUS, async (_, providerId: string): Promise<ProviderCheckResult> => {
     const provider = ProviderManager.getById(providerId)
 
     if (!provider) {
@@ -623,7 +593,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     return result
   })
 
-  ipcMain.handle(IpcChannels.PROVIDERS_CHECK_ALL_STATUS, async (): Promise<Record<string, ProviderCheckResult>> => {
+  registerMainHandler(IpcChannels.PROVIDERS_CHECK_ALL_STATUS, async (): Promise<Record<string, ProviderCheckResult>> => {
     // 一轮巡检：结果进 `ProviderChecker` 的 5 分钟缓存（Dashboard 每 60s 打一次这条通道，
     // 23 个 provider ⇒ 改前是每分钟 23 次整份 `data.json` 加密落盘 + 约 10 次上游 GET），
     // 落盘交给 `persistStatusSnapshot` 那道「只认翻转」的门。
@@ -634,19 +604,19 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     )
   })
 
-  ipcMain.handle(IpcChannels.PROVIDERS_DUPLICATE, async (_, id: string): Promise<Provider> => {
+  registerMainHandler(IpcChannels.PROVIDERS_DUPLICATE, async (_, id: string): Promise<Provider> => {
     return CustomProviderManager.duplicate(id)
   })
 
-  ipcMain.handle(IpcChannels.PROVIDERS_EXPORT, async (_, id: string): Promise<string> => {
+  registerMainHandler(IpcChannels.PROVIDERS_EXPORT, async (_, id: string): Promise<string> => {
     return CustomProviderManager.exportProvider(id)
   })
 
-  ipcMain.handle(IpcChannels.PROVIDERS_IMPORT, async (_, jsonData: string): Promise<Provider> => {
+  registerMainHandler(IpcChannels.PROVIDERS_IMPORT, async (_, jsonData: string): Promise<Provider> => {
     return CustomProviderManager.importProvider(jsonData)
   })
 
-  ipcMain.handle(IpcChannels.PROVIDERS_UPDATE_MODELS, async (_, providerId: string): Promise<{
+  registerMainHandler(IpcChannels.PROVIDERS_UPDATE_MODELS, async (_, providerId: string): Promise<{
     success: boolean
     reason?: ModelsFetchFailure
     detail?: string
@@ -696,7 +666,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.PROVIDERS_GET_EFFECTIVE_MODELS, async (_, providerId: string) => {
+  registerMainHandler(IpcChannels.PROVIDERS_GET_EFFECTIVE_MODELS, async (_, providerId: string) => {
     try {
       return storeManager.getEffectiveModels(providerId)
     } catch (error) {
@@ -705,7 +675,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.PROVIDERS_GET_MODEL_CATALOGUE, async (_, providerId: string) => {
+  registerMainHandler(IpcChannels.PROVIDERS_GET_MODEL_CATALOGUE, async (_, providerId: string) => {
     try {
       return storeManager.getModelCatalogue(providerId)
     } catch (error) {
@@ -714,7 +684,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(
+  registerMainHandler(
     IpcChannels.PROVIDERS_SET_MODELS_SERVED,
     async (_, providerId: string, names: string[], served: boolean) => {
       if (!Array.isArray(names) || names.some(name => typeof name !== 'string')) {
@@ -736,7 +706,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   )
 
-  ipcMain.handle(IpcChannels.PROVIDERS_ADD_CUSTOM_MODEL, async (_, providerId: string, model: { displayName: string; actualModelId: string }) => {
+  registerMainHandler(IpcChannels.PROVIDERS_ADD_CUSTOM_MODEL, async (_, providerId: string, model: { displayName: string; actualModelId: string }) => {
     try {
       return {
         success: true,
@@ -752,7 +722,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.PROVIDERS_REMOVE_MODEL, async (_, providerId: string, modelName: string) => {
+  registerMainHandler(IpcChannels.PROVIDERS_REMOVE_MODEL, async (_, providerId: string, modelName: string) => {
     try {
       return {
         success: true,
@@ -768,7 +738,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.PROVIDERS_RESET_MODELS, async (_, providerId: string) => {
+  registerMainHandler(IpcChannels.PROVIDERS_RESET_MODELS, async (_, providerId: string) => {
     try {
       return {
         success: true,
@@ -784,11 +754,11 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.PROVIDERS_GET_MODEL_MARKS, async () => {
+  registerMainHandler(IpcChannels.PROVIDERS_GET_MODEL_MARKS, async () => {
     return storeManager.getUserModelMarks()
   })
 
-  ipcMain.handle(
+  registerMainHandler(
     IpcChannels.PROVIDERS_SET_MODEL_MARK,
     async (_, providerId: string, displayName: string, mark: ModelCapabilityHint | null) => {
       try {
@@ -804,7 +774,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   )
 
-  ipcMain.handle(IpcChannels.PROVIDERS_GET_MODEL_METADATA, async () => {
+  registerMainHandler(IpcChannels.PROVIDERS_GET_MODEL_METADATA, async () => {
     try {
       return await getModelMetadataReport()
     } catch (error) {
@@ -813,7 +783,27 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(
+  // 逐模型标注入口（聚合渠道 / 账号渠道的模型列表）只要这一行的解析结果。
+  // 走 `getResolvedModelMetadata` 而不是报表：报表会遍历所有供应商并重建目录索引，
+  // 为一次点击付那个代价不值得，且 store 每次读取都整份解密（见 ~/.modelport 热循环记录）。
+  registerMainHandler(
+    IpcChannels.PROVIDERS_GET_MODEL_METADATA_ONE,
+    async (_, providerId: string, displayName: string) => {
+      if (typeof providerId !== 'string' || typeof displayName !== 'string') {
+        return { success: false, error: 'providerId and displayName are required' }
+      }
+      try {
+        const metadata = await getResolvedModelMetadata({ providerId, displayName })
+        if (!metadata) return { success: false, error: '模型不在该供应商目录中' }
+        return { success: true, metadata }
+      } catch (error) {
+        console.error('[IPC] Failed to resolve model metadata:', error)
+        return { success: false, error: error instanceof Error ? error.message : 'metadata failed' }
+      }
+    }
+  )
+
+  registerMainHandler(
     IpcChannels.PROVIDERS_PROBE_MODEL,
     async (_, providerId: string, displayName: string, scope?: string, force?: boolean) => {
       if (typeof providerId !== 'string' || typeof displayName !== 'string') {
@@ -910,18 +900,18 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     },
   )
 
-  ipcMain.handle(IpcChannels.PROVIDERS_CANCEL_PROBE, (_, jobId: string) => {
+  registerMainHandler(IpcChannels.PROVIDERS_CANCEL_PROBE, (_, jobId: string) => {
     const record = probeJobs.get(jobId)
     if (!record) return { success: false, error: '未知的探测任务' }
     record.controller.abort('cancel')
     return { success: true }
   })
 
-  ipcMain.handle(IpcChannels.PROVIDERS_GET_PROBE_JOBS, () =>
+  registerMainHandler(IpcChannels.PROVIDERS_GET_PROBE_JOBS, () =>
     [...probeJobs.values()].map((record) => record.snapshot),
   )
 
-  ipcMain.handle(IpcChannels.PROVIDERS_GET_CATALOG_STATUSES, async () => {
+  registerMainHandler(IpcChannels.PROVIDERS_GET_CATALOG_STATUSES, async () => {
     try {
       return await getCatalogStatuses()
     } catch (error) {
@@ -930,7 +920,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.PROVIDERS_REFRESH_CATALOG, async (_, source: string) => {
+  registerMainHandler(IpcChannels.PROVIDERS_REFRESH_CATALOG, async (_, source: string) => {
     const normalized: CatalogSourceId | undefined =
       source === 'models.dev' || source === 'litellm' || source === 'openrouter'
         ? source
@@ -953,7 +943,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(
+  registerMainHandler(
     IpcChannels.PROVIDERS_GET_CATALOG_CANDIDATES,
     async (_, providerId: string, displayName: string) => {
       if (typeof providerId !== 'string' || typeof displayName !== 'string') {
@@ -972,7 +962,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   )
 
-  ipcMain.handle(
+  registerMainHandler(
     IpcChannels.PROVIDERS_ADOPT_CATALOG_FIELD,
     async (
       _,
@@ -990,7 +980,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   )
 
-  ipcMain.handle(
+  registerMainHandler(
     IpcChannels.PROVIDERS_REVOKE_CATALOG_ADOPTION,
     async (_, providerId: string, displayName: string, field?: CatalogAdoptionField) => {
       try {
@@ -1002,9 +992,11 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   )
 
-  ipcMain.handle(IpcChannels.PROVIDERS_ESTIMATE_CATALOG_BATCH, async () => {
+  registerMainHandler(IpcChannels.PROVIDERS_ESTIMATE_CATALOG_BATCH, async (_, providerId?: string) => {
     try {
-      return await estimateCatalogBatch()
+      return await estimateCatalogBatch(
+        typeof providerId === 'string' && providerId.length > 0 ? providerId : undefined,
+      )
     } catch (error) {
       console.error('[IPC] Failed to estimate catalog batch:', error)
       return {
@@ -1021,13 +1013,19 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(
+  registerMainHandler(
     IpcChannels.PROVIDERS_START_CATALOG_BATCH,
-    async (_, input?: { probe?: boolean; retryFailedOf?: string }) => {
+    async (
+      _,
+      input?: { probe?: boolean; retryFailedOf?: string; providerId?: string },
+    ) => {
       try {
         return await startCatalogBatch({
           probe: input?.probe === true,
           ...(input?.retryFailedOf ? { retryFailedOf: input.retryFailedOf } : {}),
+          ...(typeof input?.providerId === 'string' && input.providerId.length > 0
+            ? { providerId: input.providerId }
+            : {}),
         })
       } catch (error) {
         console.error('[IPC] Failed to start catalog batch:', error)
@@ -1039,22 +1037,22 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   )
 
-  ipcMain.handle(IpcChannels.PROVIDERS_PAUSE_CATALOG_BATCH, (_, jobId: string) =>
+  registerMainHandler(IpcChannels.PROVIDERS_PAUSE_CATALOG_BATCH, (_, jobId: string) =>
     pauseCatalogBatch(jobId),
   )
-  ipcMain.handle(IpcChannels.PROVIDERS_RESUME_CATALOG_BATCH, (_, jobId: string) =>
+  registerMainHandler(IpcChannels.PROVIDERS_RESUME_CATALOG_BATCH, (_, jobId: string) =>
     resumeCatalogBatch(jobId),
   )
-  ipcMain.handle(IpcChannels.PROVIDERS_CANCEL_CATALOG_BATCH, (_, jobId: string) =>
+  registerMainHandler(IpcChannels.PROVIDERS_CANCEL_CATALOG_BATCH, (_, jobId: string) =>
     cancelCatalogBatch(jobId),
   )
-  ipcMain.handle(IpcChannels.PROVIDERS_GET_CATALOG_BATCH_JOBS, () => getCatalogBatchJobs())
+  registerMainHandler(IpcChannels.PROVIDERS_GET_CATALOG_BATCH_JOBS, () => getCatalogBatchJobs())
 
-  ipcMain.handle(IpcChannels.AGGREGATE_LIST, async () => {
+  registerMainHandler(IpcChannels.AGGREGATE_LIST, async () => {
     return aggregateProviderManager.list()
   })
 
-  ipcMain.handle(IpcChannels.AGGREGATE_SAVE, async (_, input: AggregateSaveInput) => {
+  registerMainHandler(IpcChannels.AGGREGATE_SAVE, async (_, input: AggregateSaveInput) => {
     try {
       return { success: true, provider: aggregateProviderManager.save(input) }
     } catch (error) {
@@ -1062,7 +1060,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.AGGREGATE_SET_ENABLED, async (_, id: string, enabled: boolean) => {
+  registerMainHandler(IpcChannels.AGGREGATE_SET_ENABLED, async (_, id: string, enabled: boolean) => {
     try {
       return { success: true, provider: aggregateProviderManager.setEnabled(id, enabled) }
     } catch (error) {
@@ -1070,20 +1068,20 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.AGGREGATE_REMOVE, async (_, id: string) => {
+  registerMainHandler(IpcChannels.AGGREGATE_REMOVE, async (_, id: string) => {
     aggregateProviderManager.remove(id)
     return { success: true }
   })
 
-  ipcMain.handle(IpcChannels.AGGREGATE_TEST, async (_, id: string) => {
+  registerMainHandler(IpcChannels.AGGREGATE_TEST, async (_, id: string) => {
     return aggregateProviderManager.test(id)
   })
 
-  ipcMain.handle(IpcChannels.AGGREGATE_SYNC_MODELS, async (_, id: string) => {
+  registerMainHandler(IpcChannels.AGGREGATE_SYNC_MODELS, async (_, id: string) => {
     return aggregateProviderManager.syncModels(id)
   })
 
-  ipcMain.handle(IpcChannels.AGGREGATE_DETAIL, async (_, id: string) => {
+  registerMainHandler(IpcChannels.AGGREGATE_DETAIL, async (_, id: string) => {
     try {
       return aggregateProviderManager.detail(id)
     } catch (error) {
@@ -1092,7 +1090,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.AGGREGATE_ADD_KEY, async (_, id: string, apiKey: string) => {
+  registerMainHandler(IpcChannels.AGGREGATE_ADD_KEY, async (_, id: string, apiKey: string) => {
     try {
       return await aggregateProviderManager.addKey(id, apiKey)
     } catch (error) {
@@ -1100,7 +1098,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.AGGREGATE_REMOVE_KEY, async (_, accountId: string) => {
+  registerMainHandler(IpcChannels.AGGREGATE_REMOVE_KEY, async (_, accountId: string) => {
     try {
       return aggregateProviderManager.removeKey(accountId)
     } catch (error) {
@@ -1108,7 +1106,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.AGGREGATE_SET_KEY_ENABLED, async (_, accountId: string, enabled: boolean) => {
+  registerMainHandler(IpcChannels.AGGREGATE_SET_KEY_ENABLED, async (_, accountId: string, enabled: boolean) => {
     try {
       return aggregateProviderManager.setKeyEnabled(accountId, enabled)
     } catch (error) {
@@ -1116,7 +1114,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.AGGREGATE_VALIDATE_KEY, async (_, id: string, accountId: string) => {
+  registerMainHandler(IpcChannels.AGGREGATE_VALIDATE_KEY, async (_, id: string, accountId: string) => {
     try {
       return await aggregateProviderManager.validateKey(id, accountId)
     } catch (error) {
@@ -1124,7 +1122,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.AGGREGATE_ADD_MODEL, async (_, id: string, modelId: string) => {
+  registerMainHandler(IpcChannels.AGGREGATE_ADD_MODEL, async (_, id: string, modelId: string) => {
     try {
       return aggregateProviderManager.addModel(id, modelId)
     } catch (error) {
@@ -1132,7 +1130,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.AGGREGATE_REMOVE_MODEL, async (_, id: string, modelId: string) => {
+  registerMainHandler(IpcChannels.AGGREGATE_REMOVE_MODEL, async (_, id: string, modelId: string) => {
     try {
       return aggregateProviderManager.removeModel(id, modelId)
     } catch (error) {
@@ -1140,7 +1138,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.AGGREGATE_SET_MODEL_ENABLED, async (_, id: string, modelId: string, enabled: boolean) => {
+  registerMainHandler(IpcChannels.AGGREGATE_SET_MODEL_ENABLED, async (_, id: string, modelId: string, enabled: boolean) => {
     try {
       return aggregateProviderManager.setModelEnabled(id, modelId, enabled)
     } catch (error) {
@@ -1148,7 +1146,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.AGGREGATE_SET_MODEL_PARAMS, async (_, id: string, modelId: string, params: Record<string, unknown>) => {
+  registerMainHandler(IpcChannels.AGGREGATE_SET_MODEL_PARAMS, async (_, id: string, modelId: string, params: Record<string, unknown>) => {
     try {
       return aggregateProviderManager.setModelParams(id, modelId, params)
     } catch (error) {
@@ -1156,7 +1154,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.AGGREGATE_TEST_MODEL, async (_, id: string, modelId: string) => {
+  registerMainHandler(IpcChannels.AGGREGATE_TEST_MODEL, async (_, id: string, modelId: string) => {
     try {
       return await aggregateProviderManager.testModel(id, modelId)
     } catch (error) {
@@ -1166,7 +1164,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
 
   // 账号级实时额度：只由详情页那一个按钮触发。返回值里只有掩码 Key 与报文摘要，
   // 密钥本身不过 IPC；异常兜底也走同一个形状，避免界面收到一个裸 throw。
-  ipcMain.handle(IpcChannels.AGGREGATE_QUERY_CREDITS, async (_, id: string) => {
+  registerMainHandler(IpcChannels.AGGREGATE_QUERY_CREDITS, async (_, id: string) => {
     try {
       return await aggregateProviderManager.queryCredits(id)
     } catch (error) {
@@ -1183,7 +1181,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.CHANNELS_LIST, async () => {
+  registerMainHandler(IpcChannels.CHANNELS_LIST, async () => {
     try {
       return { success: true, channels: await accountChannelManager.list() }
     } catch (error) {
@@ -1197,7 +1195,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.CHANNELS_ACCOUNT_COUNTS, async () => {
+  registerMainHandler(IpcChannels.CHANNELS_ACCOUNT_COUNTS, async () => {
     try {
       return await accountChannelManager.accountCounts()
     } catch (error) {
@@ -1211,7 +1209,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.CHANNELS_RPC, async (_, method: string, payload: unknown) => {
+  registerMainHandler(IpcChannels.CHANNELS_RPC, async (_, method: string, payload: unknown) => {
     try {
       return await accountChannelManager.rpc(method, payload)
     } catch (error) {
@@ -1222,7 +1220,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.CHANNELS_CREDITS, async (_, id: string) => {
+  registerMainHandler(IpcChannels.CHANNELS_CREDITS, async (_, id: string) => {
     try {
       return await accountChannelManager.credits(id)
     } catch (error) {
@@ -1234,11 +1232,11 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.CHANNELS_SET_ENABLED, async (_, id: string, enabled: boolean) => {
+  registerMainHandler(IpcChannels.CHANNELS_SET_ENABLED, async (_, id: string, enabled: boolean) => {
     return accountChannelManager.setEnabled(id, enabled)
   })
 
-  ipcMain.handle(IpcChannels.CHANNELS_REMOVE, async (_, id: string) => {
+  registerMainHandler(IpcChannels.CHANNELS_REMOVE, async (_, id: string) => {
     try {
       return await accountChannelManager.remove(id)
     } catch (error) {
@@ -1246,7 +1244,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.CHANNELS_AUTO_CHECKIN, async (_, enabled?: unknown) => {
+  registerMainHandler(IpcChannels.CHANNELS_AUTO_CHECKIN, async (_, enabled?: unknown) => {
     try {
       // 不传参 = 读当前状态，传布尔 = 改写开关（与渠道包 `usage.autoCheckin` 同口径）。
       return typeof enabled === 'boolean'
@@ -1260,7 +1258,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.CHANNELS_MODELS, async (_, id: string) => {
+  registerMainHandler(IpcChannels.CHANNELS_MODELS, async (_, id: string) => {
     try {
       return await accountChannelManager.modelsFor(id)
     } catch (error) {
@@ -1272,7 +1270,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(IpcChannels.CHANNELS_REFRESH_MODELS, async (_, id: string) => {
+  registerMainHandler(IpcChannels.CHANNELS_REFRESH_MODELS, async (_, id: string) => {
     try {
       return await accountChannelManager.refreshModels(id)
     } catch (error) {
@@ -1283,7 +1281,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     }
   })
 
-  ipcMain.handle(
+  registerMainHandler(
     IpcChannels.CHANNELS_SET_MODEL_DISABLED,
     async (_, id: string, modelId: string, disabled: boolean) => {
       try {
@@ -1298,7 +1296,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     },
   )
 
-  ipcMain.handle(
+  registerMainHandler(
     IpcChannels.CHANNELS_CLEAR_DEAD_MODELS,
     async (_, id: string, modelId?: string) => {
       try {
@@ -1315,9 +1313,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
 
   // 账号/模型在 Worker 内变化后，把「已变化」广播给所有窗口，让卡片自行刷新。
   accountChannelManager.setChangeListener(() => {
-    for (const window of BrowserWindow.getAllWindows()) {
-      window.webContents.send(IpcChannels.CHANNELS_CHANGED)
-    }
+    getHost().push(IpcChannels.CHANNELS_CHANGED)
   })
 
   // 后台起 Worker：启动失败不能挡住窗口加载，具体原因由卡片页显示。
@@ -1325,7 +1321,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     console.error('[ChannelPack] 渠道运行时启动失败：', error)
   })
 
-  ipcMain.handle(IpcChannels.ACCOUNTS_GET_ALL, async (): Promise<Account[]> => {
+  registerMainHandler(IpcChannels.ACCOUNTS_GET_ALL, async (): Promise<Account[]> => {
     // 渲染层拿不到解密后的凭据：转发时用的密钥只在主进程内部解密取用
     // （`proxy/forwarder.ts` 的 `buildHeaders`），界面要显示只能显示掩码。
     // 这条通道原先带 `includeCredentials` 参数，任何能叫 IPC 的脚本一句
@@ -1333,7 +1329,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     return AccountManager.getAll(false)
   })
 
-  ipcMain.handle(IpcChannels.ACCOUNTS_GET_BY_ID, async (_, id: string, includeCredentials?: boolean): Promise<Account | null> => {
+  registerMainHandler(IpcChannels.ACCOUNTS_GET_BY_ID, async (_, id: string, includeCredentials?: boolean): Promise<Account | null> => {
     // 这一条仍然把明文凭据交给渲染进程，因为账号编辑框要预填已存的 Key
     // （`pages/Providers.tsx:681,707` 两处都传 true）。彻底闭掉它要先改编辑框语义
     // （显示掩码 + 「留空表示不修改」），那是界面改动 + 实机核对，不能在这批里盲改。
@@ -1342,11 +1338,11 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     return storeManager.getAccountById(id, includeCredentials) || null
   })
 
-  ipcMain.handle(IpcChannels.ACCOUNTS_GET_BY_PROVIDER, async (_, providerId: string): Promise<Account[]> => {
+  registerMainHandler(IpcChannels.ACCOUNTS_GET_BY_PROVIDER, async (_, providerId: string): Promise<Account[]> => {
     return storeManager.getAccountsByProviderId(providerId)
   })
 
-  ipcMain.handle(IpcChannels.ACCOUNTS_ADD, async (_, data: {
+  registerMainHandler(IpcChannels.ACCOUNTS_ADD, async (_, data: {
     providerId: string
     name: string
     email?: string
@@ -1356,20 +1352,20 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     return AccountManager.create(data)
   })
 
-  ipcMain.handle(IpcChannels.ACCOUNTS_UPDATE, async (_, id: string, updates: Partial<Account>): Promise<Account | null> => {
+  registerMainHandler(IpcChannels.ACCOUNTS_UPDATE, async (_, id: string, updates: Partial<Account>): Promise<Account | null> => {
     return AccountManager.update(id, updates)
   })
 
-  ipcMain.handle(IpcChannels.ACCOUNTS_DELETE, async (_, id: string): Promise<boolean> => {
+  registerMainHandler(IpcChannels.ACCOUNTS_DELETE, async (_, id: string): Promise<boolean> => {
     return AccountManager.delete(id)
   })
 
-  ipcMain.handle(IpcChannels.ACCOUNTS_VALIDATE, async (_, accountId: string): Promise<boolean> => {
+  registerMainHandler(IpcChannels.ACCOUNTS_VALIDATE, async (_, accountId: string): Promise<boolean> => {
     const result = await AccountManager.validate(accountId)
     return result.valid
   })
 
-  ipcMain.handle(IpcChannels.ACCOUNTS_VALIDATE_TOKEN, async (_, providerId: string, credentials: Record<string, string>) => {
+  registerMainHandler(IpcChannels.ACCOUNTS_VALIDATE_TOKEN, async (_, providerId: string, credentials: Record<string, string>) => {
     let provider = ProviderManager.getById(providerId)
     
     // If provider not in store, check builtin providers
@@ -1410,7 +1406,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     return ProviderChecker.checkAccountToken(provider, tempAccount)
   })
 
-  ipcMain.handle(IpcChannels.OAUTH_START_LOGIN, async (_, providerId: string, providerType: ProviderVendor): Promise<OAuthResult> => {
+  registerMainHandler(IpcChannels.OAUTH_START_LOGIN, async (_, providerId: string, providerType: ProviderVendor): Promise<OAuthResult> => {
     console.log('Starting OAuth login:', providerId, providerType)
     return await oauthManager.startLogin({
       providerId,
@@ -1418,28 +1414,28 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     })
   })
 
-  ipcMain.handle(IpcChannels.OAUTH_CANCEL_LOGIN, async (): Promise<void> => {
+  registerMainHandler(IpcChannels.OAUTH_CANCEL_LOGIN, async (): Promise<void> => {
     console.log('Cancel OAuth login')
     await oauthManager.cancelLogin()
   })
 
-  ipcMain.handle(IpcChannels.OAUTH_LOGIN_WITH_TOKEN, async (_, data: { providerId: string, providerType: ProviderVendor, token: string }): Promise<OAuthResult> => {
+  registerMainHandler(IpcChannels.OAUTH_LOGIN_WITH_TOKEN, async (_, data: { providerId: string, providerType: ProviderVendor, token: string }): Promise<OAuthResult> => {
     return await oauthManager.loginWithToken(data.providerId, data.providerType as ProviderType, data.token)
   })
 
-  ipcMain.handle(IpcChannels.OAUTH_VALIDATE_TOKEN, async (_, data: { providerId: string, providerType: ProviderVendor, credentials: Record<string, string> }) => {
+  registerMainHandler(IpcChannels.OAUTH_VALIDATE_TOKEN, async (_, data: { providerId: string, providerType: ProviderVendor, credentials: Record<string, string> }) => {
     return await oauthManager.validateToken(data.providerId, data.providerType as ProviderType, data.credentials)
   })
 
-  ipcMain.handle(IpcChannels.OAUTH_REFRESH_TOKEN, async (_, data: { providerId: string, providerType: ProviderVendor, credentials: Record<string, string> }) => {
+  registerMainHandler(IpcChannels.OAUTH_REFRESH_TOKEN, async (_, data: { providerId: string, providerType: ProviderVendor, credentials: Record<string, string> }) => {
     return await oauthManager.refreshToken(data.providerId, data.providerType as ProviderType, data.credentials)
   })
 
-  ipcMain.handle(IpcChannels.OAUTH_GET_STATUS, async (): Promise<string> => {
+  registerMainHandler(IpcChannels.OAUTH_GET_STATUS, async (): Promise<string> => {
     return oauthManager.getStatus()
   })
 
-  ipcMain.handle(IpcChannels.LOGS_GET, async (_, filter?: {
+  registerMainHandler(IpcChannels.LOGS_GET, async (_, filter?: {
     level?: LogLevel | 'all'
     keyword?: string
     startTime?: number
@@ -1450,33 +1446,33 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     return storeManager.getLogs(filter)
   })
 
-  ipcMain.handle(IpcChannels.LOGS_GET_STATS, async () => {
+  registerMainHandler(IpcChannels.LOGS_GET_STATS, async () => {
     return storeManager.getLogStats()
   })
 
-  ipcMain.handle(IpcChannels.LOGS_GET_TREND, async (_, days?: number) => {
+  registerMainHandler(IpcChannels.LOGS_GET_TREND, async (_, days?: number) => {
     return storeManager.getLogTrend(days)
   })
 
-  ipcMain.handle(IpcChannels.LOGS_GET_ACCOUNT_TREND, async (_, accountId: string, days?: number) => {
+  registerMainHandler(IpcChannels.LOGS_GET_ACCOUNT_TREND, async (_, accountId: string, days?: number) => {
     return storeManager.getAccountLogTrend(accountId, days)
   })
 
-  ipcMain.handle(IpcChannels.LOGS_CLEAR, async (): Promise<void> => {
+  registerMainHandler(IpcChannels.LOGS_CLEAR, async (): Promise<void> => {
     storeManager.clearLogs()
   })
 
-  ipcMain.handle(IpcChannels.LOGS_EXPORT, async (_, format?: 'json' | 'txt'): Promise<string> => {
+  registerMainHandler(IpcChannels.LOGS_EXPORT, async (_, format?: 'json' | 'txt'): Promise<string> => {
     return storeManager.exportLogs(format)
   })
 
-  ipcMain.handle(IpcChannels.LOGS_GET_BY_ID, async (_, id: string): Promise<LogEntry | undefined> => {
+  registerMainHandler(IpcChannels.LOGS_GET_BY_ID, async (_, id: string): Promise<LogEntry | undefined> => {
     return storeManager.getLogById(id)
   })
 
   // ==================== Request Logs Handlers ====================
 
-  ipcMain.handle(IpcChannels.REQUEST_LOGS_GET, async (_, filter?: {
+  registerMainHandler(IpcChannels.REQUEST_LOGS_GET, async (_, filter?: {
     status?: 'success' | 'error'
     providerId?: string
     limit?: number
@@ -1484,125 +1480,118 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     return storeManager.getRequestLogs(filter?.limit, filter)
   })
 
-  ipcMain.handle(IpcChannels.REQUEST_LOGS_GET_BY_ID, async (_, id: string) => {
+  registerMainHandler(IpcChannels.REQUEST_LOGS_GET_BY_ID, async (_, id: string) => {
     return storeManager.getRequestLogById(id)
   })
 
-  ipcMain.handle(IpcChannels.REQUEST_LOGS_GET_STATS, async () => {
+  registerMainHandler(IpcChannels.REQUEST_LOGS_GET_STATS, async () => {
     return storeManager.getRequestLogStats()
   })
 
-  ipcMain.handle(IpcChannels.REQUEST_LOGS_CLEAR, async (): Promise<void> => {
+  registerMainHandler(IpcChannels.REQUEST_LOGS_CLEAR, async (): Promise<void> => {
     storeManager.clearRequestLogs()
   })
 
-  ipcMain.handle(IpcChannels.REQUEST_LOGS_BUNDLE, async (_, key: string) => {
+  registerMainHandler(IpcChannels.REQUEST_LOGS_BUNDLE, async (_, key: string) => {
     return buildRequestDiagnosticBundle(String(key))
   })
 
-  ipcMain.handle(IpcChannels.REQUEST_LOGS_BUNDLE_SAVE, async (_, key: string) => {
+  registerMainHandler(IpcChannels.REQUEST_LOGS_BUNDLE_SAVE, async (_, key: string) => {
     const bundle = buildRequestDiagnosticBundle(String(key))
-    const result = await dialog.showSaveDialog({
-      title: 'Save ModelPort diagnostic bundle',
-      defaultPath: `modelport-diagnostic-${String(key).replace(/[^a-zA-Z0-9_-]/g, '_')}.json`,
-      filters: [{ name: 'JSON', extensions: ['json'] }],
-    })
-    if (result.canceled || !result.filePath) return { saved: false }
-    writeFileSync(result.filePath, JSON.stringify(bundle, null, 2), 'utf-8')
-    return { saved: true, path: result.filePath }
+    const target = await requireDesktop('save-diagnostic-bundle').pickSavePath(
+      `modelport-diagnostic-${String(key).replace(/[^a-zA-Z0-9_-]/g, '_')}.json`,
+    )
+    if (target === null) return { saved: false }
+    writeFileSync(target, JSON.stringify(bundle, null, 2), 'utf-8')
+    return { saved: true, path: target }
   })
 
   // ==================== Statistics Handlers ====================
 
-  ipcMain.handle(IpcChannels.STATISTICS_GET, async () => {
+  registerMainHandler(IpcChannels.STATISTICS_GET, async () => {
     return storeManager.getStatistics()
   })
 
-  ipcMain.handle(IpcChannels.STATISTICS_GET_TODAY, async () => {
+  registerMainHandler(IpcChannels.STATISTICS_GET_TODAY, async () => {
     return storeManager.getTodayStatistics()
   })
 
-  ipcMain.handle(IpcChannels.STATISTICS_GET_TOKEN_USAGE, async () => {
+  registerMainHandler(IpcChannels.STATISTICS_GET_TOKEN_USAGE, async () => {
     return storeManager.getTodayTokenUsage()
   })
 
-  ipcMain.handle(IpcChannels.STATISTICS_GET_TOKEN_USAGE_HISTORY, async (_event, days?: number) => {
+  registerMainHandler(IpcChannels.STATISTICS_GET_TOKEN_USAGE_HISTORY, async (_event, days?: number) => {
     return storeManager.getTokenUsageHistory(days)
   })
 
   // The whole retained day map, so the renderer can re-bucket it for any period
   // the user picks without another round trip.
-  ipcMain.handle(IpcChannels.STATISTICS_GET_TOKEN_USAGE_DAYS, async () => {
+  registerMainHandler(IpcChannels.STATISTICS_GET_TOKEN_USAGE_DAYS, async () => {
     return storeManager.getTokenUsageDays()
   })
 
-  ipcMain.handle(IpcChannels.APP_GET_VERSION, async (): Promise<string> => {
-    return app.getVersion()
+  // ==================== 桌面专属通道 ====================
+  // 下面这些需要窗口、托盘、安装器或系统链接处理器。无桌面宿主上 `requireDesktop`
+  // 抛 `desktop-only`，界面拿到的是「这台主机没有这个能力」，而不是一个什么都不做的按钮。
+  registerMainHandler(IpcChannels.APP_GET_VERSION, async (): Promise<string> => {
+    return getHost().getVersion()
   })
 
-  ipcMain.handle(IpcChannels.APP_CHECK_UPDATE, async () => {
+  registerMainHandler(IpcChannels.APP_CHECK_UPDATE, async () => {
+    const desktop = requireDesktop('check-for-updates')
     try {
-      await updaterManager.checkForUpdates()
-      return updaterManager.getStatus()
+      await desktop.checkForUpdates()
+      return desktop.getUpdateStatus()
     } catch (error) {
       console.error('[App] Check update error:', error)
       return {
-        ...updaterManager.getStatus(),
+        ...(desktop.getUpdateStatus() as Record<string, unknown>),
         checking: false,
         error: error instanceof Error ? error.message : String(error),
       }
     }
   })
 
-  ipcMain.handle(IpcChannels.APP_DOWNLOAD_UPDATE, async (): Promise<void> => {
-    await updaterManager.downloadUpdate()
+  registerMainHandler(IpcChannels.APP_DOWNLOAD_UPDATE, async (): Promise<void> => {
+    await requireDesktop('download-update').downloadUpdate()
   })
 
-  ipcMain.handle(IpcChannels.APP_INSTALL_UPDATE, async (): Promise<void> => {
-    updaterManager.quitAndInstall()
+  registerMainHandler(IpcChannels.APP_INSTALL_UPDATE, async (): Promise<void> => {
+    requireDesktop('install-update').quitAndInstall()
   })
 
-  ipcMain.handle(IpcChannels.APP_GET_UPDATE_STATUS, async () => {
-    return updaterManager.getStatus()
+  registerMainHandler(IpcChannels.APP_GET_UPDATE_STATUS, async () => {
+    return requireDesktop('get-update-status').getUpdateStatus()
   })
 
-  ipcMain.handle(IpcChannels.APP_MINIMIZE, async (): Promise<void> => {
-    mainWindow?.minimize()
+  registerMainHandler(IpcChannels.APP_MINIMIZE, async (): Promise<void> => {
+    requireDesktop('minimize').window('minimize')
   })
 
-  ipcMain.handle(IpcChannels.APP_MAXIMIZE, async (): Promise<void> => {
-    if (mainWindow?.isMaximized()) {
-      mainWindow.unmaximize()
-    } else {
-      mainWindow?.maximize()
-    }
+  registerMainHandler(IpcChannels.APP_MAXIMIZE, async (): Promise<void> => {
+    requireDesktop('maximize').window('maximize')
   })
 
-  ipcMain.handle(IpcChannels.APP_CLOSE, async (): Promise<void> => {
+  registerMainHandler(IpcChannels.APP_CLOSE, async (): Promise<void> => {
+    // 「最小化到托盘」还是「真的退出」仍由配置决定；宿主只负责执行那一步。
     const config = storeManager.getConfig()
-    if (config.minimizeToTray) {
-      mainWindow?.hide()
-    } else {
-      app.isQuitting = true
-      mainWindow?.close()
-    }
+    requireDesktop('close-window').window(config.minimizeToTray ? 'hide' : 'close')
   })
 
-  ipcMain.handle(IpcChannels.APP_SHOW_WINDOW, async (): Promise<void> => {
-    mainWindow?.show()
-    mainWindow?.focus()
+  registerMainHandler(IpcChannels.APP_SHOW_WINDOW, async (): Promise<void> => {
+    requireDesktop('show-window').window('show')
   })
 
-  ipcMain.handle(IpcChannels.APP_HIDE_WINDOW, async (): Promise<void> => {
-    mainWindow?.hide()
+  registerMainHandler(IpcChannels.APP_HIDE_WINDOW, async (): Promise<void> => {
+    requireDesktop('hide-window').window('hide')
   })
 
-  ipcMain.handle(IpcChannels.APP_SET_TITLE_BAR_THEME, async (_, theme: 'dark' | 'light'): Promise<void> => {
+  registerMainHandler(IpcChannels.APP_SET_TITLE_BAR_THEME, async (_, theme: 'dark' | 'light'): Promise<void> => {
     if (theme !== 'dark' && theme !== 'light') return
-    setTitleBarTheme(theme)
+    requireDesktop('title-bar-theme').window('title-bar-theme', theme)
   })
 
-  ipcMain.handle(IpcChannels.APP_OPEN_EXTERNAL, async (_, url: string): Promise<void> => {
+  registerMainHandler(IpcChannels.APP_OPEN_EXTERNAL, async (_, url: string): Promise<{ opened: boolean; url: string }> => {
     // `shell.openExternal` 把 URL 交给系统默认处理器：`file://` 会开本地文件、`smb://`
     // 会把 NetBIOS 凭据往外送、`ms-msdt:` / `search-ms:` 有已知的协议处理器滥用。
     // 界面里的外链只有 http(s)，所以其它协议一律拒绝并留痕。
@@ -1617,9 +1606,14 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
       console.warn(`[IPC] Rejected openExternal for protocol ${protocol}`)
       throw new Error(`Refused to open a ${protocol} URL`)
     }
+    const desktop = getHost().desktop
+    if (!desktop) {
+      // 浏览器客户端自己开链接；无头宿主不能假装它已经打开了。
+      return { opened: false, url }
+    }
     try {
-      await shell.openExternal(url)
-      console.log('[APP_OPEN_EXTERNAL] Successfully opened')
+      await desktop.openWithSystemHandler(url)
+      return { opened: true, url }
     } catch (error) {
       console.error('[APP_OPEN_EXTERNAL] Error:', error)
       throw error
@@ -1628,54 +1622,54 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
 
   // ==================== Session Management Handlers ====================
 
-  ipcMain.handle(IpcChannels.SESSION_GET_CONFIG, async (): Promise<SessionConfig> => {
+  registerMainHandler(IpcChannels.SESSION_GET_CONFIG, async (): Promise<SessionConfig> => {
     return sessionManager.getSessionConfig()
   })
 
-  ipcMain.handle(IpcChannels.SESSION_UPDATE_CONFIG, async (_, updates: Partial<SessionConfig>): Promise<SessionConfig> => {
+  registerMainHandler(IpcChannels.SESSION_UPDATE_CONFIG, async (_, updates: Partial<SessionConfig>): Promise<SessionConfig> => {
     return sessionManager.updateSessionConfig(updates)
   })
 
-  ipcMain.handle(IpcChannels.SESSION_GET_ALL, async (): Promise<SessionRecord[]> => {
+  registerMainHandler(IpcChannels.SESSION_GET_ALL, async (): Promise<SessionRecord[]> => {
     return sessionManager.getAllSessions()
   })
 
-  ipcMain.handle(IpcChannels.SESSION_GET_ACTIVE, async (): Promise<SessionRecord[]> => {
+  registerMainHandler(IpcChannels.SESSION_GET_ACTIVE, async (): Promise<SessionRecord[]> => {
     return sessionManager.getAllActiveSessions()
   })
 
-  ipcMain.handle(IpcChannels.SESSION_GET_BY_ID, async (_, id: string): Promise<SessionRecord | undefined> => {
+  registerMainHandler(IpcChannels.SESSION_GET_BY_ID, async (_, id: string): Promise<SessionRecord | undefined> => {
     return sessionManager.getSession(id)
   })
 
-  ipcMain.handle(IpcChannels.SESSION_GET_BY_ACCOUNT, async (_, accountId: string): Promise<SessionRecord[]> => {
+  registerMainHandler(IpcChannels.SESSION_GET_BY_ACCOUNT, async (_, accountId: string): Promise<SessionRecord[]> => {
     return sessionManager.getSessionsByAccount(accountId)
   })
 
-  ipcMain.handle(IpcChannels.SESSION_GET_BY_PROVIDER, async (_, providerId: string): Promise<SessionRecord[]> => {
+  registerMainHandler(IpcChannels.SESSION_GET_BY_PROVIDER, async (_, providerId: string): Promise<SessionRecord[]> => {
     return sessionManager.getSessionsByProvider(providerId)
   })
 
-  ipcMain.handle(IpcChannels.SESSION_DELETE, async (_, id: string): Promise<boolean> => {
+  registerMainHandler(IpcChannels.SESSION_DELETE, async (_, id: string): Promise<boolean> => {
     return sessionManager.deleteSession(id)
   })
 
-  ipcMain.handle(IpcChannels.SESSION_CLEAR_ALL, async (): Promise<void> => {
+  registerMainHandler(IpcChannels.SESSION_CLEAR_ALL, async (): Promise<void> => {
     return sessionManager.clearAllSessions()
   })
 
-  ipcMain.handle(IpcChannels.SESSION_CLEAN_EXPIRED, async (): Promise<number> => {
+  registerMainHandler(IpcChannels.SESSION_CLEAN_EXPIRED, async (): Promise<number> => {
     return sessionManager.cleanExpiredSessions()
   })
 
   // ==================== Management API Handlers ====================
 
-  ipcMain.handle(IpcChannels.MANAGEMENT_API_GET_CONFIG, async (): Promise<ManagementApiConfig> => {
+  registerMainHandler(IpcChannels.MANAGEMENT_API_GET_CONFIG, async (): Promise<ManagementApiConfig> => {
     const config = ConfigManager.get()
     return config.managementApi
   })
 
-  ipcMain.handle(IpcChannels.MANAGEMENT_API_UPDATE_CONFIG, async (_, updates: Partial<ManagementApiConfig>): Promise<ManagementApiConfig> => {
+  registerMainHandler(IpcChannels.MANAGEMENT_API_UPDATE_CONFIG, async (_, updates: Partial<ManagementApiConfig>): Promise<ManagementApiConfig> => {
     const config = ConfigManager.get()
     const currentManagementConfig = config.managementApi
     const newManagementConfig = { ...currentManagementConfig, ...updates }
@@ -1685,7 +1679,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
     return newManagementConfig
   })
 
-  ipcMain.handle(IpcChannels.MANAGEMENT_API_GENERATE_SECRET, async (): Promise<string> => {
+  registerMainHandler(IpcChannels.MANAGEMENT_API_GENERATE_SECRET, async (): Promise<string> => {
     const newSecret = generateManagementSecret()
     
     const config = ConfigManager.get()
@@ -1697,14 +1691,14 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
 
   // ==================== Context Management Handlers ====================
 
-  ipcMain.handle(IpcChannels.CONTEXT_MANAGEMENT_GET_CONFIG, async () => {
+  registerMainHandler(IpcChannels.CONTEXT_MANAGEMENT_GET_CONFIG, async () => {
     const config = ConfigManager.get()
     // 缺省值只有一处权威（`store/types.ts`）。这里以前抄了一份，而且抄错了：
     // 那份写 `enabled: true`，出厂默认是 `false` —— 兜底一旦生效就等于面板报一个和运行态相反的开关。
     return config.contextManagement || DEFAULT_CONTEXT_MANAGEMENT_CONFIG
   })
 
-  ipcMain.handle(IpcChannels.CONTEXT_MANAGEMENT_UPDATE_CONFIG, async (_, updates: Partial<any>) => {
+  registerMainHandler(IpcChannels.CONTEXT_MANAGEMENT_UPDATE_CONFIG, async (_, updates: Partial<any>) => {
     const config = ConfigManager.get()
     const currentContextConfig = config.contextManagement || DEFAULT_CONTEXT_MANAGEMENT_CONFIG
     const newContextConfig = {
@@ -1723,13 +1717,13 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
 
   // 模型清单定时刷新：状态只读 + 手动触发。配置变更走 `config:update` 的
   // `modelListRefresh` 字段（CONFIG_UPDATE handler 会重新 `configureModelListRefresh`）。
-  ipcMain.handle(IpcChannels.MODEL_REFRESH_GET_STATUS, async () => {
+  registerMainHandler(IpcChannels.MODEL_REFRESH_GET_STATUS, async () => {
     return {
       config: storeManager.getConfig().modelListRefresh ?? null,
       tasks: schedulerStatus(),
     }
   })
-  ipcMain.handle(IpcChannels.MODEL_REFRESH_TRIGGER_NOW, async () => {
+  registerMainHandler(IpcChannels.MODEL_REFRESH_TRIGGER_NOW, async () => {
     const refresh = storeManager.getConfig().modelListRefresh
     if (!refresh || !refresh.enabled) return { ok: false, reason: 'disabled' }
     await triggerModelListRefreshNow()
@@ -1737,7 +1731,7 @@ export async function registerIpcHandlers(mainWindow: BrowserWindow | null): Pro
   })
 
   oauthManager.on('progress', (event) => {
-    mainWindow?.webContents.send(IpcChannels.OAUTH_PROGRESS, event)
+    getHost().push(IpcChannels.OAUTH_PROGRESS, event)
   })
 }
 
@@ -1761,12 +1755,12 @@ export function getProxyStatus(): ProxyStatus {
  * 它与正常路径的 `app:getVersion` / `app:close` 不重复注册 —— 那两个 handler
  * 现在无论存储是否可用都会由主流程注册，二次注册会让 ipcMain.handle 直接抛错。
  */
-function registerStoreRetryHandler(mainWindow: BrowserWindow | null): void {
-  ipcMain.handle(IpcChannels.STORE_RETRY_INIT, async (): Promise<{ success: boolean; error?: string }> => {
+function registerStoreRetryHandler(mainWindow: RendererSink | null): void {
+  registerMainHandler(IpcChannels.STORE_RETRY_INIT, async (): Promise<{ success: boolean; error?: string }> => {
     try {
       await storeManager.initialize()
       if (!storeManager.hasInitializationError()) {
-        mainWindow?.webContents.send(IpcChannels.STORE_INIT_ERROR, { message: null })
+        getHost().push(IpcChannels.STORE_INIT_ERROR, { message: null })
         return { success: true }
       }
       return { 

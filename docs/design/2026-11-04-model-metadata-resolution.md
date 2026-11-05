@@ -123,8 +123,8 @@ provider 存在这个概念；`free` 对 `account`（`· 免费` 标签 / 上游
 也不算缺口。
 
 **关键 ≠ 自动补齐**：分组说的是「路由会不会因为这个属性不知道而判断错」，不是「批量一定要
-把它填上」。`reasoning` 是关键属性，但标准库的值只允许逐字段手工采用（§9.3），所以它可能长期
-留在缺口里——那是一个诚实的「上游没证据」，不是一个待办。
+把它填上」。`reasoning` 是关键属性，标准库两个方向都能批量采用、`no` 只写空槽（§9.3），
+所以它仍可能留在缺口里——那是一个诚实的「上游没证据」，不是一个待办。
 
 > 这一条是 1.7.2 那轮观感「补齐没效果」的根因：旧口径把「已完整标注」定义成九项全有来源，
 > 于是聚合侧 570 行因为 `weight` 按构造补不上而永远挂在「仍有缺失」里——1000 行报 998 行缺失，
@@ -174,9 +174,12 @@ coverageGaps[attr] = applicable - known
 | `main/providers/modelCatalogService.ts`（新增） | 显式刷新、候选查询、逐字段采用/撤销 |
 | `main/proxy/modelCapabilities.ts` | 静态表保留；`autoRouting.ts` 在其后叠加家族规则 |
 | `main/proxy/autoRouting.ts` | `ModelCapability` 增加 `maxOutputTokens` 与来源；推定值进入硬过滤/打分 |
-| `renderer/components/models/ModelMetadataPanel.tsx` | 覆盖率看板 + 标准库快照卡片 + 待标注队列 + 候选/采用对话框 |
+| `renderer/components/models/ModelMetadataPanel.tsx` | 覆盖率看板 + 标准库快照卡片 + 待标注队列（逐模型对话框已抽出共用） |
+| `renderer/components/models/ModelAnnotationDialog.tsx`（2026-11-05 新增） | 逐模型标注对话框，三段：这一家已声明的参数（带出处）→ 标准库逐字段采用/撤销 → 手工标注。`ModelMarkEditor` 与路由池编辑器共用一份表单，三处入口共用一份对话框 |
+| `renderer/components/models/CatalogScopeBatchButton.tsx`（2026-11-05 新增） | 按单一供应商范围批量补全：估算 → 确认（含请求数与跳过数）→ 主进程任务；探测开关默认关闭 |
 | `renderer/pages/Models.tsx` | 「标注覆盖」页签入口 |
-| IPC | `providers:getModelMetadata`、`providers:probeModel`、`providers:cancelProbe`、`providers:getProbeJobs`、`providers:probeProgress`（单向事件）、`providers:getCatalogStatuses`、`providers:refreshCatalog`、`providers:getCatalogCandidates`、`providers:adoptCatalogField`、`providers:revokeCatalogAdoption`（刷新/探测/批量都只在用户显式触发时执行） |
+| `renderer/components/aggregate/AggregateDetail.tsx`、`renderer/pages/Channels.tsx`（2026-11-05） | 两个模型界面的行内「标注」入口 + 卡片头部的按本范围批量补全。渠道侧展示名由 `shared/channels.ts::channelModelDisplayName` 现算（与 `syncProviders` 写目录同一个函数）；`disabled` / `dead` 的渠道模型不在目录里，入口禁用并说明原因 |
+| IPC | `providers:getModelMetadata`、`providers:getModelMetadataOne`（单模型解析，逐模型入口用它，不重算整张报表）、`providers:probeModel`、`providers:cancelProbe`、`providers:getProbeJobs`、`providers:probeProgress`（单向事件）、`providers:getCatalogStatuses`、`providers:refreshCatalog`、`providers:getCatalogCandidates`、`providers:adoptCatalogField`、`providers:revokeCatalogAdoption`、`providers:estimateCatalogBatch` / `providers:startCatalogBatch`（可选 `providerId` 收口范围，估算与启动必须同范围）（刷新/探测/批量都只在用户显式触发时执行） |
 
 不修改 `docs/README.md` 索引（另一任务在整理索引）；索引需要补的条目见交付说明。
 
@@ -209,7 +212,8 @@ coverageGaps[attr] = applicable - known
   （人工标记、上游声明）不进入候选。面板里只有一个「同时执行探测」开关（默认关闭）；开启
   时开始前一次性展示合计预估（探测请求条数与 token），确认后全程不再询问，关闭时零确认。
   采用口径：`exact` 与 `alias` 自动采用并在结果里标记来源（alias 标「别名匹配」），
-  `family` 只记为候选、不自动采用；价格永不自动采用；采用仍逐字段可撤销，人工标记永不
+  `family` 只记为候选、不自动采用；价格永不自动采用，`reasoning` 两个方向都采用、`no` 只写空槽（§9.3）；
+  采用仍逐字段可撤销，人工标记永不
   被覆盖。跨模型并发 1，内部批大小 10 只作为节奏控制、对用户不可见；遇 429/限流对当前批
   指数退避（2s 起、上限 30s），单模型失败记失败并继续下一个。
 - **编排在主进程**：批量任务是主进程持有的后台 job（`modelCatalogBatchRunner`），渲染层
@@ -352,6 +356,12 @@ interface CatalogStore {
 
 ### 9.3 匹配策略（三档 + 置信度）
 
+**匹配输入是上游原名，不是网关的展示名**（`upstreamModelName`）：账号渠道的展示名是
+`${供应商名} / ${上游名}` 拼出来的（`Trae (字节) / DeepSeek-4.1-Flash`），标准库里不存在
+这种 id，拿它去匹配 exact 必空、只能掉到 alias 档，模糊匹配的分词也会被供应商名污染。
+只剥这一种由网关自己拼出的前缀；聚合/自定义供应商的名字与用户自定义名原样使用。
+2026-11-04 远程网关实测：980 行里剥掉前缀后 exact 命中从 184 行升到 264 行。
+
 | 档位 | 规则 | 例子 |
 | --- | --- | --- |
 | `exact` | 原文 `actualModelId` 或 `displayName` 与条目 `id` 完全相同 | `gpt-4o` |
@@ -359,15 +369,21 @@ interface CatalogStore {
 | `family` | `catalogFamilyKey`：别名键的第一段且长度 ≥ 3 | `claude-3-opus` → 家族 `claude` |
 
 - 三档按上表顺序合并、同一 `entry` 只保留最高档；结果按 exact → alias → family 排序，
-  最多返回 5 条。
+  同一档内先给**携带路由能力多的**条目（`adoptableFieldCount`，价格不计），来源声明顺序再
+  兜底，最多返回 5 条。只按 `catalogId` 字典序排会让 LiteLLM 稳定压住 models.dev，而 LiteLLM
+  台账没有 `reasoning` 这一项：一个模型只要有 5 条以上同名条目，唯一能补上「推理」的那条候选
+  连显示机会都没有（2026-11-04 远程网关实测：980 行里 306 行如此）。
 - **默认不自动采用**：界面列出候选与置信度徽标，用户必须逐字段点击「采用」；刷新快照
   或打开页面本身不会改变任何模型的可路由能力。唯一的批量入口是用户点击「全部补齐」后
   由主进程自动执行：`exact`/`alias` 自动采用（alias 在结果中标注来源），`family` 只作
-  候选，价格与 `reasoning` 不参与自动采用（`CATALOG_BATCH_AUTO_FIELDS`）；采用仍按字段写入 ledger。
-- **`reasoning` 只允许逐字段手工采用**：它是 `hardFilterFailure` 的判据之一（请求要求思考时，
-  `reasoning: 'no'` 的候选被排除），而第三方台账对它的 `false` 常常只是「按默认回答」。批量写入
-  等于让一份社区表格获得把模型从请求里筛掉的权力；误判的代价是用户看不见那个模型，不是一次
-  次优路由。想要这个效果就得在候选对话框里逐字段点「采用」——显式动作，随时可撤销。
+  候选，价格不参与自动采用（`CATALOG_BATCH_AUTO_FIELDS`）；采用仍按字段写入 ledger。
+- **`reasoning` 两个方向都进批量，但口径不同**（2026-11-04 用户拍板放开，原裁定只允许手工）：
+  `yes` 是补强，可覆盖 `inferred` 级；`no` 是**排除性证据**（请求要求思考时该候选会被
+  `hardFilterFailure` 排除），只写进行上完全没有证据的格子，绝不覆盖家族规则/旁表给出的 `yes`。
+  实测依据（同一批 980 行目录）：models.dev 说 `no` 的 183 行里 183 行没有相反证据，仅 8 行
+  与家族规则冲突；由同一份 models.dev 生成的 93 条旁表里 `reasoning: 'yes'` 的 83 条，
+  原文 0 条说 `no` —— 原裁定担心的「`false` 只是按默认回答」在这份数据上不成立。
+  已声明级（人工标记 / 上游声明 / 成本账本）两个方向都不覆盖。
 - 候选查询一次建索引（`buildCatalogIndex`），不为每条模型重扫全量快照。
 
 ### 9.4 Adoption ledger（按字段采用、可撤销）

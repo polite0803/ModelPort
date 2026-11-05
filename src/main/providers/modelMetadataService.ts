@@ -14,13 +14,16 @@ import { aggregateCostOf } from '../../shared/aggregateCost.ts'
 import { familyRuleLayer } from '../../shared/modelFamilyRules.ts'
 import {
   buildUnclassifiedQueue,
+  classifyModelGap,
   computeMetadataCoverage,
   isRoutingComplete,
   mergeModelMetadata,
+  routingGapsOf,
   unclassifiedAttributes,
   type MetadataAttribute,
   type MetadataCoverage,
   type MetadataLayer,
+  type ModelGapKind,
   type ModelMetadata,
   type ModelMetadataReport,
   type ModelMetadataRow,
@@ -30,9 +33,13 @@ import {
   adoptionsForModel,
   catalogAdoptionEvidence,
   catalogAdoptionHint,
+  catalogIndexFromStore,
+  checkCatalogCoverage,
+  upstreamModelName,
   type CatalogAdoption,
 } from '../../shared/modelCatalog.ts'
 import { readModelProbeSidecar } from './modelProbeStore.ts'
+import { readEffectiveCatalogStore } from './modelCatalogStore.ts'
 
 function costLedgerLayer(provider: Provider, actualModelId: string): MetadataLayer | undefined {
   if (provider.type !== 'aggregate') return undefined
@@ -207,35 +214,69 @@ function coverageGapsOf(coverage: MetadataCoverage): Record<MetadataAttribute, n
   return gaps
 }
 
-/** 汇总当前目录的元数据解析与覆盖率。纯读，可随时重算。 */
+/**
+ * 汇总当前目录的元数据解析与覆盖率。纯读，可随时重算。
+ *
+ * `providerId` 给定时只遍历这一家：逐模型/逐渠道的批量补全只要本范围的队列，
+ * 不该为一次点击遍历 89 条目 × 570 模型并重建整张目录索引
+ * （store 每次读取还带整份解密，见 `AGENTS.md` §Data Storage）。
+ * 范围版的 `totals` / `coverage` 只描述这一家，界面不得拿它当全局覆盖率显示。
+ */
 export async function getModelMetadataReport(
   nowMs: number = Date.now(),
+  providerId?: string,
 ): Promise<ModelMetadataReport> {
   const probes = await readModelProbeSidecar()
   const marks = storeManager.getUserModelMarks()
   const adoptions = storeManager.getCatalogAdoptions()
   const modelUsage = storeManager.getStatistics().modelUsage
 
+  // 目录候选只建一次索引；`checkCatalogCoverage` 只查 exact / alias，不为每行跑模糊匹配。
+  const { store: catalogStore } = await readEffectiveCatalogStore()
+  const catalogIndex = catalogIndexFromStore(catalogStore)
+
   const records: ModelMetadata[] = []
+  const gapKindByKey = new Map<string, ModelGapKind>()
+  const incompleteByKind: Record<ModelGapKind, number> = {
+    adoptable: 0,
+    'missing-field': 0,
+    'no-candidate': 0,
+    'not-chat': 0,
+  }
   for (const provider of storeManager.getProviders()) {
+    if (providerId !== undefined && provider.id !== providerId) continue
     for (const model of storeManager.getModelCatalogue(provider.id)) {
-      records.push(
-        mergeModelMetadata({
-          providerId: provider.id,
+      const metadata = mergeModelMetadata({
+        providerId: provider.id,
+        displayName: model.displayName,
+        actualModelId: model.actualModelId,
+        providerType: provider.type,
+        layers: layersForModel({
+          provider,
           displayName: model.displayName,
           actualModelId: model.actualModelId,
-          providerType: provider.type,
-          layers: layersForModel({
-            provider,
-            displayName: model.displayName,
-            actualModelId: model.actualModelId,
-            marks,
-            adoptions,
-            probes,
-            nowMs,
-          }),
+          marks,
+          adoptions,
+          probes,
+          nowMs,
         }),
-      )
+      })
+      records.push(metadata)
+
+      // 分桶只回答「剩下的缺口能不能补」，不改任何标注：`adoptable` 才值得再跑一次批量。
+      const routingGaps = routingGapsOf(metadata)
+      const check = checkCatalogCoverage(catalogIndex, {
+        modelId: metadata.actualModelId,
+        displayName: upstreamModelName(provider.name, metadata.displayName),
+        missing: routingGaps.length > 0 ? routingGaps : unclassifiedAttributes(metadata),
+      })
+      const kind = classifyModelGap({
+        modelId: metadata.actualModelId,
+        hasAutoMatch: check.hasAutoMatch,
+        canFillAny: check.canFillAny,
+      })
+      gapKindByKey.set(`${provider.id}\u0000${metadata.displayName}`, kind)
+      if (routingGaps.length > 0) incompleteByKind[kind] += 1
     }
   }
 
@@ -250,6 +291,9 @@ export async function getModelMetadataReport(
     calls: row.calls,
     missing: row.missing,
     critical: row.critical,
+    gapKind:
+      gapKindByKey.get(`${row.metadata.providerId}\u0000${row.metadata.displayName}`)
+      ?? 'missing-field',
   }))
 
   return {
@@ -258,6 +302,7 @@ export async function getModelMetadataReport(
       models: records.length,
       routingComplete,
       routingIncomplete: records.length - routingComplete,
+      routingIncompleteByKind: incompleteByKind,
       fullyAnnotated,
     },
     coverage,

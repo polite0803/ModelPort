@@ -76,25 +76,9 @@ export function pickSlot(
 /** 匿名槽的固定 id（与账号池 id 空间隔离，不可能撞）。 */
 export const ANONYMOUS_SLOT_ID = 'anonymous'
 
-/** 新账号的初始指纹。 */
+/** 新账号的初始指纹（project id 只由账号身份决定，一个账号一份）。 */
 export function newAccountFingerprint(apiKey: string): OpencodeFingerprint {
-  return { projectId: deriveProjectId(apiKey, 0), generation: 0 }
-}
-
-/**
- * 轮换到下一代指纹。
- *
- * ⚠️ **返回新对象**而不是就地改：调用方（RPC）常把旧指纹留在内存快照里，
- * 就地改会让已持有的引用提前变成新代次（写单测时实测到过）。
- *
- * ⚠️ project id 用**上一代的 projectId** 作 identity 派生，而非原始 key ——
- * 本函数不持有 key（调用方可能只有代次），这样仍能保证「代次 +1 ⇒ 指纹变化」。
- */
-export function nextFingerprintGeneration(current: OpencodeFingerprint): OpencodeFingerprint {
-  const generation = Number.isSafeInteger(current.generation) && current.generation >= 0
-    ? current.generation + 1
-    : 1
-  return { projectId: deriveProjectId(current.projectId, generation), generation }
+  return { projectId: deriveProjectId(apiKey) }
 }
 
 /**
@@ -146,7 +130,7 @@ export function listIdentitySlots(
       kind: anonymous ? 'anonymous' : 'account',
       apiKey: entry.apiKey,
       proxy: normalized !== undefined && normalized.ok ? normalized.proxy : undefined,
-      fingerprint: entry.fingerprint ?? { projectId: deriveProjectId(identity, 0), generation: 0 },
+      fingerprint: entry.fingerprint ?? { projectId: deriveProjectId(identity) },
       userAgent,
     })
   }

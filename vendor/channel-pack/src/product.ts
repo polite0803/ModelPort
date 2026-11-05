@@ -29,6 +29,8 @@
  * 为保持一致性，这些字段全部维持字面量写法。
  */
 
+import { codebuddyClientVersion, workbuddyClientVersion } from './client-identity.js'
+
 /** 兜底模型目录中的一个条目（字段对齐远端 `/v3/config` 的 `data.models[]`）。 */
 export interface BuddyFallbackModel {
   id: string
@@ -58,6 +60,22 @@ export interface BuddyUserAgentRule {
   ua: string
 }
 
+export type BuddyUserAgentForm = 'intl' | 'cn'
+
+/**
+ * 根据形态渲染 WorkBuddy / CodeBuddy UA。
+ *
+ * 三段式 `Brand/<v> Middle/<v> CLI/<v>`，中间槽 `WorkBuddy AI` 仅在国际版使用。
+ *
+ * @param form   'intl' → 国际版（含 `WorkBuddy AI`）；'cn' → 国内版
+ * @param version 动态客户端版本号（由 client-identity.ts 供给）
+ */
+export function buddyUserAgent(form: BuddyUserAgentForm, version: string): string {
+  return form === 'intl'
+    ? `WorkBuddy/${version} WorkBuddy AI/${version} CLI/${version}`
+    : `WorkBuddy/${version} WorkBuddy/${version} CLI/${version}`
+}
+
 /**
  * 国际版（WorkBuddy AI）模型线 → UA 分档规则。
  *
@@ -67,8 +85,8 @@ export interface BuddyUserAgentRule {
  * 虽在国际版池中也可见，但仍沿用国内客户端形态（`WorkBuddy/<ver> WorkBuddy/...`），
  * 与 realm 无关。
  */
-const WORKBUDDY_UA_INTL = 'WorkBuddy/5.5.2 WorkBuddy AI/5.5.2 CLI/5.5.2'
-const WORKBUDDY_UA_CN = 'WorkBuddy/5.5.2 WorkBuddy/5.5.2 CLI/5.5.2'
+const WORKBUDDY_UA_INTL = 'WorkBuddy/{v} WorkBuddy AI/{v} CLI/{v}'
+const WORKBUDDY_UA_CN = 'WorkBuddy/{v} WorkBuddy/{v} CLI/{v}'
 
 /** 一个 CodeBuddy 系产品的全部差异配置。 */
 export interface BuddyProduct {
@@ -94,7 +112,8 @@ export interface BuddyProduct {
    * 默认 User-Agent（无按模型分档命中时使用）。
    *
    * 腾讯后台的「使用端」列按出站 UA 归因，故该值必须**含对应产品品牌字样**
-   * （`WorkBuddy/...` 或 `CodeBuddyIDE/...`），否则账单显示为 `-`。
+   * （`WorkBuddy/...`；2026-11-05 起 CodeBuddy（腾讯）已更名为 WorkBuddy
+   * （国内版），不再发 `CodeBuddyIDE/...`），否则账单显示为 `-`。
    */
   userAgent: string
   /**
@@ -162,7 +181,7 @@ export interface BuddyProduct {
  * `src/buddy.ts` / `src/buddy-auth.ts` 改为从本模块取值后即可删除）：
  * - `platform: 'ide'`          ↔ `src/buddy.ts:24`  `PLATFORM`
  * - `productCode: 'codebuddy'` ↔ `src/buddy.ts:79`  `BUDDY_PRODUCT_CODE`
- * - `userAgent: 'CodeBuddyIDE/1.106.1'` ↔ `src/buddy.ts:77`  `BUDDY_USER_AGENT`
+ * - `userAgent: 'WorkBuddy/5.9.3 ...'` ↔ `src/buddy.ts` `BUDDY_USER_AGENT`
  * - `defaultCredentialRef: 'BUDDY_ACCESS_TOKEN'` ↔ `src/buddy-auth.ts:27`  `BUDDY_CREDENTIAL_REF`
  * - `endpoint`/`apiDomain`     ↔ `src/buddy.ts:20/86`  `API_ENDPOINT` / `API_DOMAIN`
  *
@@ -270,14 +289,23 @@ export const CODEBUDDY: BuddyProduct = {
   platform: 'ide',
   endpoint: 'https://copilot.tencent.com',
   apiDomain: 'copilot.tencent.com',
-  displayName: 'CodeBuddy (腾讯)',
+  displayName: 'WorkBuddy (国内版)',
   productCode: 'codebuddy',
-  userAgent: 'CodeBuddyIDE/1.106.1',
-  // 中国版只有一条产品线，无需按模型分档：全部模型沿用 IDE UA。
+  // 2026-11-05 起官方把 CodeBuddy（腾讯）更名为 WorkBuddy（国内版）：客户端
+  // 就是本机安装的 WorkBuddy 桌面端（5.9.3，endpoint www.workbuddy.cn），UA
+  // 是国内客户端形态 `WorkBuddy/<v> WorkBuddy/<v> CLI/<v>`，版本号与国际版
+  // 渠道同源（client-identity.ts 的取值链）。旧的 `CodeBuddyIDE/1.106.1` 是
+  // 改名前抓的 VS Code 基线，`CodeBuddyIDE/4.12.3` 是另一条 IDE 产品线，
+  // 两者都不是现役国内客户端的形态。
+  get userAgent(): string {
+    return buddyUserAgent('cn', codebuddyClientVersion().version)
+  },
+  // 国内端点只服务国内模型池，无需按模型族分档：全部模型沿用国内客户端形态。
   userAgentByModelFamily: [],
-  attributionName: 'CodeBuddy',
-  clientVersion: '1.106.1',
-  cliVersion: '2.137.1',
+  attributionName: 'WorkBuddy',
+  clientVersion: '5.9.3',
+  // WorkBuddy 桌面端内置 CLI（@genie/agent-cli）2026-11-05 本机实测版本。
+  cliVersion: '2.165.0',
   defaultCredentialRef: 'BUDDY_ACCESS_TOKEN',
   appendSessionParams: false,
   fallbackModels: CODEBUDDY_FALLBACK_MODELS,
@@ -386,7 +414,9 @@ export const WORKBUDDY: BuddyProduct = {
   displayName: 'WorkBuddy (国际版)',
   productCode: 'workbuddy',
   // 默认档：国际版产品形态（无按模型命中时使用）。
-  userAgent: WORKBUDDY_UA_INTL,
+  get userAgent(): string {
+    return buddyUserAgent('intl', workbuddyClientVersion().version)
+  },
   userAgentByModelFamily: [
     // 国际版独有模型线（GPT / Gemini / Claude 系）→ 国际版形态。
     { match: 'gpt-', ua: WORKBUDDY_UA_INTL },
@@ -426,6 +456,24 @@ export function productById(id: string): BuddyProduct | undefined {
  * @param model - 模型 id（如 `gpt-5.6-sol` / `glm-5.2`）
  */
 export function resolveUserAgent(product: BuddyProduct, model: string): string {
+  const base = resolveBaseUserAgent(product, model)
+  // 优先使用结构化模板渲染：把 UA 中的 {v} 替换为动态客户端版本
+  if (product.id === 'workbuddy') {
+    const version = workbuddyClientVersion().version
+    if (version !== undefined) return base.replaceAll('{v}', version)
+  } else if (product.id === 'buddy') {
+    const version = codebuddyClientVersion().version
+    if (version !== undefined) return base.replaceAll('{v}', version)
+  }
+  // 旧机制：split/join 回退（兼容无模板的情况）
+  const version = product.id === 'workbuddy'
+    ? workbuddyClientVersion().version
+    : product.id === 'buddy' ? codebuddyClientVersion().version : undefined
+  if (version === undefined) return base
+  return base.split(product.clientVersion).join(version)
+}
+
+function resolveBaseUserAgent(product: BuddyProduct, model: string): string {
   for (const rule of product.userAgentByModelFamily ?? []) {
     if (model.startsWith(rule.match)) return rule.ua
   }

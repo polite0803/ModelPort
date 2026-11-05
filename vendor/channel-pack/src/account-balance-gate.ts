@@ -111,6 +111,25 @@ export class AccountBalanceGate {
     return stateToUsable(await pending)
   }
 
+  /**
+   * Hot-path read: **never** starts a probe inline.
+   *
+   * Selection runs once per request, so awaiting a probe here turns every
+   * account pick into an upstream call - on top of the request itself, against
+   * an account the vendor does not authorise this client for. The deferred
+   * probe still runs (deduped by `inFlight`), so the next request within the
+   * TTL gates on a real reading; this one proceeds ungated, which is the same
+   * fail-open contract as a probe that timed out.
+   */
+  usableFromCache(accountId: string, credential: unknown): boolean | undefined {
+    const cached = this.cache.get(accountId)
+    if (cached !== undefined && cached.expiresAt > this.now()) {
+      return stateToUsable(cached.state)
+    }
+    void this.usable(accountId, credential).catch(() => undefined)
+    return undefined
+  }
+
   /** 让指定账号（或全部）的缓存立刻失效；换号/标记限流后可调用。 */
   invalidate(accountId?: string): void {
     if (accountId === undefined) this.cache.clear()

@@ -29,7 +29,7 @@ import {
 import { LOBSTERAI_REFRESH_PATH } from './lobsterai.js'
 import { buildLobsteraiModelsUrl, parseLobsteraiModels, type LobsteraiRemoteModel } from './lobsterai-adapter.js'
 import { LOBSTERAI, type LobsteraiProduct } from './lobsterai-product.js'
-import { classifyLobsteraiError, isLobsteraiTerminalError } from './lobsterai-errors.js'
+import { classifyLobsteraiError, isLobsteraiServiceStopped, isLobsteraiTerminalError } from './lobsterai-errors.js'
 import {
   exchangeLobsteraiAuthCode,
   runLobsteraiLoginFlow,
@@ -511,7 +511,7 @@ export class LobsteraiAuth extends Service {
       // 分类后决定「终态」还是「可重试」：40100/40101 等会话死亡标记
       // 才是终态；业务码里的其他失败（如瞬时 5xx 被包成 code!=0）应可重试。
       const kind = classifyLobsteraiError(response.status, rawText)
-      if (response.status === 401 || response.status === 403 || isLobsteraiTerminalError(kind)) {
+      if (response.status === 401 || response.status === 403 || isLobsteraiTerminalError(kind) || isLobsteraiServiceStopped(kind)) {
         throw new RefreshTokenExpiredError(envelope.message)
       }
       throw new Error(`LobsterAI 续期失败：${envelope.message}`)

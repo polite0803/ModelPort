@@ -1,0 +1,55 @@
+# electron-builder config for the Windows-native shell (a client window + tray only).
+#
+# Kept in its own file rather than a `build` section because the two products must not
+# share an identity: same `appId` would collide on the Windows registry keys, the
+# uninstaller, the taskbar group and the auto-update channel, and the shell's userData is
+# deliberately `<appData>/modelport-shell` (see src/shell/main.ts).
+#
+# `publish: null` is load-bearing. electron-builder writes the Windows update metadata
+# under a fixed name (`latest.yml`); if the shell published it too, the two artifacts
+# would overwrite each other in the same GitHub Release and the main app's auto-updater
+# would start downloading the shell binary. The shell ships no updater at all - the CI
+# step uploads its installer with `gh release upload` instead of `--publish=always`.
+
+appId: com.modelport.shell
+productName: ModelPort Shell
+copyright: MIT
+
+directories:
+  output: dist-shell
+
+extraMetadata:
+  name: modelport-shell
+  main: out/main/shell.js
+
+files:
+  - package.json
+  - out/main/shell.js
+  - out/preload/shell-preload.js
+  - out/preload/shell-prompt-preload.js
+  - "!node_modules/**/*"
+
+extraResources:
+  - from: build
+    to: build
+    filter:
+      - icon.png
+      - icon.ico
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: build/icon.ico
+  artifactName: ModelPort-Shell-${version}-${arch}-setup.${ext}
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: ModelPort Shell
+  license: LICENSE
+  artifactName: ModelPort-Shell-${version}-${arch}-setup.${ext}
+
+publish: null

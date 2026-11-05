@@ -12,9 +12,12 @@ import {
   Search,
   Settings2,
   ShieldCheck,
+  Tags,
   Trash2,
   Wifi,
 } from 'lucide-react'
+import { CatalogScopeBatchButton } from '@/components/models/CatalogScopeBatchButton'
+import { ModelAnnotationDialog } from '@/components/models/ModelAnnotationDialog'
 import type {
   AggregateDetail,
   AggregateEntry,
@@ -1008,6 +1011,8 @@ function ModelsCard(props: {
   const [testResults, setTestResults] = useState<Record<string, AggregateModelTestResult>>({})
   const [paramModel, setParamModel] = useState<string | null>(null)
   const [paramDraft, setParamDraft] = useState<ParamDraft | null>(null)
+  /** 逐模型标注对话框的目标行（providerId 就是 `entry.id`，聚合供应商记录与目录条目同名）。 */
+  const [annotateModel, setAnnotateModel] = useState<AggregateModelInfo | null>(null)
   const [addOpen, setAddOpen] = useState(false)
   const [newModelId, setNewModelId] = useState('')
   const [adding, setAdding] = useState(false)
@@ -1264,6 +1269,12 @@ function ModelsCard(props: {
             {testingAll ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <ShieldCheck className="mr-1.5 h-4 w-4" />}
             {testingAll ? t('aggregate.manage.models.testing') : t('aggregate.manage.models.testAll')}
           </Button>
+          {/* 按本条目批量补全：先估算再确认，范围只这一家（见 CatalogScopeBatchButton） */}
+          <CatalogScopeBatchButton
+            providerId={entry.id}
+            scopeLabel={entry.name}
+            onFinished={() => void onRefresh()}
+          />
           <Button
             variant="ghost"
             size="sm"
@@ -1387,6 +1398,15 @@ function ModelsCard(props: {
                         >
                           <Settings2 className="h-3.5 w-3.5" />
                         </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2"
+                          title={`${t('aggregate.manage.models.annotate')} · ${t('aggregate.manage.models.annotateHint')}`}
+                          onClick={() => setAnnotateModel(model)}
+                        >
+                          <Tags className="h-3.5 w-3.5" />
+                        </Button>
                         <Switch
                           checked={model.served}
                           disabled={busyModel === model.id}
@@ -1493,6 +1513,16 @@ function ModelsCard(props: {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {annotateModel && (
+        <ModelAnnotationDialog
+          providerId={entry.id}
+          displayName={annotateModel.displayName}
+          modelLabel={annotateModel.id}
+          onClose={() => setAnnotateModel(null)}
+          onChanged={() => void onRefresh()}
+        />
+      )}
     </Card>
   )
 }

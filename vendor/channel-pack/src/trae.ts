@@ -1,4 +1,6 @@
 import { throwIfModelQueued } from './model-queue.js'
+import { release as osRelease, type as osType, version as osVersion } from 'node:os'
+import { traeClientIdentity } from './client-identity.js'
 /**
  * TRAE（字节跳动 TRAE IDE）协议常量、凭据结构与请求转换。
  *
@@ -188,37 +190,62 @@ export function isTraeRefreshable(credential: TraeCredential): boolean {
  * 注意有多处设置相同的 token 值（Authorization / X-Cloudide-Token / X-Ide-Token），
  * 实测缺任一个都可能被上游拒绝。
  *
- * @param machineIdGeneration 机器指纹轮换代次（**默认 0 = 不轮换**）。
- *   仅当显式启用 `DSH_TRAE_ROTATE_MACHINE_ID=1` 时应为非 0，见
- *   {@link deriveRotatingMachineId} 对取舍的说明。
+ * `X-Machine-Id` 用**凭据里登录时生成的**机器号，永不轮换。2026-11-05 拆掉了
+ * 按请求次数派生新机器号的能力（原开关 `DSH_TRAE_ROTATE_MACHINE_ID`）：那是
+ * 为降低端点风控而漂移设备身份，属于绕上游识别。
  */
+/**
+ * 设备身份头：与官方工作台的 `getCommonParams()` 同源。
+ *
+ * 官方映射（`workbench.desktop.main.js`）：
+ * - `X-Device-Type`  ← `os_name`
+ * - `X-OS-Version`   ← `os_version`
+ * - `X-Device-Brand` ← `device_model`（为空时**不发**该头）
+ *
+ * 本机取不到 `device_model`（不同品牌差异大），所以 Windows/Linux 默认不发
+ * `X-Device-Brand`，只保留 macOS 的 `Apple`；需要精确值用 env 覆盖。
+ */
+function traeDeviceHeaders(): Record<string, string> {
+  const type = (process.env.DSH_TRAE_DEVICE_TYPE ?? '').trim()
+    || (process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'macos' : 'linux')
+  const version = (process.env.DSH_TRAE_OS_VERSION ?? '').trim()
+    || osVersion()
+    || `${osType()} ${osRelease()}`
+  const brand = (process.env.DSH_TRAE_DEVICE_BRAND ?? '').trim()
+    || (process.platform === 'darwin' ? 'Apple' : '')
+  const headers: Record<string, string> = {
+    'X-Device-Type': type,
+    'X-OS-Version': version,
+  }
+  if (brand !== '') headers['X-Device-Brand'] = brand
+  return headers
+}
+
 export function traeSOLOHeaders(
   credential: TraeCredential,
   product: TraeProduct,
   stream: boolean,
-  machineIdGeneration = 0,
 ): Record<string, string> {
+  const identity = traeClientIdentity()
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Accept: stream ? 'text/event-stream' : 'application/json',
-    'User-Agent': product.userAgent,
+    'User-Agent': `Trae/${identity.appVersion}`,
     Authorization: `Cloud-IDE-JWT ${credential.access_token}`,
     'X-Cloudide-Token': credential.access_token,
     'X-Ide-Token': credential.access_token,
     'X-Uid': credential.uid,
     'X-App-Id': product.appId,
     'X-App-Version': 'default',
-    'X-Ide-Version': product.ideVersion,
-    'X-Ide-Version-Code': product.ideVersionCode,
-    'X-App-Version-Code': product.ideVersionCode,
+    'X-Ide-Version': identity.appVersion,
+    'X-Ide-Version-Code': identity.versionCode,
+    'X-App-Version-Code': identity.versionCode,
     'X-Ide-Version-Type': 'stable',
-    'X-Device-Type': 'macos',
-    'X-OS-Version': product.osVersion,
-    'X-Device-Brand': product.deviceBrand,
+    ...traeDeviceHeaders(),
     'Request-Traffic-Type': 'prod',
   }
   if (credential.machine_id.length > 0) {
-    headers['X-Machine-Id'] = deriveRotatingMachineId(credential.machine_id, machineIdGeneration)
+    headers['X-Machine-Id'] = credential.machine_id
   }
   if (credential.device_id.length > 0) {
     headers['X-Device-Id'] = credential.device_id
@@ -231,24 +258,24 @@ export function traeSOLOHeaders(
  *
  * 对齐 Go 端 `UgHeaders`（`headers.go:48-57`）。
  *
- * @param checkinDeviceGeneration 签到设备轮换代次（默认 0 = 用凭据原始
- *   `device_id`）。命中 9074 后传 `>0` 即可换到一个全新派生设备号绕开
- *   **设备级**限流（见 {@link deriveCheckinDeviceId}）。
+ * `X-Device-Id` 用的是**凭据里的真实设备号**。2026-11-05 之前这里可以按代次
+ * 派生出一个新设备号，用于在命中 9074（设备级限流）后「换一台设备」重试 ——
+ * 那是绕过上游按设备计量的限制，已经拆掉：命中 9074 就是这一天这个账号签不了。
  */
 export function traeUgHeaders(
   credential: TraeCredential,
-  product: TraeProduct,
-  checkinDeviceGeneration = 0,
+  _product: TraeProduct,
 ): Record<string, string> {
+  const identity = traeClientIdentity()
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Accept: 'application/json',
-    'User-Agent': product.userAgent,
+    'User-Agent': `Trae/${identity.appVersion}`,
     Authorization: `Cloud-IDE-JWT ${credential.access_token}`,
     'X-User-Region': 'CN',
   }
   if (credential.device_id.length > 0) {
-    headers['X-Device-Id'] = deriveCheckinDeviceId(credential.device_id, checkinDeviceGeneration)
+    headers['X-Device-Id'] = credential.device_id
   }
   return headers
 }
@@ -261,40 +288,42 @@ export function traeUgHeaders(
  * trae-mate 实际签到成功使用的是一套**非常完整的客户端请求头**（约 20 个），
  * 而不仅仅是简化的 Ug 头。具体差异：
  *
- * - `X-Device-Id`：使用**基于 user_id 确定性派生的 15 位数字**，而非基于
- *   credential.device_id 的 32 hex。每个账号独享一套稳定设备身份。
+ * - `X-Device-Id`：用**凭据里的真实设备号**（与 `traeUgHeaders` 同一个值）。
+ *   2026-11-05 之前这里按 user_id 派生「每个账号一套设备身份」，注释写明是为了
+ *   规避「每设备每天一次」的签到配额 —— 那是绕上游计量，已拆除。
  * - 新增 `X-Market-User-ID` / `X-Lscbd-Aid` / `X-Lgw-Req-Sdk-Type` /
  *   `Package-Type` / `X-Tt-Trace-Id` / `Vscode-Sessionid` 等头
  * - 每次请求生成独立的 `X-Request-Id` 与 `X-Tt-Trace-Id`
  *
- * @param userId 账号 user_id，用于确定性派生设备身份（每个账号独立）
+ * @param userId 账号 user_id，用于派生 market user / session 等展示身份
  */
 export function traeCheckinHeaders(
   credential: TraeCredential,
   product: TraeProduct,
   userId: string,
 ): Record<string, string> {
-  const deviceId = deriveDeviceId15(userId)
+  const deviceId = credential.device_id
   const marketUserId = deriveMarketUserId(userId)
   const sessionId = deriveSessionId(userId)
   const traceId = `00-${randomHex(16)}-01`
   const requestId = uuidV4()
+  const identity = traeClientIdentity()
   return {
     'Content-Type': 'application/json',
     Accept: '*/*',
     'Accept-Encoding': 'gzip, deflate',
     'Accept-Language': 'zh-CN',
-    'User-Agent': 'VSCode 1.107.1 (TRAE SOLO CN)',
+    'User-Agent': `VSCode ${identity.ideVersion} (TRAE SOLO CN)`,
     Authorization: `Cloud-IDE-JWT ${credential.access_token}`,
-    'X-Market-Client-Id': 'VSCode 1.107.1',
+    'X-Market-Client-Id': `VSCode ${identity.ideVersion}`,
     'X-Market-User-Id': marketUserId,
     'X-User-Region': 'CN',
     'X-Device-Id': deviceId,
     'X-Lgw-Req-Sdk-Type': '3',
     'Package-Type': 'stable_cn',
     'X-Lscbd-Aid': '787976',
-    'X-Lscbd-Platform': 'windows',
-    'App-Version': product.ideVersion,
+    'X-Lscbd-Platform': process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'macos' : 'linux',
+    'App-Version': identity.appVersion,
     'X-Tt-Trace-Id': traceId,
     'Vscode-Sessionid': sessionId,
     'X-Request-Id': requestId,
@@ -305,16 +334,6 @@ export function traeCheckinHeaders(
 }
 
 // ── 签到设备身份确定性派生（对齐 trae-mate `device_map.rs`）──
-
-/**
- * 确定性派生 15 位数字设备 ID（基于 user_id）。
- *
- * 每个账号基于其 user_id 永远得到同一套设备标识，使多账号签到各自携带独立
- * 设备身份，规避服务端"每设备每天一次"配额。
- */
-function deriveDeviceId15(userId: string): string {
-  return seededDigits(15, userId, 'devid')
-}
 
 /**
  * 确定性派生 Market User ID（UUID v4，基于 user_id）。
@@ -364,14 +383,6 @@ function seededStream(seed: string, salt: string, nbytes: number): number[] {
 }
 
 /**
- * 确定性派生 N 位数字字符串。
- */
-function seededDigits(n: number, seed: string, salt: string): string {
-  const bs = seededStream(seed, salt, n)
-  return bs.map((b) => (b % 10).toString()).join('')
-}
-
-/**
  * 生成 UUID v4（随机，非确定性）。
  */
 function uuidV4(): string {
@@ -396,11 +407,11 @@ function randomHex(n: number): string {
  * 对齐 Go 端 `OAuthHeaders`（`headers.go:60-64`）：无签名，仅 UA。
  * GetUserInfo 需要额外 `X-Cloudide-Token` 头，由调用方自行添加。
  */
-export function traeOAuthHeaders(product: TraeProduct): Record<string, string> {
+export function traeOAuthHeaders(_product: TraeProduct): Record<string, string> {
   return {
     'Content-Type': 'application/json',
     Accept: 'application/json',
-    'User-Agent': product.userAgent,
+    'User-Agent': `Trae/${traeClientIdentity().appVersion}`,
   }
 }
 
@@ -1301,68 +1312,6 @@ export function generateDeviceId(): string {
   const buf = new Uint8Array(16)
   crypto.getRandomValues(buf)
   return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('')
-}
-
-/**
- * 由「基础 device_id + 代次」派生**签到专用**的设备号（hex32）。
- *
- * ## 为什么需要轮换（对齐 `Trae2api-cn/src/trae_client.py:443-466`）
- *
- * 业务码 **9074**（"too many users, retry later"）的限流范围是
- * **device_id 而非账号**：实测同一个账号在某个 id 上签到返回 9074 后，
- * 换一个**全新派生**的 id 立刻就能签到成功。
- *
- * 因此命中 9074 时不应该是死局 —— 把代次 +1 派生一个新设备号即可绕开。
- *
- * ## 为什么是「派生」而不是「重新随机」
- *
- * 派生的结果由 `(device_id, generation)` **唯一决定**，因此：
- * - 同一代次在任意进程/重启后都得到同一个值，无需持久化新 id 本身；
- * - 只需持久化一个整数代次（`traeCheckinDeviceGeneration`），凭据本体不动
- *   —— 避免为了签到去改写 `ctx.credentials` 里的登录凭据。
- *
- * ⚠️ **必须截断到 32 位 hex**：TRAE 的 `device_id` 是 `openssl rand -hex 16`
- * 的产物（16 字节 → **32** 个 hex 字符）。`sha256().digest('hex')` 直接给的是
- * **64** 字符，原样发出会与协议格式不符；取前 32 字符即等价于「16 字节哈希」。
- *
- * `generation <= 0` 时**原样返回**基础 id：既有账号（无该字段）行为完全不变。
- *
- * @param baseDeviceId 登录时生成并持久化的 device_id
- * @param generation 轮换代次（0 = 用原始 id）
- */
-export function deriveCheckinDeviceId(baseDeviceId: string, generation: number): string {
-  if (!Number.isFinite(generation) || generation <= 0) return baseDeviceId
-  return createHash('sha256')
-    .update(`${baseDeviceId}#gen${Math.floor(generation)}`, 'utf8')
-    .digest('hex')
-    .slice(0, 32)
-}
-
-/**
- * 由「基础 machine_id + 代次」派生一个轮换用的机器指纹（hex32）。
- *
- * ## ⚠️ 默认关闭，这是**降风控**与**身份稳定**之间的权衡开关
- *
- * `Trae2api-cn/src/trae_client.py:211-224` 每 3~5 次请求主动换一次
- * `machine_id`，理由是「降低 IDE 端点风控」。但它换来抗风控的**代价**是
- * 设备身份漂移：上游按 `machine_id` 标识设备，换值可能触发重新登录或
- * 被判定为异常设备。
- *
- * 本项目的既定约束是「`machine_id` 登录时生成后**绝不重新生成**」
- * （见 `AGENTS.md` 与 `TraeCredential.machine_id` 注释），因此该能力
- * **默认关闭**，仅在显式设 `DSH_TRAE_ROTATE_MACHINE_ID=1` 时启用 ——
- * 若出现集中的 401/风控，这就是第一个可以尝试的开关。
- *
- * 同样截断到 32 位 hex（与 `machine_id` 的 hex32 格式一致）。
- *
- * `generation <= 0` 时原样返回基础 id。
- */
-export function deriveRotatingMachineId(baseMachineId: string, generation: number): string {
-  if (!Number.isFinite(generation) || generation <= 0) return baseMachineId
-  return createHash('sha256')
-    .update(`${baseMachineId}#machine${Math.floor(generation)}`, 'utf8')
-    .digest('hex')
-    .slice(0, 32)
 }
 
 /**

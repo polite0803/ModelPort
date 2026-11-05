@@ -99,6 +99,8 @@ Download the latest release from [GitHub Releases](https://github.com/polite0803
 | Windows (x64) | `ModelPort-<version>-x64-setup.exe`, or the portable `.exe` |
 | Linux (x64) | `ModelPort-<version>-x64.AppImage`, `.deb`, or `.tar.gz` |
 | Linux (arm64) | `ModelPort-<version>-arm64.AppImage` |
+| Windows shell (remote console) | `ModelPort-Shell-<version>-x64-setup.exe` |
+| WSL / headless Linux | `modelport-daemon-<version>-<arch>.tar.gz` |
 
 Release builds are not code-signed and the macOS build is not notarized. On macOS the quarantine
 attribute can be cleared with the command in the [FAQ](#faq).
@@ -166,6 +168,8 @@ unencrypted and a warning is logged, so restrict access to `~/.modelport/` in th
 | macOS | Apple Silicon (arm64) | DMG only |
 | Windows | x64 | NSIS installer, portable executable |
 | Linux | x64, arm64 | AppImage; x64 also `.deb` and `.tar.gz` |
+| WSL / headless Linux | x64, arm64 | `modelport-daemon-<ver>-<arch>.tar.gz`: the gateway without Electron (bundle + resources + UI + a systemd unit template) |
+| Windows (shell only) | x64 | `ModelPort Shell`: window + tray client for a gateway running elsewhere |
 
 ## Development and verification
 
@@ -175,7 +179,16 @@ npm run gate               # what CI runs: build + both tsc programs + full test
 npm run build:mac          # dmg only
 npm run build:win          # NSIS + portable
 npm run build:linux        # AppImage, deb, tar.gz
+npm run build:daemon       # headless Node bundle (out/daemon) + dist/modelport-daemon-<ver>-<arch>.tar.gz
+npm run build:shell        # the Windows shell installer (dist-shell/), no auto-updater metadata
 ```
+
+Windows installers are packaged by CI, not locally: to write the uninstaller, electron-builder
+launches the NSIS stub it just compiled (`NsisTarget.js` → `execWine`), and that child is killed on
+this dev host, so `build:win` and `build:shell` both stop at
+`Command failed: dist…\…-setup.exe` with the 223 KB stub left in place. It is not a config
+difference - the shipped main app fails at the same line. Use `electron-builder --dir` for an
+unpacked build, and `npx electron out/main/shell.js` to run the shell without any installer.
 
 `npm run gate` runs `tsc --noEmit` against both `tsconfig.json` (renderer + shared) and
 `tsconfig.node.json` (main + preload + shared), then the Node test suite under `tests/`.

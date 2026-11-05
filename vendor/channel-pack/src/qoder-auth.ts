@@ -23,6 +23,7 @@ import {
   type QoderCredential,
 } from './qoder.js'
 import { QODER, type QoderProduct } from './qoder-product.js'
+import { qoderClientVersion } from './client-identity.js'
 import {
   runQoderLoginFlow,
   startQoderLoginFlow,
@@ -368,7 +369,7 @@ export class QoderAuth extends Service {
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
-          'User-Agent': `${this.product.userAgentPrefix}/1.0.0`,
+          'User-Agent': `${this.product.userAgentPrefix}/${qoderClientVersion(this.product.id === 'qodercn' ? 'qodercn' : 'qoder').version}`,
         },
         body: JSON.stringify(qoderRefreshBody(credential)),
         signal: AbortSignal.timeout(QODER_REQUEST_TIMEOUT_MS),

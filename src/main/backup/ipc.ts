@@ -5,9 +5,8 @@
  * 功能，还需要做入参形状校验（渲染层送来的东西一律先收窄再往下传）。
  */
 
-import { ipcMain, type BrowserWindow } from 'electron'
-
 import { IpcChannels } from '../ipc/channels.ts'
+import { registerMainHandler } from '../ipc/registry.ts'
 import type {
   BackupApplyResult,
   BackupExportOptions,
@@ -43,19 +42,23 @@ function normalizeExportOptions(raw: unknown): BackupExportOptions {
   }
 }
 
-export function registerBackupHandlers(mainWindow: BrowserWindow | null): void {
-  ipcMain.handle(
+// 走 `ipc/registry.ts` 而不是 `ipcMain.handle`：注册表同时是管理面 RPC 的可调用集来源，
+// 用 `ipcMain` 直接登记会让这六条通道在桌面里能用、在无头宿主上变成 `unknown_channel`
+// （S2-A 搬迁 147 条通道时漏掉了本文件，导入走到「应用」那一步就是在这里 404 的）。
+// 文件对话框由宿主能力袋提供（`backup/service.ts`），所以这里不再引用 electron。
+export function registerBackupHandlers(): void {
+  registerMainHandler(
     IpcChannels.BACKUP_EXPORT,
     async (_, rawOptions: unknown): Promise<BackupExportResult> => {
-      return exportBackup(mainWindow, normalizeExportOptions(rawOptions))
+      return exportBackup(normalizeExportOptions(rawOptions))
     },
   )
 
-  ipcMain.handle(IpcChannels.BACKUP_PICK, async (): Promise<BackupPickResult> => {
-    return pickBackupFile(mainWindow)
+  registerMainHandler(IpcChannels.BACKUP_PICK, async (): Promise<BackupPickResult> => {
+    return pickBackupFile()
   })
 
-  ipcMain.handle(
+  registerMainHandler(
     IpcChannels.BACKUP_UNLOCK,
     async (_, token: unknown, password: unknown): Promise<BackupUnlockResult> => {
       if (typeof token !== 'string' || typeof password !== 'string') {
@@ -65,7 +68,7 @@ export function registerBackupHandlers(mainWindow: BrowserWindow | null): void {
     },
   )
 
-  ipcMain.handle(
+  registerMainHandler(
     IpcChannels.BACKUP_APPLY,
     async (_, token: unknown, mode: unknown): Promise<BackupApplyResult> => {
       if (typeof token !== 'string') return { ok: false, error: 'expired' }
@@ -75,11 +78,11 @@ export function registerBackupHandlers(mainWindow: BrowserWindow | null): void {
     },
   )
 
-  ipcMain.handle(IpcChannels.BACKUP_CANCEL, async (_, token: unknown): Promise<void> => {
+  registerMainHandler(IpcChannels.BACKUP_CANCEL, async (_, token: unknown): Promise<void> => {
     if (typeof token === 'string') discardBackup(token)
   })
 
-  ipcMain.handle(IpcChannels.BACKUP_RESTART, async (): Promise<void> => {
+  registerMainHandler(IpcChannels.BACKUP_RESTART, async (): Promise<void> => {
     restartApplication()
   })
 }

@@ -42,7 +42,8 @@ export type MetadataAttribute = (typeof METADATA_ATTRIBUTES)[number]
  * 排序的输入，缺了不影响一次请求能不能成。
  *
  * 「关键」讲的是**判断会不会出错**，不是「批量必须把它填上」：`reasoning` 是关键属性，
- * 但标准库的值只允许逐字段手工采用（`modelCatalogBatch.ts::CATALOG_BATCH_AUTO_FIELDS`），
+ * 标准库两个方向都能批量采用、`no` 只写空槽
+ * （`modelCatalogBatch.ts::CATALOG_BATCH_AUTO_FIELDS`），
  * 所以它留在缺口里是诚实的「上游没有证据」，不是一个待办。
  */
 export const ROUTING_METADATA_ATTRIBUTES = [
@@ -278,6 +279,41 @@ export function isRoutingComplete(metadata: ModelMetadata): boolean {
   return routingGapsOf(metadata).length === 0
 }
 
+/**
+ * 「关键属性待补」的分桶。一个数字混了四种完全不同的东西：
+ * - `adoptable`：标准库有可用的 exact/alias 候选，跑一次批量就能补上；
+ * - `missing-field`：标准库有这条模型，但缺的那一项台账里也没有；
+ * - `no-candidate`：标准库里根本没有这条模型（`Qoder / Ultimate` 这类渠道内部档位）；
+ * - `not-chat`：不是对话模型（图像生成 / 向量 / 重排 / 语音合成），聊天能力对它不适用。
+ *
+ * 2026-11-04 实测：一个 980 行的目录里 137 行待补，只有 0 行 `adoptable`，
+ * 101 行 `no-candidate`、27 行 `not-chat`。把它们并成一个数会让人以为还能补。
+ */
+export type ModelGapKind = 'adoptable' | 'missing-field' | 'no-candidate' | 'not-chat'
+
+/**
+ * 明显的非对话模型。**窄口径**：只认图像生成 / 向量 / 重排 / 语音合成这几类，
+ * 宁可漏判成对话模型也不误判——音频对话（`omni` / `realtime` / `audio`）与翻译模型
+ * 仍按对话模型计，它们缺的能力是真的缺。
+ */
+const NON_CHAT_MODEL_PATTERN =
+  /(embedding|rerank|(^|[_/.-])image([_/.-]|$)|flux|stable-diffusion|(^|[_/.-])tts([_/.-]|$))/i
+
+export function isNonChatModel(modelId: string): boolean {
+  return NON_CHAT_MODEL_PATTERN.test(modelId)
+}
+
+/** 分桶的优先级：先判不适用，再判能不能补。 */
+export function classifyModelGap(input: {
+  modelId: string
+  hasAutoMatch: boolean
+  canFillAny: boolean
+}): ModelGapKind {
+  if (isNonChatModel(input.modelId)) return 'not-chat'
+  if (input.canFillAny) return 'adoptable'
+  return input.hasAutoMatch ? 'missing-field' : 'no-candidate'
+}
+
 export interface AttributeCoverage {
   known: number
   /** 目录总行数，含对这一行没有意义的行。 */
@@ -388,6 +424,8 @@ export interface ModelMetadataRow extends ModelMetadata {
   missing: MetadataAttribute[]
   /** 见 {@link UnclassifiedQueueRow.critical}：`false` 时这一行只剩参考项。 */
   critical: boolean
+  /** 「关键属性待补」的四分类，见 {@link ModelGapKind}。由主进程按目录候选计算。 */
+  gapKind: ModelGapKind
 }
 
 export interface ModelMetadataReport {
@@ -398,6 +436,8 @@ export interface ModelMetadataReport {
     routingComplete: number
     /** 关键属性仍有缺口，且这一行在待标注队列里。 */
     routingIncomplete: number
+    /** `routingIncomplete` 的分桶；四项之和等于 `routingIncomplete`。 */
+    routingIncompleteByKind: Record<ModelGapKind, number>
     /** 全部**适用**属性都有来源的行数（聚合行没有 `weight` 这一项，所以是 8 而不是 9）；
      *  只作为「上限还有多远」的次要读数。 */
     fullyAnnotated: number

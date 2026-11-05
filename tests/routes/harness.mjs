@@ -18,6 +18,7 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { register } from 'node:module'
 
 // 钩子必须**在任何 src/main 模块被解析之前**注册；本文件由测试文件静态 import，
@@ -61,6 +62,18 @@ export async function bootstrapStore(options = {}) {
   process.env.HOME = dataDir
   process.env.MODELPORT_TEST_DATADIR = storagePath
   stub.stubState.userDataDir = storagePath
+
+  // The gateway reaches its shell only through `src/main/runtime/host.ts`. A test
+  // process has no Electron, so it binds the same headless host the WSL daemon uses:
+  // no keystore (the documented `unencrypted` branch of `planKeySetup`) and the real
+  // `resources/` tree, so channel-pack resolution is exercised rather than mocked.
+  const { setHost, createNodeHost } = await import(srcUrl('main/runtime/host.ts'))
+  setHost(
+    createNodeHost({
+      version: '0.0.0-test',
+      resourceRoot: fileURLToPath(new URL('resources', repoRoot)),
+    }),
+  )
 
   if (options.initialData !== undefined) {
     const initial = { ...options.initialData }

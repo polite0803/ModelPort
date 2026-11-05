@@ -38,7 +38,7 @@
     "build:channel-pack": "node scripts/build-channel-pack.mjs",
     "build:builtin-catalog": "node scripts/build-builtin-catalog.mjs",
     "build": "npm run check:source-artifacts && npm run build:channel-pack && electron-vite build",
-    "gate": "npm run build && tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json && node scripts/run-tests.mjs \"tests/**/*.test.ts\" \"tests/**/*.test.mjs\" \"tests/**/*.test.js\"",
+    "gate": "npm run build && npm run build:daemon && tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json && node scripts/run-tests.mjs \"tests/**/*.test.ts\" \"tests/**/*.test.mjs\" \"tests/**/*.test.js\"",
     "preview": "electron-vite preview",
     "start": "electron-vite preview",
     "start:sandbox": "electron . --no-sandbox",
@@ -51,7 +51,9 @@
     "build:mac-arm": "npm run build && electron-builder --mac --arm64",
     "build:linux": "npm run build && electron-builder --linux",
     "build:all": "npm run build && electron-builder --win --mac --linux",
-    "release": "node scripts/release.js"
+    "release": "node scripts/release.js",
+    "build:daemon": "node scripts/build-daemon.mjs",
+    "build:shell": "npm run build && electron-builder -c electron-builder.shell.yml --win --x64"
   },
   "dependencies": {
     "@koa/router": "^15.3.0",
@@ -71,7 +73,7 @@
     "axios": "^1.7.7",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.1.1",
-    "electron-store": "^10.0.0",
+    "conf": "^14.0.0",
     "electron-updater": "^6.3.9",
     "eventsource-parser": "^3.0.6",
     "i18next": "^25.8.11",

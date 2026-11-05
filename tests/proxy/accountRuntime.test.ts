@@ -265,3 +265,4 @@ test('短窗口记录首字 EWMA、429/超时/degraded 比例', () => {
   assert.equal(snapshot.degradedRate, 1 / 3)
   assert.equal(snapshot.timeoutRate, 0)
 })
+

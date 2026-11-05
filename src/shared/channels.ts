@@ -67,6 +67,26 @@ export interface ChannelDefinition {
   capabilities?: {
     tools?: boolean
   }
+  /**
+   * The client identity this channel presents upstream, and how likely that is
+   * to be read as "non-official usage".
+   *
+   * This is **disclosure, not configuration**: nothing in the app is allowed to
+   * align these values to the vendor's current client. The point is to let the
+   * user see what is being sent (`declared`, verbatim from the adapter) before
+   * deciding to keep using the channel. Absent for key-based providers.
+   */
+  upstreamIdentity?: {
+    /** What the adapter actually sends, copied from its constants. */
+    declared: string
+    /**
+     * `high`: the vendor has stopped accounts on this line, or the identity is
+     *         a frozen copy of a first-party client behind several releases.
+     * `medium`: a partial/derived identity (some headers, signature clones).
+     * `low`: official SDK shape or no client identity at all.
+     */
+    risk: 'high' | 'medium' | 'low'
+  }
 }
 
 /** One account inside a channel, as the pack reports it. */
@@ -78,6 +98,12 @@ export interface ChannelAccountView {
   /** Epoch ms; undefined when the channel does not report expiry. */
   expiresAt?: number
   refreshable: boolean
+  /**
+   * Upstream stopped serving this account and said so; the pack parked it
+   * (`enabled: false`) in the same write. `text` is the upstream wording, kept
+   * verbatim so the row can say which of the three kinds of grey it is.
+   */
+  serviceStopped?: { at: number; text: string }
 }
 
 /** Per-channel state rendered on one card. */
@@ -94,6 +120,8 @@ export interface ChannelView {
   configured: boolean
   /** The provider record is enabled (models listed and routable). */
   enabled: boolean
+  /** Disclosure of the upstream client identity; see {@link ChannelDefinition}. */
+  upstreamIdentity?: { declared: string; risk: 'high' | 'medium' | 'low' }
   accounts: {
     total: number
     enabled: number
@@ -107,9 +135,36 @@ export interface ChannelView {
   }
 }
 
+/**
+ * One channel's live client identity (B4): the values the wire headers will
+ * actually carry on the next request.
+ *
+ * 来源标记与 `vendor/channel-pack/src/client-identity.ts` 的取值链一一对应：
+ * `env`（用户钉子）优先级最高，`official` 是官方接口 6h 刷新值，
+ * `local-install` 是官网不可达时读本机安装的兜底，`fallback` 是最后的代码常量
+ * —— 两个动态源都失效时才会看到它，值得在 UI 上提醒。
+ */
+export interface ChannelIdentityEntry {
+  /** Channel id: `workbuddy` / `buddy` / `qoder` / `qodercn` / `trae`. */
+  channel: string
+  /** Version the request headers will carry right now. */
+  version: string
+  source: 'env' | 'official' | 'local-install' | 'fallback'
+  /** When this value was read (epoch ms). */
+  checkedAt: number
+  /** Human-readable extras (e.g. Trae's version code and VS Code baseline). */
+  detail?: string
+}
+
+/** Response of the `identity.snapshot` channel RPC. */
+export interface ChannelIdentitySnapshot {
+  entries: ChannelIdentityEntry[]
+  /** Whole-call failure (worker down, rpc rejected); entries stay empty then. */
+  error?: string
+}
+
 /** Credits for one channel; `null` means "the channel has no balance endpoint". */
-export interface ChannelCredits {
-  /**
+export interface ChannelCredits {  /**
    * Sum of **enabled** accounts' usable balance; undefined when no account answered.
    *
    * 停用账号的余额不出现在这里（它们的读数仍在 `accounts` 明细行里）——
@@ -225,6 +280,24 @@ export interface ChannelModelInfo {
   disabled: boolean
   /** 渠道包判定该模型已失效。 */
   dead: boolean
+}
+
+/**
+ * 渠道模型在供应商记录里的展示名 —— **唯一**口径。
+ *
+ * 标注（`userModelMarks`）与标准库采用（`catalogAdoptions`）都以
+ * `(providerId, displayName)` 为键，且两侧写入前都会校验「这个名字在该供应商目录里」
+ * （`store::setUserModelMark` / `modelCatalogService::adoptCatalogField`）。界面自己拼一份
+ * 字符串迟早和 `syncProviders` 写的名字漂移，漂移的结果是每次点标注都拿到归属错误，
+ * 所以主进程写名字和界面查名字必须调用同一个函数。
+ */
+export function channelModelDisplayName(
+  channelName: string,
+  channelId: string,
+  model: Pick<ChannelModelInfo, 'id' | 'name'>,
+): string {
+  const baseName = model.name.trim().length > 0 ? model.name : `${channelId}/${model.id}`
+  return `${channelName} / ${baseName}`
 }
 
 export interface ChannelModelsResult {

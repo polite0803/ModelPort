@@ -68,6 +68,7 @@ import { collectImages, serializeMessages } from './openai-compat.js'
 import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
 import type { ZcodeCredential } from './zcode.js'
 import { ZCODE, type ZcodeFallbackModel, type ZcodeProduct, type ZcodeRemoteModelLike } from './zcode-product.js'
+import { isAccountStoppedMessage, parkStoppedAccount } from './account-stop.js'
 import {
   buildChannelRequest,
   describeChannels,
@@ -1050,6 +1051,14 @@ export class ZcodeAdapter extends LlmAdapter {
         }
 
         const text = await response.text().catch(() => '')
+        if (isAccountStoppedMessage(text)) {
+          await parkStoppedAccount(this.options.accountPool, activeAccountId, text)
+          throw new LlmError(
+            `zcode: 上游已停止为该账号服务（${text.slice(0, 200)}）`,
+            'AUTH',
+            { status: response.status },
+          )
+        }
         noteZcodeRequestFailed(activeAccountId)
 
         // ① 额度用尽 / 无权益 → **换账号**（不是重试）

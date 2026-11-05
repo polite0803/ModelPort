@@ -14,6 +14,11 @@
  * 本模块只放常量与纯函数（无网络、无存储），网络流程见 buddy-oauth.ts。
  */
 
+// UA 版本号来自官方取值链（env → 官方 /v2/update → 本机安装 → fallback）。
+// 用 CODEBUDDY.userAgent（getter）每次访问都渲染当前版本，而不是模块级
+// 常量 —— IIFE 只在加载时求值一次，长驻进程会僵化在旧版本上。
+import { CODEBUDDY } from './product.js'
+
 // ── API 端点常量（逆向自 genie 扩展 product.json + index.js） ──
 
 /** 主 API 端点（product.json endpoint）。 */
@@ -83,10 +88,15 @@ export const HTTP_HEADER_PRODUCT = 'X-Product'
 export const HTTP_HEADER_PRODUCT_CODE = 'X-Product-Code'
 
 /**
- * User-Agent 标识（对齐 IDE 的 getUserAgent() → CodeBuddyIDE/${platformVersion}）。
- * platformVersion 来自 IDE product.json version 字段（1.106.1），非 genie 版本。
+ * User-Agent 标识（2026-11-05 起由 `CODEBUDDY.userAgent` getter 动态渲染）。
+ *
+ * 2026-11-05 起 CodeBuddy（腾讯）更名为 **WorkBuddy（国内版）**，客户端就是
+ * WorkBuddy 桌面端，UA 是国内客户端形态 `WorkBuddy/<v> WorkBuddy/<v> CLI/<v>`；
+ * 旧的 CodeBuddyIDE 形态（改名前抓的 VS Code 基线版本）不再使用。运行时版本号由
+ * `client-identity.ts` 动态取值（`product.ts` 的 getter + `buddyUserAgent`）。
+ * 旧常量 `BUDDY_USER_AGENT` 已删除：模块级 IIFE 只在加载时求值一次，
+ * 长驻进程会僵化在旧版本上，违背「客户端升级后及时跟随」的目标。
  */
-export const BUDDY_USER_AGENT = 'CodeBuddyIDE/1.106.1'
 /** X-Product-Code 值（对齐 IDE headers 设置）。 */
 export const BUDDY_PRODUCT_CODE = 'codebuddy'
 /** X-Product 默认值（deploymentType，对齐 ProductEndpointHttpInterceptor）。 */
@@ -230,7 +240,8 @@ export function isRefreshable(credential: BuddyCredential): boolean {
 export function credentialRequestHeaders(credential: BuddyCredential): Record<string, string> {
   const headers: Record<string, string> = {
     [HTTP_HEADER_DOMAIN]: credential.domain || API_DOMAIN,
-    'User-Agent': BUDDY_USER_AGENT,
+    // getter 每次访问都按 client-identity 取值链渲染当前客户端版本。
+    'User-Agent': CODEBUDDY.userAgent,
   }
   if (credential.enterprise_id !== undefined && credential.enterprise_id.length > 0) {
     headers[HTTP_HEADER_ENTERPRISE_ID] = credential.enterprise_id

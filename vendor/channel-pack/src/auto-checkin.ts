@@ -8,10 +8,11 @@
  * `credits.claimAll`；跑完把日期与**逐渠道结果**写进文档 ⇒ **当天不再触发**。
  * 用户手动点「全部渠道签到」不受此限（那是显式操作，永远放行）。
  *
- * ⚠️ **开关默认打开**（用户 2026-10-02 明确要求：「自动签到默认保持打开状态」）。
- * 这与「这是代用户打上游的写操作」相权：该特性本身是用户要的，默认开启才符合
- * 「每日第一次打开 DSH 就自动签到」的预期；用户随时可以在状态灯上关掉。
- * 判据是**只有显式 `false` 才算关闭**（与本仓库账号的 `enabled !== false` 同惯例）。
+ * ⚠️ **开关默认关闭**（2026-11-05 改；此前按 2026-10-02 的要求默认打开）。
+ * 一轮是「渠道数 × 账号数」次无人值守的认证请求，而账号渠道的本质是以消费者
+ * 账号直连官方接口 —— 上游按「非官方客户端」处置账号时，这批请求是唯一完全
+ * 可以避免的那部分。要免费积分的用户仍可在状态灯上打开，或手动「一键领取」。
+ * 判据是**只有显式 `true` 才算打开**（默认关，缺键必须落在关）。
  *
  * ## 为什么延迟 30 秒
  *
@@ -76,11 +77,27 @@ const SCHEMA = 'channel-pack/auto-checkin/v1'
  */
 export interface AutoCheckinDoc {
   /**
-   * 自动签到开关。**默认打开**（用户 2026-10-02 明确要求：「自动签到默认保持打开
-   * 状态」）—— 故判据是「只有显式 `false` 才算关闭」，与本仓库账号的
-   * `enabled !== false` 惯例一致。
+   * 自动签到开关。**默认关闭**。
+   *
+   * 2026-10-02 曾按用户要求默认打开（`DSH` 桌面端的既有预期）。2026-11-05
+   * 改为默认关闭：一轮自动签到是「渠道数 × 账号数」次**无人值守**的认证请求，
+   * 而账号渠道的上游会按「非官方客户端」判定账号；在没有任何请求要发的时候
+   * 替用户去敲一遍所有账号，是这类封禁里唯一完全可以避免的那部分流量。
+   * 手动「一键领取」不受影响，仍在面板上。
+   *
+   * 判据是「只有显式 `true` 才算打开」，与账号 `enabled !== false` 的惯例相反
+   * —— 因为这里的默认值是关，缺键必须落在关。
    */
   enabled: boolean
+  /**
+   * 这个开关是不是**用户亲手拨过的**（`'user'`）。
+   *
+   * 用于 2026-11-05 的默认值翻转：老文档里的 `enabled: true` 多半是旧默认值
+   * 被 `save()` 顺手写下的，而不是用户的选择；只改默认常量无法关掉它。
+   * 没有该标记的文档在加载时一律按**关**处理（一次性回到新默认），此后用户
+   * 每次点开关都会写下本字段，选择被尊重。
+   */
+  decidedBy?: 'user'
   /** 上次**完成**自动签到的 UTC+8 日期（`YYYY-MM-DD`）；空串 = 从未跑过。 */
   lastDate: string
   /** 上次结果摘要（中文短句，展示在状态灯提示里）。 */
@@ -98,9 +115,9 @@ export interface AutoCheckinDoc {
   dismissedRunAt: number
 }
 
-/** 默认：打开 + 无记录。 */
+/** 默认：关闭 + 无记录。 */
 export const DEFAULT_AUTO_CHECKIN: AutoCheckinDoc = {
-  enabled: true,
+  enabled: false,
   lastDate: '',
   lastResult: '',
   lastAt: 0,
@@ -142,11 +159,12 @@ export function sanitizeAutoCheckin(raw: unknown): AutoCheckinDoc {
   const record = raw as Record<string, unknown>
   const ms = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0)
   return {
-    // ⚠️ **只有显式 `false` 才算关闭**（默认是打开的，见 `AutoCheckinDoc.enabled`）：
-    // 写成 `=== true` 会让旧文档（没有该字段）与脏数据把开关静默关掉，与
-    // 「默认保持打开状态」相反。`'false'` / `0` 这些非布尔值一律按打开处理 ——
-    // 它们不是用户点出来的值。
-    enabled: record.enabled !== false,
+    // 默认是**关闭**（见 `AutoCheckinDoc.enabled`）：缺键必须落在关，否则
+    // 升级后没人点过开关的安装会立刻开始无人值守地打所有账号。
+    // 老文档里的 `true` 是旧默认值写的，没有 `decidedBy` 标记 ⇒ 同样按关处理
+    // （一次性迁移）；用户亲手打开后该标记会落盘，此后按用户选择执行。
+    enabled: record.decidedBy === 'user' && record.enabled === true,
+    ...(record.decidedBy === 'user' ? { decidedBy: 'user' as const } : {}),
     lastDate: typeof record.lastDate === 'string' && DATE_RE.test(record.lastDate) ? record.lastDate : '',
     lastResult: typeof record.lastResult === 'string' ? record.lastResult : '',
     lastAt: ms(record.lastAt),
@@ -226,10 +244,9 @@ class FileAutoCheckinStore implements AutoCheckinStore {
       return sanitizeAutoCheckin(JSON.parse(readFileSync(this.path, 'utf-8')) as unknown)
     } catch (error) {
       // 损坏时回落默认值而不是抛错：这是后台任务，读不到文档不该让插件起不来。
-      // ⚠️ 默认值现在是「**打开**」（见 `DEFAULT_AUTO_CHECKIN`），所以回落的后果
-      // 是「今天照常自动签到」，不是「不签」。早先这里写的是「= 开关关闭」，
-      // 那是默认值翻转前的旧语义 —— 留着会把排障引到反方向。
-      this.logger?.warn(`[channel-pack] 读取 ${this.path} 失败，自动签到按默认设置（开启）处理: ${String(error)}`)
+      // 默认值是「**关闭**」（见 `DEFAULT_AUTO_CHECKIN`），所以回落的后果是
+      // 「今天不自动签到」，而不是替用户去敲一遍账号。
+      this.logger?.warn(`[channel-pack] 读取 ${this.path} 失败，自动签到按默认设置（关闭）处理: ${String(error)}`)
       return { ...DEFAULT_AUTO_CHECKIN }
     }
   }
@@ -601,7 +618,7 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
   return {
     state,
     async setEnabled(enabled) {
-      doc = { ...doc, enabled }
+      doc = { ...doc, enabled, decidedBy: 'user' }
       await deps.store.save(doc)
       // 打开开关时立刻尝试一轮（今天已跑过则由 runIfDue 内部拦住）。
       // ⚠️ 不 await：一轮要串行打十几个上游，让按钮等它会让界面像卡死；

@@ -15,7 +15,8 @@ const channels = () => readFileSync(join(root, 'src/main/ipc/channels.ts'), 'utf
 
 const handlers = () => readFileSync(join(root, 'src/main/ipc/handlers.ts'), 'utf8')
 
-const preload = () => readFileSync(join(root, 'src/preload/index.ts'), 'utf8')
+// 「桥」这一环现在是 `src/shared/api.ts` 里的方法表（preload 只剩装线）。
+const preload = () => readFileSync(join(root, 'src/shared/api.ts'), 'utf8')
 
 const locale = (name) =>
   JSON.parse(readFileSync(join(root, 'src/renderer/src/i18n/locales', `${name}.json`), 'utf8'))
@@ -137,7 +138,7 @@ test('附件开关两态都接得上：面板写这个键、路由读这个键',
   assert.match(route, /documentsAsFileParts: config\.anthropicInbound\?\.documentPassThrough !== false/)
 })
 
-test('可发现名这条链四环都在：通道常量 → handler → preload → 面板调用', () => {
+test('可发现名这条链四环都在：通道常量 → handler → 方法表(shared/api) → 面板调用', () => {
   // 少任何一环，面板上那个按钮就是一个不动的装饰 —— 「加了开关但没人读」的老坑。
   const wires = channels()
   assert.match(wires, /ANTHROPIC_DISCOVERY_PLAN: 'anthropic:discovery-plan'/)
@@ -150,8 +151,8 @@ test('可发现名这条链四环都在：通道常量 → handler → preload �
   assert.match(main, /IpcChannels\.ANTHROPIC_DISCOVERY_APPLY[\s\S]{0,600}broadcastConfigChanged/)
 
   const bridge = preload()
-  assert.match(bridge, /plan: \(\): Promise<AnthropicDiscoveryResult> =>\s*\n?\s*ipcRenderer\.invoke\(IpcChannels\.ANTHROPIC_DISCOVERY_PLAN\)/)
-  assert.match(bridge, /apply: \(\): Promise<AnthropicRouteApplyResult> =>\s*\n?\s*ipcRenderer\.invoke\(IpcChannels\.ANTHROPIC_DISCOVERY_APPLY\)/)
+  assert.match(bridge, /plan: \(\): Promise<AnthropicDiscoveryResult> =>\s*\n?\s*wire\.invoke\(IpcChannels\.ANTHROPIC_DISCOVERY_PLAN\)/)
+  assert.match(bridge, /apply: \(\): Promise<AnthropicRouteApplyResult> =>\s*\n?\s*wire\.invoke\(IpcChannels\.ANTHROPIC_DISCOVERY_APPLY\)/)
   assert.match(bridge, /anthropicDiscovery: anthropicDiscoveryAPI,/)
 
   const source = panel()

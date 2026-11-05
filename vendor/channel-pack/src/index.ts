@@ -1825,26 +1825,19 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
             }
           }
           const apiKey = parsed.api_key ?? OPENCODE.anonymousKey
-          // ⚠️⚠️ **指纹代次必须以账号池为权威重算**（本任务最容易漏的一步）：
-          // 「指纹」按钮只把 generation 写进账号条目
-          // （`updateOpencodeFingerprintGeneration`），凭据里的 `fingerprint`
-          // 仍是添加账号时的旧值。若直接透传凭据里的 fingerprint，代次涨了而
-          // project id **纹丝不动** —— 用户点了「指纹」却什么都没换，且**不报错**，
-          // 是最难排查的一类静默失效。
-          const generation = Math.max(
-            pool.opencodeFingerprintGenerationFor(entry.id),
-            0,
-          )
           // ⚠️ **identity 选择**：匿名槽的 api_key 全是 `public`，用它派生会让
           // N 条匿名通道拿到**同一个指纹**（彼此无法区分）。故匿名槽改用
           // **条目 id** 作 identity —— 这正是「多个匿名账号各有独立指纹」的实现点。
+          //
+          // 2026-11-05：指纹轮换代次已退役（那是绕上游按 project 计的计量），
+          // project id 现在只由 identity 决定，一个账号一份、恒定不变。
           const identity = apiKey === OPENCODE.anonymousKey ? entry.id : apiKey
           const snapshot: PoolEntrySnapshot = {
             id: entry.id,
             enabled: entry.enabled,
             apiKey,
             proxy: pool.opencodeProxyFor(entry.id),
-            fingerprint: { projectId: deriveProjectId(identity, generation), generation },
+            fingerprint: { projectId: deriveProjectId(identity) },
           }
           return snapshot
         })),

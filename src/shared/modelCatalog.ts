@@ -13,6 +13,10 @@
  * - 采用记录存 adoption ledger，绝不写 `userModelMarks`（那是人工标注，优先级更高）。
  */
 import type { CapabilityState, InputModality, ModelCapabilityHint } from './types.ts'
+import {
+  ROUTING_METADATA_ATTRIBUTES,
+  type MetadataAttribute,
+} from './modelMetadata.ts'
 
 export const CATALOG_SOURCES = ['models.dev', 'litellm', 'openrouter'] as const
 export type CatalogSourceId = (typeof CATALOG_SOURCES)[number]
@@ -471,6 +475,80 @@ export function catalogIndexFromStore(store: CatalogStore): CatalogIndex {
 }
 
 /**
+ * 网关的展示名 = `${供应商名} / ${上游给的名字}`（账号渠道在
+ * `accountChannels/manager.ts::applyChannel` 里这样拼）。**匹配标准库必须用上游名**：
+ * 拿拼好的展示名去匹配，exact 永远落空（catalog 里不会有条目叫 `TRAE (字节) / GLM-5.1`），
+ * 只能掉到 alias 档，白丢一档置信度；模糊匹配的分词也会被供应商名前缀污染。
+ *
+ * 2026-11-04 远程网关实测：980 行里剥掉前缀后 exact 命中从 184 行升到 264 行。
+ * 只剥 `${providerName} / ` 这一种由网关自己拼出的前缀；用户自定义名、上游名里自带的
+ * `/` 都不动。
+ */
+export function upstreamModelName(providerName: string | undefined, displayName: string): string {
+  const prefix = providerName ? `${providerName} / ` : ''
+  return prefix.length > 0 && displayName.startsWith(prefix)
+    ? displayName.slice(prefix.length)
+    : displayName
+}
+
+/**
+ * 条目带几条**路由真正会用的**能力（六项，价格不计）。
+ *
+ * 同一置信度里若只按 `catalogId` 字典序排，`litellm:` 会稳定压住 `models.dev:`
+ * 与 `openrouter:`，而 LiteLLM 台账根本没有 `reasoning` 这一项：一个模型只要在
+ * LiteLLM 里有 5 条以上同名条目，弹窗的 5 个候选名额就全是 LiteLLM，唯一能补上
+ * 「推理」的那条候选连显示的机会都没有（2026-11-04 远程网关实测：980 行里 453 行如此）。
+ * 所以同置信度先让信息量高的候选靠前，来源声明顺序再兜底。
+ */
+export function adoptableFieldCount(entry: CatalogEntry): number {
+  return ROUTING_METADATA_ATTRIBUTES.filter(
+    (attribute) => catalogFieldValue(entry, attribute as CatalogAdoptionField) !== undefined,
+  ).length
+}
+
+/**
+ * 报告层的廉价判据：只用 exact / alias 两张表，**不跑模糊匹配**。
+ *
+ * 模糊匹配对每条模型都要扫全库并算 bigram，一条 60ms 量级；标注页每次打开要对近千行
+ * 判一次「标准库有没有这条」，用它会直接把报表拖成分钟级。而 family / fuzzy 本来
+ * 就永远不自动采用（`CATALOG_BATCH_AUTO_FIELDS` 的闸门），把它们算进「可补」等于
+ * 让界面承诺一件批量不会做的事。
+ */
+export interface CatalogCoverageCheck {
+  /** 标准库里有没有 exact/alias 候选。 */
+  hasAutoMatch: boolean
+  /** 缺的这几项里，有没有一项能被某条 exact/alias 候选补上。 */
+  canFillAny: boolean
+}
+
+export function checkCatalogCoverage(
+  index: CatalogIndex,
+  input: { modelId: string; displayName: string; missing: readonly MetadataAttribute[] },
+): CatalogCoverageCheck {
+  const candidates = new Map<string, CatalogEntry>()
+  const collect = (bucket: Map<string, CatalogEntry[]> | undefined, key: string): void => {
+    for (const entry of bucket?.get(key) ?? []) candidates.set(entry.catalogId, entry)
+  }
+  const rawId = input.modelId.trim()
+  const display = input.displayName.trim()
+  collect(index.exact, rawId)
+  collect(index.alias, normalizeCatalogAlias(rawId))
+  if (display.length > 0) {
+    collect(index.exact, display)
+    collect(index.alias, normalizeCatalogAlias(display))
+  }
+  if (candidates.size === 0) return { hasAutoMatch: false, canFillAny: false }
+
+  const gaps = ROUTING_METADATA_ATTRIBUTES.filter(
+    (attribute) => (input.missing as readonly MetadataAttribute[]).includes(attribute),
+  )
+  const canFillAny = [...candidates.values()].some((entry) =>
+    gaps.some((attribute) => catalogFieldValue(entry, attribute as CatalogAdoptionField) !== undefined),
+  )
+  return { hasAutoMatch: true, canFillAny }
+}
+
+/**
  * 三档匹配：原文 id → 归一化别名 → 家族启发式。置信度只降不升，同一 entry
  * 出现多次时保留最高档。默认最多返回 `limit` 条，界面按顺序展示，不自动采用。
  */
@@ -514,11 +592,15 @@ export function matchCatalogEntries(
     }
   }
 
+  const rank = (value: CatalogMatchConfidence): number =>
+    value === 'exact' ? 0 : value === 'alias' ? 1 : value === 'family' ? 2 : 3
   return [...found.values()]
     .sort((a, b) => {
-      const rank = (value: CatalogMatchConfidence): number =>
-        value === 'exact' ? 0 : value === 'alias' ? 1 : value === 'family' ? 2 : 3
       if (rank(a.confidence) !== rank(b.confidence)) return rank(a.confidence) - rank(b.confidence)
+      const informative = adoptableFieldCount(b.entry) - adoptableFieldCount(a.entry)
+      if (informative !== 0) return informative
+      const bySource = CATALOG_SOURCES.indexOf(a.entry.source) - CATALOG_SOURCES.indexOf(b.entry.source)
+      if (bySource !== 0) return bySource
       return a.entry.catalogId.localeCompare(b.entry.catalogId)
     })
     .slice(0, Math.max(1, limit))

@@ -12,10 +12,10 @@ import { readFileSync } from 'node:fs'
  * `Storage not initialized, please call initialize() first`。
  *
  * 两条围栏分别钉住因果关系：打包不带 node_modules（前提），以及
- * `electron-store` 仍然是 bundled（结论）。任何一条被改动，安装包都会再次
+ * `conf`（`electron-store` 转发的那个包）仍然是 bundled（结论）。任何一条被改动，安装包都会再次
  * 在启动时失去存储能力。
  */
-test('packaging ships no node_modules, so electron-store must stay bundled', () => {
+test('packaging ships no node_modules, so conf must stay bundled', () => {
   const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as {
     dependencies?: Record<string, string>
     build?: { files?: string[] }
@@ -28,14 +28,14 @@ test('packaging ships no node_modules, so electron-store must stay bundled', () 
     'build.files must exclude node_modules: if packaging starts shipping deps, revisit this invariant',
   )
 
-  assert.ok(pkg.dependencies?.['electron-store'], 'electron-store must remain a runtime dependency')
+  assert.ok(pkg.dependencies?.['conf'], 'conf must remain a runtime dependency')
 
   const mainExclude = config.match(/externalizeDepsPlugin\(\{[\s\S]*?exclude:\s*\[([\s\S]*?)\]/)?.[1]
   assert.ok(mainExclude, 'the main bundle must configure externalizeDepsPlugin({ exclude: [...] })')
   assert.match(
     mainExclude,
-    /['"]electron-store['"]/,
-    'electron-store must be in the exclude list (bundled), never external: the packaged app has no node_modules',
+    /['"]conf['"]/,
+    'conf must be in the exclude list (bundled), never external: the packaged app has no node_modules',
   )
 
   // 管理面限流是同一个坑：server.ts 静态 import koa-ratelimit，一旦留作 external，
@@ -49,20 +49,20 @@ test('packaging ships no node_modules, so electron-store must stay bundled', () 
 })
 
 /**
- * store.ts 的 `await import('electron-store')` 必须留在 initialize() 的 try 内。
+ * store.ts 的 `await import('conf')` 必须留在 initialize() 的 try 内。
  * 落在 try 外时异常不会写入 `initializationError`，用户只会看到没有指向性的
  * "please call initialize() first"，也没有存储失败对话框。
  */
-test('store initialisation loads electron-store inside the guarded try', () => {
+test('store initialisation loads conf inside the guarded try', () => {
   const source = readFileSync('src/main/store/store.ts', 'utf8')
   const initializeBody = source.slice(source.indexOf('async initialize(): Promise<void>'))
   const tryIndex = initializeBody.indexOf('try {')
-  const importIndex = initializeBody.indexOf("await import('electron-store')")
+  const importIndex = initializeBody.indexOf("await import('conf')")
 
   assert.ok(tryIndex >= 0, 'initialize() must keep its try block')
-  assert.ok(importIndex >= 0, "initialize() must load electron-store through await import('electron-store')")
+  assert.ok(importIndex >= 0, "initialize() must load conf through await import('conf')")
   assert.ok(
     importIndex > tryIndex,
-    'the electron-store import must sit inside the try block, otherwise initializationError stays empty',
+    'the conf import must sit inside the try block, otherwise initializationError stays empty',
   )
 })

@@ -77,6 +77,8 @@ export const IpcChannels = {
   PROVIDERS_SET_MODEL_MARK: 'providers:setModelMark',
   // 元数据解析报表（覆盖率 + 待标注队列）与手动探测（打开页面不发起请求）
   PROVIDERS_GET_MODEL_METADATA: 'providers:getModelMetadata',
+  /** 单个模型的解析结果：逐模型标注入口用它，避免为一次点击重算整张报表。 */
+  PROVIDERS_GET_MODEL_METADATA_ONE: 'providers:getModelMetadataOne',
   PROVIDERS_PROBE_MODEL: 'providers:probeModel',
   PROVIDERS_CANCEL_PROBE: 'providers:cancelProbe',
   PROVIDERS_GET_PROBE_JOBS: 'providers:getProbeJobs',

@@ -15,7 +15,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { Worker } from 'node:worker_threads'
-import { app } from 'electron'
+import { hostResourceRoot } from '../runtime/host'
 import type { ChannelRpcResult } from '../../shared/channels'
 import type { ChannelCredentialVault } from '../providers/accountChannels/vault'
 import {
@@ -101,10 +101,8 @@ function contextOf(request: ChannelCompletionRequest): ChannelLogContext {
 }
 
 export function resolveChannelPackDir(): string {
-  const base = app.isPackaged
-    ? join(process.resourcesPath, 'channel-pack')
-    : join(app.getAppPath(), 'resources', 'channel-pack')
-  return base
+  const root = hostResourceRoot()
+  return join(root ?? join(process.cwd(), 'resources'), 'channel-pack')
 }
 
 export class ChannelBridge {

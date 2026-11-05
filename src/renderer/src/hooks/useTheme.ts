@@ -1,6 +1,18 @@
 import { useEffect, useMemo } from 'react'
 import { useSettingsStore } from '@/stores/settingsStore'
 
+/**
+ * The caption-button overlay only exists in a desktop window. On a headless host the same
+ * call answers `desktop-only`, and an uncaught rejection there is one console error per
+ * theme change - so this swallows exactly that code and lets anything else surface.
+ */
+function applyTitleBarTheme(dark: boolean): void {
+  const pending = window.electronAPI?.app?.setTitleBarTheme?.(dark ? 'dark' : 'light')
+  pending?.catch((cause: unknown) => {
+    if ((cause as { code?: string } | null)?.code !== 'desktop-only') throw cause
+  })
+}
+
 export function useTheme() {
   const { theme, setTheme } = useSettingsStore()
 
@@ -24,7 +36,7 @@ export function useTheme() {
     }
 
     // Keep the window caption-button overlay in step with the app theme
-    window.electronAPI?.app?.setTitleBarTheme?.(isDark ? 'dark' : 'light')
+    applyTitleBarTheme(isDark)
   }, [theme, isDark])
 
   useEffect(() => {
@@ -34,7 +46,7 @@ export function useTheme() {
     const handleChange = (e: MediaQueryListEvent) => {
       const root = window.document.documentElement
       root.setAttribute('data-theme', e.matches ? 'dark' : 'light')
-      window.electronAPI?.app?.setTitleBarTheme?.(e.matches ? 'dark' : 'light')
+      applyTitleBarTheme(e.matches)
     }
 
     mediaQuery.addEventListener('change', handleChange)

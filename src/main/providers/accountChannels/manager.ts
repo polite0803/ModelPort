@@ -16,7 +16,7 @@
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { PassThrough } from 'node:stream'
-import { shell } from 'electron'
+import { getHost } from '../../runtime/host'
 import AccountManager from '../../store/accounts'
 import { storeManager } from '../../store/store'
 import type { ModelMapping, Provider } from '../../store/types'
@@ -24,6 +24,7 @@ import { ChannelBridge, ChannelBridgeError } from '../../channelPack/bridge'
 import type {
   ChannelAutoCheckinResult,
   ChannelCredits,
+  ChannelIdentitySnapshot,
   ChannelModelInfo,
   ChannelModelsResult,
   ChannelModelUpdateResult,
@@ -32,6 +33,8 @@ import type {
   ChannelRpcResult,
   ChannelView,
 } from '../../../shared/channels'
+import { CHANNEL_DISPLAY_RENAMES, renameDisplayNameRefs, renamedDisplayName } from '../../../shared/channelRename'
+import { channelModelDisplayName } from '../../../shared/channels'
 import type { ModelCapabilityHint } from '../../../shared/types'
 import { ACCOUNT_CHANNELS, getChannelDefinition } from './catalogue'
 import { accountRuntime } from '../../proxy/accountRuntime'
@@ -52,6 +55,8 @@ interface PackAccount {
   refreshable?: boolean
   createdAt?: number
   expiresAt?: number
+  /** Set by the pack when upstream said it will not serve this account. */
+  serviceStopped?: { at: number; text: string }
 }
 
 const MODELS_CACHE_MS = 30_000
@@ -198,6 +203,7 @@ class AccountChannelManager {
         credentialAdd: channel.credentialAdd,
         dailyCheckin: channel.dailyCheckin,
         description: channel.description,
+        upstreamIdentity: channel.upstreamIdentity,
         configured: provider !== undefined && provider.type === 'account',
         enabled: provider?.enabled === true,
         accounts: {
@@ -211,6 +217,12 @@ class AccountChannelManager {
             createdAt: typeof account.createdAt === 'number' ? account.createdAt : undefined,
             expiresAt: typeof account.expiresAt === 'number' ? account.expiresAt : undefined,
             refreshable: account.refreshable === true,
+            serviceStopped: typeof account.serviceStopped?.text === 'string'
+              ? {
+                  at: typeof account.serviceStopped.at === 'number' ? account.serviceStopped.at : 0,
+                  text: account.serviceStopped.text,
+                }
+              : undefined,
           })),
         },
         models: {
@@ -291,6 +303,57 @@ class AccountChannelManager {
       }
     })
     return { reported, accounts, ...reported > 0 ? { remaining: Math.round(total * 100) / 100 } : {} }
+  }
+
+  /**
+   * 渠道客户端身份快照（B4）：各动态渠道「下一笔请求实际会发」的版本号、来源
+   * 与核对时间。读不到 worker 时返回空表而不抛错 —— 身份展示是诊断信息，
+   * 它的失败不该把渠道页搞挂（与 `accountCounts()` 同一方向）。
+   */
+  async identitySnapshot(): Promise<ChannelIdentitySnapshot> {
+    try {
+      const bridge = await this.bridgeOrThrow()
+      const result = await bridge.rpc('identity.snapshot', {})
+      if (!result.ok) {
+        return { entries: [], error: result.error?.message ?? 'identity.snapshot 调用失败' }
+      }
+      const value = result.value as { entries?: unknown } | undefined
+      const entries = Array.isArray(value?.entries) ? value.entries : []
+      return {
+        entries: entries.filter((entry): entry is ChannelIdentitySnapshot['entries'][number] =>
+          typeof entry === 'object' && entry !== null
+          && typeof (entry as { channel?: unknown }).channel === 'string'
+          && typeof (entry as { version?: unknown }).version === 'string'),
+      }
+    } catch (error) {
+      return { entries: [], error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  /**
+   * 强制重拉官方版本源并返回刷新后的身份快照（B5 配套）。
+   *
+   * 供管理接口手动触发；风控自动触发的接线（`channel_risk_control` → 这里）
+   * 仍在计划 B5 的待办里，需要先确认「连续 N 次风控自动暂停渠道」的产品决策。
+   */
+  async identityRefresh(): Promise<ChannelIdentitySnapshot> {
+    try {
+      const bridge = await this.bridgeOrThrow()
+      const result = await bridge.rpc('identity.refresh', {})
+      if (!result.ok) {
+        return { entries: [], error: result.error?.message ?? 'identity.refresh 调用失败' }
+      }
+      const value = result.value as { entries?: unknown } | undefined
+      const entries = Array.isArray(value?.entries) ? value.entries : []
+      return {
+        entries: entries.filter((entry): entry is ChannelIdentitySnapshot['entries'][number] =>
+          typeof entry === 'object' && entry !== null
+          && typeof (entry as { channel?: unknown }).channel === 'string'
+          && typeof (entry as { version?: unknown }).version === 'string'),
+      }
+    } catch (error) {
+      return { entries: [], error: error instanceof Error ? error.message : String(error) }
+    }
   }
 
   /**
@@ -692,7 +755,7 @@ class AccountChannelManager {
     if (method === 'account.create' && result.ok) {
       const value = result.value as { loginUrl?: unknown } | undefined
       if (typeof value?.loginUrl === 'string' && /^https?:\/\//i.test(value.loginUrl)) {
-        void shell.openExternal(value.loginUrl)
+        getHost().openExternal(value.loginUrl)
       }
     }
     // 渠道包没有为所有改动账号池的方法广播 `changed`（opencode 的两个加账号方法就不发），
@@ -825,8 +888,7 @@ class AccountChannelManager {
           const capabilities: Record<string, ModelCapabilityHint> = {}
           for (const model of models.get(channel.id) ?? []) {
             if (model.disabled || model.dead) continue
-            const baseName = model.name.trim().length > 0 ? model.name : `${channel.id}/${model.id}`
-            const displayName = `${channel.name} / ${baseName}`
+            const displayName = channelModelDisplayName(channel.name, channel.id, model)
             if (!owned.has(displayName)) {
               owned.set(displayName, `${channel.id}/${model.id}`)
               const hint = capabilityHintOf(model)
@@ -1024,6 +1086,53 @@ class AccountChannelManager {
     this.ensureLocalAccount(id, name)
     this.writeMappings(id, modelMappings)
     this.migrateServedNames(id, legacyNames, servedBefore)
+    this.migrateRenamedDisplayNames(id, name, servedBefore)
+  }
+
+  /**
+   * Carry user configuration across a channel **display-name** rename.
+   *
+   * A rename changes every model name (`<channel> / <model>`), and three pieces
+   * of configuration are keyed by that name: the served flag (user switched the
+   * model off), and a route's `pinModels` / `includeModels` / `excludeModels`.
+   * Without this, a rename silently un-excludes models and leaves pinned routes
+   * pointing at names that no longer exist.
+   *
+   * Idempotent: the old prefix is gone after the first pass, so a later sync
+   * finds nothing to rewrite. Providers are updated before this runs, so the
+   * new names already resolve when a route is revalidated.
+   */
+  private migrateRenamedDisplayNames(
+    providerId: string,
+    currentName: string,
+    servedBefore: Map<string, boolean>,
+  ): void {
+    const rename = CHANNEL_DISPLAY_RENAMES.find(entry => entry.id === providerId)
+    if (rename === undefined || rename.from === currentName) return
+
+    for (const [oldName, served] of servedBefore) {
+      const renamed = renamedDisplayName(oldName, rename.from, currentName)
+      if (renamed === undefined) continue
+      if (served === false) storeManager.setModelsServed(providerId, [renamed], false)
+      // Clear the old key, same direction as `migrateServedNames`: leaving it
+      // behind would re-apply a stale "off" if the name ever came back.
+      storeManager.setModelsServed(providerId, [oldName], true)
+    }
+
+    for (const route of Object.values(storeManager.getModelRoutes())) {
+      const pinModels = renameDisplayNameRefs(route.pinModels, rename.from, currentName)
+      const includeModels = renameDisplayNameRefs(route.includeModels, rename.from, currentName)
+      const excludeModels = renameDisplayNameRefs(route.excludeModels, rename.from, currentName)
+      if (pinModels === undefined && includeModels === undefined && excludeModels === undefined) continue
+      const result = storeManager.updateRoute(route.name, {
+        ...(pinModels === undefined ? {} : { pinModels }),
+        ...(includeModels === undefined ? {} : { includeModels }),
+        ...(excludeModels === undefined ? {} : { excludeModels }),
+      })
+      if (!result.ok) {
+        console.warn(`[ChannelPack] 路由 ${route.name} 的模型引用未能跟随渠道改名：${result.error}`)
+      }
+    }
   }
 
   /**

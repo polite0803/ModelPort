@@ -989,6 +989,41 @@ wrong request from being retried down a whole pool. Message-keyed matching stays
 reproducible candidate order, the catalogue-drift 404 switch and the plain-404 switch, plus
 `tests/proxy/failover.test.ts` for the detectors themselves.
 
+**An account the upstream says it will not serve is parked, not rotated - on every channel.**
+`vendor/channel-pack/src/account-stop.ts` holds the shared judgement (`ACCOUNT_STOP_MARKERS`:
+停止提供服务 / 封禁 / 违规 / 安全审核 / account suspended / official client …, and deliberately *not*
+generic `forbidden` / `unauthorized`, which are ordinary 403s) plus `parkStoppedAccount`, which writes
+`enabled: false` and `serviceStopped { at, text }` in one store write. Every adapter calls it at the
+point where status and body are known: buddy/workbuddy (three paths), qoder (HTTP + in-stream),
+trae (first response + rotation loop), cline (region-403 read + both error paths), loomy, raccoon,
+minimax, zcode, gemini, opencode, lobsterai (its own `service-stopped` class over
+`LOBSTERAI_SERVICE_STOPPED_MARKERS`, checked before the status code because the credit lane reports
+the same stop as HTTP 200 + an in-stream error frame). A hit is terminal: no rotation, no token
+refresh + resend, no rate-limit badge (a ban shown as "限额重置" is a false statement), and
+`getAvailableAccount` / the balance gate / the catalogue pre-check stop selecting the account while
+`enabled === false`; the daily claim and balance passes skip it under the same condition, and
+re-enabling the row (per account or per channel) drops the record - that switch is the user's
+explicit "try again". `tests/channels/account-stop.test.ts` pins the judgement, the write, the
+failure-isolation, and a source scan that every adapter still calls it.
+
+Rotation is bounded everywhere: `BUDDY_MAX_ROTATE` replaced workbuddy/buddy's `for (;;)` until the
+pool ran dry, and `QODER_MAX_ROTATE` bounds `switchAccountOnQuota`; the other channels already ran at
+three. Selection inside a channel is sticky to the **current serving account** (`activeAccounts` +
+`moveActiveFirst`): while it is eligible it stays first whatever the manual order says, and the pin
+only moves when that account is excluded (it just failed), disabled, or rate-limited for the model.
+A hand-over therefore switches once instead of leaving the channel running two accounts at the same
+time - the last way one gateway could look like two clients. Re-ordering the accounts in the UI clears
+the pin, because that is the user redefining which account should serve. Unattended traffic is
+trimmed as well: auto check-in is now **off by default** (a round is
+"channels × accounts" authenticated requests nobody asked for), the balance gate only *reads* on the
+selection path (`usableFromCache`, background refresh) instead of awaiting a probe per pick, the badge
+TTL is 10 minutes. Retired outright on 2026-11-05: trae's check-in device
+generation and `DSH_TRAE_ROTATE_MACHINE_ID` machine-id rotation, and opencode's
+`opencode.rotateFingerprint` - each of them existed to change device/project identity so a per-device
+or per-project limit would not apply, which is evading the upstream's accounting rather than using
+it. What none of this does is make the lanes safe: these channels drive consumer accounts through a
+client the vendor does not authorise, and that is the stated reason for the stops.
+
 **Pool strategies are set algebra read left-to-right, and a later `or` can void an earlier filter.**
 `route.poolStrategies` is a sequence over the 17 predicates in `STRATEGY_PREDICATES`
 (`AutoPoolStrategyId`), each carrying `operator: 'and' | 'or'`: `and` intersects the running set, `or`

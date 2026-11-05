@@ -1,4 +1,4 @@
-import { app } from 'electron'
+import { getHost } from '../runtime/host'
 import { arch, platform } from 'node:os'
 import { storeManager } from '../store/store'
 import type { LogEntry, RequestDiagnosticBundle, RequestLogEntry } from '../../shared/types.ts'
@@ -53,8 +53,8 @@ export function buildRequestDiagnosticBundle(key: string): RequestDiagnosticBund
   return {
     generatedAt: new Date().toISOString(),
     app: {
-      version: app.getVersion(),
-      electron: process.versions.electron ?? 'unknown',
+      version: getHost().getVersion(),
+      electron: process.versions.electron ?? 'none (headless host)',
       node: process.versions.node,
       platform: platform(),
       arch: arch(),

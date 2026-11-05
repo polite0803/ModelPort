@@ -94,7 +94,7 @@ export default defineConfig({
           //
           // ESM-only 不是理由：rollup 打包时会把 ESM 转成 CJS 内联，1.4.4 及更早
           // 的安装包就是这样工作的。映射盘解析问题已由 cwd/preserveSymlinks 处理。
-          'electron-store',
+          'conf',
           'electron-updater'
         ]
       })
@@ -106,7 +106,10 @@ export default defineConfig({
     build: {
       rollupOptions: {
         input: {
-          index: resolve(process.cwd(), 'src/main/index.ts')
+          index: resolve(process.cwd(), 'src/main/index.ts'),
+          // The Windows-native shell: a second main process in the same build, shipped
+          // as its own installer (see PLAN-wsl-headless-daemon-and-shell.md, S3/S4).
+          shell: resolve(process.cwd(), 'src/shell/main.ts'),
         },
         output: {
           format: 'cjs'
@@ -119,7 +122,9 @@ export default defineConfig({
     build: {
       rollupOptions: {
         input: {
-          index: resolve(process.cwd(), 'src/preload/index.ts')
+          index: resolve(process.cwd(), 'src/preload/index.ts'),
+          'shell-preload': resolve(process.cwd(), 'src/shell/preload.ts'),
+          'shell-prompt-preload': resolve(process.cwd(), 'src/shell/promptPreload.ts'),
         }
       }
     }

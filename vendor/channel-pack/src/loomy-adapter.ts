@@ -29,6 +29,7 @@ import {
   type LoomyCredential,
 } from './loomy.js'
 import { LOOMY, type LoomyFallbackModel, type LoomyProduct } from './loomy-product.js'
+import { isAccountStoppedMessage, parkStoppedAccount } from './account-stop.js'
 import {
   registerAdapterIdempotent,
 } from './llm-register-compat.js'
@@ -527,6 +528,14 @@ export class LoomyAdapter extends LlmAdapter {
         }
         if (!response.ok) {
           const errorText = await response.text().catch(() => '')
+          if (isAccountStoppedMessage(errorText)) {
+            await parkStoppedAccount(this.options.accountPool, accountId, errorText)
+            throw new LlmError(
+              `loomy: 上游已停止为该账号服务（${errorDetail(errorText)}）`,
+              'AUTH',
+              { status: response.status },
+            )
+          }
           let quota = response.status === 402
           try { quota ||= isLoomyQuotaError(JSON.parse(errorText)) } catch {}
           throw new LlmError(

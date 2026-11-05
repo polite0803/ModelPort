@@ -11,30 +11,34 @@ import type { ChannelDefinition } from '../../../shared/channels'
 export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
   {
     id: 'lobsterai',
+    upstreamIdentity: { declared: 'User-Agent: LobsterAI/0.1.0 · X-LobsterAI-Client-Version: 官方最新版本', risk: 'high' },
     name: 'LobsterAI (有道)',
     vendor: '有道',
     loginKind: 'browser',
     dailyCheckin: true,
     description: '网页登录后领取每日积分，走有道龙虾的免费模型额度。',
   },
-  {
+{
     id: 'qoder',
+    upstreamIdentity: { declared: 'User-Agent: qoder（动态版本）· COSY 签名（WASM 1.1.49）· 领取时调用官方 runtime-info.exe', risk: 'high' },
     name: 'Qoder',
     vendor: 'Qoder',
     loginKind: 'device-code',
     dailyCheckin: true,
     description: '设备码登录，账号池按顺序分担请求并共享每日积分。',
-  },
-  {
+},
+{
     id: 'qodercn',
+    upstreamIdentity: { declared: 'User-Agent: qoder（动态版本）· COSY 签名（WASM 1.1.49）· 领取时调用官方 runtime-info.exe', risk: 'high' },
     name: 'Qoder (中国版)',
     vendor: '阿里',
     loginKind: 'device-code',
     dailyCheckin: true,
     description: '中国版 Qoder，与海外版同协议、不同产品线。',
-  },
+},
   {
     id: 'trae',
+    upstreamIdentity: { declared: 'User-Agent: Trae/<appVersion> · X-Ide-Version: <appVersion> · X-Ide-Version-Code: <traeVersionCode> · 设备头按宿主实取', risk: 'high' },
     name: 'TRAE (字节)',
     vendor: '字节跳动',
     loginKind: 'browser',
@@ -43,6 +47,7 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
   },
   {
     id: 'cline',
+    upstreamIdentity: { declared: 'X-CLIENT-TYPE: cline-sdk（官方 SDK 头）· WorkOS 设备码 OAuth', risk: 'low' },
     name: 'Cline',
     vendor: 'Cline',
     loginKind: 'device-code',
@@ -55,6 +60,7 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
   },
   {
     id: 'loomy',
+    upstreamIdentity: { declared: '仅 Authorization + token（不发 User-Agent，也没有官方签名）', risk: 'medium' },
     name: 'Loomy (讯飞)',
     vendor: '科大讯飞',
     loginKind: 'browser',
@@ -63,6 +69,7 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
   },
   {
     id: 'raccoon',
+    upstreamIdentity: { declared: 'X-Client-Platform: desktop-windows · X-Org-Code（无 User-Agent）', risk: 'medium' },
     name: 'Raccoon (商汤)',
     vendor: '商汤',
     loginKind: 'browser',
@@ -72,22 +79,25 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
   },
   {
     id: 'minimax',
+    upstreamIdentity: { declared: '仅 Authorization 头（不发客户端身份）· 官方设备码 OAuth', risk: 'low' },
     name: 'MiniMax Code',
     vendor: 'MiniMax',
     loginKind: 'device-code',
     dailyCheckin: true,
     description: 'OAuth 设备码授权，支持每日签到领取。',
   },
-  {
+{
     id: 'zcode',
+    upstreamIdentity: { declared: 'User-Agent: ZCode（动态版本）· X-ZCode-App-Version · 内置官方身份块', risk: 'high' },
     name: 'ZCode (智谱)',
     vendor: '智谱',
     loginKind: 'browser',
     dailyCheckin: true,
     description: '浏览器登录 ZCode，按免费套餐余额扣费。',
-  },
+},
   {
     id: 'gemini',
+    upstreamIdentity: { declared: 'antigravity/hub/<官方最新版本>（官方 update 站现取）', risk: 'high' },
     name: 'Gemini Code Assist',
     vendor: 'Google',
     loginKind: 'oauth',
@@ -97,15 +107,17 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
   },
   {
     id: 'buddy',
-    name: 'CodeBuddy (腾讯)',
+    upstreamIdentity: { declared: 'User-Agent: WorkBuddy/<version> WorkBuddy/<version> CLI/<version>（国内客户端形态）· X-IDE-Version: <version> · 版本与国际版同源', risk: 'high' },
+    name: 'WorkBuddy (国内版)',
     vendor: '腾讯',
     loginKind: 'browser',
     dailyCheckin: true,
-    description: '中国版 CodeBuddy：浏览器授权，支持每日签到领取免费积分（国际版 WorkBuddy 没有签到接口）。',
+    description: 'WorkBuddy 国内版（原 CodeBuddy）：浏览器授权，支持每日签到领取免费积分（国际版没有签到接口）。',
   },
   {
     id: 'workbuddy',
-    name: 'WorkBuddy (腾讯)',
+    upstreamIdentity: { declared: 'User-Agent: WorkBuddy/<version> · X-IDE-Version: <version> · 按模型族分档（国际线 / 国内线）', risk: 'high' },
+    name: 'WorkBuddy (国际版)',
     vendor: '腾讯',
     loginKind: 'browser',
     dailyCheckin: false,
@@ -113,6 +125,7 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
   },
   {
     id: 'opencode',
+    upstreamIdentity: { declared: 'User-Agent: opencode/latest/<version>/cli · 仿官方 project id / session id 形状', risk: 'medium' },
     name: 'OpenCode',
     vendor: 'OpenCode',
     // 这一家不跳浏览器：要么加一条匿名槽（免费车道，无需凭据），要么粘贴 API key。
