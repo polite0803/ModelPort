@@ -126,10 +126,11 @@ jobs:
 
       # 无头守护进程：给 WSL / 容器 / 没有显示环境的 Linux 主机。产物是 tar.gz
       # （bundle + resources + renderer + systemd unit 模板），不带 Electron 运行时。
+      # tarball 是纯 Node.js 代码，与架构无关，只需在 x64 runner 上构建一次。
       - name: Package and upload the headless daemon
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' && matrix.arch == 'x64'
         run: |
           npm run build:daemon
-          gh release upload "${{ github.ref_name }}" dist/modelport-daemon-*-${{ matrix.arch }}.tar.gz --clobber
+          gh release upload "${{ github.ref_name }}" dist/modelport-daemon-*.tar.gz --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
