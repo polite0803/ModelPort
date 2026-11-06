@@ -6,6 +6,48 @@
 条目按"为什么改、影响什么"描述；每条末尾括号里的短哈希指向产生该变更的提交，可在 `git show <哈希>` 中核对。
 版本边界与溯源说明见文末。
 
+## [1.7.6] - 2026-11-07
+
+版本边界：tag `v1.7.6`（相对 1.7.5）。本版是**破坏性**的发布形态变更：安装包从此是
+控制台 + 网关安装器，原「主应用」不再单独发布。
+
+### Added（新增）
+
+- 控制台三形态：本地（同一个二进制以无窗口角色 `--gateway` 起独立网关进程，保住系统密钥库封装的 `store.key`）、WSL（网关装在 WSL 里）、远程（只连接）。窗口一律加载网关自己的 `/ui/`，三种「网关不存在」各自的画面与动作不同。空地址簿首启自动落一条本地网关，安装即等于「取代主应用」。(`2586da8`)
+- 网关按需安装：本地形态首启执行 `--init-local`（建数据目录、生成管理口令、起监听），口令经 0600 一次性文件交给控制台密封后删除，用户无需粘贴；WSL 形态在网关不存在时全自动安装——读发行版与架构（`wsl.exe` 是 UTF-16LE）、Node 缺失或过低时装 nodejs.org 官方构建并按 `SHASUMS256.txt` 校验、daemon 包缺 `.sha256` 直接拒绝、写 system 作用域 systemd 单元、执行 `--init-host` 取口令、等 `/health` 应答；任一步失败自动回滚且**不动 `~/.modelport`**。(`2586da8`)
+- 渠道页的自动领取签到积分现在显示逐渠道结果，以及「今天还有 N 个渠道未完成，稍后自动重试」；有待重试渠道时用 30s 慢轮询，而不是 5s 空转。(`061f57f`)
+
+### Changed（变更）
+
+- 发布收敛为单产品：删除 `electron-builder.shell.yml` 与 `build:shell`，`package.json` 的 `build` 段成为唯一配置；移除 `publish` 段，**不再产出 `latest.yml`**。CI 三平台各打一条安装包，daemon tarball 单独构建上传，其余资产逐一生成同名 `.sha256` 后 `gh release upload`。在线升级资产名改为 `ModelPort-<ver>-<arch>-setup.exe`。(`2586da8`)
+- 安装控制台更新前先停本地网关子进程：两者是同一个 exe，留着它会锁住二进制；安装器随后重新拉起控制台，由它启动新版本网关。macOS / Linux 不再尝试静默安装，明确提示从 Release 页面下载。(`2586da8`)
+- 地址簿以形态（`local` / `wsl` / `remote`）取代「允许在线升级此 WSL 网关」开关；旧 `gateways.json` 按 `manageWsl === true ? 'wsl' : 'remote'` 迁移。(`2586da8`)
+- 自动签到改为**逐渠道**记账：每个渠道按 UTC+8 记自己的完成状态，失败或声明 `retryLater` 的留在待办，由 30 分钟的重试定时器（`DSH_CHANNEL_PACK_AUTO_CHECKIN_RETRY_MS`）只重跑这些渠道；已完成的当天不再发请求，跨日后第一轮重跑全部。(`061f57f`)
+- 开发通路改走生产同款传输：控制台窗口加载 Vite 页面，`/v1` 由 dev server 代理到本地网关（HTTP + SSE），不再依赖桌面 preload 的 IPC。(`2586da8`)
+
+### Fixed（修复）
+
+- Qoder 每日额度在 10:00（UTC+8）刷新前被记成「今天已处理」，导致当天新额度整天漏领：刷新前那一轮现在保留为待重试，10:00 之后自动补领。(`061f57f`)
+- 自动签到「一个渠道成功就把当天记完成」：失败渠道当天不再重试，也不再有逐渠道结果；现在按渠道记账并按 30 分钟补领，全部完成后的重试轮是零上游请求。(`061f57f`)
+- 本地网关的三种失败不再长得一样：未安装（可一键装）/ 已安装未运行（可启动，附退出后的日志）/ 在跑但 `/health` 不应答（列出进程与端口）。端口被占用时网关不会自行换端口。 (`2586da8`)
+
+### 发布（Breaking）
+
+- **主应用发布形态取消**：`ModelPort-<ver>-<arch>-setup.exe` 仍是唯一 Windows 安装包，但它装下来的是控制台；`ModelPort-Shell-*` 资产不再发布。appId 仍为 `com.modelport.manager`，老用户覆盖升级即可，`data.json`、`store.key` 与凭据不受影响。
+- macOS / Linux 也出控制台（本地 + 远程形态；WSL 项只在 Windows 出现）；WSL / 无头 Linux 继续用 `modelport-daemon-<ver>-<arch>.tar.gz`。
+
+### Tests（判据）
+
+- 全量 `npm run gate`：**1892 通过 / 0 失败，exit 0**（build + build:daemon + 两个 `tsc` + 全量）。
+- 新增门：`gateway-entry`（三产物与动态加载、网关角色无窗口/无托盘/保留密钥库）、`gateway/local-init`（首启计划与握手形态、状态文件拒绝坏数据）、`shell/local-gateway-plan`（未安装/未停止/不应答三态与 argv）、`shell/wsl-install-plan`（UTF-16LE、Node 供给、unit 与脚本同源、init 后才重启、回滚不动数据）。
+- 实跑读数：隔离 profile 起 daemon，`/health 200`、`/ 200`、`/ui/ 200`、RPC 无口令 `401` / 带口令 `200`。
+
+### 未取读数
+
+- 本地形态的真机运行（`--gateway` 会读写这台机器的真实 `~/.modelport`，未在作者正在使用的数据上执行）。
+- WSL 首装的真机失败路径（无 systemd、无 sudo、端口占用）。
+- macOS dmg 的 Gatekeeper 行为与 NSIS 覆盖安装时子进程是否停干净。
+
 ## [1.7.5] - 2026-11-06
 
 版本边界：tag `v1.7.5`（相对 1.7.4）。
