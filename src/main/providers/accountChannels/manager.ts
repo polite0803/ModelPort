@@ -567,8 +567,8 @@ class AccountChannelManager {
    *
    * The switch is one for all channels: when on, the pack claims once per
    * channel for every account and only once per UTC+8 day (`lastDate` is the
-   * de-duplication key). It is on by default and the pack schedules a round 30s
-   * after it starts, so this may already report somebody else's run.
+   * de-duplication key). It is off by default; the pack schedules a round 30s
+   * after it starts only when the user has explicitly enabled it.
    */
   async autoCheckin(): Promise<ChannelAutoCheckinResult> {
     return this.readAutoCheckin(undefined)
@@ -597,8 +597,9 @@ class AccountChannelManager {
     return {
       success: true,
       state: {
-        // 渠道包的判据是「只有显式 false 才算关闭」（默认打开），照抄它。
-        enabled: raw.enabled !== false,
+        // 渠道包默认关闭，且只认「用户亲手打开」（文档里的 `decidedBy: 'user'`）。
+        // 缺字段或非 true 一律按关处理，不能沿用旧版「只有显式 false 才算关闭」。
+        enabled: raw.enabled === true,
         lastDate: typeof raw.lastDate === 'string' ? raw.lastDate : '',
         ranToday: raw.ranToday === true,
         running: raw.running === true,

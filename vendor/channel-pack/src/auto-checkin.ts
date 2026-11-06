@@ -257,6 +257,10 @@ class FileAutoCheckinStore implements AutoCheckinStore {
     writeFileSync(tmp, JSON.stringify({
       schema: SCHEMA,
       enabled: doc.enabled,
+      // ⚠️ 必须落盘：`sanitizeAutoCheckin` 只认「`decidedBy === 'user'` 且
+      // `enabled === true`」为开启。漏写本字段的后果是用户打开开关、下次启动
+      // 又被读成关闭（`sanitizeAutoCheckin` 的一次性迁移判据），自动签到再也不会跑。
+      ...(doc.decidedBy === 'user' ? { decidedBy: 'user' as const } : {}),
       lastDate: doc.lastDate,
       lastResult: doc.lastResult,
       lastAt: doc.lastAt,
