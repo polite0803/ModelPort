@@ -311,8 +311,15 @@ HTTP + SSE）。
 - 兼容桥：≤1.7.5 的客户端用 electron-updater 读 `latest.yml` / `latest-linux*.yml`，
   而新控制台不读。为不让老用户失去应用内升级，本次**手工生成并上传**了这三份 yml
   （sha512 由发布侧 `.sha256` 交叉校验过的字节算出）。这是一次性桥，不是新的发布步骤。
-- macOS 两个 dmg 仍在 runner 队列中（`macos-latest` 排队），资产清单以后续
-  `gh release view v1.7.6` 为准。
+- macOS：首次运行时两个 mac job 都被取消且无法在**已结束的 run** 上重跑（job 重新排队后随
+  run 收尾又被取消）。按「同版本号重发」处理：删 Release + 删标签，在当前 main（含 `prepare`
+  与 `fail-fast: false`）重打 v1.7.6 并重跑整条矩阵，本次两枚 dmg 都产出了。
+- 发现一处冗余：`build.mac.target` 写死 `arch: ["arm64"]`，而矩阵又给了 `--mac --x64`，
+  两者取并集 ⇒ **mac x64 那个 job 实际产出 arm64 + x64 两份 dmg**，矩阵里的 mac arm64
+  job 是重复的（仍在排队）。收口方式二选一：矩阵只留 mac x64 一项，或把 target 的 arch
+  改成两项并去掉矩阵里的 arch 维度；本次不动，避免在已发布版本上再改构建形状。
+- 终局资产：**23 项** = 20 个构建产物（Win setup/portable、mac dmg×2、Linux AppImage×2/
+  deb/tar.gz、daemon×2，各带 `.sha256`）+ 3 份一次性兼容 yml。
 
 ### 仍未取到的读数
 
