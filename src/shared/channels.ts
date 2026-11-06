@@ -211,7 +211,7 @@ export interface ChannelAutoCheckin {
   enabled: boolean
   /** 上次**完成**自动领取的 UTC+8 日期（`YYYY-MM-DD`）；空串 = 从未跑过。 */
   lastDate: string
-  /** 今天是否已经自动领取过。 */
+  /** 今天的轮次是否已全部完成（仍有渠道待重试时为 false）。 */
   ranToday: boolean
   /** 这一轮正在执行（刚打开开关会立刻跑一轮）。 */
   running: boolean
@@ -219,6 +219,14 @@ export interface ChannelAutoCheckin {
   lastResult: string
   /** 上次跑完的时刻（毫秒）；0 = 从未跑过。 */
   lastAt: number
+  /** 今天仍未处理完的渠道数（0 = 今天的轮次已完成）。失败 / 渠道刷新的重试会补。 */
+  pending: number
+  /** 今天仍未处理完的渠道 id（逐渠道文本见 `channels`）。 */
+  pendingProviders: string[]
+  /** 下一次自动重试的时刻（毫秒）；0 = 没有排定。 */
+  nextRetryAt: number
+  /** 逐渠道结果（渠道包给的短文本，顺序即遍历顺序）。 */
+  channels: Array<{ provider: string; text: string }>
   dismissed: boolean
 }
 

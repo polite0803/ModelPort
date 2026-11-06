@@ -364,6 +364,14 @@ export interface RpcCreditsClaimSummary {
    */
   coversToday: number
   /**
+   * 本次结果里是否有「今天还要再试」的账号（`ClaimOutcome.retryLater`）。
+   *
+   * 与 `failed > 0` 的区别：`failed` 是请求真的失败了；本字段表示「没失败，
+   * 但现在还不是今天的额度」（Qoder 每日 10:00 UTC+8 才刷新）。自动签到据此
+   * 把该渠道保留为当天待办，稍后自动再跑一轮，而不是记成今天已完成。
+   */
+  retryLater: boolean
+  /**
    * ★ **按单位分组**的领取合计（2026-10-04）。
    *
    * ## 为什么必须有它（真实缺陷，用户报障）
@@ -1396,10 +1404,10 @@ export interface RpcUsageTokenLedgerHistoryResponse {
  */
 export interface RpcUsageAutoCheckinState {
   /**
-   * 开关是否打开。默认**打开**（`auto-checkin.ts` 的 `DEFAULT_AUTO_CHECKIN`：
-   * 用户 2026-10-02 明确要求「自动签到默认保持打开」）。⚠️ 本注释早于那次
-   * 决定、写的是「默认关闭」，已按实现更正 —— 改默认值前先改这里，别让注释
-   * 与实现分家（那正是本 PR 审查发现的一处矛盾）。
+   * 开关是否打开。**默认关闭**，且只认用户亲手拨过的选择
+   *（`auto-checkin.ts` 的 `sanitizeAutoCheckin`：`decidedBy === 'user'`）。
+   * 默认值 2026-11-05 从「打开」翻转为「关闭」—— 一轮自动签到是
+   * 「渠道数 × 账号数」次无人值守的认证请求，不该替用户默认发起。
    */
   enabled: boolean
   /** 上次**完成**自动签到的 UTC+8 日期（`YYYY-MM-DD`）；空串 = 从未跑过。 */
@@ -1412,6 +1420,18 @@ export interface RpcUsageAutoCheckinState {
   lastResult: string
   /** 上次跑完的时刻（毫秒）；0 = 从未跑过。面板上的时间戳用它。 */
   lastAt: number
+  /**
+   * 今天仍未处理完的渠道数（0 = 今天的轮次已完成）。
+   *
+   * 「未处理完」包含：请求失败、以及渠道自己声明 `retryLater` 的轮次
+   *（Qoder 每日 10:00 UTC+8 刷新前）。自动签到会按周期只重跑这些渠道，
+   * 已完成的渠道当天不会再发请求。
+   */
+  pending: number
+  /** 今天仍未处理完的渠道 id（逐渠道文本见 {@link channels}）。 */
+  pendingProviders: string[]
+  /** 下一次自动重试的时刻（毫秒）；0 = 没有排定。 */
+  nextRetryAt: number
   /**
    * **逐渠道**结果（顺序即遍历顺序，文本形如 `2 个 +800` / `今天已领` /
    * `无签到接口` / `出错`）。

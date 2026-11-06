@@ -682,7 +682,7 @@ export async function claimQoderDailyCheckin(
   // 少了这一句，上层会把「昨天那条已领」记成今天已跑 ⇒ 当天新额度整天漏领
   // （真实缺陷，2026-10-02 审查 PR !33 定位；字段语义见 `credits.ts`）。
   const refreshed = hasQoderCampaignRefreshedToday(nowMs)
-  const stale = refreshed ? undefined : { coversToday: false as const }
+  const stale = refreshed ? undefined : { coversToday: false as const, retryLater: true as const }
 
   const targets = claimableCampaigns(parsed)
   if (targets.length === 0) {
@@ -697,7 +697,9 @@ export async function claimQoderDailyCheckin(
     if (claimedBefore) {
       // 刷新前看到的那条 `CLAIMED` 属于**昨天**。说成「今天已领取」是谎报，
       // 且方向不可逆（用户会以为今天不必再领，官方 IDE 里却还没刷新）。
-      if (!refreshed) return { kind: 'inactive', message: NOT_REFRESHED_YET_HINT }
+      // 刷新前看到的是昨天那一轮：不是「今天没得领」，而是「今天还没开始」，
+      // 必须保留为当天待重试（10:00 之后自动签到会再跑一轮）。
+      if (!refreshed) return { kind: 'inactive', message: NOT_REFRESHED_YET_HINT, retryLater: true }
       return { kind: 'already-claimed', message: '今天已领取' }
     }
 

@@ -69,6 +69,8 @@ const POLL_TIMEOUT_MS = 5 * 60 * 1000
 const CHANGED_DEBOUNCE_MS = 1500
 // 积分查询是每渠道一个 RPC，变化远慢于请求事件；10s 的尾随节流足够。
 const CREDITS_MIN_INTERVAL_MS = 10_000
+// 自动签到还有渠道待重试时，下一次重试在 30 分钟后；30s 的慢轮询足够看见结果。
+const PENDING_POLL_INTERVAL_MS = 30_000
 
 /** 身份核对时间的本地短格式（`MM-DD HH:mm`）：徽标 tooltip 空间有限，日期不带年份。 */
 function formatIdentityTime(ms: number): string {
@@ -176,8 +178,11 @@ export function Channels() {
       return
     }
     setAutoCheckin(result.state)
+    // 运行中跟得紧一点（5s）；只是有待重试渠道时用更慢的节奏，避免空转。
     if (result.state.running) {
       autoCheckinTimer.current = setTimeout(() => { void loadAutoCheckin() }, POLL_INTERVAL_MS)
+    } else if (result.state.enabled && result.state.pending > 0) {
+      autoCheckinTimer.current = setTimeout(() => { void loadAutoCheckin() }, PENDING_POLL_INTERVAL_MS)
     }
   }, [])
 
@@ -520,6 +525,9 @@ export function Channels() {
   const autoCheckinStatus = useMemo(() => {
     if (autoCheckin === null) return t('channels.autoCheckin.unavailable')
     if (autoCheckin.running) return t('channels.autoCheckin.running')
+    if (autoCheckin.enabled && autoCheckin.pending > 0) {
+      return t('channels.autoCheckin.pending', { count: autoCheckin.pending })
+    }
     if (autoCheckin.ranToday) {
       return t('channels.autoCheckin.ranToday', { date: autoCheckin.lastDate })
     }
@@ -575,6 +583,16 @@ export function Channels() {
                 {autoCheckin?.running === true && <Loader2 className="h-3 w-3 animate-spin" />}
                 {autoCheckinStatus}
               </p>
+              {autoCheckin !== null && autoCheckin.channels.length > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  {autoCheckin.channels
+                    .map(entry => t('channels.autoCheckin.channelLine', {
+                      name: channels.find(channel => channel.id === entry.provider)?.name ?? entry.provider,
+                      status: entry.text,
+                    }))
+                    .join(' · ')}
+                </p>
+              )}
             </div>
           </div>
           <Switch

@@ -85,3 +85,26 @@ test('旧文档的 enabled:true 没有 decidedBy 时按关闭处理（一次性�
   assert.equal(migrated.enabled, false, '旧默认值写下的 true 不是用户选择，必须回到关闭')
   assert.equal(migrated.decidedBy, undefined)
 })
+
+test('逐渠道日期与待办列表必须落盘，脏值回落为空', async (t) => {
+  const { createAutoCheckinStore, sanitizeAutoCheckin, DEFAULT_AUTO_CHECKIN } = await loadAutoCheckin(t)
+  const { store } = storeInTempHome(t, createAutoCheckinStore)
+  await store.save({
+    ...DEFAULT_AUTO_CHECKIN,
+    enabled: true,
+    decidedBy: 'user',
+    providerDates: { qoder: '2026-11-07' },
+    pendingProviders: ['qoder', 'trae'],
+  })
+
+  const reloaded = createAutoCheckinStore({}).load()
+  assert.deepEqual(reloaded.providerDates, { qoder: '2026-11-07' }, '补领判据必须能跨重启保留')
+  assert.deepEqual(reloaded.pendingProviders, ['qoder', 'trae'])
+
+  const dirty = sanitizeAutoCheckin({
+    providerDates: { qoder: '2026-11-07', bad: 'not-a-date', '': '2026-11-07' },
+    pendingProviders: ['qoder', 42, '', 'qoder'],
+  })
+  assert.deepEqual(dirty.providerDates, { qoder: '2026-11-07' })
+  assert.deepEqual(dirty.pendingProviders, ['qoder'], '去重并丢弃非字符串项')
+})

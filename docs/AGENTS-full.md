@@ -639,7 +639,11 @@ message value: the worker asks, `vault.ts` resolves from
 whose result is `{ok:true,value}` / `{ok:false,error}`; the methods used here are `provider.status`,
 `provider.setEnabled`, `account.list|create|update|delete`, `login.poll`, `credits.balances`,
 `credits.claimAll`, `model.list` and `usage.autoCheckin` (the global one-switch daily auto-claim: no
-argument reads its state, a boolean writes it).
+argument reads its state, a boolean writes it. Completion is recorded **per channel** for the current
+UTC+8 day; channels that failed or declared `retryLater` (Qoder before its 10:00 refresh) stay pending
+and are retried every 30 minutes — `DSH_CHANNEL_PACK_AUTO_CHECKIN_RETRY_MS` — while finished channels
+are not requested again; crossing midnight makes the next retry start a new day. The first round is
+still scheduled 30s after the pack starts, and the switch defaults to off).
 
 The model catalogue comes from `model.list`, **not** from `bridge.models()` — with exactly one
 exception: `model.list` carries no context window, so `manager.models()` pulls the OpenAI-shaped

@@ -1634,12 +1634,14 @@
     "claimFailed": "Could not claim credits",
     "autoCheckin": {
       "title": "Auto-claim daily credits",
-      "description": "Once a day, claim the check-in credits of every account on every connected channel (one round per calendar day).",
+      "description": "Claim the check-in credits of every account on every connected channel once a day; channels that failed or have not refreshed yet are retried until the day is complete.",
       "on": "On",
       "off": "Off",
       "running": "Claiming…",
+      "pending": "{{count}} channel(s) still unfinished today — retrying automatically",
       "ranToday": "Already claimed today ({{date}})",
       "last": "Last run: {{result}} · {{time}}",
+      "channelLine": "{{name}}: {{status}}",
       "never": "Never ran yet",
       "unavailable": "The channel runtime is not running, so this switch cannot be read"
     },

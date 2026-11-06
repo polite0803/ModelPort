@@ -1634,12 +1634,14 @@
     "claimFailed": "领取失败",
     "autoCheckin": {
       "title": "自动领取签到积分",
-      "description": "开启后每天自动为所有已连接渠道的账号领取一次签到积分（每个自然日只跑一次）。",
+      "description": "开启后每天自动为所有已连接渠道的账号领取签到积分；未完成的渠道（失败、未到刷新时间）会自动重试，直到当天全部完成。",
       "on": "已开启",
       "off": "已关闭",
       "running": "正在领取…",
+      "pending": "今天还有 {{count}} 个渠道未完成，稍后自动重试",
       "ranToday": "今天已自动领取（{{date}}）",
       "last": "上次领取：{{result}} · {{time}}",
+      "channelLine": "{{name}}：{{status}}",
       "never": "尚未自动领取过",
       "unavailable": "渠道运行时未启动，暂时读不到这个开关"
     },

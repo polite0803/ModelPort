@@ -566,9 +566,12 @@ class AccountChannelManager {
    * Reads the global "claim every account's daily credits automatically" switch.
    *
    * The switch is one for all channels: when on, the pack claims once per
-   * channel for every account and only once per UTC+8 day (`lastDate` is the
-   * de-duplication key). It is off by default; the pack schedules a round 30s
-   * after it starts only when the user has explicitly enabled it.
+   * channel for every account and records completion **per channel** for the
+   * current UTC+8 day. Channels that failed or that are not refreshed yet
+   * (Qoder before 10:00) stay pending and are retried every 30 minutes; a
+   * channel that already finished is not requested again that day. It is off
+   * by default; the pack schedules the first round 30s after it starts only
+   * when the user has explicitly enabled it.
    */
   async autoCheckin(): Promise<ChannelAutoCheckinResult> {
     return this.readAutoCheckin(undefined)
@@ -605,6 +608,21 @@ class AccountChannelManager {
         running: raw.running === true,
         lastResult: typeof raw.lastResult === 'string' ? raw.lastResult : '',
         lastAt: typeof raw.lastAt === 'number' ? raw.lastAt : 0,
+        pending: typeof raw.pending === 'number' ? raw.pending : 0,
+        pendingProviders: Array.isArray(raw.pendingProviders)
+          ? raw.pendingProviders.filter((id): id is string => typeof id === 'string')
+          : [],
+        nextRetryAt: typeof raw.nextRetryAt === 'number' ? raw.nextRetryAt : 0,
+        channels: Array.isArray(raw.channels)
+          ? raw.channels
+              .filter((entry): entry is { provider: string; text: string } => (
+                typeof entry === 'object'
+                && entry !== null
+                && typeof (entry as { provider?: unknown }).provider === 'string'
+                && typeof (entry as { text?: unknown }).text === 'string'
+              ))
+              .map((entry) => ({ provider: entry.provider, text: entry.text }))
+          : [],
         dismissed: raw.dismissed === true,
       },
     }

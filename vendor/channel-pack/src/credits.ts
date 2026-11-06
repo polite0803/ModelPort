@@ -69,8 +69,8 @@ export interface CheckinStatus {
  * 回答**「我这条结果覆盖的是不是今天这一轮」：
  * - `coversToday` 缺省视为 `true` ⇒ 绝大多数渠道（每日签到语义）一行不用改；
  * - 观察到的是「刷新前的那一轮」时置 `false`。
- * 于是记账方（`auto-checkin.ts` 的 `shouldMarkToday`）根本不需要知道任何渠道的
- * 日界细节，只要数「有几条能证明今天已被处理」。
+ * 于是记账方（`auto-checkin.ts` 的 `isProviderSettled`）根本不需要知道任何渠道的
+ * 日界细节，只按 `coversToday` / `retryLater` 判断该渠道今天是否处理完。
  *
  * ⚠️ 判据只能由**看得见该渠道刷新语义的那一层**给出（当前是 `qoder-credits.ts`），
  * 不要在汇总层用猜测补 —— 那正是本缺陷的成因。
@@ -83,6 +83,16 @@ export interface ClaimOutcomeCommon {
    * 已处理（见上方缺陷说明）。
    */
   coversToday?: boolean
+  /**
+   * 本次结果是否需要**当天再试**（缺省 `false`）。
+   *
+   * 与 `failed` 不同：`failed` 由汇总层直接判为要重试；本字段用于「没有失败、
+   * 但现在还领不到」的那一类。典型是 Qoder：活动每日 10:00（UTC+8）才刷新，
+   * 10 点前看到的 `inactive` / 刷新前那一轮的 `claimed` 都不代表今天已经处理。
+   * 自动签到据此把该渠道保留为「今天未完成」，到点后再跑一轮，而不是把当天
+   * 记成已处理。
+   */
+  retryLater?: boolean
 }
 
 export type ClaimOutcome =

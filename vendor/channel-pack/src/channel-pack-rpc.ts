@@ -420,9 +420,13 @@ export const PERMANENT_LOCK_PROVIDERS: ReadonlySet<string> = new Set([
 export function computeClaimSummary(outcomes: readonly ClaimOutcome[]): RpcCreditsClaimSummary {
   const summary: RpcCreditsClaimSummary = {
     claimed: 0, totalCredit: 0, alreadyClaimed: 0, inactive: 0, failed: 0, coversToday: 0,
+    retryLater: false,
     totalByUnit: { token: 0, credit: 0 },
   }
   for (const outcome of outcomes) {
+    // 「今天还要再试」与 kind 正交：inactive（Qoder 刷新前）和 claimed（领到的是
+    // 昨天那一轮）都可能带它。自动签到据此把渠道保留为当天待办。
+    if (outcome.retryLater === true) summary.retryLater = true
     switch (outcome.kind) {
       case 'claimed':
         summary.claimed += 1
@@ -1018,6 +1022,8 @@ function registerChannelPackEndpoints(
     warn: (message) => ctx.logger?.warn?.(message),
   })
   // 启动时排定一轮（延迟 30s；内部自己判开关与「今天是否已跑」）。
+  // 之后每 30 分钟重试**今天仍未完成**的渠道（失败 / Qoder 10:00 刷新前），
+  // 全部完成时该轮零上游请求；跨日后的第一轮会自动重跑全部渠道。
   autoCheckin.start()
   /**
    * ⚠️ `ctx.effect` 必须**可选调用**：本文件此前没用过它，而大量单测的 ctx 桩是

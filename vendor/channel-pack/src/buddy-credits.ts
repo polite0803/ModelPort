@@ -129,8 +129,8 @@ export interface CheckinStatus {
  * 回答**「我这条结果覆盖的是不是今天这一轮」：
  * - `coversToday` 缺省视为 `true` ⇒ 绝大多数渠道（每日签到语义）一行不用改；
  * - 观察到的是「刷新前的那一轮」时置 `false`。
- * 于是记账方（`auto-checkin.ts` 的 `shouldMarkToday`）根本不需要知道任何渠道的
- * 日界细节，只要数「有几条能证明今天已被处理」。
+ * 于是记账方（`auto-checkin.ts` 的 `isProviderSettled`）根本不需要知道任何渠道的
+ * 日界细节，只按 `coversToday` / `retryLater` 判断该渠道今天是否处理完。
  *
  * ⚠️ 判据只能由**看得见该渠道刷新语义的那一层**给出（当前是 `qoder-credits.ts`），
  * 不要在汇总层用猜测补 —— 那正是本缺陷的成因。
