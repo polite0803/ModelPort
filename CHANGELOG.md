@@ -6,6 +6,34 @@
 条目按"为什么改、影响什么"描述；每条末尾括号里的短哈希指向产生该变更的提交，可在 `git show <哈希>` 中核对。
 版本边界与溯源说明见文末。
 
+## [1.7.5] - 2026-11-06
+
+版本边界：tag `v1.7.5`（相对 1.7.4）。
+
+### Added（新增）
+
+- Windows Shell 在线升级：托盘「检查更新（Shell + WSL 网关）…」和设置 → 关于的「在线升级（Shell + 网关）」卡片可以同时升级 Shell 与标记为 WSL 托管的 daemon。Shell 读 GitHub Release API，下载 `ModelPort-Shell-<ver>-x64-setup.exe` 与 `modelport-daemon-<ver>-<arch>.tar.gz`，每个资产必须带同名 `.sha256` 才允许安装；daemon 安装前备份到 `<install>.bak-<时间戳>`，失败自动回滚，升级前还会比对「本机 WSL daemon 版本」与「网关 URL 报的版本」。(`0703641`)
+- 壳安装包在静默安装后自启动：`/S` 会跳过 NSIS 完成页的运行勾选框，`build/installer.nsh` 的 `customInstall` 在静默安装结束时拉起新 Shell，升级后不会留下无窗口/无托盘的进程。(`0703641`)
+- 地址簿新增每个网关的「允许 Shell 在线升级此 WSL 网关」开关（`manageWsl`，默认关闭）与 `wslDistro`；远程网关只升级 Shell，daemon 仍在宿主机手动升级。(`0703641`)
+
+### Fixed（修复）
+
+- 管理面自限流：8 小时窗口里 71 条 429（09:01 一分钟 50 条）都来自远程 UI 自己的刷新风暴。限额从 60/分钟提到 240/分钟，客户端对相同 `channel+args` 做在途合并并对 429 按 `retryAfterMs` 退避一次；Channels 的 `changed` 事件 1.5s 去抖、积分 fan-out 10s 节流、自动签到/登录轮询 2.5s→5s，ProxyStatus 5s→15s。(`0703641`)
+- 首块后停摆不撤粘性：`qodercn/dmodel` 在 09:13/09:15/09:19 三笔都是 `reason:"sticky"`、`totalMs` 132s/182s/156s，超时只记了账号失败却没撤锚点。现在 `timeout` 与上游 `error` 也撤粘性，`client_gone` 保持不撤。(`0703641`)
+- 上游目录缺失模型冷却：ModelScope/BazaarLink 的静态目录会把已下架模型一直当候选（8 小时里 ModelScope 11 次 400、BazaarLink 10 次 402）。命中窄口径目录缺失文案后，对 `(provider, model)` 记 6 小时冷却；只影响选路，不记账号故障，不影响 `/v1/models` 广告。(`0703641`)
+- 日志 redaction 误伤：`missing_api_key: API key is required` 被键值对规则改成 `"[REDACTED]" key is required`（15 条 401 全是这个形状）。规则加词边界后不再命中 `missing_api_key` 内部的 `api_key`；正常 `api_key=...`/`x-api-key: ...` 不受影响。拒绝行同时补 `userAgent`，下次能直接指认未带 Key 的客户端。(`0703641`)
+- 日志降噪：keychain 不可用的 stdout 警告只报一次；`desktop-only` 403 降为 info 且不写访问日志。(`0703641`)
+
+### 发布
+
+- CI 在 shell 与 daemon 步骤生成并上传同名 `.sha256`；`latest.yml` 仍然只有主应用一份，Shell/daemon 走 GitHub Release API + `.sha256`，不产生第二份更新描述文件。(`0703641`)
+- 本版是首个带 Shell/daemon `.sha256` 资产的 Release；1.7.5 之前的 Release 没有校验文件，在线升级会拒绝安装并提示缺少校验。(`0703641`)
+
+### Tests（判据）
+
+- 全量 gate：**1852 通过 / 0 失败**，两个 `tsc` program 零报错；新增 Shell 更新计划/接线、About 合并升级、目录缺失冷却、粘性撤锚、redaction/UA 等测试。(`0703641`)
+- 线上验证：壳桥接真实返回 `shell 1.7.4 / gateway 1.7.4 / managed:true`；用本地 1.7.5 假 Release 跑通完整升级（`daemonUpdated:true, shellUpdated:true`，daemon/Shell 均变为 1.7.5），随后恢复到 1.7.4；静默安装器自启动实测 `BEFORE=0 → AFTER=4`。(`0703641`)
+
 ## [1.7.3] - 2026-11-04
 
 版本边界：tag `v1.7.3`。
