@@ -90,7 +90,7 @@ if (existsSync(wasmAtRoot)) cpSync(wasmAtRoot, join(outDir, 'resources', 'sha3_w
 // differs per machine (WSL distros have no node by default), so the install doc fills
 // NODE with `sed`. Shipping a unit that hardcodes a path we cannot know is how an
 // install guide turns into "service failed to start, reason unknown".
-const arch = process.arch
+const arch = process.env.DAEMON_ARCH || process.arch
 const stageRoot = join(root, 'dist', 'daemon-stage')
 const stageName = `modelport-daemon-${pkg.version}`
 const stageDir = join(stageRoot, stageName)
