@@ -299,6 +299,21 @@ HTTP + SSE）。
 `--desktop`（开发宿主）里可达，而发货产物根本不带这个参数；现在删会让开发态失去最后一个 A/B 参照。
 删除前必须先确认开发通路在新控制台形态下稳定（见下一条未取读数）。
 
+### 发布记录（v1.7.6，2026-11-07）
+
+- 首次 tag 推送后 windows job 报 `release not found`：`--publish=always` 退役后**
+  没有任何步骤创建 Release**，而所有上传都是 `gh release upload`，失败还取消了整个矩阵。
+  修法是在 gate 与 release 之间加 `prepare` job（`gh release create --generate-notes
+  --verify-tag`，已存在则跳过），提交 `72d2af3`；本次发布用同标签重跑（`gh run rerun
+  --failed`）+ 手工建 Release，没有改版本号。
+- 资产读数：Windows setup/portable、Linux AppImage(两种 arch)/deb/tar.gz、两个 arch 的
+  daemon tarball，各自带同名 `.sha256`；构建侧不再产出任何 `.yml`。
+- 兼容桥：≤1.7.5 的客户端用 electron-updater 读 `latest.yml` / `latest-linux*.yml`，
+  而新控制台不读。为不让老用户失去应用内升级，本次**手工生成并上传**了这三份 yml
+  （sha512 由发布侧 `.sha256` 交叉校验过的字节算出）。这是一次性桥，不是新的发布步骤。
+- macOS 两个 dmg 仍在 runner 队列中（`macos-latest` 排队），资产清单以后续
+  `gh release view v1.7.6` 为准。
+
 ### 仍未取到的读数
 
 1. **本地形态的真机运行**：`ModelPort.exe --gateway` 会读写这台机器的真实 `<appData>/modelport` 与
