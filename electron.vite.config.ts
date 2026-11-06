@@ -106,10 +106,13 @@ export default defineConfig({
     build: {
       rollupOptions: {
         input: {
+          // The role orchestrator: argv decides which of the three below is evaluated.
+          // Every branch it takes is a dynamic import, so these stay separate bundles -
+          // a console process must never evaluate the gateway tree (one product, three
+          // roles; docs/plan/PLAN-shell-three-modes.md §3.1).
           index: resolve(process.cwd(), 'src/main/index.ts'),
-          // The Windows-native shell: a second main process in the same build, shipped
-          // as its own installer (see PLAN-wsl-headless-daemon-and-shell.md, S3/S4).
           shell: resolve(process.cwd(), 'src/shell/main.ts'),
+          gateway: resolve(process.cwd(), 'src/main/gateway/entry.ts'),
         },
         output: {
           format: 'cjs'
@@ -148,11 +151,23 @@ export default defineConfig({
       }
     },
     server: {
-      // 默认只绑回环。开发态的 CSP 放开 `script-src 'unsafe-inline'`，而 dev 模式下渲染进程
-      // 挂着完整 `electronAPI`：绑 0.0.0.0 等于让同网段任意主机把这套界面加载起来。
-      // 确实需要局域网调试（手机、另一台机器）时显式指定：MODELPORT_DEV_HOST=0.0.0.0。
+      // 默认只绑回环。开发态的 CSP 放开 `script-src 'unsafe-inline'`，而 dev 模式下
+      // 同一份页面通过下面的代理访问网关：绑 0.0.0.0 等于让同网段任意主机把这套界面
+      // 连同管理接口一起加载起来。确实需要局域网调试时显式指定：MODELPORT_DEV_HOST=0.0.0.0。
       host: process.env.MODELPORT_DEV_HOST || '127.0.0.1',
-      port: 5173
+      port: 5173,
+      // 控制台窗口在开发态加载这一页（HMR），网关请求由 dev server 转发到本地网关，
+      // 所以开发走的是与生产同一条 HTTP + SSE 通路，而不是旧的 preload IPC。
+      proxy: {
+        '/v1': {
+          target: process.env.MODELPORT_DEV_GATEWAY || 'http://127.0.0.1:8080',
+          changeOrigin: false,
+        },
+        '/health': {
+          target: process.env.MODELPORT_DEV_GATEWAY || 'http://127.0.0.1:8080',
+          changeOrigin: false,
+        }
+      }
     }
   }
 })

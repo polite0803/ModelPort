@@ -16,13 +16,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { generateManagementSecret } from '../proxy/middleware/managementAuth'
 import { createNodeHost, setHost } from '../runtime/host'
 import { storeManager } from '../store/store'
-import { registerIpcHandlers } from '../ipc/handlers'
-import { proxyServer } from '../proxy/server'
-import { scheduler } from '../scheduler/Scheduler'
-import { configureModelListRefresh } from '../scheduler/modelListRefresh'
-import { aggregateProviderManager } from '../providers/aggregate'
-import { primeModelProbeCache } from '../providers/modelProbeStore'
-import { shutdownCatalogBatchJobs } from '../providers/modelCatalogBatchRunner'
+import { bootstrapGateway, installGatewayShutdownHandlers } from '../gateway/bootstrap'
 
 declare const __MODELPORT_VERSION__: string
 
@@ -123,6 +117,13 @@ async function initHost(port: string | undefined): Promise<void> {
   storeManager.flushPendingWrites()
 
   const effectivePort = port ? Number(port) : config.proxyPort
+  // Machine-readable, one line: the console's WSL install parses this instead of scraping
+  // the human block below (a wording change must not silently break first install).
+  console.log(`MODELPORT_HANDSHAKE ${JSON.stringify({
+    port: effectivePort,
+    secret: managementApiSecret,
+    apiKey: apiKeys[0].key,
+  })}`)
   console.log(
     `[Init] gateway reachable from the host machine at http://127.0.0.1:${effectivePort}/ui\n` +
       `[Init]   API key     ${apiKeys[0].key}\n` +
@@ -255,70 +256,21 @@ if (process.argv.includes('--print-paths')) {
 }
 
 async function main(): Promise<void> {
-  await storeManager.initialize()
-  if (storeManager.hasInitializationError()) {
-    // A daemon with unreadable storage has nothing to serve and nobody to click "retry":
-    // say why and leave, instead of coming up and answering 500 to everything.
-    console.error(`[Daemon] Storage unavailable: ${storeManager.getInitializationError()?.message}`)
-    process.exitCode = 1
-    return
-  }
+  installGatewayShutdownHandlers((signal) => console.log(`[Daemon] ${signal}: stopping`))
 
-  if (storeManager.isCredentialEncryptionDegraded()) {
-    console.warn(
-      '[Daemon] No OS keystore here: upstream credentials are stored as plaintext in ' +
-        `${storeManager.getStoragePath()}/data.json. Restrict that directory (chmod 700) or run on a host with a keystore.`,
+  const result = await bootstrapGateway({
+    onListening: ({ version, host, port }) => {
+      console.log(`[Daemon] ModelPort ${version} listening on ${host}:${port}`)
+    },
+    onWarning: (line) => console.warn(`[Daemon] ${line}`),
+  })
+
+  if (!result.ok) {
+    console.error(
+      result.code === 'storage-unavailable'
+        ? `[Daemon] Storage unavailable: ${result.message}`
+        : `[Daemon] ${result.message}`,
     )
-  }
-
-  // Probe readings must be in memory before any candidate is picked (`autoRouter::select`
-  // is synchronous and cannot read the disk on the hot path).
-  await primeModelProbeCache()
-  configureModelListRefresh(storeManager.getConfig().modelListRefresh)
-  scheduler.start()
-  void aggregateProviderManager.autoProvisionKeyless()
-
-  // Registers the same handler table the desktop shell feeds over IPC; on this host it
-  // is the backing store for `/v1/management/rpc`. It carries no window dependency.
-  await registerIpcHandlers(null)
-
-  const config = storeManager.getConfig()
-  const host = config.proxyHost || '127.0.0.1'
-  const port = config.proxyPort
-  // `registerIpcHandlers` honours `autoStartProxy`, so a second `start()` here would
-  // report a failure for a server that is already listening.
-  const started = proxyServer.isRunning() || (await proxyServer.start(port, host))
-  if (!started) {
-    console.error(`[Daemon] Could not listen on ${host}:${port} (in use, or refused: a non-loopback ` +
-      'host needs an API key)')
     process.exitCode = 1
-    return
   }
-
-  console.log(`[Daemon] ModelPort ${__MODELPORT_VERSION__} listening on ${host}:${port}`)
-  if (!config.managementApi?.enableManagementApi) {
-    console.log(
-      '[Daemon] The management API is off, so no UI can reach this daemon yet. Enable it by ' +
-        'setting config.managementApi.enableManagementApi=true plus a managementApiSecret in ' +
-        `${storeManager.getStoragePath()}/data.json, then restart.`,
-    )
-  }
-
-  let closing = false
-  const shutdown = (signal: string) => {
-    if (closing) return
-    closing = true
-    console.log(`[Daemon] ${signal}: stopping`)
-    shutdownCatalogBatchJobs()
-    scheduler.stop()
-    void proxyServer
-      .stop()
-      .catch(() => undefined)
-      .finally(() => {
-        storeManager.flushPendingWrites()
-        process.exit(0)
-      })
-  }
-  process.on('SIGINT', () => shutdown('SIGINT'))
-  process.on('SIGTERM', () => shutdown('SIGTERM'))
 }

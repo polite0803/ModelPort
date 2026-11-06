@@ -14,6 +14,7 @@ const main = read('src/shell/main.ts')
 const preload = read('src/shell/preload.ts')
 const addressBook = read('src/shell/addressBook.ts')
 const updater = read('src/shell/updater.ts')
+const wslExec = read('src/shell/wslExec.ts')
 const plan = read('src/shell/updatePlan.ts')
 const release = read('.github/workflows/release.yml')
 
@@ -38,21 +39,23 @@ test('main registers the update channels and gates them on the active gateway or
 })
 
 test('tray has its own check-update entry and reports the daemon management state', () => {
-  assert.match(main, /检查更新（Shell \+ WSL 网关）/)
-  assert.match(main, /check.daemon\.managed/)
+  assert.ok(main.includes('检查更新（控制台 + 可管理的网关）'), 'tray must offer the update check')
+  assert.match(main, /check\.daemon\.managed/)
   assert.match(main, /未标记为 WSL 托管/)
 })
 
-test('address book persists the WSL-management opt-in and dispels it when unchecked', () => {
-  assert.match(addressBook, /manageWsl\?: boolean/)
+test('address book stores the mode and derives WSL management from it', () => {
+  // The three modes replaced the old "manage this WSL gateway" checkbox: WSL management
+  // is a consequence of the mode, not a separate switch that can disagree with it.
+  assert.match(addressBook, /export type GatewayKind = 'local' \| 'wsl' \| 'remote'/)
   assert.match(addressBook, /wslDistro\?: string/)
-  assert.match(addressBook, /input\.manageWsl === true/)
-  assert.match(addressBook, /entry\.manageWsl === true/)
+  assert.match(addressBook, /if \(kind === 'wsl'\) next\.manageWsl = true/)
+  assert.match(addressBook, /entry\.manageWsl === true \? 'wsl' : 'remote'/)
 })
 
 test('the runner refuses a missing checksum and runs the daemon only for managed entries', () => {
-  assert.match(updater, /parseSha256\(readFileSync\(checksumPath/)
-  assert.match(updater, /SHA-256 不匹配/)
+  assert.match(wslExec, /parseSha256\(readFileSync\(checksumPath/)
+  assert.match(wslExec, /SHA-256 不匹配/)
   assert.match(updater, /const daemonWanted = check\.daemon\.managed/)
   assert.match(updater, /升级包缺少校验文件或安装资源/)
   assert.match(updater, /buildWslRollbackScript/)
@@ -63,9 +66,9 @@ test('the silent shell installer is configured to relaunch the app', () => {
   // `/S` skips the finish page (and its run checkbox). The relaunch must therefore come
   // from the installer itself; a detached helper spawned by the shell is killed with the
   // shell's process group on Windows.
-  const shellBuilder = read('electron-builder.shell.yml')
+  const builder = read('package.json')
   const nsisInclude = read('build/installer.nsh')
-  assert.match(shellBuilder, /include: build\/installer\.nsh/)
+  assert.match(builder, /"include": "build\/installer\.nsh"/)
   assert.match(nsisInclude, /!macro customInstall/)
   assert.match(nsisInclude, /\$\{if\} \$\{Silent\}/)
   assert.match(nsisInclude, /StdUtils\.ExecShellAsUser/)
@@ -79,8 +82,8 @@ test('plan requires a checksum pair before exposing an installable asset', () =>
   assert.match(plan, /return null/)
 })
 
-test('release workflow publishes checksums for both shell and daemon', () => {
-  assert.match(release, /Get-FileHash \$exe\.FullName -Algorithm SHA256/)
+test('release workflow publishes checksums for the console and the daemon', () => {
+  assert.match(release, /gh release upload/)
   assert.match(release, /sha256sum/)
   assert.match(release, /gh release upload.*sha256/)
 })

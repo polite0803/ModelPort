@@ -89,6 +89,12 @@ Base URL 含 `{placeholders}` 的条目（Azure、Vertex）必须先覆盖端点
 | Windows（x64） | `ModelPort-<version>-x64-setup.exe`，或便携版 `.exe` |
 | Linux（x64） | `ModelPort-<version>-x64.AppImage`、`.deb` 或 `.tar.gz` |
 | Linux（arm64） | `ModelPort-<version>-arm64.AppImage` |
+| WSL / 无头 Linux | `modelport-daemon-<version>-<arch>.tar.gz` |
+
+安装包是一个**控制台**，不只是网关：它可以在这台机器上运行网关（本地形态）、在 WSL
+里安装并升级网关（WSL 形态），或者连接另一台机器上的网关（远程形态）。本地与 WSL
+形态都会在网关不存在时完成安装——本地网关就在同一个二进制里，WSL 那份会下载、
+校验并以 systemd 单元启用。
 
 发布产物没有代码签名，macOS 版本也没有公证。macOS 的隔离属性可以用
 [常见问题](#常见问题)里的命令清除。

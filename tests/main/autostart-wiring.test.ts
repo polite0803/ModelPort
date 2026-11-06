@@ -18,7 +18,9 @@ import { readFileSync } from 'node:fs'
 
 const store = readFileSync('src/main/store/store.ts', 'utf8')
 const host = readFileSync('src/main/autostartHost.ts', 'utf8')
-const main = readFileSync('src/main/index.ts', 'utf8')
+// The desktop wiring moved into its own role entry when the binary became a three-role
+// orchestrator; the console is the shipped role now, this host is development-only.
+const main = readFileSync('src/main/desktop/entry.ts', 'utf8')
 
 test('四条配置写路径全部接上了开机自启副作用', () => {
   // setConfig / updateConfig / resetConfig / restoreConfig 各一处。

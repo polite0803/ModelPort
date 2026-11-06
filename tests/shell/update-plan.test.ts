@@ -17,7 +17,7 @@ import {
 } from '../../src/shell/updatePlan.ts'
 
 const ASSET_BASE = 'https://github.com/polite0803/ModelPort/releases/download/v1.7.5'
-const SHELL = 'ModelPort-Shell-1.7.5-x64-setup.exe'
+const SHELL = 'ModelPort-1.7.5-x64-setup.exe'
 const DAEMON = 'modelport-daemon-1.7.5-x64.tar.gz'
 
 function releasePayload(extra: { omitChecksum?: string; extraAssets?: unknown[] } = {}): unknown {

@@ -59,8 +59,8 @@ if (!bundle.includes(JSON.stringify(pkg.version))) {
 const resourceSources = [
   { from: 'resources/channel-pack', to: 'resources/channel-pack', required: 'worker.mjs' },
   { from: 'resources/catalog', to: 'resources/catalog', required: null },
-  // The UI the daemon serves to a browser: the same `electron-vite build` output the
-  // desktop app loads from disk. Missing means the operator built the daemon without
+  // The UI the daemon serves to a browser and to the console window: the same
+  // `electron-vite build` output. Missing means the operator built the daemon without
   // the app, so `/ui` would answer "not built" - fail loudly at build time instead.
   { from: 'out/renderer', to: 'renderer', required: 'index.html' },
 ]

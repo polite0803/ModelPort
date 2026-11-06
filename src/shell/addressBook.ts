@@ -16,16 +16,23 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 
+/**
+ * What this entry's gateway is: a process this console starts, a daemon inside WSL, or a
+ * host someone else runs. The three differ in what "the gateway does not exist" means -
+ * the first two can install it, the third cannot - so the mode is stored, never guessed
+ * from the URL (a `127.0.0.1` address may just as well be a container or a tunnel).
+ */
+export type GatewayKind = 'local' | 'wsl' | 'remote'
+
 export interface GatewayEntry {
   id: string
   name: string
   /** Origin of a daemon's management UI, e.g. http://127.0.0.1:8080 or https://host:8443 */
   url: string
+  kind: GatewayKind
   /**
-   * Opt-in: the shell may upgrade the daemon inside WSL for this entry. Default off -
-   * a remote gateway has no local daemon to replace, and guessing from the URL would
-   * turn "http://127.0.0.1:8080" (a native daemon, a container, a tunnel) into a
-   * privileged `systemctl` operation.
+   * Implied by `kind === 'wsl'`; kept as a field because the upgrade path reads it and
+   * an old `gateways.json` has no `kind` to migrate from until it is read once.
    */
   manageWsl?: boolean
   /** Distro name for `wsl.exe -d`; absent = the Windows default distro. */
@@ -60,6 +67,13 @@ export function normalizeOrigin(url: string): string | null {
   return parsed.origin
 }
 
+function readKind(entry: GatewayEntry): GatewayKind {
+  if (entry.kind === 'local' || entry.kind === 'wsl' || entry.kind === 'remote') return entry.kind
+  // Files written before the three-mode change have no `kind`; WSL management was the
+  // only opt-in, so it is the only thing that can be recovered from them.
+  return entry.manageWsl === true ? 'wsl' : 'remote'
+}
+
 export function readBook(): AddressBook {
   const path = bookPath()
   if (!existsSync(path)) return { ...EMPTY }
@@ -68,15 +82,19 @@ export function readBook(): AddressBook {
     const entries = Array.isArray(raw.entries)
       ? raw.entries
           .filter((entry): entry is GatewayEntry => !!entry && typeof entry.url === 'string' && typeof entry.name === 'string')
-          .map(entry => ({
-            id: entry.id ?? randomUUID(),
-            name: entry.name,
-            url: entry.url,
-            ...(entry.manageWsl === true ? { manageWsl: true as const } : {}),
-            ...(typeof entry.wslDistro === 'string' && entry.wslDistro.trim() !== ''
-              ? { wslDistro: entry.wslDistro.trim() }
-              : {}),
-          }))
+          .map(entry => {
+            const kind = readKind(entry)
+            return {
+              id: entry.id ?? randomUUID(),
+              name: entry.name,
+              url: entry.url,
+              kind,
+              ...(kind === 'wsl' ? { manageWsl: true as const } : {}),
+              ...(typeof entry.wslDistro === 'string' && entry.wslDistro.trim() !== ''
+                ? { wslDistro: entry.wslDistro.trim() }
+                : {}),
+            }
+          })
       : []
     const activeId = entries.some(entry => entry.id === raw.activeId) ? raw.activeId : undefined
     return { entries, ...(activeId ? { activeId } : {}) }
@@ -100,12 +118,12 @@ export function activeEntry(book: AddressBook): GatewayEntry | null {
 
 export function upsertEntry(
   book: AddressBook,
-  input: { id?: string; name: string; url: string; manageWsl?: boolean; wslDistro?: string },
+  input: { id?: string; name: string; url: string; kind: GatewayKind; wslDistro?: string },
 ): AddressBook {
   const origin = normalizeOrigin(input.url)
   if (origin === null) throw new Error(`"${input.url}" is not an http(s) origin`)
-  const manageWsl = input.manageWsl === true
-  const wslDistro = typeof input.wslDistro === 'string' ? input.wslDistro.trim() : ''
+  const kind = input.kind
+  const wslDistro = kind === 'wsl' && typeof input.wslDistro === 'string' ? input.wslDistro.trim() : ''
 
   if (input.id) {
     return {
@@ -116,8 +134,9 @@ export function upsertEntry(
           id: entry.id,
           name: input.name.trim() || entry.name,
           url: origin,
+          kind,
         }
-        if (manageWsl) next.manageWsl = true
+        if (kind === 'wsl') next.manageWsl = true
         if (wslDistro !== '') next.wslDistro = wslDistro
         return next
       }),
@@ -128,8 +147,9 @@ export function upsertEntry(
     id: randomUUID(),
     name: input.name.trim() || origin,
     url: origin,
+    kind,
   }
-  if (manageWsl) created.manageWsl = true
+  if (kind === 'wsl') created.manageWsl = true
   if (wslDistro !== '') created.wslDistro = wslDistro
   return { entries: [...book.entries, created], activeId: book.activeId ?? created.id }
 }

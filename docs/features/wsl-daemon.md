@@ -1,19 +1,25 @@
 # 无头守护进程与远程管理
 
-> 适用版本：v1.8.0 ｜ 最后核对：2026-11-06 ｜ 状态：现行
+> 适用版本：v1.8.0 ｜ 最后核对：2026-11-07 ｜ 状态：现行
 
 ## 这个功能点是什么
 
 网关进程（Koa 服务 + 供应商 + 路由 + 配额 + 渠道包 Worker）可以**不带任何窗口**运行，
-由另一台机器或另一个系统上的图形界面远程管理。三种运行形态共用同一份代码：
+由同一台机器或另一台机器上的图形界面管理。安装包是一个**控制台**，它自己不承载网关，
+只负责启动、安装或连接网关：
 
-| 形态 | 入口 | 产物 | 界面从哪来 |
+| 形态 | 网关在哪 | 谁安装它 | 界面从哪来 |
 | --- | --- | --- | --- |
-| 桌面应用 | `src/main/index.ts` | NSIS / dmg / AppImage / deb / tar.gz | preload + `window.electronAPI`（IPC） |
-| 无头守护进程 | `src/main/daemon/entry.ts` | `modelport-daemon-<version>-<arch>.tar.gz` | 浏览器或壳打开 `GET /ui/`（HTTP + SSE） |
-| Windows 壳 | `src/shell/main.ts` | `ModelPort-Shell-<version>-x64-setup.exe` | 一个 `loadURL` 到 `/ui/` 的窗口 + 托盘 |
+| 本地 | 本机 `ModelPort --gateway` 子进程（同一二进制、无窗口） | 控制台首启 `--init-local`：建数据目录、写管理口令、起监听 | 控制台窗口 `loadURL` 到 `http://127.0.0.1:<port>/ui/` |
+| WSL | WSL 内 systemd（`modelport-daemon-<ver>-<arch>.tar.gz`） | 控制台探测到不存在时全自动安装（含 Node），见下节 | 同上（NAT localhost forwarding） |
+| 远程 | 另一台主机 | **控制台不安装**，只连接；部署方式按宿主机的文档 | 同上，地址由用户填写 |
 
-关掉界面（窗口或标签页）**不影响网关继续服务**——这是这一条存在的全部理由。
+控制台本体是 `src/shell/main.ts`；本地网关入口是 `src/main/gateway/entry.ts`（Electron 无窗口，
+因为 `store.key` 由 `safeStorage` 封装，纯 Node 宿主没有密钥库）。WSL 与 headless Linux 用
+`src/main/daemon/entry.ts`（纯 Node）。三者共用 `src/main/gateway/bootstrap.ts`。
+
+关掉界面（窗口或标签页）**不影响网关继续服务**——这是这一条存在的全部理由。本地网关由控制台
+以独立进程启动并常驻，关窗口只是隐藏托盘；WSL/headless 由 systemd 常驻。
 
 ## 安装与启动（WSL 实测过的路径）
 
@@ -43,19 +49,35 @@ sudo systemctl enable --now modelport
 WSL 客户端退出后被回收（`wsl -l --running` 能看到「没有正在运行的分发」）。两者叠加的结果
 是「服务昨天还在，今天连不上」。`enable` 之后 `wsl --shutdown` 冷启动回来会自己起来。
 
-## 在线升级（Windows Shell 编排）
+## WSL 首装（控制台自动，v1.8.0 起）
 
-从 v1.7.5 起，Windows Shell 的托盘和远程界面的 About 页可以一键升级 **Shell + 本机 WSL daemon**：
+网关不存在时，控制台（托盘 →「安装 WSL 网关…」或新增网关时选 WSL）会按顺序做：
 
-- 地址簿里每个网关有「允许 Shell 在线升级此 WSL 网关」开关（默认关闭）。只有显式打开的条目才会执行 `wsl.exe -u root` 的 daemon 替换；远程网关只升级 Shell，daemon 仍按宿主机流程手动升级。
-- 版本来自 GitHub Release 的 tag；资产名固定为 `ModelPort-Shell-<ver>-x64-setup.exe` 与
+1. `wsl.exe -l -v` 读发行版（**UTF-16LE**，按 UTF-8 解会得到一串 NUL）、`uname -m` 定架构；
+2. `systemctl is-system-running` 确认 systemd 可用（否则给 `/etc/wsl.conf` 的 `systemd=true` 指引）；
+3. `command -v node` 探测 Node；缺失或低于 20 时下载 nodejs.org 官方 tarball 并按 `SHASUMS256.txt` 校验，
+   解到 `/opt/modelport/node`（不动 apt）；
+4. 下载 daemon tarball + `.sha256`（缺校验文件即拒绝）；
+5. root 执行：解包 → 写 system 作用域 unit（`ExecStart` 用实测 Node 路径）→ `enable` →
+   `--init-host --port <port>`（写 `proxyHost=0.0.0.0`、API Key、管理口令）→ `restart` → 等 `is-active`；
+6. 解析 `--init-host` 打印的 `MODELPORT_HANDSHAKE {...}` 一行，把管理口令封进控制台的密钥库，
+   地址簿记为 WSL 形态。任一步失败会执行回滚（移除 unit 与 `/opt/modelport`，**不动 `~/.modelport`**）。
+
+## 在线升级（控制台编排）
+
+控制台的托盘和界面里的 About 页可以一键升级 **控制台 + 本机 WSL daemon**：
+
+- 地址簿的形态本身就是授权：只有 WSL 形态的条目才会执行 `wsl.exe -u root` 的 daemon 替换；远程形态只升级控制台自身。
+- 版本来自 GitHub Release 的 tag；资产名固定为 `ModelPort-<ver>-<arch>-setup.exe` 与
   `modelport-daemon-<ver>-<arch>.tar.gz`，每个资产必须带同名 `.sha256`，缺校验文件时**拒绝安装**。
+- 安装控制台更新前会先停本机网关子进程：两者是同一个 exe，留着它安装器无法替换二进制。
+- macOS / Linux 不自动安装更新（dmg / AppImage 没有静默安装通路），界面指向 Release 页面。
 - daemon 升级会先解析 `systemctl cat modelport.service` 的 `ExecStart` 安装目录，备份到
   `<dir>.bak-<timestamp>`，停服、替换、启动，再等网关返回新版本；失败自动用备份回滚。
   版本化 symlink 布局会先 `readlink -f` 解析，避免把链接本身当成备份。
 - 升级前会比较「本机 WSL daemon 版本」与「当前网关 URL 报的版本」，不一致时拒绝，
   防止把远程网关误当成本机实例后去替换本机 daemon。
-- Shell 安装包用 NSIS `/S` 静默安装，随后 Shell 退出并由安装器重新拉起。`/S` 会跳过完成页的
+- 控制台安装包用 NSIS `/S` 静默安装，随后控制台退出并由安装器重新拉起。`/S` 会跳过完成页的
   「运行应用」勾选框，所以自动启动来自 `build/installer.nsh` 的 `customInstall` 钩子；
   没有这个钩子的旧安装包只能手动启动一次。
   界面本身由 daemon 的 `/ui/` 托管，所以 **daemon 升级会同时更新壳里看到的 UI**；

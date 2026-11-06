@@ -1,6 +1,6 @@
 import type { RendererSink } from './logBroadcast'
 import { registerMainHandler } from './registry'
-import { getHost, requireDesktop } from '../runtime/host'
+import { getHost, requireDesktop, requireSystem } from '../runtime/host'
 import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
 import axios from 'axios'
@@ -1498,7 +1498,7 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
 
   registerMainHandler(IpcChannels.REQUEST_LOGS_BUNDLE_SAVE, async (_, key: string) => {
     const bundle = buildRequestDiagnosticBundle(String(key))
-    const target = await requireDesktop('save-diagnostic-bundle').pickSavePath(
+    const target = await requireSystem('save-diagnostic-bundle').pickSavePath(
       `modelport-diagnostic-${String(key).replace(/[^a-zA-Z0-9_-]/g, '_')}.json`,
     )
     if (target === null) return { saved: false }

@@ -42,6 +42,9 @@ test('the shell imports no gateway module tree', () => {
     'src/shell/preload.ts',
     'src/shell/promptPreload.ts',
     'src/shell/secretStore.ts',
+    // The console supervises a local gateway process; it still never becomes one.
+    'src/shell/localGateway.ts',
+    'src/shell/localGatewayPlan.ts',
     // The updater is still a client: it reads a release and starts installers, but it
     // must not pull the gateway store into the shell bundle (the test above catches it
     // in the built file; this list makes the failure name the source file).
@@ -89,6 +92,26 @@ test('the shell forwards renderer failures instead of showing a dark rectangle',
   // renderer process that goes away. The shell writes no app log, so stderr is the channel.
   assert.match(shellMain, /webContents\.on\('console-message'/)
   assert.match(shellMain, /webContents\.on\('render-process-gone'/)
+})
+
+test('the address book carries the mode and migrates files written before it', () => {
+  const book = readFileSync('src/shell/addressBook.ts', 'utf8')
+  for (const kind of ["'local'", "'wsl'", "'remote'"]) {
+    assert.ok(book.includes(kind), `the kind union must include ${kind}`)
+  }
+  // A pre-three-mode file has no `kind`; WSL management was the only opt-in, so it is the
+  // only thing recoverable. Anything else is a remote gateway.
+  assert.match(book, /manageWsl === true \? 'wsl' : 'remote'/, 'old entries must migrate')
+})
+
+test('the console adopts the handshake but never writes the gateway files', () => {
+  // Ownership is one-way: the gateway writes status/handshake, the console reads the
+  // status and deletes the handshake. A console that wrote them would be a second writer
+  // on gateway state - the exact fence this file exists for.
+  const client = readFileSync('src/shell/localGateway.ts', 'utf8')
+  assert.doesNotMatch(client, /writeFileSync|renameSync/, 'the console must not write gateway files')
+  assert.match(client, /rmSync\(handshake/, 'the one-time secret is deleted after adoption')
+  assert.doesNotMatch(client, /from ['"]\.\.\/main\//, 'the console must not import gateway modules')
 })
 
 test('the secret store keeps only sealed bytes and refuses without a keystore', () => {

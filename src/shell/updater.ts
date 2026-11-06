@@ -1,28 +1,11 @@
-/**
- * The shell's online upgrade orchestration.
- *
- * Two artifacts, one release tag:
- *   1. WSL daemon: download the tarball, verify its `.sha256`, run `systemctl`-backed
- *      install inside WSL as root, then poll the gateway for the new version. On failure
- *      the script's backup directory is restored and the old service is restarted.
- *   2. Shell: download the NSIS installer, verify its `.sha256`, start it silently and
- *      quit; the installer relaunches the new shell.
- *
- * Why the shell and not the daemon: the Windows side has the network and `wsl.exe`; the
- * daemon has no updater by design (headless host, no Electron). The remote page can only
- * trigger this through the named preload bridge, and `main.ts` restricts that to the
- * active gateway's origin.
- */
 import { app, net } from 'electron'
-import { createHash } from 'node:crypto'
-import { execFile, spawn } from 'node:child_process'
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { promisify } from 'node:util'
-import { once } from 'node:events'
 
 import type { GatewayEntry } from './addressBook'
 import type { ShellUpdateCheck, ShellUpdateProgress, ShellUpgradeResult } from '../shared/shellBridge'
+import type { SystemdInstall } from './updatePlan'
 import {
   archFromUname,
   buildWslInstallScript,
@@ -31,143 +14,16 @@ import {
   normalizeVersion,
   parseBackupPath,
   parseRelease,
-  parseSha256,
   parseSystemdUnit,
   selectReleaseAssets,
   type AssetPair,
   type DaemonArch,
   type ReleaseInfo,
-  type SystemdInstall,
 } from './updatePlan'
+import { fetchText, releaseFeedUrl, runWsl, toWslPath, verifyDownload } from './wslExec'
+import { isPidAlive, readLocalGatewayView, stopLocalGateway } from './localGateway'
 
-const RELEASE_API = 'https://api.github.com/repos/polite0803/ModelPort/releases/latest'
 const SERVICE = 'modelport'
-const execFileAsync = promisify(execFile)
-
-function releaseFeedUrl(): string {
-  const override = process.env.MODELPORT_UPDATE_FEED?.trim()
-  if (!override) return RELEASE_API
-  const url = new URL(override)
-  const local = url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '::1'
-  if (url.protocol !== 'https:' && !local) {
-    throw new Error('MODELPORT_UPDATE_FEED must be https (localhost is allowed for tests)')
-  }
-  return url.toString()
-}
-
-function wslExecutable(): string {
-  const root = process.env.SystemRoot
-  const candidate = root ? join(root, 'System32', 'wsl.exe') : ''
-  return candidate !== '' && existsSync(candidate) ? candidate : 'wsl.exe'
-}
-
-function wslArgs(distro: string | undefined, root: boolean, command: string[]): string[] {
-  const args: string[] = []
-  const name = distro?.trim()
-  if (name) args.push('-d', name)
-  if (root) args.push('-u', 'root')
-  args.push('-e', ...command)
-  return args
-}
-
-async function runWsl(
-  distro: string | undefined,
-  root: boolean,
-  command: string[],
-  timeout = 120_000,
-): Promise<{ stdout: string; stderr: string }> {
-  try {
-    const result = await execFileAsync(wslExecutable(), wslArgs(distro, root, command), {
-      encoding: 'utf8',
-      windowsHide: true,
-      timeout,
-      maxBuffer: 16 * 1024 * 1024,
-    })
-    return { stdout: String(result.stdout ?? ''), stderr: String(result.stderr ?? '') }
-  } catch (error) {
-    const failure = error as { stdout?: unknown; stderr?: unknown; message?: string }
-    const stdout = String(failure.stdout ?? '')
-    const stderr = String(failure.stderr ?? '')
-    const detail = stderr.trim() || stdout.trim() || failure.message || String(error)
-    // Keep both streams on the thrown error: the install script prints BACKUP= to stdout
-    // and the failure reason to stderr, and the caller needs the backup path even then.
-    throw Object.assign(new Error(`WSL command failed: ${detail}`), { stdout, stderr })
-  }
-}
-
-async function fetchText(url: string): Promise<string> {
-  const response = await net.fetch(url, {
-    redirect: 'follow',
-    headers: { accept: 'application/vnd.github+json', 'user-agent': 'ModelPort-Shell' },
-  })
-  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`)
-  return await response.text()
-}
-
-async function downloadFile(
-  url: string,
-  destination: string,
-  onProgress?: (received: number, total: number | null) => void,
-): Promise<void> {
-  const response = await net.fetch(url, { redirect: 'follow' })
-  if (!response.ok || response.body === null) {
-    throw new Error(`HTTP ${response.status} for ${url}`)
-  }
-  const total = Number(response.headers.get('content-length')) || null
-  const reader = response.body.getReader()
-  const file = createWriteStream(destination)
-  let received = 0
-  try {
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      if (!value) continue
-      const chunk = Buffer.from(value)
-      received += chunk.byteLength
-      if (!file.write(chunk)) await once(file, 'drain')
-      onProgress?.(received, total)
-    }
-    await new Promise<void>((resolve, reject) => {
-      file.once('error', reject)
-      file.end(() => resolve())
-    })
-  } catch (error) {
-    file.destroy()
-    throw error
-  }
-}
-
-async function sha256File(path: string): Promise<string> {
-  return await new Promise<string>((resolve, reject) => {
-    const hash = createHash('sha256')
-    createReadStream(path)
-      .on('data', chunk => hash.update(chunk))
-      .on('error', reject)
-      .on('end', () => resolve(hash.digest('hex')))
-  })
-}
-
-async function verifyDownload(
-  pair: AssetPair,
-  directory: string,
-  onProgress: (received: number, total: number | null) => void,
-  onVerify: () => void,
-): Promise<string> {
-  const assetPath = join(directory, pair.name)
-  const checksumPath = join(directory, pair.checksumName)
-  await downloadFile(pair.url, assetPath, onProgress)
-  await downloadFile(pair.checksumUrl, checksumPath)
-  onVerify()
-  const expected = parseSha256(readFileSync(checksumPath, 'utf8'), pair.name)
-  if (expected === null) {
-    throw new Error(`${pair.checksumName} 不是有效的 SHA-256 文件，已拒绝安装`)
-  }
-  const actual = await sha256File(assetPath)
-  if (actual !== expected) {
-    throw new Error(`${pair.name} 的 SHA-256 不匹配，已拒绝安装`)
-  }
-  return assetPath
-}
 
 async function gatewayVersion(url: string): Promise<string | null> {
   try {
@@ -227,22 +83,6 @@ async function localDaemonVersion(
   } catch {
     return null
   }
-}
-
-async function toWslPath(distro: string | undefined, windowsPath: string): Promise<string> {
-  try {
-    const result = await runWsl(distro, false, ['wslpath', '-u', windowsPath], 20_000)
-    const converted = result.stdout.trim()
-    if (converted.startsWith('/')) return converted
-  } catch {
-    // wslpath is normally present; the drive mapping below is the fallback.
-  }
-  if (!/^[A-Za-z]:[\\/]/.test(windowsPath)) {
-    throw new Error(`无法把 Windows 路径映射进 WSL：${windowsPath}`)
-  }
-  const drive = windowsPath.slice(0, 1).toLowerCase()
-  const rest = windowsPath.slice(2).replace(/\\/g, '/')
-  return `/mnt/${drive}${rest.startsWith('/') ? rest : `/${rest}`}`
 }
 
 async function waitForDaemon(url: string, version: string, timeoutMs: number): Promise<boolean> {
@@ -321,6 +161,16 @@ export async function runUpgrade(
   let backup: string | undefined
 
   try {
+    if (process.platform !== 'win32') {
+      // macOS ships a dmg and Linux an AppImage; neither is replaceable by the Windows
+      // silent-install path this updater owns. Say so instead of downloading and failing.
+      return {
+        ok: false,
+        daemonUpdated: false,
+        shellUpdated: false,
+        error: 'macOS / Linux 不自动安装更新：请从 Release 页面下载新的安装包覆盖安装。',
+      }
+    }
     report('checking', '正在检查更新…')
     const check = await checkForUpdates(entry)
     if (check.error) throw new Error(check.error)
@@ -422,7 +272,14 @@ export async function runUpgrade(
         (received, total) => report('downloading-shell', '正在下载 Shell…', received, total),
         () => report('verifying-shell', '校验 Shell 安装包…'),
       )
-      report('installing-shell', '正在启动 Shell 安装包；窗口会关闭并重新打开…')
+      report('installing-shell', '正在停止本地网关并启动安装包；窗口会关闭并重新打开…')
+      // The local gateway is the same binary as this console: leaving it running locks the
+      // exe and the installer copies over a live process. Stopping it first is also what
+      // makes the relaunched console start a fresh, new-version gateway.
+      const local = await readLocalGatewayView()
+      if (local.status && isPidAlive(local.status.pid)) {
+        await stopLocalGateway(local.status.pid)
+      }
       shellUpdated = true
       // The installer's `customInstall` hook (`build/installer.nsh`) relaunches the app
       // when `/S` skips the finish page. Spawning the installer directly is the part

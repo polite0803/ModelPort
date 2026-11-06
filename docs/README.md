@@ -73,6 +73,7 @@
 | [`plan/PLAN-next-dev-code-tasks.md`](plan/PLAN-next-dev-code-tasks.md) | 三条活跃线的剩余项拆解、落点与验收判据 | v1.6.1 | 历史记录 | 2026-11-03 |
 | [`plan/PLAN-channel-identity-alignment.md`](plan/PLAN-channel-identity-alignment.md) | 13 个账号渠道的客户端身份头与实际发包对齐、版本号自动更新机制 | v1.6.2 | 实施中 | 2026-11-05 |
 | [`plan/PLAN-wsl-headless-daemon-and-shell.md`](plan/PLAN-wsl-headless-daemon-and-shell.md) | WSL 无头守护进程、管理面走网络与 Windows 原生壳的四阶段改造 | v1.8.0 | 实施中 | 2026-11-05 |
+| [`plan/PLAN-shell-three-modes.md`](plan/PLAN-shell-three-modes.md) | 控制台三形态（本地 / WSL / 远程）与网关按需安装；取消主应用发布形态 | v1.8.0 | 实施中 | 2026-11-07 |
 | [`plan/2026-05-26-in-app-update.md`](plan/2026-05-26-in-app-update.md) | 应用内更新的任务拆解与测试计划 | v1.3.0 | 历史记录 | 2026-05-26 |
 | [`plan/2026-05-27-modelport-tool-testing-skills.md`](plan/2026-05-27-modelport-tool-testing-skills.md) | 工具调用测试技能集的目录、脚本与验收计划 | v1.3.0 | 历史记录 | 2026-05-27 |
 

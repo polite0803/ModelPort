@@ -11,7 +11,8 @@ the comments in the file you are changing.
 
 ## Project Overview
 
-ModelPort is an Electron desktop application exposing an OpenAI-compatible API proxy. Three provider
+ModelPort is a desktop **console** that runs, installs or connects to an OpenAI-compatible API proxy
+gateway (local / WSL / remote). Three provider
 classes ship: a 89-entry / 570-model aggregate catalogue of key-based and key-less endpoints, the
 thirteen account channels served by the vendored channel pack, and user-defined custom providers.
 Runs on macOS, Windows, Linux.
@@ -176,8 +177,11 @@ retirement.)
 
 Host boundary (`docs/plan/PLAN-wsl-headless-daemon-and-shell.md`):
 
-* The gateway runs in two hosts: the Electron main process and a headless Node daemon (`src/main/daemon/entry.ts`,
-WSL and friends). Everything host-specific is reached through `src/main/runtime/host.ts` - version, resource root,
+* The gateway runs in three hosts: a **windowless Electron process** started by the console (local mode - Electron
+because `safeStorage` seals `store.key`), the headless Node daemon (`src/main/daemon/entry.ts`, WSL and friends),
+and the retired desktop host kept for development (`--desktop`). All three share
+`gateway/bootstrap.ts::bootstrapGateway()`, so a startup step cannot land on one and miss another. Everything
+host-specific is reached through `src/main/runtime/host.ts` - version, resource root,
 `openExternal`, login-item sync, and the credential sealer. **Nothing under `proxy/`, `providers/`, `store/`,
 `scheduler/` or `channelPack/` may import `electron`** (fenced by `tests/build/daemon-bundle.test.ts`, which also
 checks the built bundle: esbuild will inline the electron launcher stub and the crash only appears on the target
@@ -200,19 +204,22 @@ URLs and koa-router needs `strict` to keep `/ui` from looping onto itself).
   deletes the file before responding; export has **no** headless entry and says so in the UI rather
   than pretending to write a file it cannot reach.
 * The management secret's lifetime depends on the client, and neither may go plaintext. A browser
-  tab keeps it in `sessionStorage` and forgets on close; the Windows shell seals it with
+  tab keeps it in `sessionStorage` and forgets on close; the console seals it with
   `safeStorage` (DPAPI, current user) into `secrets.json` 0600, one row per gateway origin, and
   only after the gateway accepted it. With no keystore the store **refuses to write** - the UI
   keeps asking, which is the honest failure; a copy of that file under another user or machine
   decrypts to nothing and reports `unreadable`, never `none`. `gateways.json` stays credential-free.
-* One release ships three kinds of artifacts: the desktop installers, `dist/modelport-daemon-<ver>-<arch>.tar.gz`
-(`scripts/build-daemon.mjs`: bundle + `resources/` + `renderer/` + a systemd unit template), and
-`ModelPort-Shell-<ver>-x64-setup.exe` from `electron-builder.shell.yml`. Two rules there are load-bearing:
-the daemon bundle must inline every runtime dependency (the tarball carries no `node_modules` either - same
-1.4.5 failure mode as the asar, and `npm run gate` builds it so the fences cannot go stale), and the shell
-publishes **no** `latest.yml`: electron-builder names the Windows update metadata the same for both products,
-so a second `--publish=always` would make the main app's auto-updater download the shell binary. The CI step
-therefore builds the shell and uploads the exe with `gh release upload`.
+* One product ships one installer per platform plus `dist/modelport-daemon-<ver>-<arch>.tar.gz`
+(`scripts/build-daemon.mjs`: bundle + `resources/` + `renderer/` + a systemd unit template). The installer
+is a **console** with three gateway modes - local (a windowless gateway this binary starts), WSL (installed
+by the console when absent) and remote - and its entry is a thin argv orchestrator: `src/main/index.ts`
+dynamic-imports the console (default), `gateway` (`--gateway` / `--init-local`) or the retired desktop host
+(`--desktop`, development only). A **static** import between those roles would put a second gateway identity
+in the console process - the fence is in `tests/build/shell-entries.test.ts` and `gateway-entry.test.ts`.
+Two more rules are load-bearing: the daemon bundle must inline every runtime dependency (the tarball carries
+no `node_modules` either - same 1.4.5 failure mode as the asar, and `npm run gate` builds it so the fences
+cannot go stale), and **no `latest.yml` is published**: the console updates itself from release assets plus a
+sibling `.sha256` (`src/shell/updater.ts`), which is also what makes the unsigned macOS dmg workable.
 * Persistence on a headless host needs a **system-scope** enabled unit: a `systemctl --user` service dies with
 the login session that started it, and the WSL distro itself is reclaimed once the last client exits, so the
 gateway would silently stop between boots.

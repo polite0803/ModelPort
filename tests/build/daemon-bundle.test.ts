@@ -136,9 +136,15 @@ test('the desktop-only set is exactly these files', () => {
     'src/main/autostartHost.ts',
     // `backup/ipc.ts` left this set when its six channels moved from `ipcMain.handle` to the
     // handler registry: it no longer imports electron, and the headless host registers them.
-    'src/main/index.ts',
+    //
+    // The three role entries joined in the three-mode change: the orchestrator
+    // (`index.ts`) is a pure argv switch and no longer imports electron itself, while the
+    // gateway entry, its windowless host and the retired desktop host do.
+    'src/main/desktop/entry.ts',
+    'src/main/gateway/entry.ts',
     'src/main/ipc/trustedSender.ts',
     'src/main/logging/crashReporter.ts',
+    'src/main/runtime/electronGatewayHost.ts',
     'src/main/runtime/electronHost.ts',
     'src/main/tray/TrayManager.ts',
     'src/main/tray/TrayWindow.ts',

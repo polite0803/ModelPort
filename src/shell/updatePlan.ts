@@ -1,16 +1,16 @@
 /**
- * Pure planning for the shell's online upgrade: release selection, checksum rules,
+ * Pure planning for the console's online update: release selection, checksum rules,
  * systemd-unit parsing and the WSL install/rollback shell scripts.
  *
  * Kept free of Electron and `node:fs` so `node --test` can prove the dangerous parts -
  * asset name matching, checksum refusal, path quoting, backup-before-overwrite - without
  * a WSL host, a network or a real installer.
  *
- * The upgrade is two independent artifacts:
- *   - the shell installer (`ModelPort-Shell-<version>-x64-setup.exe`);
- *   - the WSL daemon tarball (`modelport-daemon-<version>-<arch>.tar.gz`).
- * The release tag is the single version both carry. The shell is the orchestrator because
- * the Windows side has the network and `wsl.exe`; the daemon itself has no updater.
+ * One product ships two kinds of artifacts in the same release: the console installer
+ * (`ModelPort-<version>-<arch>-setup.exe`) and the WSL/headless daemon tarball
+ * (`modelport-daemon-<version>-<arch>.tar.gz`). Both carry a `.sha256`, and the release
+ * tag is the single version they share. The console is the orchestrator because the
+ * Windows side has the network and `wsl.exe`; the daemon itself has no updater.
  */
 
 export interface ReleaseAsset {
@@ -146,35 +146,44 @@ export function parseRelease(payload: unknown): ReleaseInfo {
   }
 }
 
+function assetPair(release: ReleaseInfo, name: string, missing: string[]): AssetPair | null {
+  const asset = release.assets.find(entry => entry.name === name)
+  if (!asset) {
+    missing.push(name)
+    return null
+  }
+  const checksumName = `${name}.sha256`
+  const checksum = release.assets.find(entry => entry.name === checksumName)
+  if (!checksum) {
+    // Refusing to install without a checksum is deliberate: these bytes are executed
+    // as root (daemon) or run as a Windows installer (shell).
+    missing.push(checksumName)
+    return null
+  }
+  return {
+    name,
+    url: asset.url,
+    checksumName,
+    checksumUrl: checksum.url,
+    ...(asset.size === undefined ? {} : { size: asset.size }),
+  }
+}
+
+/** One named artifact, with the same checksum rule the pair selector applies. */
+export function selectAsset(release: ReleaseInfo, name: string): AssetPair | null {
+  return assetPair(release, name, [])
+}
+
 export function selectReleaseAssets(release: ReleaseInfo, arch: DaemonArch): ReleaseSelection {
   const missing: string[] = []
-  const pairOf = (name: string): AssetPair | null => {
-    const asset = release.assets.find(entry => entry.name === name)
-    if (!asset) {
-      missing.push(name)
-      return null
-    }
-    const checksumName = `${name}.sha256`
-    const checksum = release.assets.find(entry => entry.name === checksumName)
-    if (!checksum) {
-      // Refusing to install without a checksum is deliberate: these bytes are executed
-      // as root (daemon) or run as a Windows installer (shell).
-      missing.push(checksumName)
-      return null
-    }
-    return {
-      name,
-      url: asset.url,
-      checksumName,
-      checksumUrl: checksum.url,
-      ...(asset.size === undefined ? {} : { size: asset.size }),
-    }
-  }
+  const pairOf = (name: string): AssetPair | null => assetPair(release, name, missing)
 
   return {
     version: release.version,
     pageUrl: release.pageUrl,
-    shell: pairOf(`ModelPort-Shell-${release.version}-x64-setup.exe`),
+    // One product ships one installer: the console *is* the app now, so its update asset
+    // is the same NSIS package a fresh install uses.
+    shell: pairOf(`ModelPort-${release.version}-x64-setup.exe`),
     daemon: pairOf(`modelport-daemon-${release.version}-${arch}.tar.gz`),
     missing,
   }

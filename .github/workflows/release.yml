@@ -90,42 +90,23 @@ jobs:
       - name: Build application
         run: npm run build
 
-      - name: Build and Publish (macOS)
+      - name: Package the console (macOS)
         if: matrix.os == 'macos-latest'
-        run: npx electron-builder --mac --${{ matrix.arch }} --publish=always
+        run: npx electron-builder --mac --${{ matrix.arch }} --publish=never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
 
-      - name: Build and Publish (Windows)
+      - name: Package the console (Windows)
         if: matrix.os == 'windows-latest'
-        run: npx electron-builder --win --${{ matrix.arch }} --publish=always
+        run: npx electron-builder --win --${{ matrix.arch }} --publish=never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
 
-      # 壳：同一次 Release 的第二个 Windows 产物。刻意**不用** `--publish=always`——
-      # electron-builder 的 Windows 更新描述文件名固定 `latest.yml`，两个产品都发就会互相
-      # 覆盖，主程序的自动更新会开始下载壳的二进制。所以这里只构建，再用 gh 传 exe 本体，
-      # 一个 yml 都不上传（壳也不带 electron-updater）。
-      - name: Build and upload the Windows shell (no updater metadata)
-        if: matrix.os == 'windows-latest' && matrix.arch == 'x64'
-        run: |
-          npx electron-builder -c electron-builder.shell.yml --win --x64
-          # The shell updater refuses to execute an artifact without a matching
-          # `<asset>.sha256`; publish it in the same upload as the installer.
-          $exe = Get-ChildItem dist-shell/ModelPort-Shell-*-setup.exe | Select-Object -First 1
-          if (-not $exe) { throw 'shell installer not found' }
-          $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
-          "$hash  $($exe.Name)" | Out-File -Encoding ascii "$($exe.FullName).sha256"
-          gh release upload "${{ github.ref_name }}" dist-shell/ModelPort-Shell-*-*-setup.exe "$($exe.FullName).sha256" --clobber
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
-
-      - name: Build and Publish (Linux)
+      - name: Package the console (Linux)
         if: matrix.os == 'ubuntu-latest'
-        run: npx electron-builder --linux --${{ matrix.arch }} --publish=always
+        run: npx electron-builder --linux --${{ matrix.arch }} --publish=never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
@@ -137,12 +118,34 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           DAEMON_ARCH="${{ matrix.arch }}" npm run build:daemon
-          # Same rule as the shell: the updater will not hand this tarball to root
+          # The console will not hand this tarball to root
           # without a checksum. Write the basename-only line from inside dist/ so the
-          # shell's parser can match it to the asset name.
+          # console's parser can match it to the asset name.
           file=$(ls dist/modelport-daemon-*-${{ matrix.arch }}.tar.gz | head -n 1)
           test -n "$file"
           (cd dist && sha256sum "$(basename "$file")" > "$(basename "$file").sha256")
           gh release upload "${{ github.ref_name }}" "$file" "$file.sha256" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 安装包本体 + 同名校验文件：控制台的在线升级要求 `<asset>.sha256`，缺了会拒绝安装。
+      # daemon tarball 由上一行单独上传，这一步的 find 明确排除它，避免同一资产传两次。
+      - name: Upload installers with checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          upload=()
+          for f in dist/*.exe dist/*.dmg dist/*.AppImage dist/*.deb dist/*.tar.gz; do
+            case "$(basename "$f")" in
+              modelport-daemon-*) continue ;;
+            esac
+            upload+=("$f")
+          done
+          test ${#upload[@]} -gt 0
+          for f in "${upload[@]}"; do
+            (cd "$(dirname "$f")" && sha256sum "$(basename "$f")" > "$(basename "$f").sha256")
+          done
+          gh release upload "${{ github.ref_name }}" "${upload[@]}" $(for f in "${upload[@]}"; do echo "$f.sha256"; done) --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

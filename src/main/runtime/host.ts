@@ -19,19 +19,12 @@ export interface CredentialSealer {
 }
 
 /**
- * Things only a desktop install can do. Absent on a headless host, and every handler
- * that needs it answers with `desktop-only` instead of pretending it worked - the
- * failure the user must be able to read is "this host has no such capability", not a
- * button that spins forever.
+ * OS surfaces a *windowless* Electron host still has: native file dialogs, the system
+ * opener and a restart hook. The local gateway runs without a window but is the same
+ * Electron binary, so the remote page inside the local console keeps `export backup` and
+ * `save diagnostic bundle` working instead of answering `desktop-only`.
  */
-export interface DesktopCapabilities {
-  /** Reflect the running state into the tray / notification surface. */
-  notifyProxyStatus(running: boolean): void
-  getAppVersion(): string
-  getUpdateStatus(): unknown
-  checkForUpdates(): Promise<unknown>
-  downloadUpdate(): Promise<void>
-  quitAndInstall(): void
+export interface SystemCapabilities {
   /**
    * File dialogs. They return a path and nothing else: writing the bytes stays with the
    * caller, so the backup format, the `0600` mode and the sealed/unsealed decision are not
@@ -43,6 +36,22 @@ export interface DesktopCapabilities {
   restart(): void
   /** Open a local path or URL with the OS handler (folder, browser, file). */
   openWithSystemHandler(target: string): Promise<void>
+}
+
+/**
+ * Things only a desktop install can do. Absent on a headless host, and every handler
+ * that needs it answers with `desktop-only` instead of pretending it worked - the
+ * failure the user must be able to read is "this host has no such capability", not a
+ * button that spins forever.
+ */
+export interface DesktopCapabilities extends SystemCapabilities {
+  /** Reflect the running state into the tray / notification surface. */
+  notifyProxyStatus(running: boolean): void
+  getAppVersion(): string
+  getUpdateStatus(): unknown
+  checkForUpdates(): Promise<unknown>
+  downloadUpdate(): Promise<void>
+  quitAndInstall(): void
   /** Window buttons, including the hide-or-quit decision the close button makes. */
   window(action: WindowAction, theme?: string): void
 }
@@ -83,6 +92,12 @@ export interface HostBindings {
   syncLoginItem(enabled: boolean): Promise<{ applied: boolean }>
   sealer: CredentialSealer
   readonly desktop?: DesktopCapabilities
+  /**
+   * Present on both Electron hosts: the desktop app and the windowless local gateway.
+   * A headless Node daemon has neither, which is why every consumer asks through
+   * `requireSystem()` rather than reading `desktop`.
+   */
+  readonly system?: SystemCapabilities
 }
 
 let host: HostBindings | null = null
@@ -132,6 +147,16 @@ export function requireDesktop(action: string): DesktopCapabilities {
   return desktop
 }
 
+/**
+ * File dialogs and the system opener: available on a windowless Electron gateway too.
+ * Falls back to `desktop` so a host that predates the split keeps working.
+ */
+export function requireSystem(action: string): SystemCapabilities {
+  const system = host?.system ?? host?.desktop
+  if (!system) throw new DesktopOnlyError(action)
+  return system
+}
+
 type PushSubscriber = (channel: string, payload: unknown) => void
 
 /** Headless push sinks (the SSE route registers one per connected client). */
@@ -141,6 +166,20 @@ export function onHeadlessPush(subscriber: PushSubscriber): () => void {
   headlessPushSubscribers.add(subscriber)
   return () => {
     headlessPushSubscribers.delete(subscriber)
+  }
+}
+
+/**
+ * Deliver one event to the SSE clients. Shared by the Node daemon and the windowless
+ * Electron gateway: both serve `/v1/management/events`, so both must feed the same sinks.
+ */
+export function pushToHeadlessSubscribers(channel: string, payload: unknown): void {
+  for (const subscriber of headlessPushSubscribers) {
+    try {
+      subscriber(channel, payload)
+    } catch {
+      // A dead SSE client must not break the request path that pushed to it.
+    }
   }
 }
 
@@ -173,15 +212,7 @@ export function createNodeHost(input: { version: string; resourceRoot: string; w
       )
       return { applied: false }
     },
-    push: (channel, payload) => {
-      for (const subscriber of headlessPushSubscribers) {
-        try {
-          subscriber(channel, payload)
-        } catch {
-          // A dead SSE client must not break the request path that pushed to it.
-        }
-      }
-    },
+    push: pushToHeadlessSubscribers,
     sealer: UNAVAILABLE_SEALER,
   }
 }

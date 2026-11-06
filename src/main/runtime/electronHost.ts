@@ -10,7 +10,7 @@
  */
 import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from 'electron'
 import { join } from 'node:path'
-import { setHost, type WindowAction } from './host'
+import { setHost, type SystemCapabilities, type WindowAction } from './host'
 import { setIpcTransport } from '../ipc/registry'
 import { installTrustedSenderGuard } from '../ipc/trustedSender'
 import { syncAutoStart } from '../autostartHost'
@@ -27,6 +27,45 @@ export function bindElectronHost(): void {
   })
 
   const updaterManager = UpdaterManager.getInstance()
+
+  // Shared by the windowed desktop host and the windowless local gateway.
+  const system: SystemCapabilities = {
+    pickSavePath: async (defaultName) => {
+      // `downloads` is unavailable in a few managed environments; a failed export
+      // because of the default folder would be worse than writing to home.
+      let directory = app.getPath('home')
+      try {
+        directory = app.getPath('downloads')
+      } catch {
+        // fall back to home
+      }
+      const options = {
+        defaultPath: join(directory, defaultName),
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+      }
+      const parent = dialogWindow()
+      const result = parent
+        ? await dialog.showSaveDialog(parent, options)
+        : await dialog.showSaveDialog(options)
+      return result.canceled || !result.filePath ? null : result.filePath
+    },
+    pickOpenPath: async () => {
+      const options = {
+        properties: ['openFile'] as ['openFile'],
+        filters: [{ name: 'ModelPort backup', extensions: ['json'] }],
+      }
+      const parent = dialogWindow()
+      const result = parent
+        ? await dialog.showOpenDialog(parent, options)
+        : await dialog.showOpenDialog(options)
+      return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+    },
+    restart: () => {
+      app.relaunch()
+      app.quit()
+    },
+    openWithSystemHandler: (target) => shell.openExternal(target),
+  }
 
   setHost({
     kind: 'electron',
@@ -55,7 +94,9 @@ export function bindElectronHost(): void {
       encryptString: (plain) => Buffer.from(safeStorage.encryptString(plain)),
       decryptString: (sealed) => safeStorage.decryptString(sealed),
     },
+    system,
     desktop: {
+      ...system,
       notifyProxyStatus: (running) => TrayManager.getInstance().updateProxyStatus(running),
       getAppVersion: () => app.getVersion(),
       getUpdateStatus: () => updaterManager.getStatus(),
@@ -65,41 +106,6 @@ export function bindElectronHost(): void {
       },
       downloadUpdate: () => updaterManager.downloadUpdate(),
       quitAndInstall: () => updaterManager.quitAndInstall(),
-      pickSavePath: async (defaultName) => {
-        // `downloads` is unavailable in a few managed environments; a failed export
-        // because of the default folder would be worse than writing to home.
-        let directory = app.getPath('home')
-        try {
-          directory = app.getPath('downloads')
-        } catch {
-          // fall back to home
-        }
-        const options = {
-          defaultPath: join(directory, defaultName),
-          filters: [{ name: 'JSON', extensions: ['json'] }],
-        }
-        const parent = dialogWindow()
-        const result = parent
-          ? await dialog.showSaveDialog(parent, options)
-          : await dialog.showSaveDialog(options)
-        return result.canceled || !result.filePath ? null : result.filePath
-      },
-      pickOpenPath: async () => {
-        const options = {
-          properties: ['openFile'] as ['openFile'],
-          filters: [{ name: 'ModelPort backup', extensions: ['json'] }],
-        }
-        const parent = dialogWindow()
-        const result = parent
-          ? await dialog.showOpenDialog(parent, options)
-          : await dialog.showOpenDialog(options)
-        return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
-      },
-      restart: () => {
-        app.relaunch()
-        app.quit()
-      },
-      openWithSystemHandler: (target) => shell.openExternal(target),
       window: (action, theme) => {
         const window = BrowserWindow.getAllWindows().find(item => !item.isDestroyed())
         switch (action) {

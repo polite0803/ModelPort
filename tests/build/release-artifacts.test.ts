@@ -3,51 +3,58 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 
 /**
- * The release wiring for the two new artifacts.
+ * The release wiring for a single product.
  *
+ * After the three-mode change the console *is* the app: one installer per platform, one
+ * `appId`, and one update mechanism (GitHub Release API + `.sha256`, no `latest.yml`).
  * Each assertion blocks one concrete accident:
- * - a second `latest.yml` in the same Release (electron-builder names the Windows update
- *   metadata the same for every nsis target) would point the main app's auto-updater at
- *   the shell binary, so the shell must never be published with `--publish`;
- * - a shared `appId`/`productName` would collide on registry keys, the uninstaller, the
- *   taskbar group and the updater channel;
- * - a feature doc that is not in the index is exactly the "no orphan files" claim the
- *   index itself makes, so registration is checked here rather than remembered.
+ * - a second packaging config left behind would keep shipping a binary nobody maintains;
+ * - a `publish` section would make electron-builder write update metadata that no updater
+ *   reads (and reintroduce the two-`latest.yml` collision the old split existed to avoid);
+ * - an artifact whose name is not scanned by the upload step is a release that silently
+ *   ships without it, and the console refuses an update without a `.sha256`.
  */
-const mainBuild = JSON.parse(readFileSync('package.json', 'utf8')).build
-const shellConfig = readFileSync('electron-builder.shell.yml', 'utf8')
+const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
+const mainBuild = pkg.build
 const release = readFileSync('.github/workflows/release.yml', 'utf8')
 
-test('the shell has its own identity and no updater metadata', () => {
-  assert.match(shellConfig, /appId: com\.modelport\.shell/)
-  assert.notEqual(mainBuild.appId, 'com.modelport.shell', 'the two products must not share an appId')
-  assert.match(shellConfig, /productName: ModelPort Shell/)
-  assert.match(shellConfig, /publish: null/, 'publishing the shell would write a second latest.yml')
-  assert.match(shellConfig, /artifactName: ModelPort-Shell-/)
-  assert.match(shellConfig, /main: out\/main\/shell\.js/, 'extraMetadata must retarget the entry')
+test('one product: one identity, one entry, no publish section', () => {
+  assert.equal(mainBuild.appId, 'com.modelport.manager')
+  assert.equal(mainBuild.productName, 'ModelPort')
+  assert.equal(pkg.main, './out/main/index.js', 'the shipped entry is the role orchestrator')
+  assert.equal(mainBuild.publish, undefined, 'no latest.yml: updates are release assets + sha256')
+  assert.equal(pkg.scripts['build:shell'], undefined, 'the second product no longer has a build script')
+  assert.ok(!existsSync('electron-builder.shell.yml'), 'the second product must not keep a packaging config')
 })
 
-test('release.yml publishes the desktop app but only uploads the shell and the daemon', () => {
-  // Counted on run lines only: the file's own header comment quotes the old
-  // `--publish=always` behaviour, and prose is not a wiring site.
-  const publishSteps = release
+test('release.yml packages one console per platform and publishes no updater metadata', () => {
+  const commandLines = release
     .split('\n')
     .filter(line => !line.trim().startsWith('#'))
-    .filter(line => line.includes('--publish=always'))
-  assert.equal(publishSteps.length, 3, 'only the mac/win/linux desktop steps may publish')
-
-  const shellStep = release.slice(
-    release.indexOf('Build and upload the Windows shell'),
-    release.indexOf('Build and Publish (Linux)'),
+  assert.equal(
+    commandLines.filter(line => line.includes('publish=always')).length,
+    0,
+    'publishing metadata is exactly what one product no longer needs',
   )
-  assert.ok(shellStep.includes('electron-builder.shell.yml'), 'the shell step must use its own config')
-  assert.ok(!shellStep.includes('--publish=always'), 'the shell step must not publish updater metadata')
-  assert.match(shellStep, /gh release upload/)
+  for (const platform of ['macOS', 'Windows', 'Linux']) {
+    assert.ok(release.includes(`name: Package the console (${platform})`), `missing the ${platform} package step`)
+  }
+  assert.equal(
+    commandLines.filter(line => line.includes('electron-builder --')).length,
+    3,
+    'one packaging command per platform, and only the console',
+  )
+})
 
-  const daemonStep = release.slice(release.indexOf('Package and upload the headless daemon'))
-  assert.match(daemonStep, /npm run build:daemon/)
-  assert.match(daemonStep, /gh release upload/)
-  assert.match(daemonStep, /modelport-daemon-\*-\$\{\{ matrix\.arch \}\}\.tar\.gz/)
+test('every shipped artifact is uploaded with a checksum', () => {
+  const step = release.slice(release.indexOf('Upload installers with checksums'))
+  assert.ok(step.includes('sha256sum'), 'the console refuses an artifact without one')
+  assert.match(step, /gh release upload/)
+  assert.match(step, /modelport-daemon-\*/, 'the daemon tarball is uploaded by its own step')
+  for (const pattern of ['*.exe', '*.dmg', '*.AppImage', '*.deb', '*.tar.gz']) {
+    assert.ok(step.includes(pattern), `the upload sweep must include ${pattern}`)
+  }
+  assert.equal(mainBuild.directories.output, 'dist', 'the sweep scans exactly the packaging output')
 })
 
 test('the daemon tarball carries the UI, the resources and a unit template', () => {
@@ -66,38 +73,21 @@ test('the daemon tarball carries the UI, the resources and a unit template', () 
   )
 })
 
-/** The filename pattern electron-builder will emit, expressed as the `gh release upload` glob. */
-function expectedShellGlob(configText: string): string {
-  return `dist-shell/${configText
-    .match(/artifactName: (\S+)/)![1]
-    .replace(/\$\{version\}/, '*')
-    .replace(/\$\{arch\}/, '*')
-    .replace(/\$\{ext\}/, 'exe')}`
-}
-
-test('the shell artifact name and the CI upload glob are the same string', () => {
-  // A rename in one place only is a release that silently ships without the shell:
-  // electron-builder writes whatever `artifactName` says, `gh release upload` is handed a glob
-  // that then matches nothing.
-  assert.equal(release.match(/gh release upload "[^"]+" (dist-shell\/\S+)/)![1], expectedShellGlob(shellConfig))
-
-  // Same guard, mutated input: proves it reads the pattern from the builder config rather
-  // than restating a literal that can never disagree with itself.
-  assert.notEqual(expectedShellGlob(shellConfig), expectedShellGlob(shellConfig.replace('-${arch}', '')))
+test('the artifacts match the place the updater looks for them', () => {
+  // `selectReleaseAssets` picks `ModelPort-<ver>-x64-setup.exe`; electron-builder writes
+  // exactly that name from this pattern. A rename on one side only is an updater that
+  // "cannot find the release" on a release that is right there.
+  assert.equal(mainBuild.nsis.artifactName, '${productName}-${version}-${arch}-setup.${ext}')
+  assert.equal(mainBuild.win.artifactName, '${productName}-${version}-${arch}-setup.${ext}')
+  const plan = readFileSync('src/shell/updatePlan.ts', 'utf8')
+  assert.ok(plan.includes('ModelPort-${release.version}-x64-setup.exe'))
 })
 
-test('the shell output directory is ignored', () => {
-  // `dist-shell/` is a second build root; without this line a locally packaged installer
-  // (60-90MB) is one `git add -A` away from the repository. The trailing `*` also covers a
-  // throwaway output dir, which a killed NSIS stub can leave half-deletable behind.
-  assert.ok(readFileSync('.gitignore', 'utf8').split('\n').includes('dist-shell*/'))
-})
-
-test('the new feature doc exists and is registered in the index', () => {
+test('the new feature doc and plan are registered in the index', () => {
   assert.ok(existsSync('docs/features/wsl-daemon.md'), 'the WSL/headless behaviour must be documented')
   const index = readFileSync('docs/README.md', 'utf8')
   assert.match(index, /\[`features\/wsl-daemon\.md`\]\(features\/wsl-daemon\.md\)/,
     'a doc the index does not list is an orphan, and the index claims there are none')
-  const plan = readFileSync('docs/README.md', 'utf8')
-  assert.match(plan, /PLAN-wsl-headless-daemon-and-shell\.md/)
+  assert.match(index, /PLAN-wsl-headless-daemon-and-shell\.md/)
+  assert.match(index, /PLAN-shell-three-modes\.md/, 'the three-mode decision record must be indexed')
 })

@@ -52,8 +52,7 @@
     "build:linux": "npm run build && electron-builder --linux",
     "build:all": "npm run build && electron-builder --win --mac --linux",
     "release": "node scripts/release.js",
-    "build:daemon": "node scripts/build-daemon.mjs",
-    "build:shell": "npm run build && electron-builder -c electron-builder.shell.yml --win --x64"
+    "build:daemon": "node scripts/build-daemon.mjs"
   },
   "dependencies": {
     "@koa/router": "^15.3.0",
@@ -236,7 +235,8 @@
       "createStartMenuShortcut": true,
       "shortcutName": "ModelPort",
       "license": "LICENSE",
-      "artifactName": "${productName}-${version}-${arch}-setup.${ext}"
+      "artifactName": "${productName}-${version}-${arch}-setup.${ext}",
+      "include": "build/installer.nsh"
     },
     "portable": {
       "artifactName": "${productName}-${version}-${arch}-portable.${ext}"
@@ -280,11 +280,6 @@
     "deb": {
       "priority": "optional",
       "artifactName": "${productName}-${version}-${arch}.${ext}"
-    },
-    "publish": {
-      "provider": "github",
-      "owner": "polite0803",
-      "repo": "ModelPort"
     }
   }
 }

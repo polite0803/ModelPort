@@ -18,7 +18,7 @@
  * 这件事在它那侧不存在——那条路径由命令行显式给路径。
  */
 
-import { getHost, requireDesktop } from '../runtime/host'
+import { getHost, requireSystem } from '../runtime/host'
 import { copyFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -202,7 +202,7 @@ export async function exportBackup(options: BackupExportOptions): Promise<Backup
   }
 
   // 默认落点（下载目录，拿不到时回家目录）由宿主决定，见 electronHost 的 pickSavePath。
-  const target = await requireDesktop('export-backup').pickSavePath(
+  const target = await requireSystem('export-backup').pickSavePath(
     `modelport-backup-${fileStamp()}.json`,
   )
   if (target === null) return { canceled: true }
@@ -273,7 +273,7 @@ export function stageBackupFile(filePath: string): BackupPickResult {
 
 /** 选文件并读进主进程内存，返回一次性的导入句柄。 */
 export async function pickBackupFile(): Promise<BackupPickResult> {
-  const filePath = await requireDesktop('pick-backup-file').pickOpenPath()
+  const filePath = await requireSystem('pick-backup-file').pickOpenPath()
   if (filePath === null) return { canceled: true }
 
   return stageBackupFile(filePath)
@@ -510,5 +510,5 @@ export async function applyBackup(token: string, mode: BackupMode): Promise<Back
 
 /** 导入后必须重启：供应商/账号是在启动时播种并镜像进运行时的，热替换等于让两套状态并存。 */
 export function restartApplication(): void {
-  requireDesktop('restart-application').restart()
+  requireSystem('restart-application').restart()
 }
