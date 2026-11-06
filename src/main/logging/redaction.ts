@@ -9,8 +9,13 @@ export function redactSensitiveText(value: string): string {
   return (
     value
       // 1. 「字段名 + 分隔符 + 值」：含带 X- 前缀的会话/凭据头名。
+      // `\b` 是必要的：没有它，`missing_api_key: API key is required` 会把
+      // `api_key: API` 当成键值对，日志读成 `missing_api_key: "[REDACTED]" key
+      // is required`（2026-11-06 WSL 的 15 条 401 全是这个形状）。前置字符是
+      // `_` 时没有词边界，所以 `missing_api_key` 内部的 `api_key` 不再命中；
+      // 正常的 `api_key=...`、`"api_key": "..."`、`x-api-key: ...` 不受影响。
       .replace(
-        /(\"?(?:authorization|x-[a-z0-9-]*(?:key|token|secret)|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?key|cookie|set-cookie|password|secret|token)\"?\s*[:=]\s*)\"?[^\",}\]\s]+\"?/gi,
+        /(\"?\b(?:authorization|x-[a-z0-9-]*(?:key|token|secret)|api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?key|cookie|set-cookie|password|secret|token)\"?\s*[:=]\s*)\"?[^\",}\]\s]+\"?/gi,
         '$1"[REDACTED]"',
       )
       // 2. 独立的 `Bearer <token>`，句子中间出现的那种。

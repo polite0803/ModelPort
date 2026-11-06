@@ -8,8 +8,13 @@
 # `publish: null` is load-bearing. electron-builder writes the Windows update metadata
 # under a fixed name (`latest.yml`); if the shell published it too, the two artifacts
 # would overwrite each other in the same GitHub Release and the main app's auto-updater
-# would start downloading the shell binary. The shell ships no updater at all - the CI
-# step uploads its installer with `gh release upload` instead of `--publish=always`.
+# would start downloading the shell binary. The shell still ships **no electron-updater**:
+# its online upgrade reads the GitHub Release API and the `.sha256` assets directly
+# (`src/shell/updater.ts`), so there is exactly one `latest.yml`. The CI step uploads the
+# installer with `gh release upload` instead of `--publish=always`.
+#
+# `nsis.include` makes a `/S` install relaunch the app: the silent path skips the finish
+# page (and its run checkbox), and the shell's updater installs with `/S`.
 
 appId: com.modelport.shell
 productName: ModelPort Shell
@@ -51,5 +56,8 @@ nsis:
   shortcutName: ModelPort Shell
   license: LICENSE
   artifactName: ModelPort-Shell-${version}-${arch}-setup.${ext}
+  # `/S` skips the finish page and therefore the "run app" checkbox. The shell's online
+  # updater installs with `/S`; this include relaunches it when the install is silent.
+  include: build/installer.nsh
 
 publish: null

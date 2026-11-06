@@ -31,7 +31,7 @@ const UPSTREAM_PORT = 18942
  * - `generic` —— 只有 `badp-upstream` 报普通的上游 404（客户端写了个不存在的名字）。
  * 两条 404 的状态码相同、只有文案不同，正是「窄判据」的分水岭。
  */
-type UpstreamMode = 'ok' | 'unavailable' | 'generic'
+type UpstreamMode = 'ok' | 'unavailable' | 'generic' | 'catalog-miss'
 let mode: UpstreamMode = 'ok'
 const seenModels: string[] = []
 
@@ -45,10 +45,17 @@ const server = createServer((req, res) => {
     const isBad = actualModel === 'badp-upstream'
 
     if (isBad && mode !== 'ok') {
-      res.writeHead(404, { 'content-type': 'application/json' })
+      // catalog-miss 是聚合目录的 400（ModelScope/BazaarLink 原文），与渠道
+      // worker 的 404 是两类：前者要进 (provider, model) 冷却，后者不进。
+      const catalogMiss = mode === 'catalog-miss'
+      res.writeHead(catalogMiss ? 400 : 404, { 'content-type': 'application/json' })
       res.end(JSON.stringify({
         error: {
-          message: mode === 'unavailable' ? '模型不存在或已停用' : 'The model `badp-upstream` does not exist',
+          message: mode === 'unavailable'
+            ? '模型不存在或已停用'
+            : catalogMiss
+              ? 'Model id : badp-upstream , has no provider supported'
+              : 'The model `badp-upstream` does not exist',
           type: 'invalid_request_error',
           code: 'model_not_found',
         },
@@ -186,6 +193,24 @@ test('目录漂移类 404：换成下一家并成功，账号不被记冷却/记
   assert.deepEqual([...new Set(after.candidates.map(candidate => candidate.displayName))].sort(),
     ['Bad-Channel', 'Good-Model'], '失败之后 Bad 仍必须在池里（没有冷却）')
   assert.deepEqual([...after.skipped], [], 'Bad 的账号没有因为这次 404 被记故障')
+})
+
+test('上游目录缺失 400：换下一家，且同模型在冷却期内不再进池', async () => {
+  mode = 'catalog-miss'
+
+  const first = await postAuto()
+  assert.equal(first.status, 200, '目录缺失不等于 auto 不可用')
+  assert.match(first.headers['x-modelport-route'], /Upstream Provider goodp/)
+  assert.equal(first.headers['x-modelport-auto-attempts'], '2')
+  assert.deepEqual(seenModels, ['badp-upstream', 'goodp-upstream'])
+
+  // 第二笔：Bad 仍在目录里，但 (provider, model) 已被冷却剔除，不再付
+  // 一次必败的往返（WSL 日志里 modelscope 每小时重撞十几次的就是这一步）。
+  seenModels.length = 0
+  const second = await postAuto()
+  assert.equal(second.status, 200)
+  assert.equal(second.headers['x-modelport-auto-attempts'], '1')
+  assert.deepEqual(seenModels, ['goodp-upstream'], '冷却期内的 Bad 不该再被上游调用')
 })
 
 test('普通上游 404 也换下一家（2026-11-02 对齐 new-api）', async () => {

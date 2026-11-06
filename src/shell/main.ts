@@ -13,7 +13,19 @@
  * Closing the window does not quit. That is the requirement this whole line of work
  * exists for: the gateway lives in WSL, and the shell is just a view of it.
  */
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, safeStorage, shell, Tray, type MenuItemConstructorOptions } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  nativeImage,
+  safeStorage,
+  shell,
+  Tray,
+  type IpcMainInvokeEvent,
+  type MenuItemConstructorOptions,
+} from 'electron'
 import { join } from 'node:path'
 import {
   activeEntry,
@@ -25,6 +37,8 @@ import {
   type GatewayEntry,
 } from './addressBook'
 import { dropSecret, getSecret, putSecret, type SecretSealer } from './secretStore'
+import { checkForUpdates, runUpgrade } from './updater'
+import type { ShellUpdateProgress } from '../shared/shellBridge'
 
 app.setPath('userData', join(app.getPath('appData'), 'modelport-shell'))
 app.setAppUserModelId('com.modelport.shell')
@@ -160,11 +174,18 @@ function createWindow(): void {
   loadActive()
 }
 
-function promptForGateway(existing?: GatewayEntry): Promise<{ name: string; url: string } | null> {
+type GatewayPromptResult = {
+  name: string
+  url: string
+  manageWsl: boolean
+  wslDistro: string
+}
+
+function promptForGateway(existing?: GatewayEntry): Promise<GatewayPromptResult | null> {
   return new Promise(resolve => {
     const dialog = new BrowserWindow({
-      width: 460,
-      height: 300,
+      width: 480,
+      height: 410,
       parent: window ?? undefined,
       modal: !!window,
       resizable: false,
@@ -177,14 +198,19 @@ function promptForGateway(existing?: GatewayEntry): Promise<{ name: string; url:
       },
     })
 
-    const settle = (result: { name: string; url: string } | null): void => {
+    const settle = (result: GatewayPromptResult | null): void => {
       ipcMain.removeAllListeners('shell:prompt-submit')
       ipcMain.removeAllListeners('shell:prompt-cancel')
       if (!dialog.isDestroyed()) dialog.close()
       resolve(result)
     }
 
-    ipcMain.once('shell:prompt-submit', (_event, values: { name?: string; url?: string }) => {
+    ipcMain.once('shell:prompt-submit', (_event, values: {
+      name?: string
+      url?: string
+      manageWsl?: boolean
+      wslDistro?: string
+    }) => {
       const url = typeof values?.url === 'string' ? values.url : ''
       if (normalizeOrigin(url) === null) {
         // Keep the dialog open with the reason: closing it on a typo reads as a cancel.
@@ -193,7 +219,19 @@ function promptForGateway(existing?: GatewayEntry): Promise<{ name: string; url:
         ).catch(() => undefined)
         return
       }
-      settle({ name: typeof values?.name === 'string' ? values.name : '', url })
+      const wslDistro = typeof values?.wslDistro === 'string' ? values.wslDistro.trim() : ''
+      if (wslDistro !== '' && !/^[A-Za-z0-9._-]+$/.test(wslDistro)) {
+        dialog.webContents.executeJavaScript(
+          `document.getElementById('err').textContent='WSL 发行版只能包含字母、数字、点、下划线与连字符'`,
+        ).catch(() => undefined)
+        return
+      }
+      settle({
+        name: typeof values?.name === 'string' ? values.name : '',
+        url,
+        manageWsl: values?.manageWsl === true,
+        wslDistro,
+      })
     })
     ipcMain.once('shell:prompt-cancel', () => settle(null))
     // The window's own X button fires no IPC: without this the promise never settles and the
@@ -202,11 +240,18 @@ function promptForGateway(existing?: GatewayEntry): Promise<{ name: string; url:
 
     const nameValue = existing ? ` value="${escapeHtml(existing.name)}"` : ''
     const urlValue = existing ? ` value="${escapeHtml(existing.url)}"` : ''
+    const distroValue = existing?.wslDistro ? ` value="${escapeHtml(existing.wslDistro)}"` : ''
+    const manageChecked = existing?.manageWsl === true ? ' checked' : ''
     const html = `<!doctype html><meta charset="utf-8"><title>gateway</title>
 <body style="font:14px/1.5 system-ui;padding:18px;background:#1a1a1a;color:#eee">
 <label style="display:block;margin-bottom:10px">名称<input id="name" ${nameValue}
   style="display:block;width:100%;margin-top:4px;padding:6px;box-sizing:border-box"></label>
 <label style="display:block;margin-bottom:10px">地址<input id="url" ${urlValue} placeholder="http://127.0.0.1:8080"
+  style="display:block;width:100%;margin-top:4px;padding:6px;box-sizing:border-box"></label>
+<label style="display:flex;align-items:center;gap:8px;margin:2px 0 10px">
+  <input id="manageWsl" type="checkbox"${manageChecked}> 允许 Shell 在线升级此 WSL 网关
+</label>
+<label style="display:block;margin-bottom:10px">WSL 发行版（留空使用默认）<input id="wslDistro"${distroValue} placeholder="Ubuntu-24.04"
   style="display:block;width:100%;margin-top:4px;padding:6px;box-sizing:border-box"></label>
 <p id="err" style="color:#f87171;min-height:1.2em;margin:0"></p>
 <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
@@ -215,7 +260,10 @@ function promptForGateway(existing?: GatewayEntry): Promise<{ name: string; url:
 <script>
 const send=(t)=>window.promptHost[t]();
 document.getElementById('ok').onclick=()=>window.promptHost.submit({
-  name:document.getElementById('name').value, url:document.getElementById('url').value});
+  name:document.getElementById('name').value,
+  url:document.getElementById('url').value,
+  manageWsl:document.getElementById('manageWsl').checked,
+  wslDistro:document.getElementById('wslDistro').value});
 document.getElementById('cancel').onclick=send('cancel');
 addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('ok').click();
 if(e.key==='Escape')send('cancel')});
@@ -267,6 +315,74 @@ function trayAction(label: string, run: () => void): MenuItemConstructorOptions 
   }
 }
 
+/**
+ * Tray entry is the second way in (the first is the remote About page). It uses the
+ * active entry directly because the click is the operator's own action, not a message
+ * from a remote document.
+ */
+async function checkForUpdatesFromTray(): Promise<void> {
+  const entry = activeEntry(readBook())
+  if (!entry) {
+    await dialog.showMessageBox({
+      type: 'info',
+      title: '检查更新',
+      message: '还没有配置网关',
+      detail: '先在托盘里添加一个网关，再检查更新。',
+    })
+    return
+  }
+  try {
+    const check = await checkForUpdates(entry)
+    const lines = [
+      `Shell: ${check.shell.current} → ${check.shell.latest ?? '未知'}`,
+      `网关: ${check.daemon.current ?? '读取失败'} → ${check.daemon.latest ?? '未知'}`,
+      check.daemon.managed ? '网关由本机 WSL 管理，可一并升级' : '网关未标记为 WSL 托管，只升级 Shell',
+    ]
+    if (check.error) lines.push(`检查失败：${check.error}`)
+    const wanted = check.shell.updateAvailable
+      || (check.daemon.managed && check.daemon.updateAvailable)
+    if (wanted && check.missing.length > 0) {
+      lines.push(`缺少安装资源或校验文件：${check.missing.join(', ')}`)
+    }
+    if (!wanted) {
+      await dialog.showMessageBox({ type: 'info', title: '检查更新', message: '已是最新版本', detail: lines.join('\n') })
+      return
+    }
+    const choice = await dialog.showMessageBox({
+      type: 'question',
+      title: '检查更新',
+      message: `有可用更新：${check.release?.version ?? ''}`,
+      detail: lines.join('\n'),
+      buttons: ['升级', '取消'],
+      defaultId: 0,
+      cancelId: 1,
+    })
+    if (choice.response !== 0) return
+
+    const result = await runUpgrade(entry, (progress: ShellUpdateProgress) => {
+      tray?.setToolTip(`ModelPort: ${progress.message}`)
+      if (window && !window.isDestroyed()) window.webContents.send('shell:update-progress', progress)
+    })
+    tray?.setToolTip('ModelPort 控制台')
+    if (!result.ok) {
+      await dialog.showMessageBox({ type: 'error', title: '升级失败', message: result.error ?? '未知错误' })
+    } else if (!result.shellUpdated) {
+      await dialog.showMessageBox({
+        type: 'info',
+        title: '升级完成',
+        message: '网关已升级',
+        detail: result.backup ? `回滚备份：${result.backup}` : '',
+      })
+    }
+  } catch (error) {
+    await dialog.showMessageBox({
+      type: 'error',
+      title: '检查更新失败',
+      message: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
 function buildTrayMenu(): void {
   if (!tray) return
   const book = readBook()
@@ -294,6 +410,7 @@ function buildTrayMenu(): void {
         })]
       : []),
     { type: 'separator' },
+    trayAction('检查更新（Shell + WSL 网关）…', () => void checkForUpdatesFromTray()),
     trayAction('重新连接', () => loadActive()),
     trayAction('在浏览器中打开', () => {
       if (active) void shell.openExternal(uiUrl(active))
@@ -397,4 +514,39 @@ ipcMain.handle('shell:reconnect', async () => {
 ipcMain.handle('shell:quit', async () => {
   app.isQuitting = true
   app.quit()
+})
+
+/**
+ * The update actions are more dangerous than the secret methods: the WSL side runs as
+ * root. Only the page currently loaded from the active gateway may ask for them. A
+ * `data:` failure page, a stale frame, or a different origin gets a rejected promise.
+ */
+function activeGatewayForSender(event: IpcMainInvokeEvent): GatewayEntry {
+  const entry = activeEntry(readBook())
+  if (!entry) throw new Error('还没有配置网关')
+  let origin: string | null = null
+  try {
+    const url = event.senderFrame?.url ?? ''
+    origin = url === '' ? null : new URL(url).origin
+  } catch {
+    origin = null
+  }
+  if (origin === null || origin !== normalizeOrigin(entry.url)) {
+    throw new Error('升级操作只允许当前网关页面发起')
+  }
+  return entry
+}
+
+ipcMain.handle('shell:version', async () => app.getVersion())
+
+ipcMain.handle('shell:update-check', async (event: IpcMainInvokeEvent) => {
+  return await checkForUpdates(activeGatewayForSender(event))
+})
+
+ipcMain.handle('shell:update-start', async (event: IpcMainInvokeEvent) => {
+  const entry = activeGatewayForSender(event)
+  const sender = event.sender
+  return await runUpgrade(entry, (progress: ShellUpdateProgress) => {
+    if (!sender.isDestroyed()) sender.send('shell:update-progress', progress)
+  })
 })

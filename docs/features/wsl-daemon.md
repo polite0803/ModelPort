@@ -43,6 +43,29 @@ sudo systemctl enable --now modelport
 WSL 客户端退出后被回收（`wsl -l --running` 能看到「没有正在运行的分发」）。两者叠加的结果
 是「服务昨天还在，今天连不上」。`enable` 之后 `wsl --shutdown` 冷启动回来会自己起来。
 
+## 在线升级（Windows Shell 编排）
+
+从 v1.7.5 起，Windows Shell 的托盘和远程界面的 About 页可以一键升级 **Shell + 本机 WSL daemon**：
+
+- 地址簿里每个网关有「允许 Shell 在线升级此 WSL 网关」开关（默认关闭）。只有显式打开的条目才会执行 `wsl.exe -u root` 的 daemon 替换；远程网关只升级 Shell，daemon 仍按宿主机流程手动升级。
+- 版本来自 GitHub Release 的 tag；资产名固定为 `ModelPort-Shell-<ver>-x64-setup.exe` 与
+  `modelport-daemon-<ver>-<arch>.tar.gz`，每个资产必须带同名 `.sha256`，缺校验文件时**拒绝安装**。
+- daemon 升级会先解析 `systemctl cat modelport.service` 的 `ExecStart` 安装目录，备份到
+  `<dir>.bak-<timestamp>`，停服、替换、启动，再等网关返回新版本；失败自动用备份回滚。
+  版本化 symlink 布局会先 `readlink -f` 解析，避免把链接本身当成备份。
+- 升级前会比较「本机 WSL daemon 版本」与「当前网关 URL 报的版本」，不一致时拒绝，
+  防止把远程网关误当成本机实例后去替换本机 daemon。
+- Shell 安装包用 NSIS `/S` 静默安装，随后 Shell 退出并由安装器重新拉起。`/S` 会跳过完成页的
+  「运行应用」勾选框，所以自动启动来自 `build/installer.nsh` 的 `customInstall` 钩子；
+  没有这个钩子的旧安装包只能手动启动一次。
+  界面本身由 daemon 的 `/ui/` 托管，所以 **daemon 升级会同时更新壳里看到的 UI**；
+  壳的 Electron/托盘二进制则跟随 Shell 安装包更新。
+- 限制：发布物没有代码签名，SHA-256 只防传输损坏；GitHub 不可达时检查/下载会失败。
+  没有第二份 `latest.yml`：Shell/daemon 走 GitHub Release API + `.sha256`，主应用的
+  `latest.yml` 仍唯一。
+
+发布流水线负责为两个资产生成 `.sha256`（见 `.github/workflows/release.yml`）。
+
 ## 三个命令行开关
 
 | 命令 | 作用 | 注意 |
@@ -101,6 +124,10 @@ WSL 客户端退出后被回收（`wsl -l --running` 能看到「没有正在运
    在这里放 Key 只能进 URL，而 `?api_key=` 是明令禁止的形态。
 8. **`latest.yml` 只能有一份。** 壳不带 `electron-updater`，CI 里也不给它 `--publish=always`，
    产物用 `gh release upload` 传——否则两个产品写同一个更新描述文件，主程序的自动更新会去下载壳。
+   壳/daemon 的在线升级因此走 GitHub Release API + 同名 `.sha256`，不产生第二份更新描述文件。
+9. **升级只对当前网关页面开放，且 daemon 只对显式 `manageWsl` 的条目执行。** IPC 入口检查
+   `senderFrame.url` 的 origin 与地址簿中的活动网关一致；没有校验文件的资产不安装；daemon
+   安装脚本在停服前打印备份路径，失败必须能回滚。
 
 ## 默认值
 
@@ -122,6 +149,7 @@ WSL 客户端退出后被回收（`wsl -l --running` 能看到「没有正在运
 | 静态 UI 托管 | `src/main/proxy/routes/web.ts`（`/ui` 302 → `/ui/`，资产 `immutable`，逃逸 404） |
 | 浏览器传输 | `src/renderer/src/api/headless.ts`、`src/shared/sseFrames.ts`、`src/renderer/src/components/ConnectGate.tsx` |
 | 壳 | `src/shell/main.ts`、`addressBook.ts`、`secretStore.ts`、`preload.ts`、`promptPreload.ts`；打包配置 `electron-builder.shell.yml` |
+| 在线升级 | `src/shell/updatePlan.ts`（纯逻辑）、`src/shell/updater.ts`（下载/校验/WSL 安装/Shell 安装）、`src/shared/shellBridge.ts`（桥接类型）、`build/installer.nsh`（静默安装后自启动）；测试 `tests/shell/update-plan.test.ts`、`tests/shell/update-surface.test.ts`、`tests/renderer/about-shell-update.test.mjs` |
 | 门 | `tests/build/daemon-bundle.test.ts`、`daemon-import-cli.test.ts`、`shell-entries.test.ts`、`renderer-bundle-browser-safe.test.ts`、`tests/routes/management-rpc.test.ts`、`management-backup-upload.test.ts`、`tests/ipc/api-wire-single-source.test.ts`、`tests/renderer/headless-absence.test.mjs`、`tests/shell/secret-store.test.ts` |
 
 ## 排查

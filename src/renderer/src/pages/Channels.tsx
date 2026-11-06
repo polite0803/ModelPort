@@ -61,8 +61,14 @@ interface CredentialAddState {
   error?: string
 }
 
-const POLL_INTERVAL_MS = 2500
+// 2.5s 轮询叠加上面那次「一次刷新十几个 RPC」，会把远程 UI 自己打到 429。
+// 登录轮询 5s 仍远快于人工感知；自动签到的状态变化也不需要 2.5s 的精度。
+const POLL_INTERVAL_MS = 5000
 const POLL_TIMEOUT_MS = 5 * 60 * 1000
+// `channels:changed` 在请求消耗时也会触发，逐个事件刷新等于按流量频率打 RPC。
+const CHANGED_DEBOUNCE_MS = 1500
+// 积分查询是每渠道一个 RPC，变化远慢于请求事件；10s 的尾随节流足够。
+const CREDITS_MIN_INTERVAL_MS = 10_000
 
 /** 身份核对时间的本地短格式（`MM-DD HH:mm`）：徽标 tooltip 空间有限，日期不带年份。 */
 function formatIdentityTime(ms: number): string {
@@ -100,10 +106,14 @@ export function Channels() {
   } | null>(null)
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const autoCheckinTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const creditsTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const creditsPendingViews = useRef<ChannelView[] | null>(null)
+  const creditsLastRunAt = useRef(0)
   const loginRef = useRef<LoginState | null>(null)
   loginRef.current = login
 
-  const loadCredits = useCallback(async (views: ChannelView[]) => {
+  const runCredits = useCallback(async (views: ChannelView[]) => {
     const connected = views.filter(view => view.accounts.total > 0)
     if (connected.length === 0) return
     await Promise.all(connected.map(async view => {
@@ -117,6 +127,30 @@ export function Channels() {
       setCredits(current => ({ ...current, [view.id]: value }))
     }))
   }, [])
+
+  /**
+   * 尾随节流：变化事件密集时只保留最后一次视图，10s 内最多查一轮积分。
+   * 不用简单丢弃（leading-only），否则请求持续消耗时积分会停在旧值。
+   */
+  const loadCredits = useCallback((views: ChannelView[]) => {
+    creditsPendingViews.current = views
+    const elapsed = Date.now() - creditsLastRunAt.current
+    if (elapsed >= CREDITS_MIN_INTERVAL_MS) {
+      creditsLastRunAt.current = Date.now()
+      creditsPendingViews.current = null
+      void runCredits(views)
+      return
+    }
+    if (creditsTimer.current !== null) return
+    creditsTimer.current = setTimeout(() => {
+      creditsTimer.current = null
+      const pending = creditsPendingViews.current
+      creditsPendingViews.current = null
+      if (pending === null) return
+      creditsLastRunAt.current = Date.now()
+      void runCredits(pending)
+    }, CREDITS_MIN_INTERVAL_MS - elapsed)
+  }, [runCredits])
 
   // 这个开关不属于某个渠道：一个开关管所有渠道，每个自然日只跑一次。
   // 跑一轮是后台任务，只有 running 时才追着看，跑完就停。
@@ -157,17 +191,29 @@ export function Channels() {
     void loadIdentity()
   }, [loadAutoCheckin, loadCredits, loadIdentity])
 
+  /**
+   * `changed` 是逐请求触发的（积分/用量变化），直接 refresh 等于把流量频率
+   * 复制到管理面上。1.5s 去抖把一次突发折叠成一轮，用户看到的仍是最终状态。
+   */
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimer.current !== null) clearTimeout(refreshTimer.current)
+    refreshTimer.current = setTimeout(() => {
+      refreshTimer.current = null
+      void refresh()
+    }, CHANGED_DEBOUNCE_MS)
+  }, [refresh])
+
   useEffect(() => {
     void refresh()
-    const unsubscribe = window.electronAPI.channels.onChanged(() => {
-      void refresh()
-    })
+    const unsubscribe = window.electronAPI.channels.onChanged(scheduleRefresh)
     return unsubscribe
-  }, [refresh])
+  }, [refresh, scheduleRefresh])
 
   useEffect(() => () => {
     if (pollTimer.current !== null) clearTimeout(pollTimer.current)
     if (autoCheckinTimer.current !== null) clearTimeout(autoCheckinTimer.current)
+    if (refreshTimer.current !== null) clearTimeout(refreshTimer.current)
+    if (creditsTimer.current !== null) clearTimeout(creditsTimer.current)
   }, [])
 
   const stopPolling = useCallback(() => {

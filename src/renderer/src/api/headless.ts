@@ -16,6 +16,7 @@
  */
 import { createElectronAPI, type ApiWire } from '@shared/api'
 import type { BackupPickResult } from '@shared/backup'
+import type { ShellBridge } from '@shared/shellBridge'
 import { parseEventFrame } from '@shared/sseFrames'
 
 const SECRET_KEY = 'modelport.managementSecret'
@@ -47,11 +48,7 @@ function forgetSecret(): void {
  * anywhere. Presence of the bridge is the whole capability check - the main process decides
  * whether a keystore exists and says so per call.
  */
-type ShellBridge = {
-  getGatewaySecret(origin: string): Promise<{ status: string; secret?: string }>
-  setGatewaySecret(origin: string, secret: string): Promise<{ stored: boolean; result: string }>
-  forgetGatewaySecret(origin: string): Promise<void>
-}
+export type { ShellBridge } from '@shared/shellBridge'
 
 function shellBridge(): ShellBridge | null {
   const host = window as unknown as { modelportShell?: Partial<ShellBridge> }
@@ -87,7 +84,7 @@ export const unauthorizedEventName = UNAUTHORIZED
 type RpcEnvelope = {
   success: boolean
   data?: unknown
-  error?: { code?: string; message?: string }
+  error?: { code?: string; message?: string; retryAfterMs?: number }
 }
 
 /** The channel list the daemon reports, for the connect screen's sanity check. */
@@ -101,7 +98,39 @@ export async function probeGateway(): Promise<number> {
   return Array.isArray(body.data) ? body.data.length : 0
 }
 
-async function invoke(channel: string, ...args: unknown[]): Promise<any> {
+/**
+ * 同一次调用的并发合并。Channels 页一次刷新会同时发 list + 每渠道 credits +
+ * autoCheckin + identity，`channels:changed` 又会把它们再触发一遍；相同的
+ * `channel + args` 在途时只发一次，既省限额也避免两个调用拿到不同的快照。
+ *
+ * 只合并**完全相同**的调用：不同参数的写入不会被折叠。
+ */
+const inFlightRpc = new Map<string, Promise<unknown>>()
+
+function rpcKey(channel: string, args: unknown[]): string {
+  try {
+    return `${channel}\u0000${JSON.stringify(args)}`
+  } catch {
+    // 含循环引用的参数不该被静默当成同一个调用。
+    return `${channel}\u0000<unserializable:${Date.now()}:${Math.random()}>`
+  }
+}
+
+/** 429 后的等待：优先用网关给的机器可读值，单次最多等 5s，再试一次。 */
+function retryDelayMs(response: Response, body: RpcEnvelope | null): number {
+  const fromBody = body?.error?.retryAfterMs
+  if (typeof fromBody === 'number' && Number.isFinite(fromBody) && fromBody > 0) {
+    return Math.min(fromBody, 5000)
+  }
+  const header = response.headers.get('Retry-After')
+  const seconds = header === null ? Number.NaN : Number(header)
+  if (Number.isFinite(seconds) && seconds > 0) {
+    return Math.min(seconds * 1000, 5000)
+  }
+  return 1000
+}
+
+async function invokeOnce(channel: string, args: unknown[], retried = false): Promise<any> {
   const response = await fetch('/v1/management/rpc', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Management-Secret': secret() },
@@ -112,6 +141,12 @@ async function invoke(channel: string, ...args: unknown[]): Promise<any> {
     throw new Error('management secret rejected')
   }
   const body = (await response.json().catch(() => null)) as RpcEnvelope | null
+  // 管理面限流由 UI 自己的轮询触发，不是用户操作失败：等一个窗口再试一次。
+  // 第二次仍 429 就按普通失败抛出，避免把一次点击挂成无限重试。
+  if (response.status === 429 && !retried) {
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs(response, body)))
+    return invokeOnce(channel, args, true)
+  }
   if (!body) throw new Error(`rpc ${channel}: empty response (${response.status})`)
   if (!body.success) {
     const code = body.error?.code ?? 'rpc_failed'
@@ -120,6 +155,21 @@ async function invoke(channel: string, ...args: unknown[]): Promise<any> {
     throw Object.assign(new Error(body.error?.message ?? code), { code })
   }
   return body.data
+}
+
+function invoke(channel: string, ...args: unknown[]): Promise<any> {
+  const key = rpcKey(channel, args)
+  const existing = inFlightRpc.get(key)
+  if (existing) return existing
+
+  const pending = invokeOnce(channel, args)
+  inFlightRpc.set(key, pending)
+  const settle = (): void => {
+    if (inFlightRpc.get(key) === pending) inFlightRpc.delete(key)
+  }
+  // 用 then 的两个分支而不是 finally：后者的派生 promise 会再抛一次 rejection。
+  pending.then(settle, settle)
+  return pending
 }
 
 // ---------------------------------------------------------------- backup upload
@@ -274,8 +324,12 @@ const wire: ApiWire = {
  * Returns true when this browser is now driving a remote gateway.
  */
 export function installHeadlessApi(): boolean {
-  const target = window as unknown as { electronAPI?: unknown }
+  const target = window as unknown as { electronAPI?: unknown; __MODELPORT_REMOTE__?: boolean }
   if (target.electronAPI) return false
   target.electronAPI = createElectronAPI(wire)
+  // The About page must be able to say "there is no desktop updater here" instead of
+  // showing a button whose only outcome is `desktop-only`. The shell bridge is checked
+  // separately; this marks the plain browser/remote-gateway case.
+  target.__MODELPORT_REMOTE__ = true
   return true
 }

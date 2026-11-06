@@ -1174,6 +1174,13 @@ export interface RequestLogEntry {
   method: string
   /** Request URL path */
   url: string
+  /**
+   * Client User-Agent. Refused requests never reach a route, so without this a
+   * `401 missing_api_key` row names neither the client nor the caller - the
+   * 2026-11-06 WSL probes (`GET /v1/models` + `/v1/props` for 23 minutes) could
+   * not be attributed to any installed tool.
+   */
+  userAgent?: string
   /** Requested model name */
   model: string
   /** Actual model used (after mapping) */

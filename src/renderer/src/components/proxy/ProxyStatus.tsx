@@ -48,7 +48,9 @@ export function ProxyStatus({ onStatusChange }: ProxyStatusProps) {
       if (document.visibilityState !== 'visible') return
       fetchProxyStatus()
       fetchProxyStatistics()
-    }, 5000)
+      // 5s 一次 × 两个调用 = 24 RPC/分钟，单独就吃掉旧管理面限额的四成；
+      // 15s 仍是「状态看起来是活的」的粒度，靠可见性补刷保证回前台不空虚。
+    }, 15_000)
 
     const refreshWhenVisible = (): void => {
       if (document.visibilityState !== 'visible') return

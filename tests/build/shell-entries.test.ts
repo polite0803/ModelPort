@@ -42,6 +42,11 @@ test('the shell imports no gateway module tree', () => {
     'src/shell/preload.ts',
     'src/shell/promptPreload.ts',
     'src/shell/secretStore.ts',
+    // The updater is still a client: it reads a release and starts installers, but it
+    // must not pull the gateway store into the shell bundle (the test above catches it
+    // in the built file; this list makes the failure name the source file).
+    'src/shell/updatePlan.ts',
+    'src/shell/updater.ts',
   ]
   for (const file of shellSources) {
     const source = readFileSync(file, 'utf8')

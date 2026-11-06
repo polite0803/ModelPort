@@ -15,6 +15,8 @@ export function buildRejectionLogEntry(input: {
   now: number
   /** The model a client asked for; empty when the body was never parsed. */
   model: string
+  /** Client UA; the only way to name a caller that was refused before any route. */
+  userAgent?: string
 }): Omit<RequestLogEntry, 'id'> {
   const latency = Math.max(0, input.now - input.startedAt)
 
@@ -25,6 +27,7 @@ export function buildRejectionLogEntry(input: {
     method: input.method,
     url: input.path,
     model: input.model,
+    ...(input.userAgent ? { userAgent: input.userAgent } : {}),
     responseStatus: input.statusCode,
     latency,
     isStream: false,
@@ -58,6 +61,7 @@ export function rejectionEntryFromContext(
     path: string
     state?: { startedAt?: unknown }
     request?: { body?: unknown }
+    get?: (name: string) => string
   },
   statusCode: number,
   code: string,
@@ -74,6 +78,7 @@ export function rejectionEntryFromContext(
     startedAt,
     now: Date.now(),
     model: requestedModelOf(ctx.request?.body),
+    ...(typeof ctx.get === 'function' ? { userAgent: ctx.get('user-agent') } : {}),
   })
 }
 

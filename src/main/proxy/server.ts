@@ -123,6 +123,9 @@ function recordRejectedRequest(ctx: Context, statusCode: number, code: string, m
     startedAt,
     now: Date.now(),
     model: requestedModelOf(ctx.request.body),
+    // A refused request never reaches a route: without the UA the row cannot
+    // be attributed to the client that sent it.
+    userAgent: ctx.get('user-agent'),
   })
 
   storeManager.addRequestLog(entry)
@@ -316,6 +319,8 @@ export class ProxyServer {
       const shouldRecordAccessLog =
         !isModelListRead &&
         !unmounted404Traced &&
+        // `desktop-only` 是宿主能力事实：UI 已按 code 处理，不该每次切主题刷一条 403。
+        ctx.state.suppressAccessLog !== true &&
         (ctx.status >= 400 || latency >= SLOW_REQUEST_THRESHOLD_MS)
 
       if (shouldRecordAccessLog) {

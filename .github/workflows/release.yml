@@ -112,7 +112,13 @@ jobs:
         if: matrix.os == 'windows-latest' && matrix.arch == 'x64'
         run: |
           npx electron-builder -c electron-builder.shell.yml --win --x64
-          gh release upload "${{ github.ref_name }}" dist-shell/ModelPort-Shell-*-*-setup.exe --clobber
+          # The shell updater refuses to execute an artifact without a matching
+          # `<asset>.sha256`; publish it in the same upload as the installer.
+          $exe = Get-ChildItem dist-shell/ModelPort-Shell-*-setup.exe | Select-Object -First 1
+          if (-not $exe) { throw 'shell installer not found' }
+          $hash = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $($exe.Name)" | Out-File -Encoding ascii "$($exe.FullName).sha256"
+          gh release upload "${{ github.ref_name }}" dist-shell/ModelPort-Shell-*-*-setup.exe "$($exe.FullName).sha256" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
@@ -131,6 +137,12 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: |
           DAEMON_ARCH="${{ matrix.arch }}" npm run build:daemon
-          gh release upload "${{ github.ref_name }}" dist/modelport-daemon-*-${{ matrix.arch }}.tar.gz --clobber
+          # Same rule as the shell: the updater will not hand this tarball to root
+          # without a checksum. Write the basename-only line from inside dist/ so the
+          # shell's parser can match it to the asset name.
+          file=$(ls dist/modelport-daemon-*-${{ matrix.arch }}.tar.gz | head -n 1)
+          test -n "$file"
+          (cd dist && sha256sum "$(basename "$file")" > "$(basename "$file").sha256")
+          gh release upload "${{ github.ref_name }}" "$file" "$file.sha256" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

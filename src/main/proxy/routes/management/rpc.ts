@@ -44,7 +44,12 @@ function fail(ctx: Context, status: number, code: string, message: string, chann
   // The access-log middleware can only see the path, and every RPC shares it: a bare
   // `POST /v1/management/rpc 404` in the app log names neither the channel nor the reason,
   // which is how a missing registration costs a whole round trip to diagnose.
-  storeManager.addLog('warn', `rpc ${code}`, {
+  //
+  // `desktop-only` is the host telling the UI "there is no window here", not a fault:
+  // the UI already catches it, so it must not add a warn per theme change (6 in the
+  // 2026-11-06 WSL window). The access-log line is suppressed through ctx.state below.
+  if (code === 'desktop-only') ctx.state.suppressAccessLog = true
+  storeManager.addLog(code === 'desktop-only' ? 'info' : 'warn', `rpc ${code}`, {
     data: { channel, code, status },
   })
   return { success: false, error: { code, message } }

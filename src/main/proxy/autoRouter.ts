@@ -36,6 +36,7 @@ import type { ModelProbeRow } from '../../shared/modelProbe.ts'
 import { indexProbeRows, probeRowKey, probeRowToLayer } from '../../shared/modelProbe.ts'
 import { getProbeRowsSync } from '../providers/modelProbeStore.ts'
 import { accountRuntime } from './accountRuntime'
+import { clearCatalogMissCooldowns, isCatalogMissCoolingDown } from './modelCatalogCooldown'
 import { getChannelDefinition } from '../providers/accountChannels/catalogue'
 import {
   advertisedContextFloorOf,
@@ -495,6 +496,15 @@ class AutoRouter {
       for (const model of storeManager.getEffectiveModels(provider.id)) {
         // 通配符模型名不能作为上游真实模型使用
         if (model.displayName.endsWith('*')) {
+          continue
+        }
+
+        // 上游目录已经明确「没有这个模型」：冷却期内不再送进候选池，省掉
+        // 每笔请求 0.1–3.5s 的必败往返。广告口径不扣（`ignoreTransientAvailability`），
+        // 与配额门控同一层语义。
+        if (!options.ignoreTransientAvailability
+          && isCatalogMissCoolingDown(provider.id, model.actualModelId, now)) {
+          skipped.add(`${provider.id}/${model.displayName}:catalog_miss`)
           continue
         }
 
@@ -968,6 +978,8 @@ class AutoRouter {
   /** 代理服务重启时清空，避免跨进程生命周期残留 */
   reset(): void {
     accountRuntime.reset()
+    // 目录缺失冷却也是运行时状态：代理重启/测试用例之间应回到干净池。
+    clearCatalogMissCooldowns()
     // 份额账本与运行时指标同生命周期：重启后不该继续背着上一轮的派发欠债
     dispatchLedger.reset()
     this.sticky.clear()

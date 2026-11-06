@@ -24,6 +24,9 @@ export function sanitizeRequestLogEntry(
     ...(entry.upstreamRequestId === undefined
       ? {}
       : { upstreamRequestId: entry.upstreamRequestId.slice(0, MAX_UPSTREAM_REQUEST_ID_CHARS) }),
+    ...(entry.userAgent === undefined
+      ? {}
+      : { userAgent: truncateText(redactText(entry.userAgent, config), 300) }),
   }
 
   if (!config.includeBodies && entry.captureBodies !== true) {
@@ -76,6 +79,10 @@ export function sanitizeRequestLogUpdates(
 
   if ('upstreamRequestId' in updates) {
     sanitized.upstreamRequestId = updates.upstreamRequestId?.slice(0, MAX_UPSTREAM_REQUEST_ID_CHARS)
+  }
+
+  if ('userAgent' in updates) {
+    sanitized.userAgent = truncateText(redactText(updates.userAgent, config), 300)
   }
 
   const bodyConfig = forceBodies && config.maxBodyChars <= 0

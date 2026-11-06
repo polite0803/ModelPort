@@ -14,6 +14,7 @@ const readSource = (path) => readFileSync(path, 'utf8').replace(/\r\n/g, '\n')
 
 const chat = readSource('src/main/proxy/routes/chat.ts')
 const router = readSource('src/main/proxy/autoRouter.ts')
+const policy = readSource('src/main/proxy/streamOutcomePolicy.ts')
 const panel = readSource('src/renderer/src/components/proxy/LoadBalanceConfig.tsx')
 const locales = ['src/renderer/src/i18n/locales/en-US.json', 'src/renderer/src/i18n/locales/zh-CN.json']
   .map((path) => ({ path, json: JSON.parse(readFileSync(path, 'utf8')) }))
@@ -27,7 +28,7 @@ const GUARD_KEYS = [
   'repetitionGuardNonStreamNote',
 ]
 
-function checkMainProcess(chatSource, routerSource) {
+function checkMainProcess(chatSource, routerSource, policySource) {
   const problems = []
   if (!/storeManager\.getConfig\(\)\.streamRepetitionGuard/.test(chatSource)) {
     problems.push('chat.ts never reads the configured thresholds')
@@ -35,12 +36,19 @@ function checkMainProcess(chatSource, routerSource) {
   if (!/repetition: measureStreamRepetition\(collectedContent, repetitionGuard\)/.test(chatSource)) {
     problems.push('the stream trace does not carry the repetition reading')
   }
-  const revokeCalls = (chatSource.match(/revokeStickyOnRepetition\(trace\)/g) ?? []).length
-  if (revokeCalls !== 2) {
-    problems.push(`both stream settle paths must revoke stickiness, saw ${revokeCalls}`)
+  // 三个结算点：流错误（含首块后超时）、直通路径正常结束、转换路径正常结束。
+  const settleCalls = (chatSource.match(/settleSticky\(trace\)/g) ?? []).length
+  if (settleCalls !== 3) {
+    problems.push(`all three stream settle paths must settle stickiness, saw ${settleCalls}`)
   }
-  if (!/trace\.repetition\?\.degraded !== true/.test(chatSource)) {
-    problems.push('the revoke helper is not gated on the degraded verdict')
+  if (!/shouldRevokeStickyAfterStream\(trace\)/.test(chatSource)) {
+    problems.push('settleSticky does not delegate to the shared policy')
+  }
+  if (!/endReason === 'timeout' \|\| trace\.endReason === 'error'/.test(policySource)) {
+    problems.push('the policy does not revoke on timeout or upstream error')
+  }
+  if (!/trace\.repetition\?\.degraded === true/.test(policySource)) {
+    problems.push('the policy is not gated on the degraded verdict')
   }
   if (!/revokeSticky\(key: string \| undefined, route\?: ModelRoute\): void \{/.test(routerSource)) {
     problems.push('autoRouter has no revokeSticky')
@@ -74,8 +82,8 @@ function checkLocales(jsons, keys) {
     .map(({ path }) => `${path} is missing one of ${keys.join(', ')}`)
 }
 
-test('the repetition reading reaches the row and both stream paths revoke stickiness', () => {
-  assert.deepEqual(checkMainProcess(chat, router), [])
+test('the repetition reading reaches the row and all stream settle paths revoke stickiness', () => {
+  assert.deepEqual(checkMainProcess(chat, router, policy), [])
 })
 
 test('the settings panel reads and writes the guard, and waits for the persisted config', () => {
@@ -90,17 +98,17 @@ test('each check fails on the mutation it is meant to catch', () => {
   // 摘掉读数 ⇒ 只有主进程那条红。
   const noReading = chat.replace('repetition: measureStreamRepetition(collectedContent, repetitionGuard) ?? undefined,', '')
   assert.deepEqual(
-    checkMainProcess(noReading, router).map((p) => p.includes('stream trace')),
+    checkMainProcess(noReading, router, policy).map((p) => p.includes('stream trace')),
     [true],
   )
 
   // 只在一个结算点撤粘性（另一个分支漏了）⇒ 也是红，而且是计数那条。
-  const oneRevoke = chat.replace('revokeStickyOnRepetition(trace)\n          reportStreamOutcome(\n            endReason,\n            elapsed,\n            delivered', 'reportStreamOutcome(\n            endReason,\n            elapsed,\n            delivered')
-  assert.match(checkMainProcess(oneRevoke, router).join('\n'), /saw 1/)
+  const oneRevoke = chat.replace('settleSticky(trace)\n          reportStreamOutcome(\n            endReason,\n            elapsed,\n            delivered', 'reportStreamOutcome(\n            endReason,\n            elapsed,\n            delivered')
+  assert.match(checkMainProcess(oneRevoke, router, policy).join('\n'), /saw 2/)
 
   // 阈值写死成常量（不再读配置）⇒ 红。
   const hardcoded = chat.replace('storeManager.getConfig().streamRepetitionGuard ?? DEFAULT_REPETITION_GUARD', 'DEFAULT_REPETITION_GUARD')
-  assert.match(checkMainProcess(hardcoded, router).join('\n'), /never reads the configured thresholds/)
+  assert.match(checkMainProcess(hardcoded, router, policy).join('\n'), /never reads the configured thresholds/)
 
   // 面板存了别的键 ⇒ 红。
   const wrongSave = panel.replace('streamRepetitionGuard: guard', 'loadBalanceStrategyNote: guard')

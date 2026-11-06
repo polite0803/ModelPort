@@ -8,6 +8,11 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('promptHost', {
-  submit: (values: { name: string; url: string }): void => ipcRenderer.send('shell:prompt-submit', values),
+  submit: (values: {
+    name: string
+    url: string
+    manageWsl: boolean
+    wslDistro: string
+  }): void => ipcRenderer.send('shell:prompt-submit', values),
   cancel: (): void => ipcRenderer.send('shell:prompt-cancel'),
 })

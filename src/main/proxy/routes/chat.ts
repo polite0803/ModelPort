@@ -46,6 +46,7 @@ import { accountChannelManager } from '../../providers/accountChannels/manager'
 import { accountRuntime } from '../accountRuntime'
 import { storeManager } from '../../store/store'
 import { AUTO_PREFERENCES, type AutoPreference } from '../../../shared/types'
+import { shouldRevokeStickyAfterStream } from '../streamOutcomePolicy'
 import { readRequestContextFit } from '../../../shared/requestContextFit.ts'
 import { DEFAULT_REPETITION_GUARD, measureStreamRepetition } from '../../../shared/streamRepetition.ts'
 import { readOrEstimateUsage, usageInputText, type UsageReading } from '../quota/usage'
@@ -1260,14 +1261,15 @@ router.post('/completions', async (ctx: Context) => {
       })
 
       /**
-       * 内容退化的轮次不保留粘性锚点。
+       * 本轮不健康时撤粘性锚点：内容退化、首块后超时、上游流错误都算。
        *
-       * 粘性在响应头阶段就写了（成功路径上的 `rememberRoute`），而退化要到流结束
-       * 才算得出来。不撤的话，协议成功、内容塌掉的这一家会一直把会话钉住 —— 2026-11-03
-       * 那个会话 24 行里 23 行 `reason=sticky`，正是这个形状。
+       * 粘性在响应头阶段就写了（成功路径上的 `rememberRoute`），而这些问题要到
+       * 流结束才算得出来。不撤的话，协议成功但内容塌掉/中途停摆的这一家会一直
+       * 把会话钉住 —— 2026-11-03 的重复退化会话与 2026-11-06 qodercn 的三连
+       * 停摆都是这个形状。
        */
-      const revokeStickyOnRepetition = (trace: RequestStreamTrace): void => {
-        if (trace.repetition?.degraded !== true) return
+      const settleSticky = (trace: RequestStreamTrace): void => {
+        if (!shouldRevokeStickyAfterStream(trace)) return
         if (!autoDecision || !chosenCandidate) return
         autoRouter.revokeSticky(autoDecision.conversationKey, autoDecision.route)
       }
@@ -1281,6 +1283,8 @@ router.post('/completions', async (ctx: Context) => {
           endReason = failureStatus === 504 ? 'timeout' : 'error'
         }
         reportStreamOutcome(endReason, Date.now() - startTime)
+        const trace = streamTraceOf(endReason, Date.now() - startTime)
+        settleSticky(trace)
 
         // 流失败必须回写请求日志：日志条目是在响应头阶段按 success 建的，
         // 不翻成 error 的话这条请求在日志里永远显示成功（且耗时为响应头时间）。
@@ -1296,7 +1300,7 @@ router.post('/completions', async (ctx: Context) => {
             errorType: details.type,
             errorCode: details.code ?? null,
             errorParam: details.param ?? null,
-            streamTrace: streamTraceOf(endReason, Date.now() - startTime),
+            streamTrace: trace,
           })
         }
 
@@ -1384,7 +1388,7 @@ router.post('/completions', async (ctx: Context) => {
             wrapperStream.write('data: [DONE]\n\n')
           }
           const trace = streamTraceOf(endReason, elapsed)
-          revokeStickyOnRepetition(trace)
+          settleSticky(trace)
           reportStreamOutcome(
             endReason,
             elapsed,
@@ -1485,7 +1489,7 @@ router.post('/completions', async (ctx: Context) => {
             wrapperStream.write('data: [DONE]\n\n')
           }
           const trace = streamTraceOf(endReason, elapsed)
-          revokeStickyOnRepetition(trace)
+          settleSticky(trace)
           reportStreamOutcome(
             endReason,
             elapsed,

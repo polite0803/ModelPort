@@ -34,6 +34,14 @@ test('独立成串的 Bearer 值不留明文', () => {
   assert.equal((out.errorMessage ?? '').includes('abcdefghijklmnop1234'), false)
 })
 
+test('错误文案里的 "API key is required" 不被当成键值对脱敏', () => {
+  const out = sanitizeRequestLogEntry(
+    { ...BASE, errorMessage: 'missing_api_key: API key is required' },
+    CONFIG,
+  )
+  assert.equal(out.errorMessage, 'missing_api_key: API key is required')
+})
+
 test('URL 查询串里的凭据不留明文', () => {
   const out = sanitizeRequestLogEntry({ ...BASE, errorMessage: 'GET https://api.example.com/v1?api_key=supersecretvalue1' }, CONFIG)
   assert.equal((out.errorMessage ?? '').includes('supersecretvalue1'), false)

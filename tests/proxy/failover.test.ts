@@ -121,9 +121,12 @@ test('上下文超限识别：窄口径，别的 400 一律不得误判成可换
 })
 
 test('转发层把上下文超限接进「换一家就能成」，普通 400 仍终止', () => {
+  // 窗口 600 → 900：这条链的中文注释在 2026-11-06 之前已把距离推到 657
+  // （HEAD 5536aac 上就已经红），断言要钉的是「谓词在这条链里」，不是相邻
+  // 字符数。下一个同名谓词在 8.3k 字符之外，900 仍不会误配到 probe 分支。
   assert.match(
     forwarderSource,
-    /const capabilityMismatch = isToolOverflowError\(result\.error\)[\s\S]{0,600}?\|\| isContextOverflowError\(result\.error\)/,
+    /const capabilityMismatch = isToolOverflowError\(result\.error\)[\s\S]{0,900}?\|\| isContextOverflowError\(result\.error\)/,
     'capabilityMismatch 必须包含上下文超限判据',
   )
   // 判据的接线位置只此一处：别的分支（isFailoverEligible / 状态码表）不许出现

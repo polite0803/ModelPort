@@ -60,11 +60,16 @@ test('管理路径打满窗口后返回 429 与统一错误信封', async () => 
   const limited = await pass()
   assert.equal(limited.ctx.status, 429)
   assert.ok(limited.ctx.body, '429 必须有响应体')
-  const body = limited.ctx.body as { success: boolean; error: { code: string; message: string } }
+  const body = limited.ctx.body as {
+    success: boolean
+    error: { code: string; message: string; retryAfterMs?: number }
+  }
   assert.equal(body.success, false)
   assert.equal(body.error.code, 'management_rate_limited')
   assert.match(body.error.message, /too many management api requests/i)
   assert.ok('Retry-After' in limited.headers, '429 必须带 Retry-After')
+  // 远程 UI 靠这个字段自动退避一次，不能只靠解析英文文案。
+  assert.ok(typeof body.error.retryAfterMs === 'number' && body.error.retryAfterMs > 0)
 })
 
 test('非管理路径永不计数', async () => {
@@ -107,7 +112,9 @@ test('计数按归属键分开，且每个实例自成一个桶', async () => {
   assert.equal(sameIp.ctx.status, 200, '新实例不带前一个实例的计数')
 })
 
-test('默认窗口是 60 次 / 60 秒', () => {
-  assert.equal(MANAGEMENT_RATE_LIMIT_MAX, 60)
+test('默认窗口是 240 次 / 60 秒', () => {
+  // 60/分钟会让远程 UI 自己把自己限流：一次 Channels 刷新就有十几个 RPC，
+  // 再叠加状态轮询。240 仍然拦得住死循环脚本。
+  assert.equal(MANAGEMENT_RATE_LIMIT_MAX, 240)
   assert.equal(MANAGEMENT_RATE_LIMIT_WINDOW_MS, 60_000)
 })

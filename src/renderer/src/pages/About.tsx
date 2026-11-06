@@ -12,6 +12,7 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import logoIcon from '@/assets/icons/icons.png'
+import type { ShellBridge, ShellUpdateCheck, ShellUpdateProgress } from '@shared/shellBridge'
 
 type UpdatePhase = 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error'
 
@@ -30,6 +31,10 @@ interface DownloadProgress {
 
 export function About() {
   const { t } = useTranslation()
+  const shellBridge = (window as unknown as { modelportShell?: ShellBridge }).modelportShell
+  const isShell = typeof shellBridge?.checkForUpdates === 'function'
+  const isRemotePage = (window as unknown as { __MODELPORT_REMOTE__?: boolean }).__MODELPORT_REMOTE__ === true
+  const isDesktopApp = !isShell && !isRemotePage
   const [appVersion, setAppVersion] = useState<string>('')
 
   useEffect(() => {
@@ -44,8 +49,14 @@ export function About() {
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null)
   const displayAppVersion = appVersion || '...'
 
+  const [shellVersion, setShellVersion] = useState('')
+  const [shellCheck, setShellCheck] = useState<ShellUpdateCheck | null>(null)
+  const [shellPhase, setShellPhase] = useState<'idle' | 'checking' | 'ready' | 'upgrading' | 'done' | 'error'>('idle')
+  const [shellProgress, setShellProgress] = useState<ShellUpdateProgress | null>(null)
+  const [shellError, setShellError] = useState<string | null>(null)
+
   useEffect(() => {
-    if (!window.electronAPI?.app) return
+    if (!isDesktopApp || !window.electronAPI?.app) return
 
     const unsubscribeChecking = window.electronAPI.app.onUpdateChecking(() => {
       setUpdateInfo((current) => ({
@@ -109,7 +120,28 @@ export function About() {
       unsubscribeDownloaded()
       unsubscribeError()
     }
-  }, [])
+  }, [isDesktopApp])
+
+  useEffect(() => {
+    if (!isShell || !shellBridge) return
+    let cancelled = false
+    void shellBridge.getVersion?.().then(version => {
+      if (!cancelled) setShellVersion(version)
+    }).catch(() => undefined)
+    const unsubscribe = shellBridge.onUpdateProgress?.((progress) => {
+      if (cancelled) return
+      setShellProgress(progress)
+      if (progress.stage === 'done') setShellPhase('done')
+      if (progress.stage === 'error') {
+        setShellPhase('error')
+        setShellError(progress.message)
+      }
+    })
+    return () => {
+      cancelled = true
+      unsubscribe?.()
+    }
+  }, [isShell, shellBridge])
 
   const formatBytes = (bytes: number): string => {
     if (bytes === 0) return '0 B'
@@ -127,6 +159,54 @@ export function About() {
     if (typeof error === 'string') return error
     return error instanceof Error ? error.message : fallback
   }
+
+  const handleShellCheck = async (): Promise<void> => {
+    if (!shellBridge?.checkForUpdates) return
+    setShellPhase('checking')
+    setShellError(null)
+    setShellProgress(null)
+    try {
+      const result = await shellBridge.checkForUpdates()
+      setShellCheck(result)
+      setShellPhase('ready')
+    } catch (error) {
+      setShellPhase('error')
+      setShellError(getUpdateErrorMessage(error, t('about.upgradeFailed')))
+    }
+  }
+
+  const handleShellUpgrade = async (): Promise<void> => {
+    if (!shellBridge?.startUpgrade) return
+    setShellPhase('upgrading')
+    setShellError(null)
+    setShellProgress(null)
+    try {
+      const result = await shellBridge.startUpgrade()
+      if (!result.ok) {
+        setShellPhase('error')
+        setShellError(result.error ?? t('about.upgradeFailed'))
+        return
+      }
+      if (!result.shellUpdated) {
+        setShellPhase('done')
+        setShellCheck(null)
+      }
+    } catch (error) {
+      setShellPhase('error')
+      setShellError(getUpdateErrorMessage(error, t('about.upgradeFailed')))
+    }
+  }
+
+  const shellCanUpgrade = shellCheck !== null && (
+    (shellCheck.shell.updateAvailable && shellCheck.shell.asset !== null)
+    || (shellCheck.daemon.managed && shellCheck.daemon.updateAvailable && shellCheck.daemon.asset !== null)
+  )
+  // Only complain about a missing checksum when an update actually needs that asset;
+  // an up-to-date install must not show a red "missing" note for the latest release.
+  const shellNeedsMissing = shellCheck !== null && (
+    (shellCheck.shell.updateAvailable && shellCheck.shell.asset === null)
+    || (shellCheck.daemon.managed && shellCheck.daemon.updateAvailable && shellCheck.daemon.asset === null)
+  )
 
   const handleCheckAppUpdate = async () => {
     setUpdateInfo((current) => ({
@@ -283,7 +363,143 @@ export function About() {
           </div>
         </div>
 
-        <div className="glass-card p-6 relative overflow-hidden group">
+        {!isDesktopApp && (
+          <div className="glass-card p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+              <div className="space-y-1">
+                <h3 className="text-sm font-bold text-[var(--text-primary)] flex items-center gap-2">
+                  <Zap className="w-4 h-4 text-[var(--accent-primary)]" />
+                  {isShell ? t('about.shellUpdateTitle') : t('about.gatewayRemoteTitle')}
+                </h3>
+                <p className="text-xs text-[var(--text-muted)] max-w-xl">
+                  {isShell ? t('about.shellUpdateDesc') : t('about.gatewayRemoteDesc')}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {isShell && (
+                  <button
+                    onClick={() => void handleShellCheck()}
+                    disabled={shellPhase === 'checking' || shellPhase === 'upgrading'}
+                    className="px-4 py-2 bg-[var(--glass-bg)] hover:bg-[var(--glass-bg-hover)] border border-[var(--glass-border)] rounded-full text-sm font-medium transition-colors flex items-center gap-2 disabled:opacity-50"
+                  >
+                    {shellPhase === 'checking'
+                      ? <Loader2 className="w-4 h-4 animate-spin" />
+                      : <RefreshCw className="w-4 h-4" />}
+                    {t('settings.checkUpdates')}
+                  </button>
+                )}
+                {isShell && shellCanUpgrade && (
+                  <button
+                    onClick={() => void handleShellUpgrade()}
+                    disabled={shellPhase === 'upgrading'}
+                    className="px-4 py-2 bg-[var(--accent-primary)] hover:bg-[var(--button-primary-hover)] text-[var(--text-on-accent)] rounded-full text-sm font-medium transition-colors flex items-center gap-2 disabled:opacity-50"
+                  >
+                    <Download className="w-4 h-4" />
+                    {t('about.upgradeAll')}
+                  </button>
+                )}
+                {!isShell && (
+                  <button
+                    onClick={() => handleOpenExternal('https://github.com/polite0803/ModelPort/releases')}
+                    className="px-4 py-2 bg-[var(--glass-bg)] hover:bg-[var(--glass-bg-hover)] border border-[var(--glass-border)] rounded-full text-sm font-medium transition-colors flex items-center gap-2"
+                  >
+                    <Github className="w-4 h-4" />
+                    {t('about.openReleasePage')}
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {isShell && (
+                <div className="rounded-xl bg-[var(--glass-bg)] border border-[var(--glass-border)] p-3 space-y-1">
+                  <div className="text-micro uppercase tracking-widest text-[var(--text-dim)]">
+                    {t('about.shellVersion')}
+                  </div>
+                  <div className="text-sm font-mono text-[var(--text-primary)]">
+                    {shellVersion || '...'}
+                    {shellCheck?.shell.latest
+                      ? <span className="text-[var(--text-muted)]"> → {shellCheck.shell.latest}</span>
+                      : null}
+                  </div>
+                  {shellCheck && (
+                    <div className="text-xs text-[var(--text-muted)]">
+                      {shellCheck.shell.updateAvailable ? t('about.updateAvailable') : t('settings.upToDate')}
+                    </div>
+                  )}
+                </div>
+              )}
+              <div className="rounded-xl bg-[var(--glass-bg)] border border-[var(--glass-border)] p-3 space-y-1">
+                <div className="text-micro uppercase tracking-widest text-[var(--text-dim)]">
+                  {t('about.gatewayVersion')}
+                </div>
+                <div className="text-sm font-mono text-[var(--text-primary)]">
+                  {displayAppVersion}
+                  {shellCheck?.daemon.latest
+                    ? <span className="text-[var(--text-muted)]"> → {shellCheck.daemon.latest}</span>
+                    : null}
+                </div>
+                {shellCheck && (
+                  <div className="text-xs text-[var(--text-muted)]">
+                    {shellCheck.daemon.current === null
+                      ? t('about.daemonReadFailed')
+                      : shellCheck.daemon.updateAvailable
+                        ? (shellCheck.daemon.managed
+                            ? t('about.updateAvailable')
+                            : t('about.gatewayUnmanaged'))
+                        : t('settings.upToDate')}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {isShell && shellCheck?.daemon.managed === false && (
+              <p className="text-xs text-[var(--text-muted)]">{t('about.gatewayUnmanaged')}</p>
+            )}
+            {isShell && shellCheck && shellNeedsMissing && (
+              <p className="text-xs text-[var(--accent-error)]">
+                {t('about.missingAssets')}: {shellCheck.missing.join(', ')}
+              </p>
+            )}
+            {isShell && (shellCheck?.error || shellError) && (
+              <p className="text-xs text-[var(--accent-error)]">{shellCheck?.error ?? shellError}</p>
+            )}
+
+            {isShell && shellProgress && (
+              <div className="space-y-2 pt-3 border-t border-[var(--glass-border)]">
+                <div className="flex items-center justify-between text-xs text-[var(--text-muted)]">
+                  <span>{t(`about.stages.${shellProgress.stage}`)}</span>
+                  {shellProgress.percent !== undefined && (
+                    <span className="font-mono">{shellProgress.percent.toFixed(1)}%</span>
+                  )}
+                </div>
+                {shellProgress.percent !== undefined && (
+                  <div className="w-full h-2 bg-[var(--bg-tertiary)] rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-[var(--accent-primary)] transition-all duration-300"
+                      style={{ width: `${shellProgress.percent}%` }}
+                    />
+                  </div>
+                )}
+                <p className="text-xs text-[var(--text-muted)]">{shellProgress.message}</p>
+              </div>
+            )}
+
+            {isShell && shellPhase === 'done' && !shellProgress && (
+              <p className="text-xs text-[var(--accent-success)]">{t('about.upgradeDone')}</p>
+            )}
+            {isShell && shellCheck?.release && (
+              <button
+                onClick={() => handleOpenExternal(shellCheck.release?.pageUrl ?? '')}
+                className="text-xs text-[var(--accent-primary)] hover:underline text-left"
+              >
+                {t('about.openReleasePage')}
+              </button>
+            )}
+          </div>
+        )}
+
+        <div className={`glass-card p-6 relative overflow-hidden group${isDesktopApp ? '' : ' hidden'}`}>
           <div className="absolute top-0 right-0 w-64 h-64 bg-[var(--accent-primary)]/5 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2 pointer-events-none transition-opacity opacity-50 group-hover:opacity-100" />
 
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-6 relative z-10">

@@ -833,6 +833,13 @@ class StoreManager {
    * 用户与运维都不知道凭据正以明文落盘。
    */
   private plaintextStorageWarned = false
+  /**
+   * stdout 也要只报一次：`encryptData` 是逐字段调用的，WSL 的 journal 里
+   * 一次保存会出现 4 条同样的 `System keychain unavailable`（2026-11-06
+   * 20:22/20:55/21:28 各有四连）。应用日志那一侧已有 `plaintextStorageWarned`
+   * 去重，这里补上 console 侧。
+   */
+  private plaintextConsoleWarned = false
   private credentialsDegradedAtInit = false
 
   /**
@@ -856,7 +863,10 @@ class StoreManager {
    */
   encryptData(data: string): string {
     if (!getHost().sealer.isAvailable()) {
-      console.warn('[Store] System keychain unavailable - credentials will be stored unencrypted')
+      if (!this.plaintextConsoleWarned) {
+        this.plaintextConsoleWarned = true
+        console.warn('[Store] System keychain unavailable - credentials will be stored unencrypted')
+      }
       this.warnPlaintextStorage('keystore-unavailable')
       return data
     }

@@ -21,6 +21,15 @@ export interface GatewayEntry {
   name: string
   /** Origin of a daemon's management UI, e.g. http://127.0.0.1:8080 or https://host:8443 */
   url: string
+  /**
+   * Opt-in: the shell may upgrade the daemon inside WSL for this entry. Default off -
+   * a remote gateway has no local daemon to replace, and guessing from the URL would
+   * turn "http://127.0.0.1:8080" (a native daemon, a container, a tunnel) into a
+   * privileged `systemctl` operation.
+   */
+  manageWsl?: boolean
+  /** Distro name for `wsl.exe -d`; absent = the Windows default distro. */
+  wslDistro?: string
 }
 
 export interface AddressBook {
@@ -59,7 +68,15 @@ export function readBook(): AddressBook {
     const entries = Array.isArray(raw.entries)
       ? raw.entries
           .filter((entry): entry is GatewayEntry => !!entry && typeof entry.url === 'string' && typeof entry.name === 'string')
-          .map(entry => ({ id: entry.id ?? randomUUID(), name: entry.name, url: entry.url }))
+          .map(entry => ({
+            id: entry.id ?? randomUUID(),
+            name: entry.name,
+            url: entry.url,
+            ...(entry.manageWsl === true ? { manageWsl: true as const } : {}),
+            ...(typeof entry.wslDistro === 'string' && entry.wslDistro.trim() !== ''
+              ? { wslDistro: entry.wslDistro.trim() }
+              : {}),
+          }))
       : []
     const activeId = entries.some(entry => entry.id === raw.activeId) ? raw.activeId : undefined
     return { entries, ...(activeId ? { activeId } : {}) }
@@ -81,18 +98,39 @@ export function activeEntry(book: AddressBook): GatewayEntry | null {
   return book.entries.find(entry => entry.id === book.activeId) ?? book.entries[0] ?? null
 }
 
-export function upsertEntry(book: AddressBook, input: { id?: string; name: string; url: string }): AddressBook {
+export function upsertEntry(
+  book: AddressBook,
+  input: { id?: string; name: string; url: string; manageWsl?: boolean; wslDistro?: string },
+): AddressBook {
   const origin = normalizeOrigin(input.url)
   if (origin === null) throw new Error(`"${input.url}" is not an http(s) origin`)
+  const manageWsl = input.manageWsl === true
+  const wslDistro = typeof input.wslDistro === 'string' ? input.wslDistro.trim() : ''
+
   if (input.id) {
     return {
       ...book,
-      entries: book.entries.map(entry =>
-        entry.id === input.id ? { ...entry, name: input.name.trim() || entry.name, url: origin } : entry,
-      ),
+      entries: book.entries.map(entry => {
+        if (entry.id !== input.id) return entry
+        const next: GatewayEntry = {
+          id: entry.id,
+          name: input.name.trim() || entry.name,
+          url: origin,
+        }
+        if (manageWsl) next.manageWsl = true
+        if (wslDistro !== '') next.wslDistro = wslDistro
+        return next
+      }),
     }
   }
-  const created: GatewayEntry = { id: randomUUID(), name: input.name.trim() || origin, url: origin }
+
+  const created: GatewayEntry = {
+    id: randomUUID(),
+    name: input.name.trim() || origin,
+    url: origin,
+  }
+  if (manageWsl) created.manageWsl = true
+  if (wslDistro !== '') created.wslDistro = wslDistro
   return { entries: [...book.entries, created], activeId: book.activeId ?? created.id }
 }
 

@@ -34,6 +34,21 @@ test('a refused request is logged as an error row that says why', () => {
   assert.equal(entry.latency, 260)
   assert.equal(entry.isStream, false)
   assert.match(entry.errorMessage ?? '', /^method_not_allowed: Method Not Allowed/)
+  assert.equal(
+    buildRejectionLogEntry({
+      method: 'GET',
+      path: '/v1/models',
+      statusCode: 401,
+      code: 'missing_api_key',
+      message: 'API key is required',
+      startedAt: today.start + 1000,
+      now: today.start + 1005,
+      model: '',
+      userAgent: 'some-client/1.2.3',
+    }).userAgent,
+    'some-client/1.2.3',
+    'a refused caller must be identifiable by UA',
+  )
 
   assert.equal(
     buildRejectionLogEntry({
@@ -63,6 +78,7 @@ test('every refusal path records the request, and only the model API does', () =
   const server = sourceOf('../../src/main/proxy/server.ts')
 
   assert.match(server, /recordRejectedRequest\(ctx, 401, 'missing_api_key'/)
+  assert.match(server, /userAgent: ctx\.get\('user-agent'\)/, 'refused rows must carry the caller UA')
   assert.match(server, /recordRejectedRequest\(ctx, 401, 'invalid_api_key'/)
   assert.match(server, /recordRejectedRequest\(ctx, routeError\.status, routeError\.body\.error\.code/)
   assert.match(server, /if \(!isModelApiPath\(ctx\.path\)\)/, 'management refusals must not join the model traffic counts')

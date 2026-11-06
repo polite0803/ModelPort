@@ -129,6 +129,7 @@ import {
 export { isFailoverEligibleStatus }
 import { qualifyChannelModel } from '../providers/accountChannels/modelCatalog'
 import { requestDeadlines } from './requestBudget'
+import { recordCatalogMiss } from './modelCatalogCooldown'
 import { isForbiddenProviderHeader } from '../../shared/providerHeaders'
 
 function shouldDeleteSession(): boolean {
@@ -643,6 +644,12 @@ export class RequestForwarder {
         return finish()
       }
 
+      // 上游目录明确没有这个模型：给 (provider, model) 记一个目录缺失冷却，
+      // 让下一笔请求不再把它送进候选池。只影响选路，不记账号故障。
+      if (isUpstreamCatalogMissError(result.error)) {
+        recordCatalogMiss(candidate.provider.id, candidate.actualModel)
+      }
+
       // 「换一家就能成」类失败（工具数超限、历史缺 reasoning_content、渠道目录不认
       // 这个模型、这一家的上下文窗口装不下这次请求）：请求在生成之前就被拒，账号
       // 本身是健康的，既不该记冷却也不该计账号失败 —— 小工具请求/无思考历史的会话/
@@ -654,7 +661,8 @@ export class RequestForwarder {
         // BazaarLink `Unknown model: … not in our catalog`）：静态目录是编译期
         // 快照，上游改名/下架后它不会跟着变，于是宿主把「目录说有、请求时不认」
         // 的模型广告成候选并给了高分。请求在生成之前就被拒，账号健康 ——
-        // 换下一家，不记冷却、不计账号失败（2026-11-03 真机实测两笔）。
+        // 换下一家，不记账号冷却/故障；只在 `(provider, model)` 上记一个短期
+        // 目录缺失冷却（见上面的 `recordCatalogMiss`），避免每笔请求重撞。
         || isUpstreamCatalogMissError(result.error)
         || isForcedToolChoiceUnsupported(result.error)
         // 窗口不够是「这一家装不下这次请求」，池里窗口更大的候选能成：原先 400 一律
