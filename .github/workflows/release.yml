@@ -43,8 +43,31 @@ jobs:
   # 说明：产物均未签名、未公证；macOS 只发布 dmg（没有 zip 更新源，electron-updater
   # 在 macOS 上不可用），Windows/Linux 产物也未做代码签名。平台矩阵改动前请先核对
   # package.json 的 build 目标与 README 的产物表。
-  release:
+  # Release 本身要先存在：自 `--publish=always` 退役后，electron-builder 不再创建它，
+  # 而所有上传步骤都是 `gh release upload`（`release not found` 就是这一步漏掉的症状）。
+  prepare:
     needs: gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create the release if it does not exist
+        run: |
+          tag="${{ github.ref_name }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists"
+          else
+            gh release create "$tag" --title "$tag" --generate-notes --verify-tag
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release:
+    needs: prepare
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
