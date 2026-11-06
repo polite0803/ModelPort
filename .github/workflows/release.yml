@@ -75,6 +75,9 @@ jobs:
       # 留着只会放大凭据泄露后的影响面。
 
     strategy:
+      # 一个平台失败不该取消其余平台：v1.7.6 首次运行时 windows 的上传失败直接取消了
+      # 整个矩阵（含还没开始的 mac/linux），而 Release 里已经有多少资产完全取决于取消落在哪一步。
+      fail-fast: false
       matrix:
         include:
           - os: macos-latest
