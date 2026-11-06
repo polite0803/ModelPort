@@ -316,16 +316,17 @@ HTTP + SSE）。
   与 `fail-fast: false`）重打 v1.7.6 并重跑整条矩阵，本次两枚 dmg 都产出了。
 - 发现一处冗余：`build.mac.target` 写死 `arch: ["arm64"]`，而矩阵又给了 `--mac --x64`，
   两者取并集 ⇒ **mac x64 那个 job 实际产出 arm64 + x64 两份 dmg**，矩阵里的 mac arm64
-  job 是重复的（仍在排队）。收口方式二选一：矩阵只留 mac x64 一项，或把 target 的 arch
-  改成两项并去掉矩阵里的 arch 维度；本次不动，避免在已发布版本上再改构建形状。
+  job 是重复的（仍在排队，且反复被取消，使每次 release run 以 `failed` 收尾）。
+  **收口（2026-11-07）**：`build.mac.target` 的 arch 改成显式 `["x64","arm64"]`，矩阵删掉
+  mac arm64 行——只留一个 mac job，仍产出两份 dmg。
 - 旧客户端的资产名：1.7.5 的壳（`com.modelport.shell`）只找 `ModelPort-Shell-<ver>-x64-setup.exe`，
   它在 1.7.6 上报「缺少安装资源或校验文件」——升级链路断在名字上，不是校验上。已补同字节别名
   （同名 `.sha256`，`parseSha256` 接受该格式），并把生成动作写进 Windows 打包步骤，
   注释与 `AGENTS.md` 都标了「旧壳清空后可删」。
 - 另一个同类事实：旧壳装的是**另一个产品**（`com.modelport.shell`），新安装包是
   `com.modelport.manager`，所以升级完成后「ModelPort Shell」仍会留在程序列表里，需要手动卸载一次。
-- 终局资产：**23 项** = 20 个构建产物（Win setup/portable、mac dmg×2、Linux AppImage×2/
-  deb/tar.gz、daemon×2，各带 `.sha256`）+ 3 份一次性兼容 yml。
+- 终局资产：**25 项** = 20 个构建产物（Win setup/portable、mac dmg×2、Linux AppImage×2/
+  deb/tar.gz、daemon×2，各带 `.sha256`）+ 3 份一次性兼容 yml + 旧壳资产名的别名两份（exe 与 `.sha256`）。
 
 ### 仍未取到的读数
 
