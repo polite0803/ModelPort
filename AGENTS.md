@@ -220,8 +220,9 @@ Two more rules are load-bearing: the daemon bundle must inline every runtime dep
 no `node_modules` either - same 1.4.5 failure mode as the asar, and `npm run gate` builds it so the fences
 cannot go stale), and **no `latest.yml` is published** by the build: the console updates itself from release assets plus a
 sibling `.sha256` (`src/shell/updater.ts`), which is also what makes the unsigned macOS dmg workable.
-(One-off exception, v1.7.6: a generated `latest.yml` / `latest-linux*.yml` was uploaded by hand so clients
-on ≤1.7.5 - which still read those files through electron-updater - can upgrade; the console ignores them.)
+(Two migration shims, both removable once ≤1.7.5 clients are gone: a generated `latest.yml` /
+`latest-linux*.yml` for clients that still use electron-updater, and an identical `ModelPort-Shell-<ver>-<arch>-setup.exe`
+alias because the 1.7.5 shell's updater cannot be told the new asset name. The console reads neither.)
 * Persistence on a headless host needs a **system-scope** enabled unit: a `systemctl --user` service dies with
 the login session that started it, and the WSL distro itself is reclaimed once the last client exits, so the
 gateway would silently stop between boots.

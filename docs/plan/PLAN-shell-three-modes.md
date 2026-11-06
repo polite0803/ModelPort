@@ -318,6 +318,12 @@ HTTP + SSE）。
   两者取并集 ⇒ **mac x64 那个 job 实际产出 arm64 + x64 两份 dmg**，矩阵里的 mac arm64
   job 是重复的（仍在排队）。收口方式二选一：矩阵只留 mac x64 一项，或把 target 的 arch
   改成两项并去掉矩阵里的 arch 维度；本次不动，避免在已发布版本上再改构建形状。
+- 旧客户端的资产名：1.7.5 的壳（`com.modelport.shell`）只找 `ModelPort-Shell-<ver>-x64-setup.exe`，
+  它在 1.7.6 上报「缺少安装资源或校验文件」——升级链路断在名字上，不是校验上。已补同字节别名
+  （同名 `.sha256`，`parseSha256` 接受该格式），并把生成动作写进 Windows 打包步骤，
+  注释与 `AGENTS.md` 都标了「旧壳清空后可删」。
+- 另一个同类事实：旧壳装的是**另一个产品**（`com.modelport.shell`），新安装包是
+  `com.modelport.manager`，所以升级完成后「ModelPort Shell」仍会留在程序列表里，需要手动卸载一次。
 - 终局资产：**23 项** = 20 个构建产物（Win setup/portable、mac dmg×2、Linux AppImage×2/
   deb/tar.gz、daemon×2，各带 `.sha256`）+ 3 份一次性兼容 yml。
 

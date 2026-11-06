@@ -125,7 +125,17 @@ jobs:
 
       - name: Package the console (Windows)
         if: matrix.os == 'windows-latest'
-        run: npx electron-builder --win --${{ matrix.arch }} --publish=never
+        run: |
+          npx electron-builder --win --${{ matrix.arch }} --publish=never
+          # <=1.7.5 shells look for `ModelPort-Shell-<ver>-<arch>-setup.exe`. Their updater
+          # cannot be changed remotely, so ship an identical alias until those clients are
+          # gone; the upload sweep below picks it up and writes its `.sha256`.
+          # TODO: drop this once no 1.7.5 shell is left (it doubles the Windows asset size).
+          $exe = Get-ChildItem dist/ModelPort-*-x64-setup.exe | Select-Object -First 1
+          if (-not $exe) { throw 'windows installer not found' }
+          $alias = Join-Path $exe.DirectoryName ($exe.Name -replace '^ModelPort-', 'ModelPort-Shell-')
+          Copy-Item $exe.FullName $alias
+          "alias: $alias"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
