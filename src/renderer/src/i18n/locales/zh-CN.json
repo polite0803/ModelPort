@@ -12,6 +12,7 @@
     "models": "模型管理",
     "logs": "日志",
     "settings": "设置",
+    "gatewayManager": "网关管理",
     "about": "关于"
   },
   "dashboard": {

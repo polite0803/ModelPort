@@ -19,6 +19,7 @@ const bridge: ShellBridge = {
   openInBrowser: (): Promise<void> => ipcRenderer.invoke('shell:openInBrowser'),
   reconnect: (): Promise<void> => ipcRenderer.invoke('shell:reconnect'),
   quit: (): Promise<void> => ipcRenderer.invoke('shell:quit'),
+  openGatewayManager: (): Promise<void> => ipcRenderer.invoke('shell:gateway-list-open'),
   getGatewaySecret: (origin: string): Promise<{ status: string; secret?: string }> =>
     ipcRenderer.invoke('shell:secret-get', origin),
   setGatewaySecret: (origin: string, secret: string): Promise<{ stored: boolean; result: string }> =>

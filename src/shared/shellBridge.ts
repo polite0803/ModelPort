@@ -75,6 +75,13 @@ export interface ShellBridge {
   reconnect(): Promise<void>
   quit(): Promise<void>
 
+  /**
+   * Opens the console's gateway manager window. Optional: the page is also served to
+   * plain browsers and to shells older than the panel, and both must hide the entry
+   * instead of rendering a button that calls `undefined`.
+   */
+  openGatewayManager?(): Promise<void>
+
   getGatewaySecret(origin: string): Promise<{ status: string; secret?: string }>
   setGatewaySecret(origin: string, secret: string): Promise<{ stored: boolean; result: string }>
   forgetGatewaySecret(origin: string): Promise<void>

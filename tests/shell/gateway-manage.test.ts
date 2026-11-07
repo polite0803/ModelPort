@@ -98,3 +98,21 @@ test('the deploy guide keeps navigation and downloads outside the console docume
   assert.match(main, /guideWindow\.webContents\.on\('will-navigate'/)
   assert.match(main, /shell\.openExternal\(target\)/)
 })
+
+test('the sidebar offers the panel only where a console window exists', () => {
+  // The page is also served to plain browsers (remote gateways) and to shells older than
+  // the panel: the entry must hang off the bridge, not off the page.
+  const sidebar = read('src/renderer/src/components/layout/Sidebar.tsx')
+  const bridgeType = read('src/shared/shellBridge.ts')
+  const preload = read('src/shell/preload.ts')
+  assert.match(bridgeType, /openGatewayManager\?\(\): Promise<void>/, 'the method is optional by contract')
+  assert.match(preload, /openGatewayManager: .*'shell:gateway-list-open'/, 'named bridge method only')
+  assert.match(main, /ipcMain\.handle\('shell:gateway-list-open'/, 'the channel must be registered in main')
+  assert.match(sidebar, /modelportShell/, 'the entry must be gated on the bridge')
+  assert.match(sidebar, /openGatewayManager\(\)/)
+  assert.match(sidebar, /nav\.gatewayManager/)
+  for (const locale of ['en-US', 'zh-CN']) {
+    const pack = read(`src/renderer/src/i18n/locales/${locale}.json`)
+    assert.ok(pack.includes('"gatewayManager"'), `${locale} is missing nav.gatewayManager`)
+  }
+})

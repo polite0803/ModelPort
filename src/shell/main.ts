@@ -1118,6 +1118,10 @@ ipcMain.handle('shell:gateway-list-close', async () => {
   listWindow?.close()
 })
 
+ipcMain.handle('shell:gateway-list-open', async () => {
+  openGatewayList()
+})
+
 /**
  * The update actions are more dangerous than the secret methods: the WSL side runs as
  * root. Only the page currently loaded from the active gateway may ask for them. A

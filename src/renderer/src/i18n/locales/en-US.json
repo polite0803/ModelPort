@@ -12,6 +12,7 @@
     "models": "Models",
     "logs": "Logs",
     "settings": "Settings",
+    "gatewayManager": "Gateway Manager",
     "about": "About"
   },
   "dashboard": {

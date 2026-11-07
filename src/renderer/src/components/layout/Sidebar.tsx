@@ -13,7 +13,9 @@ import {
   Zap,
   Boxes,
   KeyRound,
+  Network,
 } from 'lucide-react'
+import type { ShellBridge } from '@shared/shellBridge'
 import { cn } from '@/lib/utils'
 import { useSettingsStore } from '@/stores/settingsStore'
 import { useNavigationStore } from '@/stores/navigationStore'
@@ -103,6 +105,11 @@ export function Sidebar() {
   const navigate = useNavigate()
   const location = useLocation()
 
+  // Only the console window injects `modelportShell`; the same page opened in a browser
+  // (or in a shell older than the panel) has no bridge and shows no entry.
+  const openGatewayManager = (window as unknown as { modelportShell?: ShellBridge }).modelportShell
+    ?.openGatewayManager
+
   const hasBlockers = blockers.length > 0
 
   const handleNavigation = (href: string) => {
@@ -153,6 +160,22 @@ export function Sidebar() {
               }
             />
           ))}
+          {openGatewayManager !== undefined && (
+            <button
+              type="button"
+              className={cn(
+                'sidebar-nav-item',
+                sidebarCollapsed ? 'collapsed' : 'expanded',
+                'inactive'
+              )}
+              aria-label={t('nav.gatewayManager')}
+              title={sidebarCollapsed ? t('nav.gatewayManager') : undefined}
+              onClick={() => void openGatewayManager()}
+            >
+              <Network className="h-[18px] w-[18px] flex-shrink-0" />
+              {!sidebarCollapsed && <span className="truncate">{t('nav.gatewayManager')}</span>}
+            </button>
+          )}
         </nav>
 
         <div className="border-t border-[var(--glass-border)] p-2">
