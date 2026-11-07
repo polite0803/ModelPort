@@ -9,6 +9,7 @@
 
 import type { AggregateCostSignal } from './aggregateCost.ts'
 import type { AggregateCreditSnapshot } from './aggregateCredit.ts'
+import type { PromptCacheCapability } from './promptCache.ts'
 
 export type AggregateCategory = 'apikey' | 'free-tier' | 'local'
 
@@ -108,6 +109,12 @@ export interface AggregateEntry {
    * 被剥离的字段对上游就是非法字段，留着只会换回一个 400。
    */
   dropParams?: readonly string[]
+  /**
+   * Prompt-cache behaviour, only where the vendor documents it. Absent means
+   * `unknown` — the gateway will not place markers, synthesise a cache key, or
+   * apply a cache-first compression policy for this entry.
+   */
+  promptCache?: PromptCacheCapability
 }
 
 /** Per-entry state merged from the stored provider record, for the catalogue UI. */

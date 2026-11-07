@@ -95,6 +95,18 @@ export function CompressionSettings() {
 
             {config.enabled && (
               <div className="space-y-3 pt-4 border-t">
+                <div className="flex items-center justify-between p-4 bg-muted/30 rounded-lg">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="compression-cache-first">{t('compression.cacheFirst')}</Label>
+                    <p className="text-sm text-muted-foreground">{t('compression.cacheFirstHint')}</p>
+                  </div>
+                  <Switch
+                    id="compression-cache-first"
+                    checked={config.cacheFirst !== false}
+                    onCheckedChange={checked => handleChange({ cacheFirst: checked })}
+                  />
+                </div>
+
                 <div className="space-y-0.5">
                   <Label htmlFor="compression-aggressiveness">{t('compression.aggressiveness')}</Label>
                   <p className="text-sm text-muted-foreground">

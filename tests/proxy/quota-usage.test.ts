@@ -142,4 +142,16 @@ test('cache reads are read through, and stay absent when unreported', () => {
     })?.cacheReadTokens,
     undefined,
   )
+  // 但「报了 0」与「没报」必须可分：分模型命中率的分母只收前者。
+  assert.equal(
+    readUsageFromBody({
+      usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110, prompt_tokens_details: { cached_tokens: 0 } },
+    })?.cacheReadReported,
+    true,
+  )
+  assert.equal(
+    readUsageFromBody({ usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 } })
+      ?.cacheReadReported,
+    undefined,
+  )
 })

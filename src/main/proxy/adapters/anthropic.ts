@@ -11,6 +11,10 @@
 import { PassThrough } from 'node:stream'
 import axios from 'axios'
 import type { Account, Provider } from '../../store/types'
+import {
+  type PromptCacheCapability,
+  type PromptCachingConfig,
+} from '../../../shared/promptCache.ts'
 import { DEFAULT_MAX_OUTPUT_TOKENS } from '../utils/outputCap.ts'
 import {
   pickUpstreamErrorDetails,
@@ -33,28 +37,48 @@ const ANTHROPIC_VERSION = '2023-06-01'
  */
 const DEFAULT_MAX_TOKENS = DEFAULT_MAX_OUTPUT_TOKENS
 
+interface AnthropicCacheControl {
+  type: 'ephemeral'
+  /** Omitted means the upstream default (5 minutes). */
+  ttl?: '1h'
+}
+
 type AnthropicBlock =
-  | { type: 'text'; text: string }
-  | { type: 'image'; source: Record<string, unknown> }
-  | { type: 'tool_use'; id: string; name: string; input: unknown }
-  | { type: 'tool_result'; tool_use_id: string; content: string }
+  | { type: 'text'; text: string; cache_control?: AnthropicCacheControl }
+  | { type: 'image'; source: Record<string, unknown>; cache_control?: AnthropicCacheControl }
+  | { type: 'tool_use'; id: string; name: string; input: unknown; cache_control?: AnthropicCacheControl }
+  | { type: 'tool_result'; tool_use_id: string; content: string; cache_control?: AnthropicCacheControl }
+
+type AnthropicSystemBlock = { type: 'text'; text: string; cache_control?: AnthropicCacheControl }
 
 type AnthropicMessage = { role: 'user' | 'assistant'; content: AnthropicBlock[] }
+
+interface AnthropicTool {
+  name: string
+  description?: string
+  input_schema: Record<string, unknown>
+  cache_control?: AnthropicCacheControl
+}
 
 interface AnthropicRequest {
   model: string
   max_tokens: number
   messages: AnthropicMessage[]
-  system?: string
+  system?: string | AnthropicSystemBlock[]
   stream?: boolean
   temperature?: number
   top_p?: number
   stop_sequences?: string[]
-  tools?: { name: string; description?: string; input_schema: Record<string, unknown> }[]
+  tools?: AnthropicTool[]
   tool_choice?:
     | { type: 'auto'; disable_parallel_tool_use?: boolean }
     | { type: 'any'; disable_parallel_tool_use?: boolean }
     | { type: 'tool'; name: string; disable_parallel_tool_use?: boolean }
+}
+
+export interface AnthropicPromptCacheOptions {
+  capability?: PromptCacheCapability
+  config?: PromptCachingConfig
 }
 
 export class AnthropicAdapter {
@@ -76,7 +100,7 @@ export class AnthropicAdapter {
     return `${base}${path.startsWith('/') ? '' : '/'}${path}`
   }
 
-  private buildHeaders(): Record<string, string> {
+  private buildHeaders(promptCache?: AnthropicPromptCacheOptions): Record<string, string> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'anthropic-version': ANTHROPIC_VERSION,
@@ -89,21 +113,37 @@ export class AnthropicAdapter {
       const prefix = this.provider.authPrefix ?? ''
       headers[headerName] = `${prefix}${key}`
     }
+
+    // The 1-hour cache tier is a beta-gated header on the Anthropic wire. Only
+    // send it for an endpoint that actually gets explicit breakpoints: an
+    // unrelated provider must not receive a header it never asked for.
+    const config = promptCache?.config
+    if (
+      config?.enabled
+      && config.anthropicTtl === '1h'
+      && promptCache?.capability?.mode === 'explicit-breakpoints'
+    ) {
+      const existing = headers['anthropic-beta']
+      const flag = 'extended-cache-ttl-2025-04-11'
+      headers['anthropic-beta'] = existing ? `${existing},${flag}` : flag
+    }
+
     return headers
   }
 
   async chatCompletion(
     request: ChatCompletionRequest,
-    actualModel: string
+    actualModel: string,
+    promptCache?: AnthropicPromptCacheOptions
   ): Promise<ForwardResult> {
     const startTime = Date.now()
-    const body = buildAnthropicRequest(request, actualModel)
+    const body = buildAnthropicRequest(request, actualModel, promptCache)
 
     try {
       const response = await axios.request({
         method: 'POST',
         url: this.buildUrl(),
-        headers: this.buildHeaders(),
+        headers: this.buildHeaders(promptCache),
         data: body,
         timeout: 120000,
         responseType: request.stream ? 'stream' : 'json',
@@ -214,7 +254,8 @@ function toolUseBlock(call: ChatCompletionMessageToolCall): AnthropicBlock {
 
 export function buildAnthropicRequest(
   request: ChatCompletionRequest,
-  actualModel: string
+  actualModel: string,
+  promptCache?: { capability?: PromptCacheCapability; config?: PromptCachingConfig }
 ): AnthropicRequest {
   const messages: AnthropicMessage[] = []
   const systemParts: string[] = []
@@ -291,7 +332,81 @@ export function buildAnthropicRequest(
     }
   }
 
+  applyCacheBreakpoints(body, promptCache?.capability, promptCache?.config)
+
   return body
+}
+
+function cacheControlOf(config: PromptCachingConfig): AnthropicCacheControl {
+  return config.anthropicTtl === '1h'
+    ? { type: 'ephemeral', ttl: '1h' }
+    : { type: 'ephemeral' }
+}
+
+/** Rough prompt size, only used to skip breakpoints below the documented floor. */
+function estimatePromptTokens(body: AnthropicRequest): number {
+  const text = JSON.stringify({ system: body.system, tools: body.tools, messages: body.messages })
+  return Math.ceil(text.length / 4)
+}
+
+/**
+ * Place explicit cache breakpoints on the Anthropic wire.
+ *
+ * Two boundaries are stable across turns — the end of the tool list and the end
+ * of the system prompt — and one is the end of the **previous** turn: the next
+ * request resends exactly those bytes, so that is the marker that turns into a
+ * cache read instead of another write.
+ *
+ * Everything here is metadata: no text, no ordering and no message content is
+ * touched. A capability that is not `explicit-breakpoints` is left alone, and a
+ * too-short prompt gets no markers because the upstream would not cache it.
+ */
+export function applyCacheBreakpoints(
+  body: AnthropicRequest,
+  capability: PromptCacheCapability | undefined,
+  config: PromptCachingConfig | undefined
+): void {
+  if (!config?.enabled) return
+  if (capability?.mode !== 'explicit-breakpoints') return
+
+  const max = capability.maxBreakpoints ?? 4
+  if (max <= 0) return
+
+  const minimum = capability.minCacheableTokens ?? 0
+  if (minimum > 0 && estimatePromptTokens(body) < minimum) return
+
+  const cacheControl = cacheControlOf(config)
+  let used = 0
+
+  if (Array.isArray(body.tools) && body.tools.length > 0 && used < max) {
+    const index = body.tools.length - 1
+    body.tools[index] = { ...body.tools[index]!, cache_control: cacheControl }
+    used += 1
+  }
+
+  if (body.system !== undefined && used < max) {
+    const blocks = typeof body.system === 'string'
+      ? [{ type: 'text' as const, text: body.system }]
+      : body.system
+    if (blocks.length > 0) {
+      body.system = blocks.map((block, index) =>
+        index === blocks.length - 1 ? { ...block, cache_control: cacheControl } : block
+      )
+      used += 1
+    }
+  }
+
+  const previousIndex = body.messages.length - 2
+  if (previousIndex >= 0 && used < max) {
+    const previous = body.messages[previousIndex]
+    if (previous && previous.content.length > 0) {
+      const blocks = previous.content.slice()
+      const last = blocks[blocks.length - 1]!
+      blocks[blocks.length - 1] = { ...last, cache_control: cacheControl }
+      body.messages[previousIndex] = { ...previous, content: blocks }
+      used += 1
+    }
+  }
 }
 
 /** Same evidence list as the main forwarder; Anthropic gateways expose all of these. */

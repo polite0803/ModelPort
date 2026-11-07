@@ -127,6 +127,19 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     "authUrl": "https://platform.claude.com/settings/keys",
     "envVar": "ANTHROPIC_API_KEY",
     "notes": "Native Anthropic Messages passthrough (FCC marks it native_messages_passthrough). Its three transcribed models were retired upstream (the API answers them with an error), so the list is empty by design - add the current ids by hand or via discovery.",
+    "promptCache": {
+      "mode": "explicit-breakpoints",
+      "maxBreakpoints": 4,
+      "readDiscount": 0.1,
+      "writeMultiplier": 0.25,
+      "minCacheableTokens": 1024,
+      "acceptsPromptCacheKey": false,
+      "ttlMinutes": 5,
+      "evidence": {
+        "docUrl": "https://platform.claude.com/llms-full.txt",
+        "asOf": "2026-10-30"
+      }
+    },
     "website": "https://www.anthropic.com/"
   },
   {
@@ -435,6 +448,15 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     "envVar": "DEEPSEEK_API_KEY",
     "modelsUrl": "https://api.deepseek.com/models",
     "notes": "Cache usage is reported on this endpoint (FCC).",
+    "promptCache": {
+      "mode": "implicit-prefix",
+      "readDiscount": 0.02,
+      "acceptsPromptCacheKey": false,
+      "evidence": {
+        "docUrl": "https://api-docs.deepseek.com/guides/kv_cache",
+        "asOf": "2026-11-08"
+      }
+    },
     "website": "https://www.deepseek.com/"
   },
   {

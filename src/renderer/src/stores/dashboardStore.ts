@@ -3,8 +3,8 @@ import type { ProxyStatus, ProxyStatistics, Provider, Account, ProviderCheckResu
 import type { DailyTrendPoint } from '@shared/types'
 import { localDayKey, recentLocalDays } from '@shared/localDay'
 import { dailyTrendPoints, dayCountsOf, differenceInPoints, percentChange, successRateOf } from '@shared/trendMath'
-import { aggregateProviderUsage, aggregateProviderTokenUsage, DEFAULT_PROVIDER_WINDOW } from '@shared/providerUsage'
-import type { DailyProviderUsage, ProviderStatsWindow } from '@shared/providerUsage'
+import { aggregateModelTokenUsage, aggregateProviderUsage, aggregateProviderTokenUsage, DEFAULT_PROVIDER_WINDOW } from '@shared/providerUsage'
+import type { DailyProviderUsage, ModelWindowTokenUsage, ProviderStatsWindow } from '@shared/providerUsage'
 import type { DayTokenBucket } from '@shared/tokenAccounting'
 import type { ProviderStats, ActivityItem, ChartDataPoint } from '@/components/dashboard'
 
@@ -27,6 +27,8 @@ interface DashboardState {
   statistics: ProxyStatistics | null
   stats: DashboardStats
   providers: ProviderStats[]
+  /** Per-(provider, model) cache counters over `providerWindow`. */
+  modelCacheStats: Record<string, ModelWindowTokenUsage>
   /** The period the provider card is summing; `today` until the user picks one. */
   providerWindow: ProviderStatsWindow
   /**
@@ -173,6 +175,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
     accountsTrend: null,
   },
   providers: [],
+  modelCacheStats: {},
   providerWindow: DEFAULT_PROVIDER_WINDOW,
   providerCard: EMPTY_PROVIDER_CARD,
   activities: [],
@@ -190,6 +193,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   setProviderWindow: (window) => set((state) => ({
     providerWindow: window,
     providers: providerStatsOf(state.providerCard, window),
+    modelCacheStats: aggregateModelTokenUsage(state.providerCard.tokenDays, window),
   })),
   setActivities: (activities) => set({ activities }),
   addActivity: (activity) => set((state) => ({
@@ -306,6 +310,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
 
       set({ providerCard })
       setProviders(providerStatsOf(providerCard, get().providerWindow))
+      set({ modelCacheStats: aggregateModelTokenUsage(providerCard.tokenDays, get().providerWindow) })
 
       const recentRequestLogs = requestLogs.slice(0, 10)
       if (recentRequestLogs && recentRequestLogs.length > 0) {

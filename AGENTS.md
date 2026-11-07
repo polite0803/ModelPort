@@ -281,6 +281,13 @@ page never asks by itself.
 `!== false` so records predating the field keep it). Turning it off per route leaves only the `+0.12` / `+0.06`
 score bonus - and because the promotion happens in `autoRouter::select`, an assertion over `rankCandidates`
 alone cannot catch a regression in it; the two settings must be tested as a pair (same pool, opposite winners).
+* **Cache-first compression**: `CompressionConfig.cacheFirst` (default on) makes a provider with a documented
+prefix cache and a cheap cache read (DeepSeek ≈0.02x, Anthropic 0.1x) skip live-zone compression, because the
+next turn resends the original bytes; the saving must beat the cache discount (`1 - c/(1+w)`). A per-provider
+`providerOverrides[id]` wins. Capability data lives in `AggregateEntry.promptCache` and is `unknown` unless
+evidenced; only the Anthropic adapter writes `cache_control`, and `autoRouting.cacheAffinityMinutes` keeps a
+conversation on the same account/model for known-cache providers. Plan and two-round math:
+`docs/plan/PLAN-prompt-cache.md`.
 * `LoadBalanceStrategy` is declared twice (`src/shared/types.ts`, `src/main/store/types.ts`) plus the
 UI maps and both locales - add a value in all of them or it silently cannot be selected.
 

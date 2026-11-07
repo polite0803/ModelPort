@@ -100,6 +100,8 @@ import {
   type ResponsesEvent,
 } from '../../shared/responsesWire'
 import { applyCompression, recordCompressionReport } from './compression'
+import { resolveCompressionConfig } from '../store/compressionConfig.ts'
+import { cacheEconomicsOf, promptCacheOf } from '../../shared/promptCache.ts'
 import { measureCrossTurnDuplication, recordDuplication } from './compression/duplication.ts'
 import { recordConversationTurn, recordConversationTurnForRequest } from './compression/survivorship.ts'
 
@@ -211,8 +213,17 @@ export class RequestForwarder {
     {
       name: 'anthropic-messages',
       matches: AnthropicAdapter.isAnthropicProvider,
-      forward: (request, account, provider, actualModel) =>
-        new AnthropicAdapter(provider, account).chatCompletion(request, actualModel),
+      forward: (request, account, provider, actualModel) => {
+        const capability = promptCacheOf(
+          provider.type === 'aggregate' && provider.aggregateId
+            ? getAggregateEntry(provider.aggregateId)
+            : undefined
+        )
+        return new AnthropicAdapter(provider, account).chatCompletion(request, actualModel, {
+          capability,
+          config: storeManager.getConfig().promptCaching,
+        })
+      },
     },
     {
       name: 'account-channel',
@@ -287,10 +298,18 @@ export class RequestForwarder {
     // 这样上游前缀缓存不被打掉。必须排在托管工具层注入之前 —— 注入的提示属于
     // 受管标记，绝不能再过一遍内容压缩器。重复调用是幂等的：已带 CCR 标记的
     // 文本会被识别并跳过，所以链式重试不会二次压缩。
+    const compressionConfig = resolveCompressionConfig(config.compression, provider)
+    const promptCacheCapability = promptCacheOf(
+      provider.type === 'aggregate' && provider.aggregateId
+        ? getAggregateEntry(provider.aggregateId)
+        : undefined
+    )
+    const cachePolicy = cacheEconomicsOf(promptCacheCapability, config.promptCaching?.anthropicTtl)
     const compression = applyCompression({
       messages: request.messages,
       n: request.n,
-      config: config.compression,
+      config: compressionConfig,
+      ...(cachePolicy === undefined ? {} : { cachePolicy }),
     })
     if (compression.messages && compression.messages !== request.messages) {
       request = { ...request, messages: compression.messages }

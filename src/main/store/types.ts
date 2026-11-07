@@ -20,11 +20,13 @@ import type {
   CompressionConfig,
   AnthropicInboundConfig,
   ModelListRefreshConfig,
+  PromptCachingConfig,
 } from '../../shared/types.ts'
 import type { ChannelLoginKind } from '../../shared/channels.ts'
 import {
   DEFAULT_AUTO_ROUTING_CONFIG,
   DEFAULT_COMPRESSION_CONFIG,
+  DEFAULT_PROMPT_CACHING_CONFIG,
 } from '../../shared/types.ts'
 import { RETIRED_PROVIDER_IDS } from '../../shared/types.ts'
 import type { DayTokenBucket } from '../../shared/tokenAccounting.ts'
@@ -378,6 +380,11 @@ export interface AppConfig {
   seededPresetRoutes?: string[]
   /** Live-zone context compression (shipped default: on — see DEFAULT_COMPRESSION_CONFIG) */
   compression: CompressionConfig
+  /**
+   * Prompt-cache behaviour: Anthropic breakpoint injection and its TTL tier.
+   * Implicit-prefix providers read their capability table instead.
+   */
+  promptCaching: PromptCachingConfig
   /**
    * `/v1/messages` 入向的模型解析与清单申报规则。缺席即默认行为
    * （请求名能解析就原样用，否则落 `auto`）。
@@ -886,6 +893,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   // 一旦它预置了这个键，全新安装与重置都会被判成「已迁移」，谁也不会再建 auto 路由。
   // 于是新装/重置走「键不存在」分支：用 legacy `autoRouting` 生成一条名为 `auto` 的路由。
   compression: DEFAULT_COMPRESSION_CONFIG,
+  promptCaching: DEFAULT_PROMPT_CACHING_CONFIG,
   dismissedAutoProviders: [],
 }
 

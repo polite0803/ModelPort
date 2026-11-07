@@ -97,6 +97,7 @@ import type {
 } from '../../shared/modelRouteName'
 import { validateRouteNameInput } from '../../shared/modelRouteName'
 import { normalizeCompressionConfig } from './compressionConfig'
+import { normalizePromptCachingConfig } from '../../shared/promptCache.ts'
 import type { AppLogTrendPoint, AutoRoutingConfig } from '../../shared/types'
 import { AppLogManager } from '../appLogs/manager'
 import { QuotaLedger } from '../proxy/quota/ledger'
@@ -569,6 +570,7 @@ class StoreManager {
       streamRepetitionGuard: normalizeStreamRepetitionGuard(rawConfig.streamRepetitionGuard),
       routes: this.normalizeRoutes(config, rawConfig),
       compression: normalizeCompressionConfig(rawConfig.compression),
+      promptCaching: normalizePromptCachingConfig(rawConfig.promptCaching),
       // 摘要策略退役后，老 `data.json` 里的 `strategies.summary` 与 `executionOrder` 里那一项
       // 都由同一个归一摘掉 —— 面板与管理 API 读到的就是运行态真正会用的那两个策略。
       contextManagement: normalizeContextManagementConfig(rawConfig.contextManagement),
@@ -2143,8 +2145,12 @@ class StoreManager {
     savedTokens?: number
     /** 上游报的缓存命中输入 token；只在 `source === 'upstream'` 时入池。 */
     cacheReadTokens?: number
+    /** 上游是否给了缓存字段（0 也算给了）；分模型命中率的分母口径。 */
+    cacheReadReported?: boolean
     /** 服务这次请求的供应商；缺省就只累加全局池，不写分表。 */
     providerId?: string
+    /** 上游模型 id；与 `providerId` 同时存在才写分模型表。 */
+    modelId?: string
     /** 这次请求的美元估算；`undefined` = 没有价格证据，不是 0。 */
     costUsd?: number
     nowMs?: number

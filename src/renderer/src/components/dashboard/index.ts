@@ -4,3 +4,4 @@ export { RequestChart, type RequestChartProps, type ChartDataPoint } from './Req
 export { QuickActions, type QuickActionsProps } from './QuickActions'
 export { RecentActivity, type RecentActivityProps, type ActivityItem } from './RecentActivity'
 export { TokenUsageCard, formatTokens, type TokenUsageCardProps } from './TokenUsageCard'
+export { ModelCacheCard, type ModelCacheCardProps } from './ModelCacheCard'

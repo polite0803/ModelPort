@@ -37,6 +37,7 @@ export function normalizeAutoRoutingConfig(input?: Partial<AutoRoutingConfig>): 
   const merged = { ...DEFAULT_AUTO_ROUTING_CONFIG, ...(input || {}) }
   const attempts = Number(merged.maxAttempts)
   const sticky = Number(merged.stickyMinutes)
+  const affinity = Number(merged.cacheAffinityMinutes)
   return {
     enabled: merged.enabled !== false,
     maxAttempts: Number.isFinite(attempts)
@@ -45,6 +46,9 @@ export function normalizeAutoRoutingConfig(input?: Partial<AutoRoutingConfig>): 
     stickyMinutes: Number.isFinite(sticky)
       ? Math.min(1440, Math.max(0, Math.round(sticky)))
       : DEFAULT_AUTO_ROUTING_CONFIG.stickyMinutes,
+    cacheAffinityMinutes: Number.isFinite(affinity)
+      ? Math.min(1440, Math.max(0, Math.round(affinity)))
+      : DEFAULT_AUTO_ROUTING_CONFIG.cacheAffinityMinutes,
     // 非法偏好回落默认值，而不是让一次手写配置把路由打回未知分支
     prefer: AUTO_PREFERENCES.includes(merged.prefer)
       ? merged.prefer

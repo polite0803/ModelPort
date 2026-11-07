@@ -10,6 +10,7 @@ import {
 } from '@/components/proxy'
 import { ContextManagement } from '@/components/proxy/ContextManagement'
 import { CompressionSettings } from '@/components/proxy/CompressionSettings'
+import { PromptCacheSettings } from '@/components/proxy/PromptCacheSettings'
 import { AnthropicInboundSettings } from '@/components/proxy/AnthropicInboundSettings'
 import ApiKeys from '@/pages/ApiKeys'
 import { useProxyStore } from '@/stores/proxyStore'
@@ -74,6 +75,7 @@ export function ProxySettings() {
             <SessionManagement />
             <ContextManagement />
             <CompressionSettings />
+            <PromptCacheSettings />
             <AnthropicInboundSettings />
           </div>
         </TabsContent>

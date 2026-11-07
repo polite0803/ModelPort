@@ -55,8 +55,7 @@ test('error keywords are matched case-insensitively and include the full set', (
   assert.equal(hasErrorKeyword('everything went fine'), false)
 })
 
-test('the acceptance gate rejects rewrites that do not shrink', () => {
-  const same = acceptCompression({
+test('the acceptance gate rejects rewrites that do not shrink', () => {  const same = acceptCompression({
     before: 'x'.repeat(1000),
     after: 'x'.repeat(1000),
     contentType: 'json_array',
@@ -130,4 +129,35 @@ test('already-compressed text is recognised in every marker form', () => {
   assert.equal(isAlreadyCompressed('[12 lines compressed to 3. Retrieve more: hash=abc]'), true)
   assert.equal(isAlreadyCompressed('[Read content stale: Retrieve original: hash=abc]'), true)
   assert.equal(isAlreadyCompressed('ordinary tool output'), false)
+})
+
+test('the cache-aware gate demands more than the flat 10% floor', () => {
+  const before = 'x'.repeat(1000)
+
+  const ordinary = acceptCompression({
+    before,
+    after: 'x'.repeat(200),
+    contentType: 'json_array',
+    changed: true,
+  })
+  assert.equal(ordinary.accept, true, '无缓存证据时 80% 仍然足够')
+
+  const deepseek = acceptCompression({
+    before,
+    after: 'x'.repeat(200),
+    contentType: 'json_array',
+    changed: true,
+    cachePolicy: { readDiscount: 0.02, writeMultiplier: 0 },
+  })
+  assert.equal(deepseek.accept, false)
+  assert.equal(deepseek.reason, 'insufficient_savings')
+
+  const extreme = acceptCompression({
+    before,
+    after: 'x'.repeat(5),
+    contentType: 'json_array',
+    changed: true,
+    cachePolicy: { readDiscount: 0.02, writeMultiplier: 0 },
+  })
+  assert.equal(extreme.accept, true, '省到 98% 以上才值得丢掉缓存读')
 })

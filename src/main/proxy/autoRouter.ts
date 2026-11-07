@@ -38,6 +38,8 @@ import { getProbeRowsSync } from '../providers/modelProbeStore.ts'
 import { accountRuntime } from './accountRuntime'
 import { clearCatalogMissCooldowns, isCatalogMissCoolingDown } from './modelCatalogCooldown'
 import { getChannelDefinition } from '../providers/accountChannels/catalogue'
+import { getAggregateEntry } from '../providers/aggregate/registry.ts'
+import { promptCacheOf } from '../../shared/promptCache.ts'
 import {
   advertisedContextFloorOf,
   advertisedContextTokens,
@@ -69,7 +71,6 @@ import { aggregateThirdPartyHint } from '../../shared/aggregateCapabilities.ts'
 import { costBucketOf, type CostBucket } from '../../shared/channels.ts'
 import type { ClientSessionKey } from '../../shared/clientSessionKey.ts'
 import { aggregateCostOf, costBucketOfAggregateClass, type AggregateCostClass } from '../../shared/aggregateCost.ts'
-import { getAggregateEntry } from '../providers/aggregate/registry.ts'
 
 /**
  * 对外暴露的虚拟模型 id，保留字：不能作为真实模型或映射名。
@@ -86,6 +87,17 @@ const AUTO_MAX_ATTEMPTS = 3
 
 /** 会话粘性表容量上限，超出后按插入顺序淘汰最旧的条目 */
 const STICKY_CAPACITY = 500
+
+/**
+ * Whether this candidate's upstream has a documented cache behaviour.
+ *
+ * Only aggregate entries carry the capability table; builtin/custom endpoints
+ * stay out, because "unknown" must not silently become "cache-friendly".
+ */
+function isCacheCapableProvider(provider: Provider): boolean {
+  if (provider.type !== 'aggregate' || !provider.aggregateId) return false
+  return promptCacheOf(getAggregateEntry(provider.aggregateId)).mode !== 'unknown'
+}
 
 export interface AutoCandidate {
   account: Account
@@ -147,7 +159,7 @@ export interface AutoRouteDecision {
   /** 本次生效的优化目标（配置值或请求头覆盖） */
   prefer: AutoPreference
   /** 胜负原因：只有一个候选 / 命中会话粘性 / 综合分 */
-  reason: 'only' | 'sticky' | 'score'
+  reason: 'only' | 'sticky' | 'cache-affinity' | 'score'
 }
 
 // 预览的 DTO 定义在 shared/types.ts：渲染进程要用同一份形状，而 renderer 不能
@@ -321,6 +333,14 @@ class AutoRouter {
    * 判定过期才删）。代理重启（`reset()`）才彻底归零。
    */
   private sticky = new Map<string, StickyRoute>()
+  /**
+   * Cache-affinity hints, kept apart from `sticky` because their lifetime and
+   * their reason are different: a conversation stays on the same account/model
+   * for as long as the upstream cache plausibly lives, even when the user set
+   * `stickyMinutes` to 0. Only providers with a known cache capability enter
+   * this map.
+   */
+  private cacheAffinity = new Map<string, StickyRoute>()
 
   /**
    * `/v1/models` 的 `context_window`：**这条路由自己的候选池**里最小的那个窗口。
@@ -688,6 +708,24 @@ class AutoRouter {
       }
     }
 
+    // Cache affinity is a second, longer-lived hint. It only exists for
+    // providers whose cache capability is known, and it is written only after a
+    // successful request, so it cannot pin a conversation to a guess.
+    const cacheAffinityMinutes = autoConfig?.cacheAffinityMinutes ?? 0
+    let cacheHint: StickyHint | undefined
+    if (stickyKey && cacheAffinityMinutes > 0) {
+      const previous = this.cacheAffinity.get(stickyKey)
+      if (previous && previous.expiresAt > now) {
+        cacheHint = previous.hint
+      } else if (previous) {
+        this.cacheAffinity.delete(stickyKey)
+      }
+    }
+    // Cache affinity wins over the shorter routing stickiness: it exists only
+    // for providers whose cache we can actually read, and it is written only on
+    // success, so it cannot invent a hint the sticky map did not have.
+    if (cacheHint !== undefined) sticky = cacheHint
+
     // 候选链不再预裁：整条排序结果交给换家循环，真正的上限在它那一侧
     // （账号故障类撞满 `baseCap`、墙钟 `AUTO_WALL_CLOCK_BUDGET_MS`）。以前这里是
     // `maxAttempts + AUTO_RECOVERABLE_EXTRA_ATTEMPTS` 家，等于在选号阶段就把池子
@@ -733,6 +771,7 @@ class AutoRouter {
       && candidates[0] !== undefined
       && candidates[0].provider.id === sticky.providerId
       && candidates[0].displayName === sticky.displayName
+    const cacheAffinityHit = cacheHint !== undefined && stickyHit
 
     // 服务候选自己的能力描述只算一次：下面两个读数同源，不许各折一遍。
     const servedCapability = ordered.length === 0 ? undefined : capabilityOfCandidate(ordered[0]!)
@@ -766,7 +805,7 @@ class AutoRouter {
       skipped: [...skipped],
       missing,
       prefer,
-      reason: candidates.length <= 1 ? 'only' : stickyHit ? 'sticky' : 'score',
+      reason: candidates.length <= 1 ? 'only' : cacheAffinityHit ? 'cache-affinity' : stickyHit ? 'sticky' : 'score',
     }
   }
 
@@ -898,6 +937,10 @@ class AutoRouter {
   revokeSticky(key: string | undefined, route?: ModelRoute): void {
     if (!key) return
     this.sticky.delete(stickyMapKey(route?.name ?? LEGACY_ROUTE_NAME, key))
+    // Quality degradation is a correctness signal, not a cache trade-off: a
+    // repeating or truncated turn must not stay pinned just because its prefix
+    // is warm.
+    this.cacheAffinity.delete(stickyMapKey(route?.name ?? LEGACY_ROUTE_NAME, key))
   }
 
   /**
@@ -905,14 +948,20 @@ class AutoRouter {
    * 一个模型。粘性时长按路由取（没传路由才回退 legacy 全局值），键带路由名前缀，
    * 所以两条路由各钉各的、互不覆盖。
    * 被钉住的候选若因冷却/配额从候选池消失，会自然失效，不需要额外清理。
+   *
+   * 同一处还写一份缓存亲和（`cacheAffinityMinutes`）：它只对能力表里已知支持
+   * 前缀缓存的供应商生效，且与 `stickyMinutes` 独立 —— 用户把粘性设为 0 时仍然
+   * 可以保留「同一段会话尽量落在同一个账号/模型」这条缓存规则。
    */
   rememberRoute(key: string | undefined, candidate: AutoCandidate, route?: ModelRoute): void {
     if (!key) return
 
-    const minutes = route?.stickyMinutes
-      ?? storeManager.getConfig().autoRouting?.stickyMinutes
-      ?? 0
-    if (minutes <= 0) return
+    const config = storeManager.getConfig().autoRouting
+    const minutes = route?.stickyMinutes ?? config?.stickyMinutes ?? 0
+    const affinityMinutes = config?.cacheAffinityMinutes ?? 0
+    const cacheCapable = isCacheCapableProvider(candidate.provider)
+
+    if (minutes <= 0 && !(affinityMinutes > 0 && cacheCapable)) return
 
     const now = Date.now()
     for (const [existingKey, entry] of this.sticky) {
@@ -920,22 +969,38 @@ class AutoRouter {
         this.sticky.delete(existingKey)
       }
     }
+    for (const [existingKey, entry] of this.cacheAffinity) {
+      if (entry.expiresAt <= now) {
+        this.cacheAffinity.delete(existingKey)
+      }
+    }
 
     const stickyKey = stickyMapKey(route?.name ?? LEGACY_ROUTE_NAME, key)
-    this.sticky.delete(stickyKey)
-    this.sticky.set(stickyKey, {
-      hint: {
-        providerId: candidate.provider.id,
-        displayName: candidate.displayName,
-        accountId: candidate.account.id,
-      },
-      expiresAt: now + minutes * 60 * 1000,
-    })
+    const hint = {
+      providerId: candidate.provider.id,
+      displayName: candidate.displayName,
+      accountId: candidate.account.id,
+    }
+
+    if (minutes > 0) {
+      this.sticky.delete(stickyKey)
+      this.sticky.set(stickyKey, { hint, expiresAt: now + minutes * 60 * 1000 })
+    }
+
+    if (affinityMinutes > 0 && cacheCapable) {
+      this.cacheAffinity.delete(stickyKey)
+      this.cacheAffinity.set(stickyKey, { hint, expiresAt: now + affinityMinutes * 60 * 1000 })
+    }
 
     while (this.sticky.size > STICKY_CAPACITY) {
       const oldest = this.sticky.keys().next()
       if (oldest.done) break
       this.sticky.delete(oldest.value)
+    }
+    while (this.cacheAffinity.size > STICKY_CAPACITY) {
+      const oldest = this.cacheAffinity.keys().next()
+      if (oldest.done) break
+      this.cacheAffinity.delete(oldest.value)
     }
   }
 

@@ -17,6 +17,18 @@ export interface GateInput {
   contentType: ContentType
   /** Whether the compressor claims it changed anything. */
   changed: boolean
+  /**
+   * Cache economics of the serving provider. When present, the saving must also
+   * beat the cache discount lost on the next turn:
+   *
+   *   compressed wins over two turns iff  R'(1+w) < cR
+   *
+   * so the required saving ratio is `1 - c/(1+w)`. A 0.02 read discount needs
+   * ~98%; a 0.1 discount with a 0.25 write premium needs ~92%. This is applied
+   * only when the caller passes the policy — unknown providers keep the
+   * original 10% floor.
+   */
+  cachePolicy?: { readDiscount: number; writeMultiplier: number }
 }
 
 export interface GateOutcome {
@@ -52,7 +64,13 @@ export function acceptCompression(input: GateInput): GateOutcome {
   }
 
   const ratio = (tokensBefore - tokensAfter) / tokensBefore
-  if (ratio < MIN_SAVINGS_RATIO) {
+  const threshold = input.cachePolicy === undefined || input.cachePolicy.readDiscount >= 1
+    ? MIN_SAVINGS_RATIO
+    : Math.max(
+        MIN_SAVINGS_RATIO,
+        1 - input.cachePolicy.readDiscount / (1 + Math.max(0, input.cachePolicy.writeMultiplier))
+      )
+  if (ratio < threshold) {
     return { accept: false, reason: 'insufficient_savings', tokensBefore, tokensAfter, ratio }
   }
 

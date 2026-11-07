@@ -70,6 +70,21 @@
       "costHint": "Estimated from upstream-reported usage at third-party prices (models.dev) only; free and in-plan models count as $0, unpriced requests are left out. {{costed}} of {{requests}} requests in this period are priceable.",
       "costMissing": "Nothing in this period had price evidence - that is not the same as costing nothing"
     },
+    "modelCache": {
+      "title": "Cache hits by model",
+      "model": "Model",
+      "requests": "Requests",
+      "upstream": "Upstream",
+      "input": "Input",
+      "cacheRead": "Cache read",
+      "hitRate": "Hit rate",
+      "coverageHint": "{{upstream}} of {{requests}} requests carried upstream usage",
+      "missing": "not reported",
+      "noData": "No per-model token records for this period",
+      "expand": "Show all ({{count}})",
+      "collapse": "Collapse",
+      "note": "Cache read is what the upstream itself reported and is a subset of input. A model without upstream usage shows \"-\", not 0%."
+    },
     "lastUpdated": "Last Updated",
     "refresh": "Refresh",
     "browserMode": "Browser Mode",
@@ -1303,6 +1318,8 @@
     "enableHint": "Compresses only the newest turn (tool output and user input) and leaves all history bytes untouched, so the upstream prompt cache is preserved. With it off, requests are byte-for-byte unchanged.",
     "aggressiveness": "Strength",
     "aggressivenessHint": "Stronger settings keep fewer rows. Error rows, statistical outliers and numeric anomalies are never dropped at any strength.",
+    "cacheFirst": "Cache first (skip compression for cache-friendly providers)",
+    "cacheFirstHint": "A compressed block is discarded by the next turn's original bytes, so on providers whose cached input is much cheaper than fresh input (DeepSeek, Anthropic) compression usually costs more than it saves. This policy skips it unless a per-provider override says otherwise.",
     "level": {
       "conservative": "Conservative",
       "moderate": "Moderate",
@@ -1310,6 +1327,21 @@
     },
     "configSaved": "Compression settings saved",
     "configSaveFailed": "Failed to save compression settings"
+  },
+  "promptCaching": {
+    "title": "Prompt cache",
+    "loading": "Reading the current settings…",
+    "enable": "Place Anthropic cache breakpoints",
+    "enableHint": "Adds cache_control markers to Anthropic-format requests (tool list, system prompt, previous turn). Metadata only — no text is changed. Implicit-cache providers such as DeepSeek need no marker and are unaffected.",
+    "ttl": "Cache lifetime",
+    "ttlHint": "5 minutes is the default tier. 1 hour costs more to write but survives longer gaps; it is only sent to endpoints that support explicit breakpoints.",
+    "ttlOption": {
+      "5m": "5 minutes",
+      "1h": "1 hour"
+    },
+    "note": "Anthropic-format endpoints only. DeepSeek and other implicit-prefix providers cache automatically; their hit rate is governed by prefix stability and account/model affinity, not this switch.",
+    "configSaved": "Prompt cache settings saved",
+    "configSaveFailed": "Failed to save prompt cache settings"
   },
   "anthropicInbound": {
     "title": "Anthropic clients (Claude Desktop / Claude Code)",

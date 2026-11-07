@@ -9,6 +9,7 @@ const tzApplied = new Date('2026-06-01T00:00:00').getTimezoneOffset() === -480
 const {
   aggregateProviderUsage,
   aggregateProviderTokenUsage,
+  aggregateModelTokenUsage,
   isDayKey,
   windowDayKeys,
 } = await import('../../src/shared/providerUsage.ts')
@@ -287,4 +288,59 @@ test('a custom range keeps the token window honest', () => {
   const all = aggregateProviderTokenUsage(days, { kind: 'all' }, NOW)
   assert.equal(all.glm?.requests, 3)
   assert.equal(all.glm?.coveredFrom, '2026-10-01')
+})
+
+test('per-model cache stats key the pair and keep the reported-cache denominator', () => {
+  let bucket = accumulateDayBucket(undefined, {
+    promptTokens: 1000,
+    completionTokens: 10,
+    source: 'upstream',
+    providerId: 'deepseek',
+    modelId: 'deepseek-chat',
+    cacheReadTokens: 800,
+    cacheReadReported: true,
+  })
+  bucket = accumulateDayBucket(bucket, {
+    promptTokens: 100,
+    completionTokens: 5,
+    source: 'estimated',
+    providerId: 'deepseek',
+    modelId: 'deepseek-chat',
+  })
+  // Same model name on another endpoint: two cache domains, two rows.
+  bucket = accumulateDayBucket(bucket, {
+    promptTokens: 500,
+    completionTokens: 5,
+    source: 'upstream',
+    providerId: 'baidu',
+    modelId: 'deepseek-chat',
+  })
+
+  const stats = aggregateModelTokenUsage({ [TODAY]: bucket }, { kind: 'today' }, NOW)
+
+  const own = stats['deepseek::deepseek-chat']
+  assert.equal(own.providerId, 'deepseek')
+  assert.equal(own.model, 'deepseek-chat')
+  assert.equal(own.requests, 2)
+  assert.equal(own.upstreamRequests, 1)
+  assert.equal(own.promptTokens, 1000)
+  assert.equal(own.cacheReadTokens, 800)
+  assert.equal(own.cacheReportedRequests, 1)
+  assert.equal(own.promptWithCache, 1000)
+
+  const other = stats['baidu::deepseek-chat']
+  assert.equal(other.promptTokens, 500)
+  assert.equal(other.cacheReportedRequests, 0)
+  assert.equal(other.promptWithCache, 0, '没报缓存的家没有命中率分母')
+})
+
+test('a day without a model split contributes no model rows', () => {
+  const legacy = accumulateDayBucket(undefined, {
+    promptTokens: 5000,
+    completionTokens: 900,
+    source: 'upstream',
+    providerId: 'deepseek',
+  })
+  assert.equal(legacy.byModel, undefined)
+  assert.deepEqual(aggregateModelTokenUsage({ [TODAY]: legacy }, { kind: 'today' }, NOW), {})
 })

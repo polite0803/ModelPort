@@ -7,6 +7,8 @@ import {
   trimDays,
   normalizeDayBucket,
   tokenDayKey,
+  MAX_MODEL_KEYS_PER_DAY,
+  OTHER_MODEL_KEY,
   type DayTokenBucket,
 } from '../../src/shared/tokenAccounting.ts'
 
@@ -367,3 +369,99 @@ test('provider split accrual never mutates the bucket it was given', () => {
 function summaryOf(bucket: DayTokenBucket) {
   return summarizeDay('2026-10-29', bucket)
 }
+
+test('the per-model split keeps estimated requests out of the cache pools', () => {
+  let bucket: DayTokenBucket | undefined
+  bucket = accumulateDayBucket(bucket, {
+    promptTokens: 1000,
+    completionTokens: 50,
+    source: 'upstream',
+    providerId: 'deepseek',
+    modelId: 'deepseek-chat',
+    cacheReadTokens: 800,
+    cacheReadReported: true,
+  })
+  bucket = accumulateDayBucket(bucket, {
+    promptTokens: 100,
+    completionTokens: 5,
+    source: 'estimated',
+    providerId: 'deepseek',
+    modelId: 'deepseek-chat',
+  })
+
+  const row = bucket.byModel?.['deepseek::deepseek-chat']
+  assert.equal(row?.requests, 2)
+  assert.equal(row?.upstreamRequests, 1)
+  assert.equal(row?.upstreamPrompt, 1000)
+  assert.equal(row?.upstreamCacheRead, 800)
+  assert.equal(row?.cacheReportedRequests, 1)
+  assert.equal(row?.upstreamPromptWithCache, 1000)
+})
+
+test('a reported zero keeps a real hit-rate denominator', () => {
+  const bucket = accumulateDayBucket(undefined, {
+    promptTokens: 500,
+    completionTokens: 20,
+    source: 'upstream',
+    providerId: 'deepseek',
+    modelId: 'deepseek-reasoner',
+    cacheReadTokens: undefined,
+    cacheReadReported: true,
+  })
+
+  const row = bucket.byModel?.['deepseek::deepseek-reasoner']
+  assert.equal(row?.upstreamCacheRead, 0)
+  assert.equal(row?.cacheReportedRequests, 1, '上游明确报了 0，就有分母')
+  assert.equal(row?.upstreamPromptWithCache, 500)
+})
+
+test('a provider that never reports caching has no hit-rate denominator', () => {
+  const bucket = accumulateDayBucket(undefined, {
+    promptTokens: 500,
+    completionTokens: 20,
+    source: 'upstream',
+    providerId: 'some-relay',
+    modelId: 'm',
+  })
+
+  const row = bucket.byModel?.['some-relay::m']
+  assert.equal(row?.upstreamPrompt, 500)
+  assert.equal(row?.cacheReportedRequests, 0)
+  assert.equal(row?.upstreamPromptWithCache, 0, '没报缓存不是 0% 命中')
+})
+
+test('the model split caps its row count and folds the overflow into __other__', () => {
+  let bucket: DayTokenBucket | undefined
+  const total = MAX_MODEL_KEYS_PER_DAY + 5
+
+  for (let index = 0; index < total; index += 1) {
+    bucket = accumulateDayBucket(bucket, {
+      promptTokens: 10,
+      completionTokens: 1,
+      source: 'upstream',
+      providerId: 'p',
+      modelId: `m${index}`,
+    })
+  }
+
+  const rows = Object.keys(bucket?.byModel ?? {})
+  assert.equal(rows.length, MAX_MODEL_KEYS_PER_DAY + 1)
+  assert.equal(bucket?.byModel?.[OTHER_MODEL_KEY]?.requests, total - MAX_MODEL_KEYS_PER_DAY)
+})
+
+test('a hand-edited model split is sanitized, and old buckets have none', () => {
+  const cleaned = normalizeDayBucket({
+    requests: 2,
+    byModel: {
+      'a::b': { providerId: 'a', model: 'b', upstreamPrompt: -9, requests: 'x' },
+      '': { providerId: '', model: 'x' },
+      broken: null,
+    },
+  })
+
+  assert.equal(cleaned.byModel?.['a::b'].upstreamPrompt, 0)
+  assert.equal(cleaned.byModel?.['a::b'].requests, 0)
+  assert.equal(cleaned.byModel?.['a::b'].cacheReportedRequests, 0)
+  assert.deepEqual(Object.keys(cleaned.byModel ?? {}), ['a::b'])
+  assert.equal(normalizeDayBucket({ requests: 1 }).byModel, undefined)
+})

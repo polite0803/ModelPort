@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { normalizeCompressionConfig } from '../../src/main/store/compressionConfig.ts'
+import { normalizeCompressionConfig, resolveCompressionConfig } from '../../src/main/store/compressionConfig.ts'
 import { DEFAULT_COMPRESSION_CONFIG } from '../../src/shared/types.ts'
 
 test('an install from before the feature inherits the shipped default', () => {
@@ -34,4 +34,41 @@ test('normalisation returns a fresh object and never mutates the input', () => {
   assert.notEqual(normalized, input)
   normalized.enabled = false
   assert.equal(input.enabled, true)
+})
+
+test('cache-first defaults on and per-provider overrides only keep booleans', () => {
+  const normalized = normalizeCompressionConfig({
+    enabled: true,
+    providerOverrides: { deepseek: true, ' bad ': false, nope: 'yes' as never },
+  })
+
+  assert.equal(normalized.cacheFirst, true)
+  assert.deepEqual(normalized.providerOverrides, { deepseek: true, bad: false })
+  assert.equal(normalizeCompressionConfig({ enabled: true, cacheFirst: false }).cacheFirst, false)
+})
+
+test('a cache-sensitive provider skips compression unless explicitly overridden', () => {
+  const config = normalizeCompressionConfig({ enabled: true, cacheFirst: true })
+
+  const deepseek = resolveCompressionConfig(config, {
+    id: 'deepseek-key-1',
+    type: 'aggregate',
+    aggregateId: 'deepseek',
+  })
+  assert.equal(deepseek.enabled, false, 'DeepSeek 的读价约 0.02，压缩净亏')
+
+  const forced = resolveCompressionConfig(
+    { ...config, providerOverrides: { 'deepseek-key-1': true } },
+    { id: 'deepseek-key-1', type: 'aggregate', aggregateId: 'deepseek' }
+  )
+  assert.equal(forced.enabled, true, '显式覆盖优先于缓存优先')
+
+  const custom = resolveCompressionConfig(config, { id: 'my-endpoint', type: 'custom' })
+  assert.equal(custom.enabled, true, '无缓存证据的家行为不变')
+
+  const off = resolveCompressionConfig(
+    { ...config, cacheFirst: false },
+    { id: 'deepseek-key-1', type: 'aggregate', aggregateId: 'deepseek' }
+  )
+  assert.equal(off.enabled, true)
 })

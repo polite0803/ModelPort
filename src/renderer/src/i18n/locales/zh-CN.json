@@ -70,6 +70,21 @@
       "costHint": "只按第三方标价（models.dev）估算上游实际上报的用量；免费与套餐内模型计 $0，没有标价证据的请求不计入。本段 {{costed}}/{{requests}} 条请求可计价。",
       "costMissing": "这一时间段的请求都没有价格证据，不是「没花钱」"
     },
+    "modelCache": {
+      "title": "缓存命中（按模型）",
+      "model": "模型",
+      "requests": "请求",
+      "upstream": "上游请求",
+      "input": "输入",
+      "cacheRead": "缓存读",
+      "hitRate": "命中率",
+      "coverageHint": "{{requests}} 条请求中 {{upstream}} 条带上游用量",
+      "missing": "未报告",
+      "noData": "该时间段没有分模型的 token 记录",
+      "expand": "展开全部（{{count}}）",
+      "collapse": "收起",
+      "note": "缓存读由上游自己报告，且是输入 token 的子集；没有上游用量的模型显示「-」，不显示 0%。"
+    },
     "lastUpdated": "上次更新",
     "refresh": "刷新",
     "browserMode": "浏览器模式",
@@ -1303,6 +1318,8 @@
     "enableHint": "只压缩最新一轮的工具输出与用户输入（live zone），历史字节不动，因此不会打掉上游前缀缓存。关闭时请求逐字节不变。",
     "aggressiveness": "压缩力度",
     "aggressivenessHint": "力度越高保留的行越少。错误行、统计离群行与数值异常行在任何力度下都不会被丢弃。",
+    "cacheFirst": "缓存优先（对支持前缀缓存的供应商跳过压缩）",
+    "cacheFirstHint": "压缩后的最新块会被下一轮的原文覆盖，所以在上游缓存读远便宜于新输入的家（DeepSeek、Anthropic）上，压缩往往省得没有丢掉的缓存折扣多。开启后这些家默认不压缩，除非按供应商显式覆盖。",
     "level": {
       "conservative": "保守",
       "moderate": "中等",
@@ -1310,6 +1327,21 @@
     },
     "configSaved": "压缩配置已保存",
     "configSaveFailed": "保存压缩配置失败"
+  },
+  "promptCaching": {
+    "title": "提示缓存",
+    "loading": "正在读取当前设置…",
+    "enable": "为 Anthropic 请求放置缓存断点",
+    "enableHint": "给 Anthropic 格式的请求加 cache_control 标记（工具表末尾、system 末尾、上一轮末尾）。只加元数据，不改任何文本。DeepSeek 等自动前缀缓存的供应商不需要断点，也不受这个开关影响。",
+    "ttl": "缓存存活时长",
+    "ttlHint": "5 分钟是默认档。1 小时的写入更贵、但能跨过更长的空档；只发给支持显式断点的端点。",
+    "ttlOption": {
+      "5m": "5 分钟",
+      "1h": "1 小时"
+    },
+    "note": "只作用于 Anthropic 格式端点。DeepSeek 等 implicit-prefix 供应商由上游自动缓存，命中率取决于前缀稳定与账号/模型亲和，不由这个开关控制。",
+    "configSaved": "提示缓存配置已保存",
+    "configSaveFailed": "保存提示缓存配置失败"
   },
   "anthropicInbound": {
     "title": "Anthropic 客户端（Claude Desktop / Claude Code）",

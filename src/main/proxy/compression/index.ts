@@ -59,6 +59,12 @@ export interface ApplyCompressionInput {
   n?: number
   config?: CompressionConfig
   /**
+   * Cache economics of the serving provider. Present only when the provider
+   * documents a prefix cache; the gate then requires the saving to beat the
+   * cache discount the next turn would otherwise keep.
+   */
+  cachePolicy?: { readDiscount: number; writeMultiplier: number }
+  /**
    * CCR sink override. Production omits it and the on-disk store is used; tests
    * inject an in-memory one so a locked-down home directory cannot turn every
    * assertion into "compression refused".
@@ -224,6 +230,7 @@ export function applyCompression(input: ApplyCompressionInput): ApplyCompression
       after: outcome.block.text,
       contentType: outcome.block.contentType,
       changed: true,
+      ...(input.cachePolicy === undefined ? {} : { cachePolicy: input.cachePolicy }),
     })
     if (!gate.accept) {
       lastSkip = gate.reason ?? 'not_smaller'

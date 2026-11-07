@@ -251,3 +251,75 @@ export function aggregateProviderTokenUsage(
 
   return result
 }
+
+/**
+ * Per-`(provider, model)` cache counters over the same window.
+ *
+ * The key is the pair, not the model name: the same model served by two
+ * endpoints has two cache domains, and a merged hit rate would reconcile with
+ * neither. Only upstream-reported numbers are summed — estimated requests still
+ * count in `requests`, so coverage stays readable, but they never enter
+ * `promptTokens` / `cacheReadTokens`.
+ */
+export interface ModelWindowTokenUsage {
+  providerId: string
+  model: string
+  /** Every request, estimated or upstream-reported. */
+  requests: number
+  /** Requests whose usage came from the upstream — the coverage denominator. */
+  upstreamRequests: number
+  /** Upstream-reported input tokens; cache reads are a subset. */
+  promptTokens: number
+  /** Upstream-reported cache-read input tokens. */
+  cacheReadTokens: number
+  /** Upstream requests carrying a cache figure (an explicit 0 counts). */
+  cacheReportedRequests: number
+  /**
+   * Prompt tokens of the cache-reporting requests only. This is the hit-rate
+   * denominator: dividing by every upstream prompt would charge providers that
+   * never report caching as 0% hits.
+   */
+  promptWithCache: number
+  /** Earliest day in the window carrying this model's split. */
+  coveredFrom?: string
+}
+
+export function aggregateModelTokenUsage(
+  days: Record<string, DayTokenBucket>,
+  window: ProviderStatsWindow,
+  now: number = Date.now()
+): Record<string, ModelWindowTokenUsage> {
+  const totals: Record<string, ModelWindowTokenUsage> = {}
+
+  for (const key of windowDayKeys(days, window, now)) {
+    const byModel = days[key]?.byModel
+    if (byModel === undefined) continue
+
+    for (const [modelKey, usage] of Object.entries(byModel)) {
+      const total = totals[modelKey] ?? {
+        providerId: usage.providerId,
+        model: usage.model,
+        requests: 0,
+        upstreamRequests: 0,
+        promptTokens: 0,
+        cacheReadTokens: 0,
+        cacheReportedRequests: 0,
+        promptWithCache: 0,
+      }
+
+      total.requests += usage.requests
+      total.upstreamRequests += usage.upstreamRequests
+      total.promptTokens += usage.upstreamPrompt
+      total.cacheReadTokens += usage.upstreamCacheRead
+      total.cacheReportedRequests += usage.cacheReportedRequests
+      total.promptWithCache += usage.upstreamPromptWithCache
+      if (total.coveredFrom === undefined || compareDayKeys(key, total.coveredFrom) < 0) {
+        total.coveredFrom = key
+      }
+
+      totals[modelKey] = total
+    }
+  }
+
+  return totals
+}

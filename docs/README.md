@@ -74,6 +74,7 @@
 | [`plan/PLAN-channel-identity-alignment.md`](plan/PLAN-channel-identity-alignment.md) | 13 个账号渠道的客户端身份头与实际发包对齐、版本号自动更新机制 | v1.6.2 | 实施中 | 2026-11-05 |
 | [`plan/PLAN-wsl-headless-daemon-and-shell.md`](plan/PLAN-wsl-headless-daemon-and-shell.md) | WSL 无头守护进程、管理面走网络与 Windows 原生壳的四阶段改造 | v1.8.0 | 实施中 | 2026-11-05 |
 | [`plan/PLAN-shell-three-modes.md`](plan/PLAN-shell-three-modes.md) | 控制台三形态（本地 / WSL / 远程）与网关按需安装；取消主应用发布形态 | v1.8.0 | 实施中 | 2026-11-07 |
+| [`plan/PLAN-prompt-cache.md`](plan/PLAN-prompt-cache.md) | Prompt 缓存命中：DeepSeek 优先（亲和 + 缓存优先压缩）、Anthropic 显式断点、按模型缓存仪表盘与压缩净收益门 | v1.7.9 | 实施中 | 2026-11-08 |
 | [`plan/2026-05-26-in-app-update.md`](plan/2026-05-26-in-app-update.md) | 应用内更新的任务拆解与测试计划 | v1.3.0 | 历史记录 | 2026-05-26 |
 | [`plan/2026-05-27-modelport-tool-testing-skills.md`](plan/2026-05-27-modelport-tool-testing-skills.md) | 工具调用测试技能集的目录、脚本与验收计划 | v1.3.0 | 历史记录 | 2026-05-27 |
 
@@ -114,6 +115,8 @@
 | [`../README.md`](../README.md)、[`../README_CN.md`](../README_CN.md) | 面向使用者的安装、配置与运行说明 | v1.7.3 | 现行 |
 | [`providers/README.md`](providers/README.md) | 三类供应商的存储、命名空间与聚合保存流程 | v1.7.3 | 现行 |
 | [`providers/opencode.md`](providers/opencode.md) | `opencode` 账号渠道，以及已退役本机运行时的区分 | v1.7.3 | 现行 |
+| [`providers/deepseek.md`](providers/deepseek.md) | DeepSeek 上下文缓存的取证、能力表取值与缓存优先策略约束 | v1.7.9 | 现行 |
+| [`providers/anthropic.md`](providers/anthropic.md) | Anthropic 显式 prompt caching 的断点位置、能力表与待复核项 | v1.7.9 | 现行 |
 | [`upstream/workbuddy-v2.5.1/README.md`](upstream/workbuddy-v2.5.1/README.md) | WorkBuddy v2.5.1 逐字快照的来源、校验和与用途 | v1.6.1 | 历史记录 |
 | [`repo-description.md`](repo-description.md) | GitHub “About” 文案：短描述与长介绍 | v1.7.3 | 现行 |
 | [`data/`](data/) | 生成型 sidecar 的源票据（`models-dev-cost.json`、`models-dev-capabilities.json`、`free-quota-research/*.json`）；只改票据再跑 builder | v1.7.3 | 现行 |

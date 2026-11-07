@@ -18,6 +18,14 @@ export interface TokenUsage {
    * 命中 —— 把它们统计成 0 会让仪表盘说"缓存完全没用上"，而那我们没有证据。
    */
   cacheReadTokens?: number
+  /**
+   * Whether the upstream supplied a cache field at all, **including an
+   * explicit 0**. `cacheReadTokens` is omitted when the value is 0, so without
+   * this flag a reader cannot tell "0 hits" from "no figure reported" — and a
+   * per-model hit rate built on that ambiguity would report 0% for providers
+   * that simply never report caching.
+   */
+  cacheReadReported?: boolean
 }
 
 export interface UsageReading extends TokenUsage {
@@ -52,6 +60,7 @@ export function readUsageFromBody(body: unknown): TokenUsage | null {
     completionTokens,
     totalTokens: total ?? promptTokens + completionTokens,
     ...(cached !== null && cached > 0 ? { cacheReadTokens: cached } : {}),
+    ...(cached !== null ? { cacheReadReported: true } : {}),
   }
 }
 

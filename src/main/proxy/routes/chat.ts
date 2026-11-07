@@ -188,11 +188,35 @@ function meterQuota(
       savedTokens,
       // 上游没报就是 undefined，不是 0 —— 见 `TokenUsage.cacheReadTokens`。
       cacheReadTokens: reading.cacheReadTokens,
+      cacheReadReported: reading.cacheReadReported,
       providerId: provider.id,
+      modelId,
       costUsd: estimateRequestCost(provider, modelId, reading),
     })
   } catch (error) {
     console.error('[Chat] token usage record failed:', error)
+  }
+}
+
+/**
+ * Request-log projection of an upstream-reported reading.
+ *
+ * Estimated readings return `undefined`: the row must not present `chars/4`
+ * arithmetic as usage, and the per-model cache table's denominator is exactly
+ * this pool. `cacheReadTokens` keeps its "absent means not reported" rule.
+ */
+function upstreamUsageOf(reading: UsageReading): {
+  promptTokens: number
+  completionTokens: number
+  cacheReadTokens?: number
+  source: 'upstream'
+} | undefined {
+  if (reading.source !== 'upstream') return undefined
+  return {
+    promptTokens: reading.promptTokens,
+    completionTokens: reading.completionTokens,
+    ...(reading.cacheReadTokens === undefined ? {} : { cacheReadTokens: reading.cacheReadTokens }),
+    source: 'upstream',
   }
 }
 
@@ -1089,6 +1113,16 @@ router.post('/completions', async (ctx: Context) => {
       ? JSON.stringify(result.body)
       : undefined
 
+    // Read usage once: the log row and the quota ledger must show the same
+    // numbers, and a second read of the same body is exactly how the two drift.
+    const outputText = !request.stream
+      ? String((result.body as Record<string, any> | undefined)?.choices?.[0]?.message?.content ?? '')
+      : ''
+    const nonStreamReading = !request.stream
+      ? readOrEstimateUsage(usageInputText(request), outputText, result.body)
+      : undefined
+    const nonStreamUsage = nonStreamReading === undefined ? undefined : upstreamUsageOf(nonStreamReading)
+
     // For streaming requests, we'll collect content and update the log later
     let logEntryId: string | undefined
 
@@ -1123,6 +1157,7 @@ router.post('/completions', async (ctx: Context) => {
         maxTokens: requestedMaxTokens,
         responseStatus: 200,
         responseBody: responseBodyForLog,
+        ...(nonStreamUsage === undefined ? {} : { usage: nonStreamUsage }),
         finishReason: finishReasonOfBody(result.body),
         latency,
         isStream: false,
@@ -1189,13 +1224,12 @@ router.post('/completions', async (ctx: Context) => {
       })
     }
 
-    if (!request.stream) {
-      const outputText = String((result.body as Record<string, any> | undefined)?.choices?.[0]?.message?.content ?? '')
+    if (nonStreamReading !== undefined) {
       meterQuota(
         provider,
         account.id,
         actualModel,
-        readOrEstimateUsage(usageInputText(request), outputText, result.body),
+        nonStreamReading,
         // 只计真正生效的压缩节省；跳过的请求不计入（那是反事实）。
         compressionReport && compressionReport.applied.length > 0
           ? compressionReport.saved
@@ -1394,6 +1428,10 @@ router.post('/completions', async (ctx: Context) => {
             elapsed,
             outcome.finishReason === 'length' && requestedMaxTokens === undefined,
           )
+          // One reading feeds both the log row and the ledger; a second read of
+          // the collected stream is how the two figures drift apart.
+          const streamReading = readOrEstimateUsage(usageInputText(request), collectedContent)
+          const streamUsage = upstreamUsageOf(streamReading)
           // Update log with collected response
           if (logEntryId) {
             storeManager.updateRequestLog(logEntryId, streamError
@@ -1410,6 +1448,7 @@ router.post('/completions', async (ctx: Context) => {
                   finishReason: outcome.finishReason,
                   streamTruncated: !outcome.sawFinish,
                   streamTrace: trace,
+                  ...(streamUsage === undefined ? {} : { usage: streamUsage }),
                   ...(result.deferred ? { latency: elapsed } : {}),
                 }
               : {
@@ -1417,6 +1456,7 @@ router.post('/completions', async (ctx: Context) => {
                   finishReason: outcome.finishReason,
                   streamTruncated: !outcome.sawFinish,
                   streamTrace: trace,
+                  ...(streamUsage === undefined ? {} : { usage: streamUsage }),
                   // 延迟型响应（响应头先发、正文后补）的耗时是整段，不是首字节
                   ...(result.deferred ? { latency: elapsed } : {}),
                 })
@@ -1425,7 +1465,7 @@ router.post('/completions', async (ctx: Context) => {
             provider,
             account.id,
             actualModel,
-            readOrEstimateUsage(usageInputText(request), collectedContent),
+            streamReading,
             compressionReport && compressionReport.applied.length > 0
               ? compressionReport.saved
               : 0
@@ -1495,6 +1535,8 @@ router.post('/completions', async (ctx: Context) => {
             elapsed,
             delivered.finishReason === 'length' && requestedMaxTokens === undefined,
           )
+          const streamReading = readOrEstimateUsage(usageInputText(request), collectedContent)
+          const streamUsage = upstreamUsageOf(streamReading)
           // Update log with collected response
           if (logEntryId) {
             storeManager.updateRequestLog(logEntryId, {
@@ -1502,13 +1544,14 @@ router.post('/completions', async (ctx: Context) => {
               finishReason: delivered.finishReason,
               streamTruncated: !upstream.sawFinish,
               streamTrace: trace,
+              ...(streamUsage === undefined ? {} : { usage: streamUsage }),
             })
           }
           meterQuota(
             provider,
             account.id,
             actualModel,
-            readOrEstimateUsage(usageInputText(request), collectedContent),
+            streamReading,
             compressionReport && compressionReport.applied.length > 0
               ? compressionReport.saved
               : 0

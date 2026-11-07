@@ -60,6 +60,42 @@ export interface ProviderDayUsage {
 
 export type ProviderDayUsageMap = Record<string, ProviderDayUsage>
 
+/**
+ * One local day's counters for one `(provider, model)` pair.
+ *
+ * The pair is the key on purpose: a model served by two endpoints has two cache
+ * domains, and merging by model name would produce a hit rate that reconciles
+ * with neither bill.
+ */
+export interface ModelDayUsage {
+  providerId: string
+  model: string
+  /** Every request, estimated or upstream-reported. */
+  requests: number
+  /** Requests whose usage came from the upstream — the coverage denominator. */
+  upstreamRequests: number
+  /** Upstream-reported input tokens; cache reads are a subset. */
+  upstreamPrompt: number
+  /** Upstream-reported cache-read input tokens. */
+  upstreamCacheRead: number
+  /**
+   * Upstream requests that carried a cache figure, including an explicit 0.
+   * Only these can enter a hit-rate denominator — a provider that never reports
+   * caching must render "-", not 0%.
+   */
+  cacheReportedRequests: number
+  /** Upstream prompt tokens of the cache-reporting requests. */
+  upstreamPromptWithCache: number
+}
+
+export type ModelDayUsageMap = Record<string, ModelDayUsage>
+
+/** Cap on model rows per day; overflow folds into {@link OTHER_MODEL_KEY}. */
+export const MAX_MODEL_KEYS_PER_DAY = 200
+
+/** Aggregation bucket for models beyond the per-day cap. */
+export const OTHER_MODEL_KEY = '__other__'
+
 /** One day's counters. */
 export interface DayTokenBucket {
   /** Tokens the upstream itself reported. */
@@ -92,6 +128,12 @@ export interface DayTokenBucket {
    * "nothing served", which the card renders as "-" for exactly that reason.
    */
   byProvider?: ProviderDayUsageMap
+  /**
+   * Same counters split by `provider::model`. Optional for the same reason as
+   * `byProvider`: a bucket written before this field existed says nothing about
+   * per-model traffic, and reading that as zero would render a false 0% hit rate.
+   */
+  byModel?: ModelDayUsageMap
 }
 
 export interface DayTokenSummary extends DayTokenBucket {
@@ -181,6 +223,83 @@ function normalizeProviderUsage(input: unknown): ProviderDayUsageMap {
   return next
 }
 
+/** Key for the per-model split; `::` inside either part is flattened first. */
+export function modelBucketKey(providerId: string, model: string): string {
+  return `${providerId.replace(/::/g, '_')}::${model.replace(/::/g, '_')}`
+}
+
+function emptyModelUsage(providerId: string, model: string): ModelDayUsage {
+  return {
+    providerId,
+    model,
+    requests: 0,
+    upstreamRequests: 0,
+    upstreamPrompt: 0,
+    upstreamCacheRead: 0,
+    cacheReportedRequests: 0,
+    upstreamPromptWithCache: 0,
+  }
+}
+
+export function normalizeModelUsage(input: unknown): ModelDayUsageMap | undefined {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const next: ModelDayUsageMap = {}
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+    const raw = value as Record<string, unknown>
+    const providerId = typeof raw.providerId === 'string' ? raw.providerId.trim() : ''
+    const model = typeof raw.model === 'string' ? raw.model.trim() : ''
+    if (providerId.length === 0 || model.length === 0) continue
+    next[key] = {
+      providerId,
+      model,
+      requests: nonNegative(raw.requests as number),
+      upstreamRequests: nonNegative(raw.upstreamRequests as number),
+      upstreamPrompt: nonNegative(raw.upstreamPrompt as number),
+      upstreamCacheRead: nonNegative(raw.upstreamCacheRead as number),
+      cacheReportedRequests: nonNegative(raw.cacheReportedRequests as number),
+      upstreamPromptWithCache: nonNegative(raw.upstreamPromptWithCache as number),
+    }
+  }
+  return Object.keys(next).length > 0 ? next : undefined
+}
+
+function accumulateModelUsage(
+  base: ModelDayUsageMap | undefined,
+  providerId: string,
+  model: string,
+  isUpstream: boolean,
+  prompt: number,
+  cacheRead: number,
+  cacheReported: boolean
+): ModelDayUsageMap {
+  const known = base ?? {}
+  const key = modelBucketKey(providerId, model)
+  const existing = known[key]
+  // Cap the map so a pathological model list cannot grow one day's bucket
+  // forever. `__other__` keeps the totals reconcilable with the top-level pools.
+  const target = existing === undefined
+    && Object.keys(known).filter(candidate => candidate !== OTHER_MODEL_KEY).length >= MAX_MODEL_KEYS_PER_DAY
+    ? OTHER_MODEL_KEY
+    : key
+  const previous = target === OTHER_MODEL_KEY
+    ? (known[OTHER_MODEL_KEY] ?? emptyModelUsage(OTHER_MODEL_KEY, OTHER_MODEL_KEY))
+    : (existing ?? emptyModelUsage(providerId, model))
+
+  return {
+    ...known,
+    [target]: {
+      ...previous,
+      requests: previous.requests + 1,
+      upstreamRequests: previous.upstreamRequests + (isUpstream ? 1 : 0),
+      upstreamPrompt: previous.upstreamPrompt + (isUpstream ? prompt : 0),
+      upstreamCacheRead: previous.upstreamCacheRead + (isUpstream ? cacheRead : 0),
+      cacheReportedRequests: previous.cacheReportedRequests + (cacheReported ? 1 : 0),
+      upstreamPromptWithCache: previous.upstreamPromptWithCache + (cacheReported ? prompt : 0),
+    },
+  }
+}
+
 /**
  * Fold one request into a day bucket. Pure: returns a new bucket, never mutates.
  *
@@ -196,12 +315,20 @@ export function accumulateDayBucket(
     savedTokens?: number
     /** Cache-read input tokens, only meaningful when `source` is `upstream`. */
     cacheReadTokens?: number
+    /** Whether the upstream supplied a cache figure at all (0 counts as supplied). */
+    cacheReadReported?: boolean
     /**
      * The provider that served this request. Blank or absent means the per
      * provider split is not written — the global pools still accrue, because
      * "we did not record which endpoint" is not "no endpoint served it".
      */
     providerId?: string
+    /**
+     * Upstream model id that served this request. Both `providerId` and
+     * `modelId` are required for the per-model split; a missing one only means
+     * that split is not written, never that traffic did not happen.
+     */
+    modelId?: string
     /**
      * USD for this request, or `undefined` when there is no price evidence.
      * `0` is a claim ("this cost nothing"); absence is the fact ("unpriced"),
@@ -219,6 +346,8 @@ export function accumulateDayBucket(
   const completion = nonNegative(input.completionTokens)
   const saved = nonNegative(input.savedTokens)
   const isUpstream = input.source === 'upstream'
+  const cacheRead = isUpstream ? nonNegative(input.cacheReadTokens) : 0
+  const cacheReported = isUpstream && input.cacheReadReported === true
 
   const next: DayTokenBucket = {
     upstreamPrompt: base.upstreamPrompt + (isUpstream ? prompt : 0),
@@ -227,7 +356,7 @@ export function accumulateDayBucket(
     estimatedCompletion: base.estimatedCompletion + (isUpstream ? 0 : completion),
     savedTokens: base.savedTokens + saved,
     // 估算请求**不可能**带来缓存命中：写了就是把"没测到"伪装成"测到了"。
-    upstreamCacheRead: base.upstreamCacheRead + (isUpstream ? nonNegative(input.cacheReadTokens) : 0),
+    upstreamCacheRead: base.upstreamCacheRead + cacheRead,
     requests: base.requests + 1,
     upstreamRequests: base.upstreamRequests + (isUpstream ? 1 : 0),
   }
@@ -254,6 +383,11 @@ export function accumulateDayBucket(
       costUsd: previous.costUsd + (cost ?? 0),
       costedRequests: previous.costedRequests + (cost === null ? 0 : 1),
     },
+  }
+
+  const modelId = (input.modelId ?? '').trim()
+  if (modelId.length > 0) {
+    next.byModel = accumulateModelUsage(base.byModel, providerId, modelId, isUpstream, prompt, cacheRead, cacheReported)
   }
 
   return next
@@ -298,18 +432,21 @@ export function normalizeDayBucket(input: unknown): DayTokenBucket {
   // 忘记加它就会让**旧文件读出来的桶**缺这个键，然后 `accumulateDayBucket`
   // 拿它去相加，把这一整天全部计数写成 `NaN`。
   //
-  // `emptyBucket()` 因此只放**数字**计数器：`byProvider` 是这层清洗唯一的例外，
-  // 它按自己的形状逐个供应商洗（下面），因为对它做一次 `Number()` 会把整张
-  // 分表抹成 0 —— 而抹掉它同样是丢数据，`accumulateDayBucket` 每一步都过这里。
+  // `emptyBucket()` 因此只放**数字**计数器：`byProvider` / `byModel` 是这层清洗
+  // 唯一的两个例外，它们按自己的形状逐个洗（下面），因为对 map 做一次
+  // `Number()` 会把整张分表抹成 0 —— 而抹掉它同样是丢数据，
+  // `accumulateDayBucket` 每一步都过这里。
   const next: DayTokenBucket = emptyBucket()
-  // `Exclude<…, 'byProvider'>` is not a convenience: it is what keeps this loop
-  // assignable. `byProvider` is the one field whose clean-up is a map, so the
-  // `nonNegative()` write below would type it as a number.
-  const numericKeys = Object.keys(next) as Exclude<keyof DayTokenBucket, 'byProvider'>[]
+  // `Exclude<…, 'byProvider' | 'byModel'>` is not a convenience: it is what keeps
+  // this loop assignable. Those two fields are maps, so the `nonNegative()` write
+  // below would type them as numbers.
+  const numericKeys = Object.keys(next) as Exclude<keyof DayTokenBucket, 'byProvider' | 'byModel'>[]
   for (const key of numericKeys) {
     next[key] = nonNegative(raw[key] as number)
   }
   next.byProvider = normalizeProviderUsage(raw.byProvider)
+  const byModel = normalizeModelUsage(raw.byModel)
+  if (byModel !== undefined) next.byModel = byModel
   return next
 }
 

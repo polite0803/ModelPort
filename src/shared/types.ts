@@ -1,10 +1,13 @@
 import type { AggregateWire } from './aggregate'
+import { DEFAULT_PROMPT_CACHING_CONFIG, type PromptCachingConfig } from './promptCache.ts'
 import type { ChannelLoginKind, CostBucket } from './channels'
 import type { AggregateCostClass } from './aggregateCost'
 import type { ClientIdentity } from './clientProfile'
 import { DEFAULT_REPETITION_GUARD, type RepetitionGuardSettings, type StreamRepetitionReading } from './streamRepetition.ts'
 
 export type { AggregateWire }
+export type { PromptCachingConfig }
+export { DEFAULT_PROMPT_CACHING_CONFIG }
 export type { RepetitionGuardSettings, StreamRepetitionReading }
 export { DEFAULT_REPETITION_GUARD }
 
@@ -264,6 +267,14 @@ export interface AutoRoutingConfig {
   maxAttempts: number
   /** How long a conversation stays pinned to the model it first succeeded on. 0 disables stickiness. */
   stickyMinutes: number
+  /**
+   * How long a conversation stays on the same `(provider, account, model)` for
+   * cache reasons, independent of `stickyMinutes`. 0 = follow stickiness only.
+   * Only providers with a known prompt-cache capability are pinned here; an
+   * unknown provider must not receive a policy just because its name looks
+   * cache-friendly.
+   */
+  cacheAffinityMinutes: number
   /** Default optimisation target; `X-Auto-Prefer` overrides it per request. */
   prefer: AutoPreference
   /**
@@ -279,6 +290,10 @@ export const DEFAULT_AUTO_ROUTING_CONFIG: AutoRoutingConfig = {
   enabled: true,
   maxAttempts: 3,
   stickyMinutes: 30,
+  // DeepSeek documents "a few hours to a few days" before its cache clears, so
+  // one hour is inside the documented lower bound and never outlives the cache.
+  // Longer values wait for a measured TTL rather than a guess.
+  cacheAffinityMinutes: 60,
   prefer: 'balanced',
   poolStrategies: [],
 }
@@ -772,6 +787,12 @@ export interface AppConfig {
    */
   anthropicInbound?: AnthropicInboundConfig
   compression: CompressionConfig
+  /**
+   * Prompt-cache behaviour. `enabled` gates the Anthropic breakpoint injection;
+   * `anthropicTtl` chooses the 5-minute or 1-hour write tier. Implicit-prefix
+   * providers need no marker, so they read only the capability table.
+   */
+  promptCaching: PromptCachingConfig
   language: 'zh-CN' | 'en-US'
   /**
    * 供应商模型清单定时刷新。缺席即默认行为（见 `DEFAULT_MODEL_REFRESH`），
@@ -840,6 +861,14 @@ export type CompressionAggressiveness = 'conservative' | 'moderate' | 'aggressiv
 export interface CompressionConfig {
   enabled: boolean
   aggressiveness: CompressionAggressiveness
+  /**
+   * Cache-first policy: a provider whose prefix cache is documented and whose
+   * cached input is much cheaper than fresh input skips live-zone compression
+   * unless the user overrides it. Absent = shipped default (on).
+   */
+  cacheFirst?: boolean
+  /** Per-provider explicit override; `true`/`false` wins over `cacheFirst`. */
+  providerOverrides?: Record<string, boolean>
 }
 
 export const COMPRESSION_AGGRESSIVENESS: CompressionAggressiveness[] = [
@@ -858,6 +887,7 @@ export const COMPRESSION_AGGRESSIVENESS: CompressionAggressiveness[] = [
 export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
   enabled: true,
   aggressiveness: 'moderate',
+  cacheFirst: true,
 }
 
 /**
@@ -1255,6 +1285,20 @@ export interface RequestLogEntry {
   /** Streaming-only transport facts. */
   streamTrace?: RequestStreamTrace
   /**
+   * Upstream-reported usage for this request.
+   *
+   * Absent when the upstream reported nothing — never filled from the local
+   * estimator. `cacheReadTokens` is a subset of `promptTokens` and is also
+   * absent when the upstream did not report a cache figure; a `0` there would
+   * claim "this turn missed the cache", which is not what was measured.
+   */
+  usage?: {
+    promptTokens: number
+    completionTokens: number
+    cacheReadTokens?: number
+    source: 'upstream'
+  }
+  /**
    * Explicit per-request trace: capture bodies even when global body logging is
    * off. Set by the `X-ModelPort-Trace: 1` header; persisted so stream-end
    * updates keep using the same decision.
@@ -1268,7 +1312,7 @@ export interface RequestLogEntry {
    */
   auto?: {
     prefer: AutoPreference
-    reason: 'only' | 'sticky' | 'score'
+    reason: 'only' | 'sticky' | 'cache-affinity' | 'score'
     attempts: number
     candidates: string[]
     /**

@@ -10,6 +10,7 @@ import {
   QuickActions,
   RecentActivity,
   TokenUsageCard,
+  ModelCacheCard,
 } from '@/components/dashboard'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { useDashboardStore } from '@/stores/dashboardStore'
@@ -27,6 +28,7 @@ export function Dashboard() {
     activities,
     chartData,
     tokenUsage,
+    modelCacheStats,
     isLoading,
     error,
     lastUpdated,
@@ -193,6 +195,14 @@ export function Dashboard() {
           onWindowChange={setProviderWindow}
         />
         <RecentActivity activities={activities} onItemClick={handleActivityClick} />
+      </div>
+
+      <div className="mt-4">
+        <ModelCacheCard
+          stats={modelCacheStats}
+          statsWindow={providerWindow}
+          onWindowChange={setProviderWindow}
+        />
       </div>
     </div>
   )
