@@ -18,6 +18,10 @@
 因为 `store.key` 由 `safeStorage` 封装，纯 Node 宿主没有密钥库）。WSL 与 headless Linux 用
 `src/main/daemon/entry.ts`（纯 Node）。三者共用 `src/main/gateway/bootstrap.ts`。
 
+控制台的托盘与「网关管理」窗口（`Ctrl+Shift+G`）列出地址簿里的全部网关：形态徽标、
+运行状态、版本，以及按形态给出的动作（连接／编辑／删除；本机再加启动／停止／修复，
+WSL 加安装）。切换是对 `activeId` 的一次写入，主窗口随之重连。
+
 关掉界面（窗口或标签页）**不影响网关继续服务**——这是这一条存在的全部理由。本地网关由控制台
 以独立进程启动并常驻，关窗口只是隐藏托盘；WSL/headless 由 systemd 常驻。
 

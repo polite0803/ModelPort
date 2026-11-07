@@ -107,6 +107,11 @@ host. Local and WSL modes provision the gateway when it does not exist yet - the
 gateway ships inside the same binary, the WSL one is downloaded, verified and enabled as
 a systemd unit.
 
+One console keeps every gateway in one place: the tray (or `Ctrl+Shift+G`) opens **网关管理**,
+a list with each gateway's mode, state and version, and the actions that fit it - connect /
+edit / delete, start / stop / repair for the local one, install for WSL. Clicking a row
+switches the window to that gateway.
+
 Release builds are not code-signed and the macOS build is not notarized. On macOS the quarantine
 attribute can be cleared with the command in the [FAQ](#faq).
 

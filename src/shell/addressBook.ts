@@ -21,8 +21,12 @@ import { randomUUID } from 'node:crypto'
  * host someone else runs. The three differ in what "the gateway does not exist" means -
  * the first two can install it, the third cannot - so the mode is stored, never guessed
  * from the URL (a `127.0.0.1` address may just as well be a container or a tunnel).
+ *
+ * Defined in `shared/shellList.ts` because the list window renders the same union; this
+ * file re-exports it so existing importers keep one name.
  */
-export type GatewayKind = 'local' | 'wsl' | 'remote'
+import type { GatewayKind } from '../shared/shellList'
+export type { GatewayKind }
 
 export interface GatewayEntry {
   id: string

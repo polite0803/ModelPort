@@ -21,6 +21,7 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  net,
   safeStorage,
   shell,
   Tray,
@@ -52,6 +53,9 @@ import {
 } from './localGateway'
 import { installWslGateway, probeWslGateway } from './wslInstall'
 import type { LocalGatewayView } from '../shared/localGateway'
+import type { GatewayListSnapshot } from '../shared/shellList'
+import { buildSnapshot, type GatewayListEntry, type GatewayProbeState } from './gatewayListPlan'
+import { gatewayListPageUrl } from './gatewayListPage'
 import type { ShellUpdateProgress } from '../shared/shellBridge'
 
 app.setPath('userData', join(app.getPath('appData'), 'modelport-shell'))
@@ -63,6 +67,7 @@ if (!app.requestSingleInstanceLock()) {
 
 let window: BrowserWindow | null = null
 let tray: Tray | null = null
+let listWindow: BrowserWindow | null = null
 
 function iconPath(): string {
   return app.isPackaged
@@ -170,6 +175,110 @@ function ensureFirstRunEntry(): void {
   } catch (error) {
     console.error('[Shell] could not create the default local entry:', error)
   }
+}
+
+/**
+ * The gateway list: one row per address-book entry, each with the actions that make sense
+ * for its mode and state. It opens as its own window so switching does not disturb the
+ * page the main window is showing, and so a failed gateway can still be edited.
+ */
+function openGatewayList(): void {
+  if (listWindow && !listWindow.isDestroyed()) {
+    listWindow.show()
+    listWindow.focus()
+    return
+  }
+  listWindow = new BrowserWindow({
+    width: 760,
+    height: 600,
+    minWidth: 620,
+    minHeight: 420,
+    parent: window ?? undefined,
+    title: '网关管理',
+    backgroundColor: '#1a1a1a',
+    autoHideMenuBar: true,
+    icon: iconPath(),
+    webPreferences: {
+      preload: join(__dirname, '../preload/shell-list-preload.js'),
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  })
+  listWindow.on('closed', () => {
+    listWindow = null
+  })
+  void listWindow.loadURL(gatewayListPageUrl())
+}
+
+function notifyGatewayList(): void {
+  if (listWindow && !listWindow.isDestroyed()) listWindow.webContents.send('shell:gateways-changed')
+}
+
+/**
+ * One probe per entry. Local goes through the status file (which is also what tells
+ * "not installed" from "stopped"); everything else is a plain `GET /` with a short
+ * timeout, because an unreachable row must not hold the list hostage.
+ */
+async function probeEntry(entry: GatewayEntry): Promise<GatewayProbeState> {
+  if (entry.kind === 'local') {
+    const view = await readLocalGatewayView()
+    return { phase: view.phase, version: view.version }
+  }
+  try {
+    const response = await net.fetch(new URL('/', entry.url).toString(), {
+      signal: AbortSignal.timeout(1_500),
+    })
+    if (!response.ok) return { phase: 'offline', version: null }
+    const body = (await response.json()) as { version?: unknown }
+    return { phase: 'running', version: typeof body.version === 'string' ? body.version : null }
+  } catch {
+    return { phase: 'offline', version: null }
+  }
+}
+
+async function gatewaySnapshot(): Promise<GatewayListSnapshot> {
+  const book = readBook()
+  const active = activeEntry(book)
+  const entries: GatewayListEntry[] = book.entries.map(entry => ({
+    id: entry.id,
+    name: entry.name,
+    url: entry.url,
+    kind: entry.kind,
+    active: entry.id === active?.id,
+  }))
+  const states: Record<string, GatewayProbeState> = {}
+  await Promise.all(
+    book.entries.map(async entry => {
+      states[entry.id] = await probeEntry(entry)
+    }),
+  )
+  return buildSnapshot(entries, states, { canAddWsl: process.platform === 'win32' })
+}
+
+function findEntryById(id: unknown): GatewayEntry | null {
+  if (typeof id !== 'string' || id === '') return null
+  return readBook().entries.find(entry => entry.id === id) ?? null
+}
+
+/** The menu entry and its accelerator are the "flexible switch" that is always one key away. */
+function installAppMenu(): void {
+  const template: MenuItemConstructorOptions[] = [
+    ...(process.platform === 'darwin'
+      ? [{ role: 'appMenu' } as MenuItemConstructorOptions]
+      : []),
+    {
+      label: '视图',
+      submenu: [
+        { label: '网关管理…', accelerator: 'CommandOrControl+Shift+G', click: () => openGatewayList() },
+        { label: '重新连接', accelerator: 'CommandOrControl+R', click: () => void loadActive() },
+        { type: 'separator' },
+        { role: 'reload' },
+        { role: 'toggleDevTools' },
+      ],
+    },
+  ]
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
 /**
@@ -619,7 +728,7 @@ async function startLocalFromTray(entry: GatewayEntry): Promise<void> {
     startLocalGateway(view.phase === 'not-installed' ? 'init' : 'serve')
     await waitForLocalGateway()
   }
-  await loadLocalGateway(entry)
+  if (activeEntry(readBook())?.id === entry.id) await loadLocalGateway(entry)
 }
 
 async function stopLocalFromTray(entry: GatewayEntry): Promise<void> {
@@ -631,8 +740,13 @@ async function stopLocalFromTray(entry: GatewayEntry): Promise<void> {
     }
   }
   // Show the "stopped" screen directly: running loadActive() here would start it again.
-  const after = await readLocalGatewayView()
-  window?.loadURL(localFailurePageUrl(activeEntry(readBook()) ?? entry, after))
+  // Only when this is the gateway the window is showing - stopping a background one is a
+  // list action, not a reason to replace the page the operator is working in.
+  const current = activeEntry(readBook())
+  if (current && current.id === entry.id) {
+    const after = await readLocalGatewayView()
+    window?.loadURL(localFailurePageUrl(current, after))
+  }
 }
 
 async function reinstallLocalFromTray(entry: GatewayEntry): Promise<void> {
@@ -640,8 +754,10 @@ async function reinstallLocalFromTray(entry: GatewayEntry): Promise<void> {
   if (view.status && isPidAlive(view.status.pid)) await stopLocalGateway(view.status.pid)
   startLocalGateway('init')
   const after = await waitForLocalGateway()
-  if (after.phase === 'running') await loadLocalGateway(entry)
-  else window?.loadURL(localFailurePageUrl(activeEntry(readBook()) ?? entry, after))
+  const current = activeEntry(readBook())
+  if (!current || current.id !== entry.id) return
+  if (after.phase === 'running') await loadLocalGateway(current)
+  else window?.loadURL(localFailurePageUrl(current, after))
 }
 
 function buildTrayMenu(): void {
@@ -678,6 +794,7 @@ function buildTrayMenu(): void {
       ? gatewayItems
       : [{ label: '还没有配置的网关', enabled: false }]),
     { type: 'separator' },
+    trayAction('网关管理…', () => openGatewayList()),
     ...(localItems.length > 0 ? [...localItems, { type: 'separator' } as MenuItemConstructorOptions] : []),
     ...(wslItems.length > 0 ? [...wslItems, { type: 'separator' } as MenuItemConstructorOptions] : []),
     trayAction('添加网关…', () => void addGateway()),
@@ -722,6 +839,7 @@ app.on('second-instance', () => {
 
 app.on('ready', () => {
   createTray()
+  installAppMenu()
   ensureFirstRunEntry()
   createWindow()
 })
@@ -796,6 +914,76 @@ ipcMain.handle('shell:reconnect', async () => {
 ipcMain.handle('shell:quit', async () => {
   app.isQuitting = true
   app.quit()
+})
+
+/**
+ * The gateway list's surface. Every id is resolved against the address book (a row the
+ * page invented is not an entry), and every action goes through the same functions the
+ * tray uses - there is no second way to start, stop or install a gateway.
+ */
+ipcMain.handle('shell:gateways', async () => await gatewaySnapshot())
+
+ipcMain.handle('shell:gateway-connect', async (_event, id: unknown) => {
+  const entry = findEntryById(id)
+  if (!entry) return
+  window?.show()
+  selectGateway(entry)
+  notifyGatewayList()
+})
+
+ipcMain.handle('shell:gateway-add', async () => {
+  await addGateway()
+  notifyGatewayList()
+})
+
+ipcMain.handle('shell:gateway-edit', async (_event, id: unknown) => {
+  const entry = findEntryById(id)
+  if (!entry) return
+  await editGateway(entry)
+  notifyGatewayList()
+})
+
+ipcMain.handle('shell:gateway-remove', async (_event, id: unknown) => {
+  const entry = findEntryById(id)
+  if (!entry) return
+  const options = {
+    type: 'question' as const,
+    title: '删除网关',
+    message: `从地址簿删除「${entry.name}」？`,
+    detail: '只删除这一条地址：不会删除网关本身，也不会删除已保存的管理口令。',
+    buttons: ['删除', '取消'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  }
+  const choice = listWindow
+    ? await dialog.showMessageBox(listWindow, options)
+    : await dialog.showMessageBox(options)
+  if (choice.response !== 0) return
+  writeBook(removeEntry(readBook(), entry.id))
+  buildTrayMenu()
+  void loadActive()
+  notifyGatewayList()
+})
+
+ipcMain.handle('shell:gateway-local', async (_event, id: unknown, action: unknown) => {
+  const entry = findEntryById(id)
+  if (!entry || entry.kind !== 'local') return
+  if (action === 'start') await startLocalFromTray(entry)
+  else if (action === 'stop') await stopLocalFromTray(entry)
+  else if (action === 'repair') await reinstallLocalFromTray(entry)
+  notifyGatewayList()
+})
+
+ipcMain.handle('shell:gateway-install-wsl', async (_event, id: unknown) => {
+  const entry = findEntryById(id)
+  if (!entry || entry.kind !== 'wsl' || process.platform !== 'win32') return
+  await offerWslInstall(entry)
+  notifyGatewayList()
+})
+
+ipcMain.handle('shell:gateway-list-close', async () => {
+  listWindow?.close()
 })
 
 /**

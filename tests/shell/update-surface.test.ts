@@ -47,7 +47,11 @@ test('tray has its own check-update entry and reports the daemon management stat
 test('address book stores the mode and derives WSL management from it', () => {
   // The three modes replaced the old "manage this WSL gateway" checkbox: WSL management
   // is a consequence of the mode, not a separate switch that can disagree with it.
-  assert.match(addressBook, /export type GatewayKind = 'local' \| 'wsl' \| 'remote'/)
+  // The union moved to shared/shellList.ts so the gateway list renders the same one;
+  // the address book keeps the re-export single-sourced.
+  assert.match(addressBook, /export type \{ GatewayKind \}/)
+  const shellList = read('src/shared/shellList.ts')
+  assert.match(shellList, /export type GatewayKind = 'local' \| 'wsl' \| 'remote'/)
   assert.match(addressBook, /wslDistro\?: string/)
   assert.match(addressBook, /if \(kind === 'wsl'\) next\.manageWsl = true/)
   assert.match(addressBook, /entry\.manageWsl === true \? 'wsl' : 'remote'/)

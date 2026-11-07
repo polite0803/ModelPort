@@ -128,6 +128,7 @@ export default defineConfig({
           index: resolve(process.cwd(), 'src/preload/index.ts'),
           'shell-preload': resolve(process.cwd(), 'src/shell/preload.ts'),
           'shell-prompt-preload': resolve(process.cwd(), 'src/shell/promptPreload.ts'),
+          'shell-list-preload': resolve(process.cwd(), 'src/shell/listPreload.ts'),
         }
       }
     }

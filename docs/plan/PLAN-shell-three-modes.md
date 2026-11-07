@@ -328,6 +328,25 @@ HTTP + SSE）。
 - 终局资产：**25 项** = 20 个构建产物（Win setup/portable、mac dmg×2、Linux AppImage×2/
   deb/tar.gz、daemon×2，各带 `.sha256`）+ 3 份一次性兼容 yml + 旧壳资产名的别名两份（exe 与 `.sha256`）。
 
+### 多网关管理面板（2026-11-08，v1.7.6 之后）
+
+用户口径：「一个 shell 可以连接多个网关，可以在 shell 中灵活切换管理的网关」。改动只
+在控制台侧，不改网关鉴权：
+
+- `src/shell/gatewayListPlan.ts`（纯）：条目 + 探测结果 → 行；动作按形态与状态给
+  （本机：运行中给 stop/repair、已停止给 start/repair、未安装给 install；WSL 恒给
+  install；远程只连接/编辑/删除；**当前网关不给 connect**，避免点一下就把页面重载）。
+- `src/shell/gatewayListPage.ts`：自包含 `data:` 页面，用户文本一律 `textContent` 写入；
+  动作文案随快照下发（`GATEWAY_ACTION_LABELS`），页面不另存一份。
+- `src/shell/listPreload.ts`：具名方法 `snapshot/connect/add/edit/remove/localAction/installWsl/close/onChanged`，
+  没有通用 invoke；主进程把每个 id 回查地址簿才执行。
+- `src/shell/main.ts`：独立窗口 + 托盘「网关管理…」+ 菜单/快捷键 `Ctrl+Shift+G`；
+  探测 —— 本机读状态文件（能区分未安装/已停止/无响应），其余 `GET /` 1.5s 超时；
+  动作复用托盘那三个函数，非当前网关的启停不会劫持窗口。
+- 门：`tests/shell/gateway-list-plan.test.ts`（9 条：动作矩阵、detail、快照文案、缺探测读数
+  归 unknown、读错误不丢行）；`shell-entries` 增加列表 preload 产物与新源码的越界检查。
+- 全量 `npm run gate`：**1917 通过 / 0 失败**。
+
 ### 仍未取到的读数
 
 1. **本地形态的真机运行**：`ModelPort.exe --gateway` 会读写这台机器的真实 `<appData>/modelport` 与

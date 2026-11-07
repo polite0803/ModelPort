@@ -20,6 +20,7 @@ test('the build emits the shell and both of its preloads', () => {
     shellBundle,
     join('out', 'preload', 'shell-preload.js'),
     join('out', 'preload', 'shell-prompt-preload.js'),
+    join('out', 'preload', 'shell-list-preload.js'),
   ]) {
     assert.ok(existsSync(artifact), `${artifact} missing: npm run build must emit the shell entries`)
   }
@@ -45,6 +46,10 @@ test('the shell imports no gateway module tree', () => {
     // The console supervises a local gateway process; it still never becomes one.
     'src/shell/localGateway.ts',
     'src/shell/localGatewayPlan.ts',
+    // The gateway list: a window over the address book, still a client.
+    'src/shell/gatewayListPlan.ts',
+    'src/shell/gatewayListPage.ts',
+    'src/shell/listPreload.ts',
     // The updater is still a client: it reads a release and starts installers, but it
     // must not pull the gateway store into the shell bundle (the test above catches it
     // in the built file; this list makes the failure name the source file).
