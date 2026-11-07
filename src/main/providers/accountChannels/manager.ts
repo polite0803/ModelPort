@@ -26,6 +26,7 @@ import type {
   ChannelCredits,
   ChannelIdentitySnapshot,
   ChannelModelInfo,
+  ChannelModelSource,
   ChannelModelsResult,
   ChannelModelUpdateResult,
   ChannelOperationResult,
@@ -38,7 +39,7 @@ import { channelModelDisplayName } from '../../../shared/channels'
 import type { ModelCapabilityHint } from '../../../shared/types'
 import { ACCOUNT_CHANNELS, getChannelDefinition } from './catalogue'
 import { accountRuntime } from '../../proxy/accountRuntime'
-import { attachContextWindows, capabilityHintOf, qualifyChannelModel, readModelList } from './modelCatalog'
+import { attachContextWindows, capabilityHintOf, qualifyChannelModel, readModelList, readModelListSource } from './modelCatalog'
 import { channelRuntimeState } from './runtimeState'
 import { resyncsAfterChannelRpc } from './rpcSync'
 import { ChannelCredentialVault } from './vault'
@@ -76,6 +77,8 @@ const PACK_SERVED_STALE_GRACE_MS = 10 * 60_000
 interface ModelsCache {
   at: number
   byChannel: Map<string, ChannelModelInfo[]>
+  /** 每渠道目录的来源；只在 pack 明确上报时写入。 */
+  sourceByChannel: Map<string, ChannelModelSource>
 }
 
 /**
@@ -228,6 +231,11 @@ class AccountChannelManager {
         models: {
           total: packStatus?.models?.total ?? 0,
           disabled: packStatus?.models?.disabled ?? 0,
+          // 只读已知缓存，不在这里触发目录拉取（`list()` 是首屏路径）。
+          ...(() => {
+            const source = this.modelsCache?.sourceByChannel.get(channel.id)
+            return source === undefined ? {} : { source }
+          })(),
         },
       })
     }
@@ -640,7 +648,12 @@ class AccountChannelManager {
     }
     const bridge = await this.bridgeOrThrow()
     const byChannel = await this.models(bridge)
-    return { success: true, models: byChannel.get(id) ?? [] }
+    const source = this.modelsCache?.sourceByChannel.get(id)
+    return {
+      success: true,
+      models: byChannel.get(id) ?? [],
+      ...source === undefined ? {} : { source },
+    }
   }
 
   /**
@@ -656,11 +669,16 @@ class AccountChannelManager {
     await this.bridgeOrThrow()
     await this.resync()
     const count = this.cachedModels(id).length
+    const source = this.modelsCache?.sourceByChannel.get(id)
     if (count === 0) {
       // 没账号、远端目录拉取失败或返回空：保留旧记录，只报告空结果。
       return { success: false, count: 0, reason: 'empty' }
     }
-    return { success: true, count }
+    return {
+      success: true,
+      count,
+      ...source === undefined ? {} : { source },
+    }
   }
 
   /**
@@ -946,10 +964,13 @@ class AccountChannelManager {
     }
     const view = await this.modelView(bridge)
     const byChannel = new Map<string, ChannelModelInfo[]>()
+    const sourceByChannel = new Map<string, ChannelModelSource>()
     await Promise.all(ACCOUNT_CHANNELS.map(async channel => {
-      byChannel.set(channel.id, await this.fetchModels(bridge, channel.id, view ?? []))
+      const fetched = await this.fetchModels(bridge, channel.id, view ?? [])
+      byChannel.set(channel.id, fetched.models)
+      if (fetched.source !== undefined) sourceByChannel.set(channel.id, fetched.source)
     }))
-    this.modelsCache = { at: now, byChannel }
+    this.modelsCache = { at: now, byChannel, sourceByChannel }
     // 同一次视图读取顺手填服务清单缓存：视图拿不到（`modelView` 返回 null）就**不填**，
     // 让 `packServedIds` 落到「未知 → 不剔除」，而不是把一次目录故障读成「整家没模型」。
     if (view !== null) this.seedPackServedCache(view, now)
@@ -1020,16 +1041,20 @@ class AccountChannelManager {
     bridge: ChannelBridge,
     id: string,
     view: ReadonlyArray<Record<string, unknown>>,
-  ): Promise<ChannelModelInfo[]> {
+  ): Promise<{ models: ChannelModelInfo[]; source?: ChannelModelSource }> {
     try {
       const result = await bridge.rpc('model.list', { provider: id })
-      // 视图为空时 `attachContextWindows` 只是原样复制一份，不会把已有字段抹掉。
-      return result.ok ? attachContextWindows(readModelList(result.value), view) : []
+      if (!result.ok) return { models: [] }
+      return {
+        // 视图为空时 `attachContextWindows` 只是原样复制一份，不会把已有字段抹掉。
+        models: attachContextWindows(readModelList(result.value), view),
+        source: readModelListSource(result.value),
+      }
     } catch (error) {
       console.warn(
         `[ChannelPack] 读取 ${id} 的模型目录失败：${error instanceof Error ? error.message : String(error)}`,
       )
-      return []
+      return { models: [] }
     }
   }
 

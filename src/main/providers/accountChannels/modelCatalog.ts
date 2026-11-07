@@ -17,7 +17,7 @@
  * 这些渠道根本不报倍率，把它们当成免费模型会让用户按免费额度选一个按量计费的
  * 模型。
  */
-import type { ChannelModelInfo } from '../../../shared/channels'
+import type { ChannelModelInfo, ChannelModelSource } from '../../../shared/channels'
 import type { ModelCapabilityHint } from '../../../shared/types.ts'
 
 /** `名称 · 免费` / `名称 · x1.5` / `名称 · x0.2→x0.1`。 */
@@ -103,6 +103,20 @@ export function readModelList(value: unknown): ChannelModelInfo[] {
     })
   }
   return out
+}
+
+/**
+ * Read the catalogue origin the pack reports alongside `models`.
+ *
+ * Anything outside the known union is treated as **absent** (normal upstream
+ * path): a typo in a future pack must not make the UI warn about a fallback
+ * that did not happen.
+ */
+export function readModelListSource(value: unknown): ChannelModelSource | undefined {
+  const source = (value as { source?: unknown } | undefined)?.source
+  return source === 'upstream' || source === 'official-cache' || source === 'static-fallback'
+    ? source
+    : undefined
 }
 
 function positiveInt(value: unknown): number | undefined {

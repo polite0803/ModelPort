@@ -132,6 +132,8 @@ export interface ChannelView {
     total: number
     /** Models switched off by the user. */
     disabled: number
+    /** 已知的目录来源；`undefined` = 本轮还没拉过目录。 */
+    source?: ChannelModelSource
   }
 }
 
@@ -308,9 +310,22 @@ export function channelModelDisplayName(
   return `${channelName} / ${baseName}`
 }
 
+/**
+ * 模型目录的**来源**（用于 UI 提醒，不是路由判据）。
+ *
+ * - `upstream`：上游接口现取的目录（正常路径）；
+ * - `official-cache`：上游接口不再返回可用模型，改读本机官方客户端缓存；
+ * - `static-fallback`：上游与官方客户端缓存都不可用，显示内置兜底表。
+ *
+ * 后两者意味着「目录可能滞后」，界面必须显式说明，不能伪装成正常刷新结果。
+ */
+export type ChannelModelSource = 'upstream' | 'official-cache' | 'static-fallback'
+
 export interface ChannelModelsResult {
   success: boolean
   models: ChannelModelInfo[]
+  /** 缺省 = 该渠道没有来源概念（旧宿主 / 未接入），按正常路径展示。 */
+  source?: ChannelModelSource
   reason?: string
 }
 
@@ -335,6 +350,8 @@ export interface ChannelRefreshResult {
   success: boolean
   /** 刷新后该渠道可用的模型数量。 */
   count?: number
+  /** 见 {@link ChannelModelSource}；非 `upstream` 时界面要提醒目录来源。 */
+  source?: ChannelModelSource
   reason?: string
 }
 

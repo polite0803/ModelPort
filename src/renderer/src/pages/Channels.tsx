@@ -20,6 +20,7 @@ import type {
   ChannelCredits,
   ChannelIdentityEntry,
   ChannelModelInfo,
+  ChannelModelSource,
   ChannelView,
 } from '../../../shared/channels'
 import { channelAddFlowOf, channelModelDisplayName } from '../../../shared/channels'
@@ -79,6 +80,20 @@ function formatIdentityTime(ms: number): string {
   return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
+/** 非上游目录的短徽标文案键；`upstream`/未接入都返回 null（不渲染）。 */
+function modelSourceBadgeKey(source: ChannelModelSource | undefined): string | null {
+  if (source === 'official-cache') return 'channels.models.source.badgeCache'
+  if (source === 'static-fallback') return 'channels.models.source.badgeFallback'
+  return null
+}
+
+/** 非上游目录的说明文案键（模型列表面板顶部、刷新提示共用）。 */
+function modelSourceNoticeKey(source: ChannelModelSource | undefined): string | null {
+  if (source === 'official-cache') return 'channels.models.source.noticeCache'
+  if (source === 'static-fallback') return 'channels.models.source.noticeFallback'
+  return null
+}
+
 export function Channels() {
   const { t } = useTranslation()
   const { toast } = useToast()
@@ -86,6 +101,9 @@ export function Channels() {
   const [channels, setChannels] = useState<ChannelView[]>([])
   const [credits, setCredits] = useState<Record<string, ChannelCredits | 'loading'>>({})
   const [models, setModels] = useState<Record<string, ChannelModelInfo[] | 'loading'>>({})
+  // 目录来源（上游现取 / 官方客户端缓存 / 静态兜底）。非上游时必须在界面上
+  // 说清「这份清单不是现取的」，否则用户会把降级目录当成上游当前报价。
+  const [modelSources, setModelSources] = useState<Record<string, ChannelModelSource>>({})
   // 各渠道「下一笔请求实际会发」的客户端身份（B4）：版本、来源、核对时间。
   // 读不到（worker 未起 / RPC 失败）就是空表，徽标退回纯声明文案，不报错打扰。
   const [identity, setIdentity] = useState<Record<string, ChannelIdentityEntry>>({})
@@ -404,6 +422,15 @@ export function Channels() {
     setModels(current => ({ ...current, [channel.id]: 'loading' }))
     const result = await window.electronAPI.channels.models(channel.id)
     setModels(current => ({ ...current, [channel.id]: result.success ? result.models : [] }))
+    setModelSources(current => {
+      if (result.source === undefined) {
+        if (!(channel.id in current)) return current
+        const next = { ...current }
+        delete next[channel.id]
+        return next
+      }
+      return { ...current, [channel.id]: result.source }
+    })
     if (!result.success) {
       toast({ title: t('common.error'), description: result.reason, variant: 'destructive' })
     }
@@ -429,9 +456,12 @@ export function Channels() {
       await loadModels(channel)
       return
     }
+    const noticeKey = modelSourceNoticeKey(result.source)
     toast({
       title: t('channels.models.refreshed'),
-      description: t('channels.models.refreshedCount', { count: result.count ?? 0 }),
+      description: noticeKey === null
+        ? t('channels.models.refreshedCount', { count: result.count ?? 0 })
+        : `${t('channels.models.refreshedCount', { count: result.count ?? 0 })} · ${t(noticeKey)}`,
     })
     await loadModels(channel)
     await refresh()
@@ -621,6 +651,10 @@ export function Channels() {
           const modelState = models[channel.id]
           const modelList = Array.isArray(modelState) ? modelState : []
           const modelsOpen = openModels[channel.id] === true
+          // 本地已拉到的来源优先；否则用 `channels:list` 从同步缓存里带的来源。
+          const modelSource = modelSources[channel.id] ?? channel.models.source
+          const sourceBadge = modelSourceBadgeKey(modelSource)
+          const sourceNotice = modelSourceNoticeKey(modelSource)
           return (
             <Card key={channel.id} className="flex flex-col">
               <CardHeader className="pb-3">
@@ -712,6 +746,15 @@ export function Channels() {
                     <div className="font-medium">
                       {channel.models.total - channel.models.disabled}/{channel.models.total}
                     </div>
+                    {connected && sourceBadge !== null && sourceNotice !== null && (
+                      <Badge
+                        variant="outline"
+                        className="mt-1 max-w-full border-amber-500 text-[10px] text-amber-600"
+                        title={t(sourceNotice)}
+                      >
+                        {t(sourceBadge)}
+                      </Badge>
+                    )}
                   </div>
                   <div>
                     <div className="text-xs text-muted-foreground">{t('channels.statCredits')}</div>
@@ -796,8 +839,14 @@ export function Channels() {
                   </div>
 
                   {modelsOpen && (
-                    modelState === 'loading'
-                      ? (
+                    <div className="space-y-2">
+                      {connected && sourceNotice !== null && (
+                        <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-2 text-xs text-amber-700">
+                          {t(sourceNotice)}
+                        </p>
+                      )}
+                      {modelState === 'loading'
+                        ? (
                         <div className="flex items-center justify-center rounded-md border py-4 text-xs text-muted-foreground">
                           <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
                           {t('common.loading')}
@@ -889,7 +938,8 @@ export function Channels() {
                               </div>
                             ))}
                           </div>
-                        )
+                        )}
+                    </div>
                   )}
                 </div>
 

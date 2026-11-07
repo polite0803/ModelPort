@@ -1663,7 +1663,15 @@
       "free": "Free",
       "disabled": "Off",
       "dead": "Dead",
-      "empty": "No models yet — add an account, then refresh online"
+      "empty": "No models yet — add an account, then refresh online",
+      "source": {
+        "badgeCache": "Catalog: local cache",
+        "badgeFallback": "Catalog: built-in fallback",
+        "noticeCache": "The vendor's model API has changed or is currently unavailable. This catalogue comes from the local official client cache rather than a live upstream call, so it may lag the vendor slightly. Chat still uses these models.",
+        "noticeFallback": "The vendor's model API has changed or is currently unavailable, and the local official client cache is unreadable. The built-in fallback catalogue is shown; it may miss new models or include retired ones.",
+        "toastCache": "Catalogue from the official client cache (upstream returned no usable list)",
+        "toastFallback": "Catalogue from the built-in fallback (upstream returned no usable list)"
+      }
     },
     "refreshAccount": "Refresh credentials",
     "identityRisk": {
