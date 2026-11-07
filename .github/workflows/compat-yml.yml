@@ -21,7 +21,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p tmpl dist out
-          gh release download v1.7.6 -p 'latest*.yml' -D tmpl
+          gh release download v1.7.6 -R polite0803/ModelPort -p 'latest*.yml' -D tmpl
           node - <<'JS'
           const fs = require('node:fs')
           const crypto = require('node:crypto')
