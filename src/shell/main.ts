@@ -56,6 +56,8 @@ import type { LocalGatewayView } from '../shared/localGateway'
 import type { GatewayListSnapshot } from '../shared/shellList'
 import { buildSnapshot, type GatewayListEntry, type GatewayProbeState } from './gatewayListPlan'
 import { gatewayListPageUrl } from './gatewayListPage'
+import { gatewayPromptPageUrl } from './gatewayPromptPage'
+import { escapeHtml } from './htmlEscape'
 import type { ShellUpdateProgress } from '../shared/shellBridge'
 
 app.setPath('userData', join(app.getPath('appData'), 'modelport-shell'))
@@ -282,21 +284,6 @@ function installAppMenu(): void {
 }
 
 /**
- * Escape interpolated text for the HTML below. The whole document is separately
- * percent-encoded for its `data:` URL, so a second URL-encode here would make the
- * address field read back as `http%3A%2F%2F127.0.0.1%3A8080` - and saving that fails
- * origin validation, so editing an entry would be impossible. Gateway names are
- * user-typed and reach both an attribute and the failure page's text.
- */
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-}
-
-/**
  * Failure and empty states are plain documents with a link back to the gateway, so they
  * need no IPC surface at all. They name the reason and the next command rather than
  * showing a blank frame - "the gateway is unreachable" and "no gateway configured yet"
@@ -427,6 +414,9 @@ type GatewayPromptResult = {
 }
 
 function promptForGateway(existing?: GatewayEntry): Promise<GatewayPromptResult | null> {
+  // A modal child of a hidden window is a dialog nobody can click: the tray opens this
+  // while the window sits in the tray. Show the owner first, then attach modally.
+  if (window && !window.isDestroyed() && !window.isVisible()) window.show()
   return new Promise(resolve => {
     const dialog = new BrowserWindow({
       width: 480,
@@ -490,49 +480,11 @@ function promptForGateway(existing?: GatewayEntry): Promise<GatewayPromptResult 
     // two `once` listeners stay behind, so the *next* dialog's submit resolves the old caller.
     dialog.on('closed', () => settle(null))
 
-    const nameValue = existing ? ` value="${escapeHtml(existing.name)}"` : ''
-    const urlValue = existing ? ` value="${escapeHtml(existing.url)}"` : ''
-    const distroValue = existing?.wslDistro ? ` value="${escapeHtml(existing.wslDistro)}"` : ''
-    const kind: GatewayKind = existing?.kind === 'wsl' && process.platform !== 'win32'
-      ? 'remote'
-      : (existing?.kind ?? 'local')
-    const selected = (value: GatewayKind): string => ` value="${value}"${kind === value ? ' selected' : ''}`
-    const html = `<!doctype html><meta charset="utf-8"><title>gateway</title>
-<body style="font:14px/1.5 system-ui;padding:18px;background:#1a1a1a;color:#eee">
-<label style="display:block;margin-bottom:10px">名称<input id="name" ${nameValue}
-  style="display:block;width:100%;margin-top:4px;padding:6px;box-sizing:border-box"></label>
-<label style="display:block;margin-bottom:10px">形态<select id="kind"
-  style="display:block;width:100%;margin-top:4px;padding:6px;box-sizing:border-box">
-  <option${selected('local')}>本地（由本控制台安装与启动）</option>
-  ${process.platform === 'win32' ? `<option${selected('wsl')}>WSL（网关装在 WSL 里，本控制台负责安装与升级）</option>` : ''}
-  <option${selected('remote')}>远程（网关在另一台机器上，本控制台只连接）</option>
-</select></label>
-<label id="urlRow" style="display:block;margin-bottom:10px">地址<input id="url" ${urlValue} placeholder="http://127.0.0.1:8080"
-  style="display:block;width:100%;margin-top:4px;padding:6px;box-sizing:border-box"></label>
-<label id="wslRow" style="display:block;margin-bottom:10px">WSL 发行版（留空使用默认）<input id="wslDistro"${distroValue} placeholder="Ubuntu-24.04"
-  style="display:block;width:100%;margin-top:4px;padding:6px;box-sizing:border-box"></label>
-<p id="err" style="color:#f87171;min-height:1.2em;margin:0"></p>
-<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
-<button id="cancel" style="padding:6px 14px">取消</button>
-<button id="ok" style="padding:6px 14px">保存</button></div>
-<script>
-const mode=document.getElementById('kind');
-const sync=function(){
-  document.getElementById('urlRow').style.display=mode.value==='local'?'none':'block';
-  document.getElementById('wslRow').style.display=mode.value==='wsl'?'block':'none';
-};
-mode.onchange=sync;sync();
-const send=(t)=>window.promptHost[t]();
-document.getElementById('ok').onclick=()=>window.promptHost.submit({
-  name:document.getElementById('name').value,
-  url:document.getElementById('url').value,
-  kind:mode.value,
-  wslDistro:document.getElementById('wslDistro').value});
-document.getElementById('cancel').onclick=send('cancel');
-addEventListener('keydown',e=>{if(e.key==='Enter')document.getElementById('ok').click();
-if(e.key==='Escape')send('cancel')});
-</script></body>`
-    void dialog.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`)
+    void dialog.loadURL(gatewayPromptPageUrl({
+      ...(existing ? { existing: { name: existing.name, url: existing.url, kind: existing.kind, wslDistro: existing.wslDistro } } : {}),
+      canUseWsl: process.platform === 'win32',
+    }))
+
   })
 }
 

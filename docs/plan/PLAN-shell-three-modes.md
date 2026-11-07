@@ -347,6 +347,27 @@ HTTP + SSE）。
   归 unknown、读错误不丢行）；`shell-entries` 增加列表 preload 产物与新源码的越界检查。
 - 全量 `npm run gate`：**1917 通过 / 0 失败**。
 
+### 修复：添加/编辑网关对话框点开即关（2026-11-08）
+
+用户实测反馈：「托盘里的『编辑当前网关』和『添加网关』都是响应不正确的」。根因不是 IPC，
+是对话框页面自己把取消事件在**加载时**发了出去：
+
+```js
+document.getElementById('cancel').onclick = send('cancel')   // ← 调用发生在赋值前
+```
+
+`onclick` 拿到的是 `send('cancel')` 的返回值（undefined），而这次调用已经触发了
+`shell:prompt-cancel` → `settle(null)` → 两个菜单项都表现为「点开就关、什么也没发生」。
+这个写法从 1.7.5 的壳就在，只是一直没人从托盘走这条路径。
+
+修法：把对话框页面抽成 `src/shell/gatewayPromptPage.ts`（可在 `node --test` 里断言），
+取消改成 `onclick = cancel` 的函数引用；同时在 `promptForGateway` 里先 `window.show()`
+——托盘在窗口隐藏时打开模态子窗，Windows 上父窗不可见会让对话框点不动。
+
+门：`tests/shell/gateway-prompt-page.test.ts` 6 条（取消必须是函数、保存转发四个字段、
+预填只转义一次且 URL 不被二次编码、WSL 选项只在 Windows、跨平台回落 remote、行显隐）。
+全量 `npm run gate`：**1926 通过 / 0 失败**。
+
 ### 仍未取到的读数
 
 1. **本地形态的真机运行**：`ModelPort.exe --gateway` 会读写这台机器的真实 `<appData>/modelport` 与

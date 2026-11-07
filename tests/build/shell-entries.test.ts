@@ -50,6 +50,8 @@ test('the shell imports no gateway module tree', () => {
     'src/shell/gatewayListPlan.ts',
     'src/shell/gatewayListPage.ts',
     'src/shell/listPreload.ts',
+    'src/shell/gatewayPromptPage.ts',
+    'src/shell/htmlEscape.ts',
     // The updater is still a client: it reads a release and starts installers, but it
     // must not pull the gateway store into the shell bundle (the test above catches it
     // in the built file; this list makes the failure name the source file).
@@ -86,9 +88,12 @@ test('the prompt dialog prefills with HTML escaping and always settles', () => {
   for (const call of shellMain.matchAll(/encodeURIComponent\((\w+)\)/g)) {
     assert.equal(call[1], 'html', 'only a whole document may be percent-encoded, never a value')
   }
-  assert.match(shellMain, /escapeHtml\(existing\.url\)/)
-  assert.match(shellMain, /escapeHtml\(existing\.name\)/)
   assert.match(shellMain, /escapeHtml\(entry\.name\)/, 'a gateway name is user-typed and lands in page text')
+  // The dialog's own prefills live in gatewayPromptPage.ts now; this list keeps the file
+  // under the same fence (and the page test pins the escaping/ordering rules).
+  const promptPage = readFileSync('src/shell/gatewayPromptPage.ts', 'utf8')
+  assert.match(promptPage, /escapeHtml\(existing\.url\)/)
+  assert.match(promptPage, /escapeHtml\(existing\.name\)/)
   assert.match(shellMain, /dialog\.on\('closed', \(\) => settle\(null\)\)/)
 })
 
