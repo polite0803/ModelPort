@@ -27,12 +27,12 @@ test('a running local gateway offers stop and repair, never install', () => {
   const [row] = buildGatewayRows([entry()], { g1: { phase: 'running', version: '1.7.6' } })
   assert.equal(row.phase, 'running')
   assert.equal(row.version, '1.7.6')
-  assert.deepEqual(actionsOf(row), ['connect', 'edit', 'remove', 'repair', 'stop'])
+  assert.deepEqual(actionsOf(row), ['connect', 'edit', 'remove', 'repair', 'stop', 'upgrade'])
 })
 
 test('a stopped local gateway offers start instead of stop', () => {
   const [row] = buildGatewayRows([entry()], { g1: { phase: 'stopped', version: '1.7.6' } })
-  assert.deepEqual(actionsOf(row), ['connect', 'edit', 'remove', 'repair', 'start'])
+  assert.deepEqual(actionsOf(row), ['connect', 'edit', 'remove', 'repair', 'start', 'upgrade'])
 })
 
 test('a never-provisioned machine offers install, not start', () => {
@@ -51,7 +51,7 @@ test('the active gateway carries no connect action', () => {
   assert.equal(row.active, true)
 })
 
-test('WSL offers install and never local start/stop; remote offers neither', () => {
+test('WSL without a reachable service offers install; remote offers the deployment guide', () => {
   const rows = buildGatewayRows(
     [
       entry({ id: 'w', kind: 'wsl', url: 'http://127.0.0.1:8090' }),
@@ -67,7 +67,29 @@ test('WSL offers install and never local start/stop; remote offers neither', () 
   assert.equal(wsl.actions.includes('start') || wsl.actions.includes('stop'), false)
 
   const remote = rows.find(row => row.id === 'r')!
-  assert.deepEqual(actionsOf(remote), ['connect', 'edit', 'remove'])
+  assert.deepEqual(actionsOf(remote), ['connect', 'deploy', 'edit', 'remove'])
+})
+
+test('an installed WSL gateway gets the lifecycle its state allows, not install', () => {
+  const rows = buildGatewayRows(
+    [
+      entry({ id: 'run', kind: 'wsl' }),
+      entry({ id: 'stop', kind: 'wsl' }),
+      entry({ id: 'sick', kind: 'wsl' }),
+      entry({ id: 'new', kind: 'wsl' }),
+    ],
+    {
+      run: { phase: 'running', version: '1.7.6' },
+      stop: { phase: 'stopped', version: null },
+      sick: { phase: 'unreachable', version: null },
+      new: { phase: 'not-installed', version: null },
+    },
+  )
+  const of = (id: string): string[] => actionsOf(rows.find(row => row.id === id)!)
+  assert.deepEqual(of('run'), ['connect', 'edit', 'remove', 'restart', 'stop', 'uninstall', 'upgrade'])
+  assert.deepEqual(of('stop'), ['connect', 'edit', 'remove', 'start', 'uninstall', 'upgrade'])
+  assert.deepEqual(of('sick'), ['connect', 'edit', 'remove', 'restart', 'uninstall', 'upgrade'])
+  assert.deepEqual(of('new'), ['connect', 'edit', 'install', 'remove'])
 })
 
 test('the detail line names the mode, the host and the version', () => {

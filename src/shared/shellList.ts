@@ -12,13 +12,13 @@ export type GatewayKind = 'local' | 'wsl' | 'remote'
 export type GatewayPhase =
   /** The gateway answered `/` — it is up and willing to serve the console. */
   | 'running'
-  /** Only local: there is a status file but its process is gone. */
+  /** Local / WSL: the gateway is installed but its process or service is not running. */
   | 'stopped'
-  /** Only local: the process is alive but `/health` did not answer. */
+  /** Local / WSL: the process or service is alive but `/health` did not answer. */
   | 'unreachable'
-  /** Only local: this machine has never been provisioned. */
+  /** Local / WSL: this machine (or distro) has never been provisioned. */
   | 'not-installed'
-  /** WSL / remote: no answer. */
+  /** WSL / remote: no answer, and nothing local says why. */
   | 'offline'
   /** The probe itself failed in a way that says nothing about the gateway. */
   | 'unknown'
@@ -29,8 +29,12 @@ export type GatewayRowAction =
   | 'remove'
   | 'start'
   | 'stop'
+  | 'restart'
   | 'repair'
   | 'install'
+  | 'upgrade'
+  | 'uninstall'
+  | 'deploy'
 
 export interface GatewayRow {
   id: string

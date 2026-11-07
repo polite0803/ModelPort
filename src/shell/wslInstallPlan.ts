@@ -293,3 +293,68 @@ export function systemdUsable(output: string): boolean {
   const state = output.trim().split('\n')[0]?.trim() ?? ''
   return state === 'running' || state === 'degraded' || state === 'starting'
 }
+
+/**
+ * One root call for the list's service probe: `systemctl cat` says whether a unit exists,
+ * `is-active` whether it runs. The five-call first-install probe is too slow to run on
+ * every panel refresh; this is the cheap version of the same two questions.
+ */
+export function buildServiceProbeScript(service: string): string {
+  assertService(service)
+  const unit = shellQuote(`${service}.service`)
+  const name = shellQuote(service)
+  return [
+    `if systemctl cat ${unit} >/dev/null 2>&1; then`,
+    '  echo installed',
+    `  systemctl is-active ${name} || true`,
+    'else',
+    '  echo absent',
+    'fi',
+  ].join('\n')
+}
+
+export interface WslServiceState {
+  installed: boolean
+  active: boolean
+}
+
+/**
+ * Reads the probe script's output. Anything that is not the installed/absent marker means
+ * the probe itself failed (no systemd, WSL died mid-call) and says nothing about the unit.
+ */
+export function parseWslServiceState(output: string): WslServiceState | null {
+  const lines = output.replace(/\r\n/g, '\n').split('\n').map(line => line.trim()).filter(line => line !== '')
+  const marker = lines[0]
+  if (marker === 'absent') return { installed: false, active: false }
+  if (marker !== 'installed') return null
+  return { installed: true, active: lines[1] === 'active' }
+}
+
+export type ServiceControlAction = 'start' | 'stop' | 'restart'
+
+/**
+ * start/restart wait for `is-active` inside the same call so the panel's re-probe does not
+ * race a booting daemon; stop returns as soon as systemd says the unit is down.
+ */
+export function buildServiceControlScript(service: string, action: ServiceControlAction): string {
+  assertService(service)
+  if (action !== 'start' && action !== 'stop' && action !== 'restart') {
+    throw new Error(`unsupported service action: ${action}`)
+  }
+  const name = shellQuote(service)
+  const lines = ['set -eu', `systemctl ${action} ${name}`]
+  if (action === 'stop') {
+    lines.push('echo "SERVICE_STOPPED"')
+  } else {
+    lines.push(
+      'i=0',
+      `until systemctl is-active --quiet ${name}; do`,
+      '  i=$((i+1))',
+      '  [ "$i" -ge 30 ] && { echo "service failed to start" >&2; exit 12; }',
+      '  sleep 1',
+      'done',
+      'echo "SERVICE_ACTIVE"',
+    )
+  }
+  return lines.join('\n')
+}

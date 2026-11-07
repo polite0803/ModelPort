@@ -45,7 +45,7 @@ async function detectArch(distro: string | undefined): Promise<DaemonArch> {
   }
 }
 
-async function readServiceUnit(distro: string | undefined): Promise<SystemdInstall> {
+export async function readServiceUnit(distro: string | undefined): Promise<SystemdInstall> {
   try {
     const result = await runWsl(distro, true, ['systemctl', 'cat', `${SERVICE}.service`, '--no-pager'])
     const parsed = parseSystemdUnit(result.stdout)

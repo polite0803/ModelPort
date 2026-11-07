@@ -9,6 +9,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type { GatewayListSnapshot } from '../shared/shellList'
 
 type LocalAction = 'start' | 'stop' | 'repair'
+type WslAction = 'start' | 'stop' | 'restart' | 'uninstall'
 
 const bridge = {
   snapshot: (): Promise<GatewayListSnapshot> => ipcRenderer.invoke('shell:gateways'),
@@ -19,6 +20,10 @@ const bridge = {
   localAction: (id: string, action: LocalAction): Promise<void> =>
     ipcRenderer.invoke('shell:gateway-local', id, action),
   installWsl: (id: string): Promise<void> => ipcRenderer.invoke('shell:gateway-install-wsl', id),
+  wslAction: (id: string, action: WslAction): Promise<void> =>
+    ipcRenderer.invoke('shell:gateway-wsl', id, action),
+  upgrade: (id: string): Promise<void> => ipcRenderer.invoke('shell:gateway-upgrade', id),
+  deploy: (id: string): Promise<void> => ipcRenderer.invoke('shell:gateway-deploy', id),
   close: (): Promise<void> => ipcRenderer.invoke('shell:gateway-list-close'),
   onChanged: (callback: () => void): (() => void) => {
     const handler = (): void => callback()

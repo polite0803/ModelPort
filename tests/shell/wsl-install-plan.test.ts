@@ -5,11 +5,14 @@ import { readFileSync } from 'node:fs'
 import {
   buildFirstInstallRollbackScript,
   buildFirstInstallScript,
+  buildServiceControlScript,
+  buildServiceProbeScript,
   buildSystemdUnit,
   parseInitHostHandshake,
   parseNodeMajor,
   parseShasums,
   parseWslDistros,
+  parseWslServiceState,
   planNodeProvision,
   systemdUsable,
   decodeWslOutput,
@@ -153,4 +156,37 @@ test('the daemon prints the handshake line --init-host promised', () => {
   // The console parses it; a wording change in the human block must not break install.
   const daemon = readFileSync('src/main/daemon/entry.ts', 'utf8')
   assert.match(daemon, /MODELPORT_HANDSHAKE \$\{JSON\.stringify/)
+})
+
+test('the service probe asks both questions in one call and quotes the unit name', () => {
+  const script = buildServiceProbeScript('modelport')
+  assert.match(script, /systemctl cat 'modelport\.service'/)
+  assert.match(script, /systemctl is-active 'modelport'/)
+  assert.equal(script.split('systemctl').length - 1, 2, 'one cat plus one is-active, nothing more')
+  assert.throws(() => buildServiceProbeScript('modelport; rm -rf /'))
+})
+
+test('the service state parse distinguishes absent, stopped, active and garbage', () => {
+  assert.deepEqual(parseWslServiceState('absent\n'), { installed: false, active: false })
+  assert.deepEqual(parseWslServiceState('installed\nactive\n'), { installed: true, active: true })
+  assert.deepEqual(parseWslServiceState('installed\ninactive\n'), { installed: true, active: false })
+  assert.deepEqual(parseWslServiceState('installed\nfailed\n'), { installed: true, active: false })
+  assert.deepEqual(parseWslServiceState('installed\nactivating\n'), { installed: true, active: false })
+  assert.equal(parseWslServiceState('System has not been booted with systemd\n'), null)
+  assert.equal(parseWslServiceState(''), null)
+})
+
+test('start and restart wait for active inside the call; stop does not', () => {
+  for (const action of ['start', 'restart'] as const) {
+    const script = buildServiceControlScript('modelport', action)
+    assert.match(script, new RegExp(`systemctl ${action} 'modelport'`))
+    assert.match(script, /until systemctl is-active --quiet 'modelport'/)
+    assert.match(script, /SERVICE_ACTIVE/)
+  }
+  const stop = buildServiceControlScript('modelport', 'stop')
+  assert.match(stop, /systemctl stop 'modelport'/)
+  assert.equal(stop.includes('is-active'), false)
+  assert.match(stop, /SERVICE_STOPPED/)
+  assert.throws(() => buildServiceControlScript('modelport', 'enable' as 'start'))
+  assert.throws(() => buildServiceControlScript('a b', 'start'))
 })

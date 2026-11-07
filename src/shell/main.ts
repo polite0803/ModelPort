@@ -52,9 +52,14 @@ import {
   waitForLocalGateway,
 } from './localGateway'
 import { installWslGateway, probeWslGateway } from './wslInstall'
+import { controlWslService, probeWslService, removeWslInstall, wslInstallDir } from './wslService'
+import type { ServiceControlAction } from './wslInstallPlan'
+import { fetchText, releaseFeedUrl } from './wslExec'
+import { parseRelease, type ReleaseInfo } from './updatePlan'
+import { deployGuideHtml } from './deployGuide'
 import type { LocalGatewayView } from '../shared/localGateway'
 import type { GatewayListSnapshot } from '../shared/shellList'
-import { buildSnapshot, type GatewayListEntry, type GatewayProbeState } from './gatewayListPlan'
+import { buildSnapshot, GATEWAY_ACTION_LABELS, type GatewayListEntry, type GatewayProbeState } from './gatewayListPlan'
 import { gatewayListPageUrl } from './gatewayListPage'
 import { gatewayPromptPageUrl } from './gatewayPromptPage'
 import { escapeHtml } from './htmlEscape'
@@ -70,6 +75,7 @@ if (!app.requestSingleInstanceLock()) {
 let window: BrowserWindow | null = null
 let tray: Tray | null = null
 let listWindow: BrowserWindow | null = null
+let guideWindow: BrowserWindow | null = null
 
 function iconPath(): string {
   return app.isPackaged
@@ -191,9 +197,9 @@ function openGatewayList(): void {
     return
   }
   listWindow = new BrowserWindow({
-    width: 760,
+    width: 860,
     height: 600,
-    minWidth: 620,
+    minWidth: 700,
     minHeight: 420,
     parent: window ?? undefined,
     title: '网关管理',
@@ -219,16 +225,13 @@ function notifyGatewayList(): void {
 
 /**
  * One probe per entry. Local goes through the status file (which is also what tells
- * "not installed" from "stopped"); everything else is a plain `GET /` with a short
- * timeout, because an unreachable row must not hold the list hostage.
+ * "not installed" from "stopped"); WSL adds one root `wsl.exe` call for the unit's state,
+ * in parallel with the HTTP probe; remote is HTTP only. An unreachable row must not hold
+ * the list hostage, so every leg has a short timeout.
  */
-async function probeEntry(entry: GatewayEntry): Promise<GatewayProbeState> {
-  if (entry.kind === 'local') {
-    const view = await readLocalGatewayView()
-    return { phase: view.phase, version: view.version }
-  }
+async function probeHttpOrigin(url: string): Promise<GatewayProbeState> {
   try {
-    const response = await net.fetch(new URL('/', entry.url).toString(), {
+    const response = await net.fetch(new URL('/', url).toString(), {
       signal: AbortSignal.timeout(1_500),
     })
     if (!response.ok) return { phase: 'offline', version: null }
@@ -237,6 +240,24 @@ async function probeEntry(entry: GatewayEntry): Promise<GatewayProbeState> {
   } catch {
     return { phase: 'offline', version: null }
   }
+}
+
+async function probeEntry(entry: GatewayEntry): Promise<GatewayProbeState> {
+  if (entry.kind === 'local') {
+    const view = await readLocalGatewayView()
+    return { phase: view.phase, version: view.version }
+  }
+  if (entry.kind !== 'wsl' || process.platform !== 'win32') return await probeHttpOrigin(entry.url)
+  const [http, service] = await Promise.all([
+    probeHttpOrigin(entry.url),
+    probeWslService(entry.wslDistro),
+  ])
+  // A gateway that answers is running no matter what the local unit says - the entry may
+  // point at another machine's WSL. Only when HTTP is silent does the unit get a vote.
+  if (http.phase === 'running') return http
+  if (!service) return { phase: 'offline', version: null }
+  if (!service.installed) return { phase: 'not-installed', version: null }
+  return { phase: service.active ? 'unreachable' : 'stopped', version: null }
 }
 
 async function gatewaySnapshot(): Promise<GatewayListSnapshot> {
@@ -602,27 +623,22 @@ function trayAction(label: string, run: () => void): MenuItemConstructorOptions 
 }
 
 /**
- * Tray entry is the second way in (the first is the remote About page). It uses the
- * active entry directly because the click is the operator's own action, not a message
- * from a remote document.
+ * The check-confirm-run upgrade path, shared by the tray (active entry) and the gateway
+ * list (any row). The entry's kind is the authorization: only a WSL entry may trigger the
+ * root daemon replacement, and a local entry's gateway is this same binary.
  */
-async function checkForUpdatesFromTray(): Promise<void> {
-  const entry = activeEntry(readBook())
-  if (!entry) {
-    await dialog.showMessageBox({
-      type: 'info',
-      title: '检查更新',
-      message: '还没有配置网关',
-      detail: '先在托盘里添加一个网关，再检查更新。',
-    })
-    return
-  }
+async function checkForUpdatesForEntry(entry: GatewayEntry): Promise<void> {
   try {
     const check = await checkForUpdates(entry)
+    const managementLine = entry.kind === 'local'
+      ? '本地网关与控制台是同一个安装包：升级控制台即升级本地网关'
+      : check.daemon.managed
+        ? '网关由本机 WSL 管理，可一并升级'
+        : '网关未标记为 WSL 托管，只升级控制台'
     const lines = [
       `Shell: ${check.shell.current} → ${check.shell.latest ?? '未知'}`,
       `网关: ${check.daemon.current ?? '读取失败'} → ${check.daemon.latest ?? '未知'}`,
-      check.daemon.managed ? '网关由本机 WSL 管理，可一并升级' : '网关未标记为 WSL 托管，只升级 Shell',
+      managementLine,
     ]
     if (check.error) lines.push(`检查失败：${check.error}`)
     const wanted = check.shell.updateAvailable
@@ -669,6 +685,25 @@ async function checkForUpdatesFromTray(): Promise<void> {
   }
 }
 
+/**
+ * Tray entry is the second way in (the first is the remote About page). It uses the
+ * active entry directly because the click is the operator's own action, not a message
+ * from a remote document.
+ */
+async function checkForUpdatesFromTray(): Promise<void> {
+  const entry = activeEntry(readBook())
+  if (!entry) {
+    await dialog.showMessageBox({
+      type: 'info',
+      title: '检查更新',
+      message: '还没有配置网关',
+      detail: '先在托盘里添加一个网关，再检查更新。',
+    })
+    return
+  }
+  await checkForUpdatesForEntry(entry)
+}
+
 function kindLabel(kind: GatewayKind): string {
   return kind === 'local' ? '本机' : kind === 'wsl' ? 'WSL' : '远程'
 }
@@ -712,6 +747,117 @@ async function reinstallLocalFromTray(entry: GatewayEntry): Promise<void> {
   else window?.loadURL(localFailurePageUrl(current, after))
 }
 
+/** Shared by the tray and the list: one systemctl path, errors named rather than swallowed. */
+async function runWslServiceAction(entry: GatewayEntry, action: ServiceControlAction): Promise<void> {
+  try {
+    await controlWslService(entry.wslDistro, action)
+  } catch (error) {
+    console.error(`[Shell] WSL gateway ${action} failed:`, error)
+    await dialog.showMessageBox({
+      type: 'error',
+      title: 'WSL 网关',
+      message: `${GATEWAY_ACTION_LABELS[action]}失败`,
+      detail: error instanceof Error ? error.message : String(error),
+    })
+  }
+  notifyGatewayList()
+}
+
+/**
+ * Uninstall removes the program and the unit, never the data: the rollback script's rule
+ * (`~/.modelport` untouched) is also the uninstall rule, so a mistaken click costs a
+ * reinstall, not a backup restore. The directory is read from the unit first - a manual
+ * deploy may not live in /opt/modelport, and the confirmation must name the real target.
+ */
+async function uninstallWslForEntry(entry: GatewayEntry): Promise<void> {
+  let installDir: string
+  try {
+    installDir = await wslInstallDir(entry.wslDistro)
+  } catch (error) {
+    await dialog.showMessageBox({
+      type: 'error',
+      title: '卸载 WSL 网关',
+      message: '找不到已安装的网关单元',
+      detail: error instanceof Error ? error.message : String(error),
+    })
+    return
+  }
+  const options = {
+    type: 'question' as const,
+    title: '卸载 WSL 网关',
+    message: `卸载「${entry.name}」的网关程序？`,
+    detail: `将停止并移除服务与 ${installDir}（含随装的 Node）。保留 ~/.modelport 数据目录；地址簿条目与管理口令不动。`,
+    buttons: ['卸载', '取消'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  }
+  const choice = listWindow
+    ? await dialog.showMessageBox(listWindow, options)
+    : await dialog.showMessageBox(options)
+  if (choice.response !== 0) return
+  try {
+    await removeWslInstall(entry.wslDistro, installDir)
+  } catch (error) {
+    await dialog.showMessageBox({
+      type: 'error',
+      title: '卸载 WSL 网关',
+      message: '卸载失败',
+      detail: error instanceof Error ? error.message : String(error),
+    })
+    return
+  }
+  notifyGatewayList()
+}
+
+/**
+ * Remote deployment is a guide, not a remote control: the console has no credentials for
+ * that host. Links open in the real browser so downloads land in the operator's own
+ * download flow instead of navigating this document away.
+ */
+function openDeployGuide(entry: GatewayEntry, release: ReleaseInfo | null, error?: string): void {
+  const html = deployGuideHtml({
+    name: entry.name,
+    url: entry.url,
+    release,
+    ...(error === undefined ? {} : { error }),
+  })
+  const url = `data:text/html;charset=utf-8,${encodeURIComponent(html)}`
+  if (guideWindow && !guideWindow.isDestroyed()) {
+    void guideWindow.loadURL(url)
+    guideWindow.show()
+    guideWindow.focus()
+    return
+  }
+  guideWindow = new BrowserWindow({
+    width: 760,
+    height: 680,
+    parent: window ?? undefined,
+    title: '部署指南',
+    backgroundColor: '#1a1a1a',
+    autoHideMenuBar: true,
+    icon: iconPath(),
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  })
+  guideWindow.on('closed', () => {
+    guideWindow = null
+  })
+  guideWindow.webContents.on('will-navigate', (event, target) => {
+    if (target.startsWith('data:')) return
+    event.preventDefault()
+    if (normalizeOrigin(target)) void shell.openExternal(target)
+  })
+  guideWindow.webContents.setWindowOpenHandler(({ url: target }) => {
+    if (normalizeOrigin(target)) void shell.openExternal(target)
+    return { action: 'deny' }
+  })
+  void guideWindow.loadURL(url)
+}
+
 function buildTrayMenu(): void {
   if (!tray) return
   const book = readBook()
@@ -724,9 +870,9 @@ function buildTrayMenu(): void {
     }),
   )
 
-  // The local gateway is the one this console owns, so it is the only mode with
-  // start/stop/repair actions. A WSL gateway gets install (it has no unit until then) and
-  // its upgrades ride along with the console's update check.
+  // The local gateway is the one this console owns as a child process; a WSL gateway is
+  // owned through systemd, so both get start/stop here, while install and the root
+  // uninstall stay WSL-only. Upgrades ride along with the console's update check.
   const localItems: MenuItemConstructorOptions[] = active?.kind === 'local'
     ? [
         trayAction('启动本地网关', () => { window?.show(); void startLocalFromTray(active) }),
@@ -737,6 +883,9 @@ function buildTrayMenu(): void {
     : []
   const wslItems: MenuItemConstructorOptions[] = active?.kind === 'wsl' && process.platform === 'win32'
     ? [
+        trayAction('启动 WSL 网关', () => { window?.show(); void runWslServiceAction(active, 'start') }),
+        trayAction('停止 WSL 网关', () => { window?.show(); void runWslServiceAction(active, 'stop') }),
+        trayAction('重启 WSL 网关', () => { window?.show(); void runWslServiceAction(active, 'restart') }),
         trayAction('安装 WSL 网关…（网关不存在时）', () => { window?.show(); void offerWslInstall(active) }),
       ]
     : []
@@ -932,6 +1081,37 @@ ipcMain.handle('shell:gateway-install-wsl', async (_event, id: unknown) => {
   if (!entry || entry.kind !== 'wsl' || process.platform !== 'win32') return
   await offerWslInstall(entry)
   notifyGatewayList()
+})
+
+ipcMain.handle('shell:gateway-wsl', async (_event, id: unknown, action: unknown) => {
+  const entry = findEntryById(id)
+  if (!entry || entry.kind !== 'wsl' || process.platform !== 'win32') return
+  if (action === 'start' || action === 'stop' || action === 'restart') {
+    await runWslServiceAction(entry, action)
+  } else if (action === 'uninstall') {
+    await uninstallWslForEntry(entry)
+  }
+})
+
+ipcMain.handle('shell:gateway-upgrade', async (_event, id: unknown) => {
+  const entry = findEntryById(id)
+  // Remote rows have no upgrade: replacing the console is not managing that gateway.
+  if (!entry || (entry.kind !== 'local' && entry.kind !== 'wsl')) return
+  await checkForUpdatesForEntry(entry)
+  notifyGatewayList()
+})
+
+ipcMain.handle('shell:gateway-deploy', async (_event, id: unknown) => {
+  const entry = findEntryById(id)
+  if (!entry || entry.kind !== 'remote') return
+  let release: ReleaseInfo | null = null
+  let error: string | undefined
+  try {
+    release = parseRelease(JSON.parse(await fetchText(releaseFeedUrl())) as unknown)
+  } catch (cause) {
+    error = cause instanceof Error ? cause.message : String(cause)
+  }
+  openDeployGuide(entry, release, error)
 })
 
 ipcMain.handle('shell:gateway-list-close', async () => {

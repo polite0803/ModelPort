@@ -65,14 +65,27 @@ function actionsFor(entry: GatewayListEntry, phase: GatewayPhase): GatewayRowAct
     if (phase === 'not-installed') {
       actions.push('install')
     } else if (phase === 'running' || phase === 'unreachable') {
-      actions.push('stop', 'repair')
+      actions.push('stop', 'repair', 'upgrade')
     } else {
-      actions.push('start', 'repair')
+      actions.push('start', 'repair', 'upgrade')
     }
   } else if (entry.kind === 'wsl') {
-    // Installing when it is already installed is a probe-then-refuse on the main side,
-    // which is cheaper than making the row's label depend on a slow `wsl.exe` call.
-    actions.push('install')
+    // The service probe tells installed from absent, so the row offers the lifecycle it
+    // actually has. "offline" means WSL itself did not answer: install stays available and
+    // the main side probes again before touching anything (probe-then-refuse).
+    if (phase === 'running') {
+      actions.push('stop', 'restart', 'upgrade', 'uninstall')
+    } else if (phase === 'unreachable') {
+      actions.push('restart', 'upgrade', 'uninstall')
+    } else if (phase === 'stopped') {
+      actions.push('start', 'upgrade', 'uninstall')
+    } else {
+      actions.push('install')
+    }
+  } else {
+    // A remote gateway is deployed by whoever owns that host; the console's part is to
+    // hand over the exact artifacts and commands, not to pretend it can run them.
+    actions.push('deploy')
   }
   actions.push('edit', 'remove')
   return actions
@@ -108,8 +121,12 @@ export const GATEWAY_ACTION_LABELS: Record<GatewayRowAction, string> = {
   remove: '删除',
   start: '启动',
   stop: '停止',
+  restart: '重启',
   repair: '修复',
   install: '安装',
+  upgrade: '升级',
+  uninstall: '卸载',
+  deploy: '部署指南',
 }
 
 export function buildSnapshot(

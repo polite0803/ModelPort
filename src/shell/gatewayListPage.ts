@@ -33,7 +33,7 @@ export function gatewayListPageUrl(): string {
   .dot { width:8px; height:8px; border-radius:50%; flex:none; }
   .dot.running { background:#22c55e; } .dot.offline, .dot.unreachable { background:#ef4444; }
   .dot.stopped, .dot.not-installed { background:#a1a1aa; } .dot.unknown { background:#f59e0b; }
-  .actions { display:flex; gap:6px; flex:none; }
+  .actions { display:flex; gap:6px; flex:none; flex-wrap:wrap; justify-content:flex-end; max-width:62%; }
   button { font:inherit; color:#eee; background:#2a2a2a; border:1px solid #3a3a3a;
            border-radius:6px; padding:4px 10px; cursor:pointer; }
   button:hover { background:#333; }
@@ -84,11 +84,15 @@ function renderRow(row, labels) {
   const actions = el('div', 'actions')
   for (const action of row.actions) {
     if (action === 'connect') continue
-    const button = el('button', action === 'remove' ? 'danger' : '', labels[action])
+    const danger = action === 'remove' || action === 'uninstall'
+    const button = el('button', danger ? 'danger' : '', labels[action])
     button.onclick = function () {
       if (action === 'edit') void api.edit(row.id)
       else if (action === 'remove') void api.remove(row.id)
       else if (action === 'install') void api.installWsl(row.id)
+      else if (action === 'upgrade') void api.upgrade(row.id)
+      else if (action === 'deploy') void api.deploy(row.id)
+      else if (row.kind === 'wsl') void api.wslAction(row.id, action)
       else void api.localAction(row.id, action)
     }
     actions.appendChild(button)

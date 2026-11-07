@@ -368,6 +368,45 @@ document.getElementById('cancel').onclick = send('cancel')   // ← 调用发生
 预填只转义一次且 URL 不被二次编码、WSL 选项只在 Windows、跨平台回落 remote、行显隐）。
 全量 `npm run gate`：**1926 通过 / 0 失败**。
 
+### M6 设计：面板补齐「部署 / 管理」（2026-11-08，用户指令「要能灵活切换、部署、管理网关」）
+
+对照现有面板逐格盘点：切换已齐（行点击 / 托盘 / Ctrl+Shift+G）；管理缺 WSL 装后生命周期
+（行上恒只有「安装」，升级只能从托盘走且只认当前网关）；部署缺远程一格（本地 provision、
+WSL 首装都在，远程没有任何部署入口）。以下取舍自行拍板，依据与代价随格注明：
+
+- **D1 WSL 服务态探测走单次 root 调用**：`systemctl cat` + `is-active` 合成一条 `sh -lc`
+  脚本（`wslInstallPlan.ts::parseWslServiceState` 纯解析）。不复用 `probeWslGateway` 的五连
+  调用——列表每次刷新都探测，五连 wsl.exe 会把面板拖到 5–10s。HTTP 探测与服务探测并行：
+  HTTP 应答 → running；服务 active 但 HTTP 死 → unreachable；装了没跑 → stopped；
+  无单元 → not-installed；WSL 本身不可用 → offline。`stopped/not-installed/unreachable`
+  三个 phase 的注释从「Only local」扩为 local/WSL。
+- **D2 WSL 动作矩阵**：running → stop/restart/upgrade/uninstall；unreachable →
+  restart/upgrade/uninstall；stopped → start/upgrade/uninstall；not-installed/offline/unknown
+  → install（主进程侧仍是 probe-then-refuse）。启停重启走 `buildServiceControlScript`
+  （start/restart 带等 active 的循环，stop 不带），卸载复用 `buildFirstInstallRollbackScript`
+  但安装目录先从 `systemctl cat` 解析（手动部署的目录可能不在 /opt/modelport），
+  确认对话框写明**保留 ~/.modelport**。代价：running 行最多 7 个按钮，窗口加宽到 860、
+  动作区允许换行。
+- **D3 逐行升级**：`checkForUpdatesFromTray` 重构为 `checkForUpdatesForEntry(entry)`，
+  托盘传当前条目，面板行传该行条目——同一条检查/确认/执行通路，不开第二套。local 行
+  （非 not-installed）也给 upgrade：本地网关与控制台是同一个安装包，文案点明。
+  管理状态文案按形态三分（local 同一安装包 / wsl 可一并升级 / remote 只升级控制台），
+  保留「未标记为 WSL 托管」字样（update-surface 门钉住）。远程行不给 upgrade：
+  升级控制台不是管理那台网关。
+- **D4 远程部署 = 指南，不是遥控**：控制台没有远程主机的凭据，SSH 部署要新造凭据面，
+  超出「连接已有网关」的形态边界；诚实的通路是把部署步骤送到操作者手里。新增 `deploy`
+  动作（文案「部署指南」）打开自包含页面：拉 Release feed 列 x64/arm64 daemon tarball +
+  `.sha256` 下载链接，给下载→校验→解包→替换单元模板→`enable --now`→`--init-host` 的
+  可复制命令（与 docs/features/wsl-daemon.md 手动节一致）；feed 不可达时降级为 Release
+  页链接。纯构建器 `deployGuide.ts` 可在 node --test 里断言。
+- **D5 桥接与托盘同步**：listPreload 增 `wslAction/upgrade/deploy` 三个具名方法（无通用
+  invoke）；主进程新 IPC `shell:gateway-wsl/-upgrade/-deploy`，每个 id 回查地址簿、
+  按 kind 校验。托盘给当前 WSL 条目补「启动/停止/重启 WSL 网关」，与面板共用函数。
+- 门：动作矩阵测试改期望并补 WSL 各 phase；`wsl-install-plan` 补服务态解析与控制脚本；
+  新增 `deploy-guide`（资产链接/校验命令/转义/降级）与 `gateway-manage`（产物级布线：
+  通道注册、卸载确认与数据保留、桥接具名、页面分发）。
+  全量 `npm run gate`：**1942 通过 / 0 失败**（2026-11-08，本地镜像 C:\mp-build）。
+
 ### 仍未取到的读数
 
 1. **本地形态的真机运行**：`ModelPort.exe --gateway` 会读写这台机器的真实 `<appData>/modelport` 与
