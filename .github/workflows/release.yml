@@ -175,8 +175,17 @@ jobs:
           shopt -s nullglob
           upload=()
           for f in dist/*.exe dist/*.dmg dist/*.AppImage dist/*.deb dist/*.tar.gz; do
-            case "$(basename "$f")" in
+            name="$(basename "$f")"
+            case "$name" in
               modelport-daemon-*) continue ;;
+            esac
+            # Both ubuntu rows build the same x64 deb/tar.gz (the config lists x64 for
+            # those targets and electron-builder unions that with the CLI arch), so two
+            # jobs used to upload one name concurrently. `--clobber` does not make that
+            # safe: the loser fails with 422/404. One name, one producer.
+            case "$name" in
+              *-arm64.AppImage) [ "${{ matrix.arch }}" = "arm64" ] || continue ;;
+              *-x86_64.AppImage|*-amd64.deb|*-x64.tar.gz) [ "${{ matrix.arch }}" = "x64" ] || continue ;;
             esac
             upload+=("$f")
           done
