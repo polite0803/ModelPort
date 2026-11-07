@@ -432,6 +432,22 @@ WSL 首装都在，远程没有任何部署入口）。以下取舍自行拍板�
 - 已知遗留：macOS 未签名/公证、Windows 未签名；旧壳（`com.modelport.shell`）装过的机器
   升级后程序列表仍留旧条目，需手动卸载一次。
 
+### 发布记录（v1.7.8，2026-11-08）
+
+- 内容：侧边栏「网关管理」入口（`337f619`）+ 发布流水线修复（`a561408`）。tag `v1.7.8` = `a561408`。
+- **首次发版失败：两个 Linux job 抢同名资产**。`build.linux.target` 里 AppImage 列了
+  `x64`+`arm64`、deb/tar.gz 列 `x64`，而矩阵又各跑一次 `--linux --x64|--arm64`
+  （electron-builder 取并集）⇒ 两个 job 都产出同一批 x64 deb/tar.gz 并并发
+  `gh release upload --clobber`，输的一方报 `422 ReleaseAsset.name already exists`
+  / `404`。mac 那次是「重复 job 白跑」，这次是「重复 job 抢写」，同一类问题的第二种表现。
+  修法：上传集按 arch 切分（`*-arm64.AppImage` 只归 arm64 job，`*-x86_64.AppImage` /
+  `*-amd64.deb` / `*-x64.tar.gz` 只归 x64 job），一个名字一个生产者；同版本号删
+  Release + 标签重打（同 v1.7.6/1.7.7 的做法）。
+- 门禁：侧边栏改动本地镜像 1943/1943；CI gate 在 tag 提交上重跑绿，四平台矩阵全绿。
+- 资产：22 → 补 3 份 `latest*.yml` 后 **25 项**（一次性 workflow 以 1.7.7 的 yml 为模板，
+  用发布侧 `.sha256` 交叉校验字节后上传，用完即删）；`latest-linux.yml` 顶层 `sha512`
+  与 `path` 指向的 AppImage 一致。
+
 ### 仍未取到的读数
 
 1. **本地形态的真机运行**：`ModelPort.exe --gateway` 会读写这台机器的真实 `<appData>/modelport` 与
