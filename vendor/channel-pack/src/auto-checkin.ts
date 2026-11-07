@@ -376,6 +376,10 @@ interface RunTotals {
   alreadyClaimed: number
   inactive: number
   failed: number
+  /** 失败里「凭据失效，需用户重新登录」的账号数（终态，不再自动重试）。 */
+  authFailed: number
+  /** 失败里「上游人数过多」的账号数（瞬时，保留 pending 自动重试）。 */
+  busyFailed: number
   /**
    * 其中**能证明「今天这一轮已被处理」**的账号数（来自 `summary.coversToday`）。
    *
@@ -392,7 +396,7 @@ interface RunTotals {
 }
 
 function emptyTotals(): RunTotals {
-  return { providers: 0, claimed: 0, totalCredit: 0, totalByUnit: { token: 0, credit: 0 }, alreadyClaimed: 0, inactive: 0, failed: 0, coversToday: 0, skipped: 0, errors: 0 }
+  return { providers: 0, claimed: 0, totalCredit: 0, totalByUnit: { token: 0, credit: 0 }, alreadyClaimed: 0, inactive: 0, failed: 0, authFailed: 0, busyFailed: 0, coversToday: 0, skipped: 0, errors: 0 }
 }
 
 /**
@@ -443,27 +447,70 @@ export function describeRun(totals: RunTotals): string {
     parts.push(`${totals.claimed} 个账号领取成功${amounts === null ? '' : `（${amounts}）`}`)
   }
   if (totals.alreadyClaimed > 0) parts.push(`${totals.alreadyClaimed} 个今天已领`)
-  if (totals.failed > 0) parts.push(`${totals.failed} 个失败`)
+  if (totals.failed > 0) {
+    const other = Math.max(0, totals.failed - totals.authFailed - totals.busyFailed)
+    if (totals.authFailed > 0) parts.push(`${totals.authFailed} 个需重新登录`)
+    if (totals.busyFailed > 0) parts.push(`${totals.busyFailed} 个人数过多`)
+    if (other > 0) parts.push(`${other} 个失败`)
+  }
   if (totals.errors > 0) parts.push(`${totals.errors} 个渠道出错`)
   if (totals.skipped > 0) parts.push(`${totals.skipped} 个渠道不支持签到`)
   if (parts.length === 0) return `${totals.providers} 个渠道：没有需要领取的账号`
   return `${totals.providers} 个渠道：${parts.join('，')}`
 }
 
+/** 一条账号级领取结果（`summary` 只给计数，失败原因在 `results` 里）。 */
+type ClaimResultRow = RpcCreditsClaimAllResponse['results'][number]
+type ClaimOutcome = ClaimResultRow['outcome']
+
+/**
+ * 这类失败**再重试也不会变**：凭据已失效 / 需要用户重新登录。
+ *
+ * ⚠️ 必须在自动签到里单独成档：MiniMax 令牌过期时上游回 HTTP 401（2026-11-08
+ * 实测），旧实现把它当成「响应缺少 claim_result」，于是每 30 分钟用同一枚死
+ * 令牌再打一遍上游 —— 既拿不到积分，也在白耗账号风控额度。这类渠道应当记成
+ * 「今天已处理」并显示「需重新登录」，等用户换好凭据后再手动领取。
+ */
+function isAuthFailure(outcome: ClaimOutcome): boolean {
+  if (outcome.kind !== 'failed') return false
+  if (outcome.code === 401 || outcome.code === 403) return true
+  return /凭据|重新登录|invalid access token|HTTP 40[13]/i.test(outcome.message)
+}
+
+/** 上游「人数过多」类瞬时失败（TRAE 9074）：保留 pending，稍后自动重试。 */
+function isBusyFailure(outcome: ClaimOutcome): boolean {
+  if (outcome.kind !== 'failed') return false
+  if (outcome.code === 9074) return true
+  return /人数过多|参与用户太多|稍后再试/.test(outcome.message)
+}
+
 /**
  * 这个渠道今天算不算「已处理完」。
  *
  * 判据（缺一不可）：
- * - 本渠道没有失败账号（`summary.failed === 0`）；
+ * - 本渠道没有**可重试**的失败账号（`summary.failed === 0`）；
  * - 渠道没有声明「现在还不是今天的额度」（`summary.retryLater !== true`）。
  *
  * ⚠️ 不能只看 `coversToday > 0`：一个有 2 个账号的渠道可能「1 个成功、1 个失败」，
  * 记成完成会让失败那个账号当天不再重试。反过来，全是「活动未开启 / 账号已停服」
  * 且没有 `retryLater` 时记完成是对的 —— 再试也不会有结果。
+ *
+ * ⚠️ **凭据失效是终态**：`results` 里所有失败都是 401/403 时记完成，否则
+ * 自动签到会拿着同一枚死令牌每 30 分钟空转一整天。
  */
-function isProviderSettled(summary: RpcCreditsClaimAllResponse['summary'] | undefined): boolean {
+function isProviderSettled(
+  summary: RpcCreditsClaimAllResponse['summary'] | undefined,
+  results: readonly ClaimResultRow[],
+): boolean {
   if (summary === undefined) return true
-  if (summary.failed > 0) return false
+  if (summary.failed > 0) {
+    const failed = results
+      .map((row) => row.outcome)
+      .filter((outcome) => outcome.kind === 'failed')
+    // 旧宿主可能不带 `results`：拿不到失败原因时保持可重试（宁多试，不误记）。
+    if (failed.length === 0) return false
+    return failed.every((outcome) => isAuthFailure(outcome))
+  }
   if (summary.retryLater === true) return false
   return true
 }
@@ -490,8 +537,12 @@ export function describeChannel(summary: {
    * 以兼容尚未上报该字段的旧响应（与 `coversToday` 的兜底同思路）。
    */
   totalByUnit?: Partial<Record<'token' | 'credit', number>>
-}): string {
+}, results: readonly ClaimResultRow[] = []): string {
   const parts: string[] = []
+  const failedOutcomes = results
+    .map((row) => row.outcome)
+    .filter((outcome) => outcome.kind === 'failed')
+  const retryableFailure = failedOutcomes.some((outcome) => !isAuthFailure(outcome))
   if (summary.claimed > 0) {
     // ⚠️ 「领到了但 +0 分」与「今天已领」必须能分辨：前者写成「已领」会和
     // alreadyClaimed 撞词，用户无法判断这次到底有没有动作。
@@ -503,7 +554,18 @@ export function describeChannel(summary: {
     parts.push(amounts === null ? `${summary.claimed} 个领取成功` : `${summary.claimed} 个 ${amounts}`)
   }
   if (summary.alreadyClaimed > 0) parts.push(`${summary.alreadyClaimed} 个今天已领`)
-  if (summary.failed > 0) parts.push(`${summary.failed} 个失败`)
+  if (summary.failed > 0) {
+    const auth = failedOutcomes.filter((outcome) => isAuthFailure(outcome)).length
+    const busy = failedOutcomes.filter((outcome) => isBusyFailure(outcome)).length
+    const other = Math.max(0, summary.failed - auth - busy)
+    // 三类失败的可操作结论完全不同：凭据失效要人去换凭据，人数过多只需等，
+    // 其余才是「失败」。合成一句「N 个失败」会把前两类也变成无从下手的噪声。
+    if (auth > 0) parts.push(`${auth} 个需重新登录`)
+    if (busy > 0) parts.push(`${busy} 个人数过多`)
+    if (other > 0) parts.push(`${other} 个失败`)
+    // 旧宿主不带 `results`：拿不到原因时保持原有计数，不编造分类。
+    if (auth + busy + other === 0) parts.push(`${summary.failed} 个失败`)
+  }
   if (summary.inactive > 0) parts.push(`${summary.inactive} 个未开启`)
   if (parts.length === 0) return '无可领'
   // ⚠️ 声称「今天已领」之前先自问一句：这些痕迹是不是**今天这一轮**的？
@@ -513,7 +575,9 @@ export function describeChannel(summary: {
   if (coversToday === 0 && (summary.claimed + summary.alreadyClaimed) > 0) {
     parts.push('非今日轮次')
   }
-  if (summary.failed > 0 || summary.retryLater === true) parts.push('稍后重试')
+  // 只有**还会自动再试**的才说「稍后重试」：凭据失效的渠道重试一千次也不会变，
+  // 那句话会让用户以为系统正在自己处理、只需等。
+  if (retryableFailure || summary.retryLater === true) parts.push('稍后重试')
   return parts.join('，')
 }
 
@@ -626,9 +690,17 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
 
     const dates = datesFor(runDate)
     // 换天时旧文本属于昨天，不能当作今天的逐渠道状态展示。
+    //
+    // ⚠️ 判据必须是**逐渠道的 providerDates**，不是整轮的 `lastDate`（2026-11-08
+    // 实测缺陷）：`lastDate` 只在**全部**渠道完成时才写，任何渠道待重试都会让它
+    // 停在昨天/空串。若拿它当闸门，当天已处理渠道的理由会在下一轮被 `'今日已处理'`
+    // 覆盖 —— 例如 MiniMax 的「2 个需重新登录」只在第一轮出现，之后用户就再也
+    // 看不到该去换凭据了。
     const previousText = new Map<string, string>()
-    if (doc.lastDate === runDate) {
-      for (const entry of doc.channels) previousText.set(entry.provider, entry.text)
+    for (const entry of doc.channels) {
+      if (doc.providerDates[entry.provider] === runDate) {
+        previousText.set(entry.provider, entry.text)
+      }
     }
     const channels: Array<{ provider: string; text: string }> = []
     let changed = false
@@ -673,6 +745,7 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       }
       totals.providers += 1
       const summary = result.value?.summary
+      const results = result.value?.results ?? []
       if (summary === undefined) {
         dates[provider] = runDate
         channels.push({ provider, text: '无可领' })
@@ -688,14 +761,21 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       totals.alreadyClaimed += summary.alreadyClaimed
       totals.inactive += summary.inactive
       totals.failed += summary.failed
+      // 失败再分两档：凭据失效（终态）与人数过多（瞬时）。摘要行若仍写
+      // 「N 个失败」，就会和下面逐渠道的「需重新登录」自相矛盾。
+      for (const row of results) {
+        if (row.outcome.kind !== 'failed') continue
+        if (isAuthFailure(row.outcome)) totals.authFailed += 1
+        else if (isBusyFailure(row.outcome)) totals.busyFailed += 1
+      }
       // ⚠️ 记账口径**只认**这一项：渠道用 `coversToday` 自己声明「这条痕迹是不是
       // 今天这一轮的」。缺省回落到 `claimed + alreadyClaimed`，是为了兼容尚未
       // 上报该字段的旧响应（缺字段 ≠ 0，否则整轮会被判成「什么都没证明」）。
       totals.coversToday += summary.coversToday ?? (summary.claimed + summary.alreadyClaimed)
       // 该渠道今天是否处理完：没失败、且渠道没声明「现在还不是今天的额度」。
       // 不满足就留在 pending 里，下一轮只重跑它（其余渠道不再发请求）。
-      if (isProviderSettled(summary)) dates[provider] = runDate
-      channels.push({ provider, text: describeChannel(summary) })
+      if (isProviderSettled(summary, results)) dates[provider] = runDate
+      channels.push({ provider, text: describeChannel(summary, results) })
     }
 
     const pendingProviders = providers.filter((provider) => dates[provider] !== runDate)

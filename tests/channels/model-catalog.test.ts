@@ -5,6 +5,7 @@ import {
   capabilityHintOf,
   qualifyChannelModel,
   readModelList,
+  readModelListSource,
   splitModelLabel,
 } from '../../src/main/providers/accountChannels/modelCatalog.ts'
 
@@ -33,6 +34,16 @@ test('a label without a rate keeps an unknown weight, never 0', () => {
   // 选一个按量计费的模型。
   assert.deepEqual(splitModelLabel('Trae Pro'), { name: 'Trae Pro', free: false })
   assert.equal(splitModelLabel('').weight, undefined)
+})
+
+test('目录来源只认已知三态，未知值按「没有来源概念」处理', () => {
+  assert.equal(readModelListSource({ source: 'upstream' }), 'upstream')
+  assert.equal(readModelListSource({ source: 'official-cache' }), 'official-cache')
+  assert.equal(readModelListSource({ source: 'static-fallback' }), 'static-fallback')
+  // 拼错/未来新增的值不能触发「降级目录」提醒。
+  assert.equal(readModelListSource({ source: 'cache' }), undefined)
+  assert.equal(readModelListSource({}), undefined)
+  assert.equal(readModelListSource(undefined), undefined)
 })
 
 test('model.list payloads are normalised, malformed entries dropped', () => {

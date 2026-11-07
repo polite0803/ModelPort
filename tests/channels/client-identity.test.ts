@@ -6,7 +6,8 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   clientIdentitySnapshot,
@@ -116,6 +117,50 @@ test('Trae 请求头不再写死 macOS / 0.1.52', () => {
   assert.match(source, /traeDeviceHeaders\(/)
   assert.doesNotMatch(source, /'X-Device-Type': 'macos'/)
   assert.doesNotMatch(source, /Trae\/0\.1\.52/)
+})
+
+test('本机安装发现覆盖 WSL 的 Windows 侧（Trae 不再恒 fallback）', () => {
+  const previous = {
+    localAppData: process.env.LOCALAPPDATA,
+    traeVersion: process.env.MODELPORT_TRAE_VERSION,
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'modelport-client-identity-'))
+  const productDir = join(dir, 'Programs', 'Trae CN', 'resources', 'app')
+  mkdirSync(productDir, { recursive: true })
+  writeFileSync(join(productDir, 'product.json'), JSON.stringify({
+    version: '1.107.1',
+    appVersion: '3.5.1',
+    traeVersionCode: '20251101',
+  }))
+  process.env.LOCALAPPDATA = dir
+  delete process.env.MODELPORT_TRAE_VERSION
+  resetClientVersionCache()
+  try {
+    const info = traeClientIdentity()
+    assert.equal(info.appVersion, '3.5.1')
+    assert.equal(info.versionCode, '20251101')
+    assert.equal(info.source, 'local-install')
+  } finally {
+    if (previous.localAppData === undefined) delete process.env.LOCALAPPDATA
+    else process.env.LOCALAPPDATA = previous.localAppData
+    if (previous.traeVersion === undefined) delete process.env.MODELPORT_TRAE_VERSION
+    else process.env.MODELPORT_TRAE_VERSION = previous.traeVersion
+    resetClientVersionCache()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('官方版本源不再被宿主平台挡住（WSL / macOS 也能取 WorkBuddy 与 Qoder）', () => {
+  const source = readFileSync(
+    join(ROOT, 'vendor', 'channel-pack', 'src', 'client-identity.ts'),
+    'utf8',
+  )
+  assert.doesNotMatch(source, /if \(process\.platform !== 'win32'\) return/)
+  assert.match(source, /workbuddy-win32-/)
+  // 国际版清单的静态站不可达时改走 download.qoder.com（2026-11-08 实测 200）。
+  assert.match(source, /https:\/\/download\.qoder\.com\/qoder-app\/releases\/latest\.yml/)
+  // WSL 下通过 /mnt/c 读 Windows 侧安装。
+  assert.match(source, /\/mnt\/\$\{drive\}\/Users/)
 })
 
 test('B4 快照：五条动态渠道全覆盖、形状可跨 RPC 序列化', () => {

@@ -685,6 +685,8 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
       else await trae.refresh()
     },
     fetchRemoteModels: () => trae.fetchModels(pool),
+    // 目录 + 来源：让界面能区分「上游现取」与「官方缓存 / 静态兜底」。
+    fetchRemoteCatalog: () => trae.fetchCatalog(pool),
     // 图片字节桥接：TRAE 上游**支持图片**（见 Issue #IKHDKC 的实测记录），
     // 但模态按模型判定（远端 `display_config.multimodal`），故这里只负责读字节。
     readImage: makeReadImage(ctx),

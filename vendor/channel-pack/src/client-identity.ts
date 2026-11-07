@@ -129,17 +129,41 @@ function readJsonField(file: string, fields: readonly string[]): string | undefi
   return undefined
 }
 
-/** `LOCALAPPDATA/Programs/...` 的 Windows 路径；非 Windows 返回空串。 */
-function winPrograms(...rest: string[]): string {
-  const base = process.env.LOCALAPPDATA
-  return base === undefined || base === '' ? '' : join(base, 'Programs', ...rest)
+/**
+ * Windows `LOCALAPPDATA/Programs/...` 的候选路径。
+ *
+ * ## 为什么 Linux 宿主也要找 Windows 路径（2026-11-08 实测）
+ *
+ * 网关可以跑在 WSL 的 headless 守护进程里，而官方客户端装在**同一台机器的
+ * Windows 侧**。进程内 `LOCALAPPDATA` 为空，旧实现直接跳过本机安装分支，
+ * 于是 WorkBuddy / Qoder / Trae 在 WSL 上恒为 `fallback`（UI 显示「落后」），
+ * 即使官方客户端就在 `/mnt/c/Users/<user>/AppData/Local/Programs` 下。
+ * 本机安装只是**兜底来源**，读它不改变「官方优先」的取值链。
+ */
+function winPrograms(...rest: string[]): string[] {
+  const roots = new Set<string>()
+  const local = process.env.LOCALAPPDATA
+  if (local !== undefined && local !== '') roots.add(join(local, 'Programs'))
+  if (process.platform !== 'win32') {
+    for (const drive of ['c']) {
+      const users = `/mnt/${drive}/Users`
+      try {
+        for (const user of readdirSync(users)) {
+          roots.add(join(users, user, 'AppData', 'Local', 'Programs'))
+        }
+      } catch {
+        // 不是 WSL / 没挂载 C:：没有候选路径，走官方源或 fallback。
+      }
+    }
+  }
+  return [...roots].map(root => join(root, ...rest))
 }
 
 function workbuddyProductFiles(): string[] {
   return [
-    winPrograms('WorkBuddy', 'resources', 'app.asar.unpacked', 'cli', 'product.json'),
+    ...winPrograms('WorkBuddy', 'resources', 'app.asar.unpacked', 'cli', 'product.json'),
     '/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/product.json',
-  ].filter(file => file !== '')
+  ]
 }
 
 /**
@@ -187,15 +211,14 @@ export function qoderClientVersion(channel: 'qoder' | 'qodercn' = 'qoder', now =
 
   const dirs = channel === 'qodercn'
     ? [
-      winPrograms('Qoder CN', '.qoder-versions'),
-      winPrograms('QoderWork CN', '.qoder-versions'),
+      ...winPrograms('Qoder CN', '.qoder-versions'),
+      ...winPrograms('QoderWork CN', '.qoder-versions'),
     ]
     : [
-      winPrograms('Qoder', '.qoder-versions'),
+      ...winPrograms('Qoder', '.qoder-versions'),
       join(homedir(), 'Library', 'Application Support', 'Qoder', '.qoder-versions'),
     ]
   for (const dir of dirs) {
-    if (dir === '') continue
     const found = readDirVersion(channel, dir, now)
     if (found !== undefined) return found
   }
@@ -240,11 +263,11 @@ export function traeClientIdentity(now = Date.now()): TraeClientIdentity {
   }
 
   const files = [
-    winPrograms('Trae CN', 'resources', 'app', 'product.json'),
-    winPrograms('Trae', 'resources', 'app', 'product.json'),
+    ...winPrograms('Trae CN', 'resources', 'app', 'product.json'),
+    ...winPrograms('Trae', 'resources', 'app', 'product.json'),
     '/Applications/Trae.app/Contents/Resources/app/product.json',
     '/Applications/Trae CN.app/Contents/Resources/app/product.json',
-  ].filter(file => file !== '')
+  ]
 
   for (const file of files) {
     if (!existsSync(file)) continue
@@ -401,7 +424,10 @@ export async function forceIdentityRefresh(): Promise<ClientIdentitySnapshotEntr
 }
 
 async function refreshWorkbuddyOfficial(now: number): Promise<void> {
-  if (process.platform !== 'win32') return
+  // ⚠️ `platform` 描述的是**要呈现的客户端**，不是跑网关的宿主（2026-11-08 实测）：
+  // `workbuddy-linux-x64-user` 被端点判为非法（HTTP 400），而
+  // `workbuddy-win32-x64-user` 从 WSL 里请求同样返回 204。网关跑在 WSL 时发的
+  // 仍是 WorkBuddy 桌面身份，官方源必须按 win32 查，平台守卫只会让 WSL 恒 fallback。
   const asset = process.arch === 'arm64' ? 'arm64' : 'x64'
   const current = official.get('workbuddy')?.version
     ?? workbuddyClientVersion(now).version
@@ -426,7 +452,14 @@ async function refreshWorkbuddyOfficial(now: number): Promise<void> {
 
 const QODER_OFFICIAL_URLS: Readonly<Record<'qoder' | 'qodercn', readonly string[]>> = {
   qodercn: ['https://static.qoder.com.cn/qoder-app/releases/latest.yml'],
-  qoder: ['https://static.qoder.com/qoder-app/releases/latest.yml'],
+  // ⚠️ `static.qoder.com` 在 2026-11-08 的 WSL 网络里不可达（fetch failed），
+  // 而同一份国际版清单在 `download.qoder.com`（实测 200，version 0.5.6）。
+  // 把可达的那个排在前面，静态站留作回退；国际版与国内版是两条产品线，
+  // 不互相借用版本号。
+  qoder: [
+    'https://download.qoder.com/qoder-app/releases/latest.yml',
+    'https://static.qoder.com/qoder-app/releases/latest.yml',
+  ],
 }
 
 async function refreshQoderOfficial(channel: 'qoder' | 'qodercn', now: number): Promise<void> {

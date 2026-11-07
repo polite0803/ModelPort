@@ -857,6 +857,13 @@ export function registerChannelPackRpc(
  */
 export interface ModelCatalogSource {
   listAllModels(): readonly { id: string; name: string; isFree?: boolean; supportsImage?: boolean }[]
+  /**
+   * 这份目录是从哪来的；**缺省 = 上游现取**。
+   *
+   * 只有「官方接口失效、改读本机缓存/静态兜底」的渠道才需要实现它；
+   * `model.list` 会原样透传到宿主，界面据此显示来源提醒。
+   */
+  catalogSource?(): 'upstream' | 'official-cache' | 'static-fallback'
 }
 
 /**
@@ -3372,7 +3379,9 @@ function registerChannelPackEndpoints(
             if (!known.has(id)) catalog.push({ id, name: id })
           }
         }
+        const catalogOrigin = catalogSource?.catalogSource?.()
         const value: RpcModelListResponse = {
+          ...catalogOrigin === undefined ? {} : { source: catalogOrigin },
           models: catalog.map((model) => ({
             id: model.id,
             name: model.name,

@@ -18,6 +18,7 @@ import {
   applyTraeRefresh,
   isTraeExpired,
   isTraeRefreshable,
+  isTraeModelCallable,
   parseTraeBatchModelList,
   parseTraeExchangeResponse,
   parseTraeUserInfoResponse,
@@ -26,12 +27,14 @@ import {
   traeOAuthHeaders,
   traeSOLOHeaders,
   withTraePhone,
+  type TraeCatalog,
   type TraeCredential,
   type TraeRemoteModel,
 } from './trae.js'
 import { jwtExpiresAtMs } from './credential-expiry.js'
 import { TRAE, type TraeProduct } from './trae-product.js'
 import { traeClientIdentity } from './client-identity.js'
+import { readTraeCachedModels } from './trae-model-cache.js'
 import {
   buildTraeLoginURL,
   exchangeTraeCallback,
@@ -166,7 +169,10 @@ export class TraeAuth extends Service {
    * 不需要用户重启宿主）。缓存的是「这次拉取的结果」，与是否有凭据无关 ——
    * 无凭据时直接返回空并缓存，避免重复走一遍凭据解析。
    */
-  private modelsCache: { models: TraeRemoteModel[]; at: number } | undefined
+  private modelsCache: (TraeCatalog & { at: number }) | undefined
+
+  /** 「改读官方缓存」只告警一次（它每 5 分钟都会命中，重复打没有信息增量）。 */
+  private cachedCatalogLogged = false
 
   /** 模型目录缓存有效期（毫秒）。短 TTL：新登录的账号最多 30s 后可见。 */
   private static readonly MODELS_CACHE_TTL_MS = 30_000
@@ -625,19 +631,29 @@ export class TraeAuth extends Service {
    * 才记录。
    */
   async fetchModels(pool?: AccountPool): Promise<TraeRemoteModel[]> {
+    return (await this.fetchCatalog(pool)).models
+  }
+
+  /**
+   * 目录 + 来源（适配器用后者向界面披露「这份清单不是上游现取的」）。
+   *
+   * 缓存**连同来源一起**存：命中缓存时不能再猜来源，否则「改读官方缓存」的
+   * 提醒会在 30 秒后的下一次调用里消失。
+   */
+  async fetchCatalog(pool?: AccountPool): Promise<TraeCatalog> {
     // 命中缓存直接返回（**含空结果**）—— 见 `modelsCache` 的字段注释：
     // 适配器不缓存空结果，没有这一层就会在未登录时反复发真实请求。
     const cached = this.modelsCache
     if (cached !== undefined && Date.now() - cached.at < TraeAuth.MODELS_CACHE_TTL_MS) {
-      return cached.models
+      return { models: cached.models, source: cached.source }
     }
-    const models = await this.fetchModelsUncached(pool)
-    this.modelsCache = { models, at: Date.now() }
-    return models
+    const catalog = await this.fetchModelsUncached(pool)
+    this.modelsCache = { ...catalog, at: Date.now() }
+    return catalog
   }
 
   /** 真正发起一次拉取；日志与错误处理见 `fetchModels` 的注释。 */
-  private async fetchModelsUncached(pool?: AccountPool): Promise<TraeRemoteModel[]> {
+  private async fetchModelsUncached(pool?: AccountPool): Promise<TraeCatalog> {
     let credential: TraeCredential | undefined
     if (pool) {
       const available = await pool.getAvailableAccount(this.product.id, '').catch(() => undefined)
@@ -645,12 +661,13 @@ export class TraeAuth extends Service {
     }
     if (credential === undefined) {
       const resolved = await this.ctx.credentials.resolve(credentialRef(this.credentialRefName))
-      if (!resolved) return []
+      if (!resolved) return { models: [], source: 'unavailable' }
       credential = parseCredential(resolved.value)
-      if (credential === undefined) return []
+      if (credential === undefined) return { models: [], source: 'unavailable' }
     }
-    if (credential.access_token.length === 0) return []
+    if (credential.access_token.length === 0) return { models: [], source: 'unavailable' }
 
+    let remote: TraeRemoteModel[] = []
     try {
       // ⚠️ 与 `get_detail_param`（单通道）不同，`batch_get_detail_param`
       // 的真实用途是**一次拉取全部 function 各自一套模型目录**。
@@ -686,13 +703,56 @@ export class TraeAuth extends Service {
       if (!response.ok) {
         // 非 2xx 是真实故障（凭据失效 / 上游异常），如实记录一次。
         this.warn(`fetchModels: HTTP ${response.status} ${response.statusText}`)
-        return []
+      } else {
+        remote = parseTraeBatchModelList(await response.json() as unknown)
       }
-      return parseTraeBatchModelList(await response.json() as unknown)
     } catch (e) {
       this.warn(`fetchModels: ${e instanceof Error ? e.message : String(e)}`)
-      return []
     }
+    // ⚠️ 判「可用」而不是「非空」：batch 现在会回几条 `config_source`/自定义
+    // 模型（`isCustomModel: true`），它们能过解析、却会被适配器的可调用闸门
+    // 全部剔除。按 `remote.length` 判断会让缓存兜底永远轮不到。
+    if (remote.some((model) => isTraeModelCallable(model) && model.isHidden !== true)) {
+      return { models: remote, source: 'upstream' }
+    }
+
+    // ⚠️ 2026-11-08 实测：batch 端点对全部 22 个 function 只回空组 + 少量
+    // `config_source: 3` 的自定义模型（解析后为 0），而官方客户端缓存里是同一
+    // 账号的 21 条真实模型。端点没有坏、账号也有权限，只是官方客户端已改走
+    // RPC `model_list_by_function`；网关无法直连那条连接层，故改读它拉下来的
+    // 本地缓存（只读、Node ≥22.5 的守护进程可用）。
+    const cached = await readTraeCachedModels(await this.accountUids(pool, credential))
+    if (cached.length > 0) {
+      if (!this.cachedCatalogLogged) {
+        this.cachedCatalogLogged = true
+        this.warn(`fetchModels: batch 目录为空，改读官方客户端缓存（${cached.length} 个模型）`)
+      }
+      return { models: cached, source: 'official-cache' }
+    }
+    return { models: remote, source: 'unavailable' }
+  }
+
+  /** 账号池里本渠道全部账号的 UID（官方缓存按 UID 分键）。 */
+  private async accountUids(
+    pool: AccountPool | undefined,
+    fallback: TraeCredential,
+  ): Promise<string[]> {
+    const uids = new Set<string>()
+    if (typeof fallback.uid === 'string' && fallback.uid.length > 0) uids.add(fallback.uid)
+    if (pool !== undefined) {
+      try {
+        for (const entry of await pool.listAllAccounts()) {
+          if (entry.provider !== this.product.id) continue
+          const resolved = await this.ctx.credentials.resolve(credentialRef(entry.credentialRef))
+          if (!resolved) continue
+          const credential = parseCredential(resolved.value)
+          if (credential !== undefined && credential.uid.length > 0) uids.add(credential.uid)
+        }
+      } catch {
+        // 账号池读不出来时至少还有 serving 账号的 UID；缓存读不到就交给静态兜底。
+      }
+    }
+    return [...uids]
   }
 
   /** 记录一条警告（经 `ctx.logger`，**仅失败路径**调用）。 */

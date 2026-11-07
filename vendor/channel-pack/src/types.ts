@@ -779,6 +779,13 @@ export interface RpcModelListEntry {
 /** RPC: 列出某 provider 的模型响应 */
 export interface RpcModelListResponse {
   models: RpcModelListEntry[]
+  /**
+   * 目录来源。缺省 = 该渠道没有来源概念（正常上游目录）。
+   *
+   * 适配器在「上游接口失效、改读本机官方缓存或静态兜底」时必须置位，
+   * 宿主据此在界面提醒「这份清单不是上游现取的」。
+   */
+  source?: 'upstream' | 'official-cache' | 'static-fallback'
 }
 
 /** RPC: 打开/关闭某个模型请求 */

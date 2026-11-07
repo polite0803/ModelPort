@@ -640,6 +640,20 @@ export function applyTraeRefresh(
 
 // ── 模型列表解析 ──
 
+/**
+ * 一次目录拉取的来源（供适配器向界面披露）。
+ *
+ * - `upstream`：batch 端点现取且至少有一条可用模型；
+ * - `official-cache`：batch 端点不再返回可用模型，改读官方客户端缓存；
+ * - `unavailable`：两条路都拿不到（适配器随后用静态兜底表）。
+ */
+export type TraeCatalogSource = 'upstream' | 'official-cache' | 'unavailable'
+
+export interface TraeCatalog {
+  models: TraeRemoteModel[]
+  source: TraeCatalogSource
+}
+
 /** TRAE 远端模型条目。 */
 export interface TraeRemoteModel {
   id: string
@@ -1209,12 +1223,7 @@ export function parseTraeBatchModelList(
   const groups = record.function_configs ?? record.FunctionConfigs
   if (!Array.isArray(groups)) return []
 
-  /** 通道优先级下标（同样即白名单成员资格；非成员返回 -1 由调用处丢弃）。 */
-  const rankOf = (channel: string): number => channelPriority.indexOf(channel)
-
-  const byId = new Map<string, TraeRemoteModel>()
-  /** 已选条目所在通道的优先级（仅用于规则 2 的择优）。 */
-  const chosenRank = new Map<string, number>()
+  const candidates: TraeRemoteModel[] = []
   for (const group of groups) {
     if (typeof group !== 'object' || group === null) continue
     const g = group as Record<string, unknown>
@@ -1223,7 +1232,7 @@ export function parseTraeBatchModelList(
     // 整组跳过 —— 后者的模型发出去必然被上游拒（判据见本函数注释的实测表）。
     // 未声明 `function` 的组同样跳过：无通道可用时无法构造合法请求，
     // 让它进目录只会变成一个「能选中但发不出去」的条目。
-    if (channel.length === 0 || rankOf(channel) < 0) continue
+    if (channel.length === 0 || channelPriority.indexOf(channel) < 0) continue
     const list = g.config_info_list ?? g.ConfigInfoList
     if (!Array.isArray(list)) continue
     for (const item of list) {
@@ -1242,29 +1251,49 @@ export function parseTraeBatchModelList(
       if (model.usage !== undefined && model.usage !== 'chat_completion') continue
       if (model.isEnabled === false) continue
       if (model.isHidden === true) continue
-      const incumbent = byId.get(model.id)
-      if (incumbent === undefined) {
-        byId.set(model.id, model)
-        chosenRank.set(model.id, rankOf(channel))
-        continue
-      }
-      // ⚠️ 规则 1 与 2，详见函数注释（issue IKI7WT/IKILR7）。
-      const incumbentHasEffort = declaresReasoningOptions(incumbent)
-      const candidateHasEffort = declaresReasoningOptions(model)
-      // 规则 1：空档位不得覆盖有档位。
-      if (incumbentHasEffort && !candidateHasEffort) continue
-      // 规则 2：两侧都有档位时按通道优先级取更靠前者（档位与 function 同源）。
-      if (incumbentHasEffort && candidateHasEffort) {
-        // ⚠️ 这里不再需要「已选条目不在优先级表内」的兜底分支（Issue IKJOZ7）：
-        // 白名单准入已在上面跳过非白名单通道，故 `chosenRank` 与 `rankOf` 恒为
-        // 0..n-1 的合法下标，不存在 `MAX_SAFE_INTEGER`。旧代码那套兜底是
-        // 「优先级表只用于排序」时代的产物，现在是**不可达**的。
-        if (rankOf(channel) >= (chosenRank.get(model.id) ?? 0)) continue
-      }
-      // 规则 3：其余情形沿用既有的「后覆盖前」。
+      candidates.push(model)
+    }
+  }
+  return mergeTraeModels(candidates, channelPriority)
+}
+
+/**
+ * 按通道优先级合并同一模型的多条候选（解析器与官方客户端缓存共用）。
+ *
+ * 规则见 {@link parseTraeBatchModelList} 的长注释：白名单准入 → 空档位不覆盖
+ * 有档位 → 两侧都有档位时取更靠前的通道 → 其余保持「后覆盖前」。
+ */
+export function mergeTraeModels(
+  candidates: readonly TraeRemoteModel[],
+  channelPriority: readonly string[] = TRAE_CHANNELS,
+): TraeRemoteModel[] {
+  /** 通道优先级下标（同样即白名单成员资格；非成员返回 -1 由调用处丢弃）。 */
+  const rankOf = (channel: string): number => channelPriority.indexOf(channel)
+
+  const byId = new Map<string, TraeRemoteModel>()
+  /** 已选条目所在通道的优先级（仅用于规则 2 的择优）。 */
+  const chosenRank = new Map<string, number>()
+  for (const model of candidates) {
+    const channel = model.function ?? ''
+    if (channel.length === 0 || rankOf(channel) < 0) continue
+    const incumbent = byId.get(model.id)
+    if (incumbent === undefined) {
       byId.set(model.id, model)
       chosenRank.set(model.id, rankOf(channel))
+      continue
     }
+    // ⚠️ 规则 1 与 2，详见 `parseTraeBatchModelList` 的注释（issue IKI7WT/IKILR7）。
+    const incumbentHasEffort = declaresReasoningOptions(incumbent)
+    const candidateHasEffort = declaresReasoningOptions(model)
+    // 规则 1：空档位不得覆盖有档位。
+    if (incumbentHasEffort && !candidateHasEffort) continue
+    // 规则 2：两侧都有档位时按通道优先级取更靠前者（档位与 function 同源）。
+    if (incumbentHasEffort && candidateHasEffort) {
+      if (rankOf(channel) >= (chosenRank.get(model.id) ?? 0)) continue
+    }
+    // 规则 3：其余情形沿用既有的「后覆盖前」。
+    byId.set(model.id, model)
+    chosenRank.set(model.id, rankOf(channel))
   }
   return [...byId.values()]
 }

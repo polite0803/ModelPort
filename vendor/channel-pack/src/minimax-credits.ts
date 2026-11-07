@@ -293,6 +293,20 @@ async function requestEnvelope(
       signal: AbortSignal.timeout(MINIMAX_REQUEST_TIMEOUT_MS),
     })
     const text = await response.text()
+    // ⚠️ 先判 HTTP 状态，再解析业务信封（2026-11-08 实测）：
+    // 令牌过期时上游回 **HTTP 401 + `{"error":"invalid access token"}`**，
+    // 这个响应没有 `base_resp`，旧实现会把它当成「业务成功」，于是调用方
+    // 报「签到响应缺少有效的 claim_result」—— 把「凭据失效」误诊成「响应
+    // 形状变了」，自动签到每 30 分钟继续用同一枚死令牌空转。
+    if (!response.ok) {
+      return {
+        ok: false,
+        code: response.status,
+        message: response.status === 401 || response.status === 403
+          ? `凭据已失效（HTTP ${response.status}），请重新登录该账号`
+          : `服务端返回 HTTP ${response.status}`,
+      }
+    }
     let payload: unknown
     try {
       payload = JSON.parse(text)
@@ -300,9 +314,7 @@ async function requestEnvelope(
       return {
         ok: false,
         code: response.status,
-        message: response.status === 401 || response.status === 403
-          ? `凭据已失效（HTTP ${response.status}），请重新登录该账号`
-          : `服务端返回了非 JSON 响应（HTTP ${response.status}）`,
+        message: `服务端返回了非 JSON 响应（HTTP ${response.status}）`,
       }
     }
     if (typeof payload !== 'object' || payload === null) {
@@ -385,7 +397,14 @@ export async function claimMinimaxDailyCheckin(
     return { kind: 'already-claimed', message: '今日已签到' }
   }
   if (claimResult !== MINIMAX_CLAIM_RESULT.Claimed) {
-    return { kind: 'failed', code: -1, message: '签到响应缺少有效的 claim_result' }
+    // 带上实际收到的字段名：响应形状真变了时，这句话本身要能指向下一处该看
+    // 哪里；只写「缺少 claim_result」会让排查者从零开始猜。
+    const keys = Object.keys(data).slice(0, 8).join(', ')
+    return {
+      kind: 'failed',
+      code: -1,
+      message: `签到响应缺少有效的 claim_result（data 字段：${keys || '空'}）`,
+    }
   }
   // ⚠️ credit 取 points（总数，已含 bonus_points）
   const points = finiteNumber(data.points) ?? 0

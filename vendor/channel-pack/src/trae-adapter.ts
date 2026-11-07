@@ -34,6 +34,8 @@ import {
   traeMaxModeFields,
   traeSOLOHeaders,
   transformToSOLOBody,
+  type TraeCatalog,
+  type TraeCatalogSource,
   type TraeCredential,
   type TraeSSEEvent,
   type TraeReasoningConfig,
@@ -219,6 +221,13 @@ export interface TraeAdapterOptions {
   refresh: (accountId?: string, reason?: 'auth') => Promise<void>
   /** 动态拉取远端模型列表；失败时回退到 `product.fallbackModels`。 */
   fetchRemoteModels?: () => Promise<TraeRemoteModel[]>
+  /**
+   * 动态目录 + 来源（优先于 {@link fetchRemoteModels}）。
+   *
+   * 只有走这条回调，适配器才知道「这份目录是上游现取的，还是官方缓存/兜底」，
+   * 从而在界面上如实提醒；旧回调保持兼容（按 `upstream` 处理）。
+   */
+  fetchRemoteCatalog?: () => Promise<TraeCatalog>
   fetchImpl?: typeof fetch
   /** 多账号池（用于限流时切换账号）。 */
   accountPool?: AccountPool
@@ -598,6 +607,8 @@ export class TraeAdapter extends LlmAdapter {
   private remoteMeta: ReadonlyMap<string, TraeRemoteModel> = new Map()
   /** 产品级兜底模型索引。 */
   private readonly fallbackIndex: ReadonlyMap<string, TraeFallbackModel>
+  /** 当前 `remoteModels` 的来源；`undefined` = 还没成功拉过目录。 */
+  private fetchedCatalogSource: TraeCatalogSource | undefined
 
   constructor(private readonly options: TraeAdapterOptions) {
     super()
@@ -615,18 +626,36 @@ export class TraeAdapter extends LlmAdapter {
 
   /** 懒加载远端模型目录（仅拉取一次）。 */
   private async ensureRemoteModels(): Promise<void> {
+    const fetchCatalog = this.options.fetchRemoteCatalog
     const fetchRemote = this.options.fetchRemoteModels
-    if (this.remoteModels !== undefined || fetchRemote === undefined) return
+    if (this.remoteModels !== undefined || (fetchCatalog === undefined && fetchRemote === undefined)) return
     // 闸门：并发去重 + 失败/空结果冷却（依据见 src/remote-catalog-gate.ts）。
     // Trae 的目录超时上限 30s（src/trae.ts:68），失败不冷却会被 buildModelCatalog
     // 放大成「每模型一次」。
     await this.catalogGate.run(async () => {
-      const models = await fetchRemote()
-      if (models.length === 0) return false
-      this.remoteModels = models
-      this.remoteMeta = new Map(models.map((model) => [model.id, model]))
+      const catalog: TraeCatalog = fetchCatalog !== undefined
+        ? await fetchCatalog()
+        : { models: await fetchRemote!(), source: 'upstream' }
+      if (catalog.models.length === 0) return false
+      this.remoteModels = catalog.models
+      this.fetchedCatalogSource = catalog.source
+      this.remoteMeta = new Map(catalog.models.map((model) => [model.id, model]))
       return true
     })
+  }
+
+  /**
+   * 当前目录的来源（`model.list` 原样透传给宿主，界面据此提醒）。
+   *
+   * - 可调用目录为空 → 适配器实际返回的是静态兜底表 → `static-fallback`；
+   * - 否则保留拉取时记录的来源（`upstream` / `official-cache`）。
+   */
+  catalogSource(): 'upstream' | 'official-cache' | 'static-fallback' {
+    const usable = this.remoteModels === undefined
+      ? []
+      : this.remoteModels.filter((model) => isTraeModelCallable(model) && model.isHidden !== true)
+    if (usable.length === 0) return 'static-fallback'
+    return this.fetchedCatalogSource === 'official-cache' ? 'official-cache' : 'upstream'
   }
 
   /**
@@ -797,9 +826,14 @@ export class TraeAdapter extends LlmAdapter {
     // 过滤逻辑与 `listModels` 的第一、二层一致（usage / config_switch /
     // is_invisible_to_user 已在解析器里剔除；这里再挡 isHidden 与 is_custom_model），
     // **唯一区别是不套用户黑名单**。
-    const source = this.remoteModels === undefined
-      ? this.staticFallbackModels()
+    const remote = this.remoteModels === undefined
+      ? []
       : this.remoteModels.filter((model) => isTraeModelCallable(model) && model.isHidden !== true)
+    // ⚠️ 远端非空但**全部不可调用**（2026-11-08 实测：batch 只剩自定义模型）
+    // 与「远端为空」是同一件事 —— 目录都不可用。旧写法只在 `remoteModels`
+    // 未定义时兜底，于是「有 2 条自定义模型」会被当成有效目录、返回空表，
+    // 界面刷新模型清单直接报「空」。可调用结果为空时用兜底表接管。
+    const source = remote.length > 0 ? remote : this.staticFallbackModels()
     return source.map((model) => ({
       id: model.id,
       name: traeDisplayName(model),
