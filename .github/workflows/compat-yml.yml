@@ -70,9 +70,9 @@ jobs:
                 current = url[1].replaceAll(FROM, TO)
                 next = line.replace(url[1], current)
                 if (primary === null) primary = current
-              } else if (/^\s*sha512:/.test(line) && current !== null) {
+              } else if (/^\s+sha512:/.test(line) && current !== null) {
                 next = `${line.match(/^\s*/)[0]}sha512: ${info.get(current).sha512}`
-              } else if (/^\s*size:/.test(line) && current !== null) {
+              } else if (/^\s+size:/.test(line) && current !== null) {
                 next = `${line.match(/^\s*/)[0]}size: ${info.get(current).size}`
               } else if (/^path:/.test(line)) {
                 next = `path: ${primary}`
