@@ -407,6 +407,26 @@ WSL 首装都在，远程没有任何部署入口）。以下取舍自行拍板�
   通道注册、卸载确认与数据保留、桥接具名、页面分发）。
   全量 `npm run gate`：**1942 通过 / 0 失败**（2026-11-08，本地镜像 C:\mp-build）。
 
+### 发布记录（v1.7.7，2026-11-08）
+
+- **首次 tag 打错了树**：发布时只提交了本轮文件，工作树里渠道侧那批改动（TRAE 目录、
+  MiniMax 归因、签到分档、WSL 身份、目录来源披露）未提交；用户以「本地还有两千多行
+  diff 就发布」退回。处理：先 `gh run cancel` 停掉已启动的流水线（未产生资产、Release
+  未建），把渠道侧改动并入 `4b07897`（vendor）与 `e6c3d3d`（宿主/界面），tag 重打到
+  `4280adc` 再推。
+- 门禁：本地镜像 1942/1942 覆盖发布提交（22 个渠道文件与镜像逐字节核对一致）；CI 的
+  gate job 在 tag 提交上重跑绿，四平台矩阵全绿。
+- 资产：22 项 → 补 3 份 `latest*.yml` 后 **25 项**，与 1.7.6 的终局资产数一致
+  （Win setup/portable、mac dmg×2、Linux AppImage×2/deb/tar.gz、daemon×2，各带
+  `.sha256`；`ModelPort-Shell-1.7.7-x64-setup.exe` 别名与三份 yml 仍在，供 ≤1.7.5 客户端）。
+- 本机 `release-assets.githubusercontent.com` 被解析到 `::1` 拒连 ⇒ 下载不了资产算
+  sha512。改为**一次性 workflow** 在 CI 内以 1.7.6 的 yml 为模板、对已发布的 1.7.7 字节
+  算 sha512（并用发布侧 `.sha256` 交叉校验）后上传，用完即删——一次性桥，不是发布步骤。
+  首次生成把 `latest-linux.yml` 顶层 `sha512` 写成 deb 的哈希（缩进正则吞了顶层行），
+  修正后重跑，顶层哈希与 `path` 指向的 AppImage 一致。
+- 已知遗留：macOS 未签名/公证、Windows 未签名；旧壳（`com.modelport.shell`）装过的机器
+  升级后程序列表仍留旧条目，需手动卸载一次。
+
 ### 仍未取到的读数
 
 1. **本地形态的真机运行**：`ModelPort.exe --gateway` 会读写这台机器的真实 `<appData>/modelport` 与
