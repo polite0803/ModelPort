@@ -1,4 +1,37 @@
-import type { CatalogueModel, ProviderModelOverrides } from './types.ts'
+import type { CatalogueModel, Provider, ProviderModelOverrides } from './types.ts'
+
+/**
+ * The provider a catalogue-shaped name belongs to when the user wrote no alias
+ * for it. Machine wiring used to be one row per model in the global mapping
+ * table; after it moved to the provider ledgers this is the read-side
+ * equivalent:
+ *
+ * - `<aggregateId>/<modelId>` → that aggregate provider (only its sync ever
+ *   produces that name);
+ * - a name the provider lists in its own ledger → that provider (account
+ *   channels qualify their display names as `<渠道名> / <展示名>`).
+ *
+ * Without the pin, an `ovh/deepseek-chat`-style name would be "routable" for a
+ * catalogue-less passthrough provider, because {@link isModelRoutable} answers
+ * `true` whenever there is no catalogue to contradict the name.
+ */
+export function derivePreferredProvider(
+  model: string,
+  providers: ReadonlyArray<Pick<Provider, 'id' | 'type' | 'modelMappings'>>
+): string | undefined {
+  const slash = model.indexOf('/')
+  if (slash > 0) {
+    const prefix = model.slice(0, slash)
+    const aggregate = providers.find(provider => provider.id === prefix && provider.type === 'aggregate')
+    if (aggregate) return aggregate.id
+  }
+
+  for (const provider of providers) {
+    if (provider.modelMappings?.[model] !== undefined) return provider.id
+  }
+
+  return undefined
+}
 
 /**
  * The single merge of a provider's model catalogue: shipped names, hand-added

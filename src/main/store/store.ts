@@ -562,7 +562,12 @@ class StoreManager {
 
     const normalized: AppConfig = {
       ...rawConfig,
-      modelMappings: normalizeModelMappingsWithDefaults(rawConfig.modelMappings),
+      // 映射表只留用户自己的别名/点名：聚合成渠道同步写进去的每模型接线行、
+      // 以及已删供应商留下的僵尸钉定，在这里读侧统一摘掉（判据见函数注释）。
+      modelMappings: normalizeModelMappingsWithDefaults(
+        rawConfig.modelMappings,
+        (this.store?.get('providers') || []) as Provider[],
+      ),
       requestLogConfig: normalizeRequestLogConfig(
         rawConfig.requestLogConfig || DEFAULT_REQUEST_LOG_CONFIG,
       ),

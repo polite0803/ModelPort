@@ -27,7 +27,7 @@ import { useProxyStore } from '@/stores/proxyStore'
 import { useNavigationStore } from '@/stores/navigationStore'
 import { useToast } from '@/hooks/use-toast'
 import type { ModelMapping, Provider, Account } from '@/types/electron'
-import { ArrowRight, Plus, Pencil, Trash2, Search, Sparkles, Save, RotateCcw, AlertTriangle } from 'lucide-react'
+import { ArrowRight, Plus, Pencil, Trash2, Search, Save, RotateCcw, AlertTriangle } from 'lucide-react'
 
 interface ModelMappingConfigProps {
   onConfigChange?: () => void
@@ -87,12 +87,6 @@ export function ModelMappingConfig({ onConfigChange }: ModelMappingConfigProps) 
   })
 
   const AUTO_SELECT_VALUE = 'auto'
-
-  const WILDCARD_EXAMPLES = [
-    { pattern: 'gpt-*', description: t('proxy.wildcardMappingDesc') },
-    { pattern: '*-turbo', description: t('proxy.wildcardMappingDesc') },
-    { pattern: 'claude-*-latest', description: t('proxy.wildcardMappingDesc') },
-  ]
 
   useEffect(() => {
     fetchProviders()
@@ -194,6 +188,18 @@ export function ModelMappingConfig({ onConfigChange }: ModelMappingConfigProps) 
       return
     }
 
+    // 运行时只按精确名字查这张表（`config.modelMappings[name]`），通配键永远
+    // 不会被任何一条读路径命中。收下它就是收下一个「看着能用其实到不了」的条目，
+    // 所以这里直接拒绝，而不是存下来再靠界面提示。
+    if (formData.requestModel.includes('*')) {
+      toast({
+        title: t('proxy.validationFailed'),
+        description: t('proxy.wildcardUnsupported'),
+        variant: 'destructive',
+      })
+      return
+    }
+
     const mapping: ModelMapping = {
       requestModel: formData.requestModel.trim(),
       actualModel: formData.actualModel.trim(),
@@ -283,8 +289,6 @@ export function ModelMappingConfig({ onConfigChange }: ModelMappingConfigProps) 
   const filteredAccounts = selectedProviderId
     ? accounts.filter(a => a.providerId === selectedProviderId)
     : []
-
-  const isWildcard = formData.requestModel.includes('*')
 
   const modelOptions: ComboboxOption[] = useMemo(() => {
     const options: ComboboxOption[] = []
@@ -463,7 +467,11 @@ export function ModelMappingConfig({ onConfigChange }: ModelMappingConfigProps) 
                       <TableCell>
                         <div className="flex items-center gap-2">
                           {isWildcardMapping && (
-                            <Sparkles className="h-4 w-4 text-warning" />
+                            // 老版本界面教过用户写通配键，运行时却只按精确名查表。
+                            // 存量条目照样列出（删不删由用户决定），但必须明说它到不了。
+                            <span title={t('proxy.wildcardUnsupported')} className="inline-flex">
+                              <AlertTriangle className="h-4 w-4 text-warning" />
+                            </span>
                           )}
                           <code className="text-sm">{mapping.requestModel}</code>
                           {mapping.disabled === true && (
@@ -530,28 +538,7 @@ export function ModelMappingConfig({ onConfigChange }: ModelMappingConfigProps) 
           </div>
         )}
 
-        <div className="flex items-start gap-2 p-3 bg-muted/50 rounded-lg">
-          <Sparkles className="h-4 w-4 text-warning mt-0.5 flex-shrink-0" />
-          <div className="space-y-1">
-            <p className="text-sm font-medium">{t('proxy.wildcardMapping')}</p>
-            <p className="text-xs text-muted-foreground">
-              {t('proxy.wildcardMappingDesc')}
-            </p>
-            <div className="flex flex-wrap gap-2 mt-2">
-              {WILDCARD_EXAMPLES.map((example) => (
-                <code
-                  key={example.pattern}
-                  className="text-xs bg-background px-2 py-1 rounded cursor-pointer hover:bg-background/80"
-                  title={example.description}
-                  onClick={() => setFormData(prev => ({ ...prev, requestModel: example.pattern }))}
-                >
-                  {example.pattern}
-                </code>
-              ))}
-            </div>
-          </div>
-        </div>
-      </CardContent>
+        </CardContent>
 
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
         <DialogContent>
@@ -568,11 +555,6 @@ export function ModelMappingConfig({ onConfigChange }: ModelMappingConfigProps) 
             <div className="space-y-2">
               <Label htmlFor="requestModel">
                 {t('proxy.requestModel')}
-                {isWildcard && (
-                  <Badge variant="outline" className="ml-2 text-xs">
-                    {t('proxy.wildcard')}
-                  </Badge>
-                )}
               </Label>
               <Input
                 id="requestModel"

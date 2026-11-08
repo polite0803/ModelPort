@@ -21,7 +21,7 @@ import { MODELS_DEV_URL, listModelsDevModels, planSyncModelIds } from '../../../
 import { aggregateCostOf } from '../../../shared/aggregateCost.ts'
 import AccountManager from '../../store/accounts'
 import { storeManager } from '../../store/store'
-import type { Account, ModelMapping, Provider } from '../../store/types'
+import type { Account, Provider } from '../../store/types'
 import type { FetchedModel } from '../../../shared/types'
 import type {
   AggregateDetail,
@@ -289,7 +289,8 @@ class AggregateProviderManager {
       this.writeKeys(entry.id, entry.name, keyList)
     }
 
-    this.writeMappings(entry.id, modelMappings)
+    // 接线只落在供应商记录的 `modelMappings` 账本上：全局别名表是用户的东西，
+    // 同步不再往里写（旧版本每轮整表重写，顺手抹掉用户同名的 pinned 别名）。
     return storeManager.getProviderById(entry.id) ?? record
   }
 
@@ -310,7 +311,8 @@ class AggregateProviderManager {
     storeManager.deleteProvider(id)
     // 记录都没了，那次"问过余额"的读数也不该继续影响路由。
     storeManager.deleteAggregateCreditSnapshot(id)
-    this.writeMappings(id, {})
+    // 全局映射表里钉到这条目的行由 `normalizeModelMappingsWithDefaults` 按
+    // 「owner 已不存在」摘掉，这里不再整表重写。
     // 用户显式删除的免验证条目记入黑名单：自动开通不再复活它。
     // 只对真正标了 autoProvision 的条目落盘，普通条目不因此多写一次配置。
     if (getAggregateEntry(id)?.autoProvision) {
@@ -906,23 +908,6 @@ class AggregateProviderManager {
       name: `${providerName} (keyless)`,
       credentials: {},
     })
-  }
-
-  /**
-   * Rewrites the global model mappings owned by this provider. Existing entries
-   * under the same `preferredProviderId` that are not in the new set are
-   * dropped, so removing or replacing a catalogue never leaves stale names.
-   */
-  private writeMappings(providerId: string, mappings: Record<string, string>): void {
-    const config = storeManager.getConfig()
-    const next: Record<string, ModelMapping> = {}
-    for (const [requestModel, mapping] of Object.entries(config.modelMappings || {})) {
-      if (mapping.preferredProviderId !== providerId) next[requestModel] = mapping
-    }
-    for (const [requestModel, actualModel] of Object.entries(mappings)) {
-      next[requestModel] = { requestModel, actualModel, preferredProviderId: providerId }
-    }
-    storeManager.updateConfig({ modelMappings: next })
   }
 
   private buildProbeHeaders(entry: AggregateEntry, provider: Provider, apiKey?: string): Record<string, string> {

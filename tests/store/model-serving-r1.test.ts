@@ -296,7 +296,7 @@ test('R1-聚合同步：上游新报的模型直接进目录并在服，同步�
 
     // `ollama` 是免 Key 条目：静态清单为空，全靠在线同步补。
     aggregateProviderManager.save({ id: 'ollama', baseUrl: server.baseUrl, models: [] })
-    assert.deepEqual(overrides(), {}, 'save() 只写供应商记录与全局映射，不写停用账本')
+    assert.deepEqual(overrides(), {}, 'save() 只写供应商记录（含模型账本），不写停用账本')
 
     const synced = await aggregateProviderManager.syncModels('ollama')
     assert.equal(synced.success, true, `sync failed: ${JSON.stringify(synced)}`)
@@ -318,8 +318,20 @@ test('R1-聚合同步：上游新报的模型直接进目录并在服，同步�
     assert.ok(selection !== null, '免 Key 条目有本机占位账号，新模型应当被选到')
     assert.equal(selection.account.providerId, 'ollama')
     assert.equal(selection.actualModel, 'new-a')
-    // 全局映射只是那家的内部账本，路由靠的是目录名本身（`isModelRoutable` 只看 served 名单）。
-    assert.equal((sm.getConfig().modelMappings as Record<string, any>)['ollama/new-a'].preferredProviderId, 'ollama')
+    // 接线只落供应商账本：全局别名表是用户数据，同步不再往里写（旧版本每轮整表重写，
+    // 会抹掉用户同名的钉定）。路由靠目录名本身，归属由 `<entry>/<model>` 形状推导。
+    assert.equal(
+      'ollama/new-a' in (sm.getConfig().modelMappings as Record<string, any>),
+      false,
+      '同步不再把目录名写进全局映射表',
+    )
+    assert.equal(sm.getProviderById('ollama').modelMappings['ollama/new-a'], 'new-a')
+    const { modelMapper } = await loadModule('main/proxy/modelMapper.ts')
+    assert.equal(
+      modelMapper.getPreferredProvider('ollama/new-a'),
+      'ollama',
+      '全局表没有这一行时，归属仍从聚合前缀推导出来',
+    )
 
     // 第二次同步带来第三个名字：仍然默认在服，仍然不写排除项。
     server.setModels([{ id: 'new-b' }, { id: 'new-c' }])
@@ -358,6 +370,30 @@ test('R1-聚合同步：上游新报的模型直接进目录并在服，同步�
   }
 })
 
+test('R1-聚合同步不再吞用户钉定：全局表里的同名条目同步后原样保留', async () => {
+  sm.clearAll()
+  const server = await startModelServer()
+  try {
+    server.setModels([{ id: 'new-a' }, { id: 'new-b' }])
+    aggregateProviderManager.save({ id: 'ollama', baseUrl: server.baseUrl, models: [] })
+
+    // 用户把目录名 `<条目>/<模型>` 改指到另一个目标。旧版本的下一次同步会整表重写，
+    // 把这一行直接抹掉（它只认识自己那一份机器接线）。
+    const userRow = { requestModel: 'ollama/new-a', actualModel: 'new-b', preferredProviderId: 'ollama' }
+    sm.updateConfig({ modelMappings: { ...sm.getConfig().modelMappings, 'ollama/new-a': userRow } })
+    assert.deepEqual(sm.getConfig().modelMappings['ollama/new-a'], userRow, '写入时不被归一当成机器接线')
+
+    const synced = await aggregateProviderManager.syncModels('ollama')
+    assert.equal(synced.success, true, `sync failed: ${JSON.stringify(synced)}`)
+    assert.deepEqual(sm.getConfig().modelMappings['ollama/new-a'], userRow, '同步不许整表重写把用户钉定吞掉')
+
+    // 对照：同一次同步新发现的 `new-b` 没有被写成第二行全局映射。
+    assert.equal('ollama/new-b' in sm.getConfig().modelMappings, false)
+  } finally {
+    await server.close()
+  }
+})
+
 test('R1-聚合删除：remove() 不写排除项；重建后的清单同样默认在服', async () => {
   sm.clearAll()
   const server = await startModelServer()
@@ -375,7 +411,7 @@ test('R1-聚合删除：remove() 不写排除项；重建后的清单同样默�
     const before = clone(overrides())
     aggregateProviderManager.remove('lmstudio')
 
-    assert.deepEqual(overrides(), before, 'remove() 只删 provider 记录与映射，不改停用账本')
+    assert.deepEqual(overrides(), before, 'remove() 只删 provider 记录（钉到它的映射由读侧归一清掉），不改停用账本')
     assert.equal(sm.getProviderById('lmstudio'), undefined)
 
     aggregateProviderManager.save({ id: 'lmstudio', baseUrl: server.baseUrl, models: ['only-one'] })

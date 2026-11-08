@@ -841,20 +841,48 @@ export function createDefaultModelMappings(): Record<string, ModelMapping> {
 }
 
 /**
- * Drop mappings that point at a retired provider or carry one of its old
- * request names. Everything the user wrote for a provider that still exists is
- * kept verbatim.
+ * Keep only entries the user owns.
+ *
+ * Three kinds of row are dropped:
+ *
+ * 1. retired request names / retired owners (the old DeepSeek integration);
+ * 2. an owner provider that no longer exists — such a pin can never select a
+ *    candidate, so it is a zombie left behind by `deleteProvider`;
+ * 3. **machine wiring**: every aggregate and account-channel sync used to also
+ *    write one row per catalogue model into this table (`<entry>/<model>` →
+ *    `<model>`, `渠道名 / 展示名` → `<channel>/<内部 id>`). That row duplicates
+ *    the provider's own `modelMappings` ledger — which is what translation,
+ *    routability and "does the gateway know this name" actually read — and
+ *    every sync rewrote the whole table, wiping any user alias it did not know
+ *    about. A row is machine wiring exactly when the owning provider's ledger
+ *    maps the same request name to the same target, or when it is the
+ *    derivable `<providerId>/<modelId>` form of an aggregate entry.
+ *
+ * `providers` omitted or empty = the caller cannot judge ownership (early boot,
+ * partial store); only the retired checks apply, never a mass drop.
  */
 export function normalizeModelMappingsWithDefaults(
-  mappings?: Record<string, ModelMapping>
+  mappings?: Record<string, ModelMapping>,
+  providers?: ReadonlyArray<Pick<Provider, 'id' | 'modelMappings'>>
 ): Record<string, ModelMapping> {
   const retired = new Set<string>(RETIRED_PROVIDER_IDS)
   const legacyModelNames = new Set(DEEPSEEK_LEGACY_MODEL_MAPPING_NAMES)
+  const ledgers = new Map((providers ?? []).map(provider => [provider.id, provider.modelMappings ?? {}]))
+  const knowOwners = ledgers.size > 0
+
   return Object.fromEntries(
-    Object.entries(mappings || {}).filter(([requestModel, mapping]) =>
-      !legacyModelNames.has(requestModel) &&
-      !(mapping.preferredProviderId && retired.has(mapping.preferredProviderId))
-    ),
+    Object.entries(mappings || {}).filter(([requestModel, mapping]) => {
+      if (legacyModelNames.has(requestModel)) return false
+      const ownerId = mapping.preferredProviderId
+      if (ownerId === undefined) return true
+      if (retired.has(ownerId)) return false
+      if (!knowOwners) return true
+      const ledger = ledgers.get(ownerId)
+      if (ledger === undefined) return false
+      if (ledger[requestModel] === mapping.actualModel) return false
+      if (requestModel === `${ownerId}/${mapping.actualModel}`) return false
+      return true
+    }),
   )
 }
 

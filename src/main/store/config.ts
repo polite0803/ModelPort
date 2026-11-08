@@ -11,7 +11,6 @@ import {
   ModelMapping,
   DEFAULT_CONFIG,
 } from './types'
-import { isMappingActive } from './modelServing'
 import { validateRoutesForWrite } from './modelRoutes'
 import { isLoopbackHost } from '../proxy/authPolicy'
 import { validateHttpsConfig } from '../../shared/httpsConfig'
@@ -147,35 +146,6 @@ export class ConfigManager {
     storeManager.addLog('info', `Delete model mapping: ${model}`)
     
     return true
-  }
-
-  /**
-   * Batch set model mappings
-   * @param mappings Mapping config list
-   */
-  static setModelMappings(mappings: ModelMapping[]): void {
-    const mappingRecord: Record<string, ModelMapping> = {}
-    
-    for (const mapping of mappings) {
-      mappingRecord[mapping.requestModel] = mapping
-    }
-    
-    this.update({ modelMappings: mappingRecord })
-    
-    storeManager.addLog('info', `Batch set model mappings: ${mappings.length} items`)
-  }
-
-  /**
-   * Resolve actual model to use
-   * @param requestedModel Requested model name
-   * @returns Actual model name to use
-   */
-  static resolveActualModel(requestedModel: string): string {
-    const mapping = this.getModelMapping(requestedModel)
-    // 映射表的又一条读路径，同一个判据必须也在这儿：停用的别名不解析。
-    // （今天它零调用者，但留着一条不过闸的读路径等于给下一个消费者挖坑。）
-    const actual = isMappingActive(mapping) ? mapping.actualModel : ''
-    return actual || requestedModel
   }
 
   // ==================== UI Configuration ====================
