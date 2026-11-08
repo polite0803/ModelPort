@@ -717,6 +717,8 @@ interface ChannelsAPI {
   accountCounts: () => Promise<Record<string, { total: number; enabled: number }>>
   rpc: (method: string, payload?: unknown) => Promise<ChannelRpcResult>
   credits: (id: string) => Promise<ChannelCredits>
+  /** 一次问完多家渠道的积分：远程 UI 上是 1 笔管理面请求，不是每家 1 笔。 */
+  creditsAll: (ids: string[]) => Promise<Record<string, ChannelCredits>>
   setEnabled: (id: string, enabled: boolean) => Promise<ChannelOperationResult>
   remove: (id: string) => Promise<ChannelOperationResult>
   autoCheckin: (enabled?: boolean) => Promise<ChannelAutoCheckinResult>

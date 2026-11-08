@@ -383,6 +383,26 @@ export async function fetchQoderCreditBalance(
   return { total, packages, expiredTotal: 0 }
 }
 
+/**
+ * 这个账号的积分维度**是否真实存在过**：任一包发放过额度（`total > 0`）
+ * 或扣过（`used > 0`）即为 true。
+ *
+ * 用途是把两种「读到 0」分开，它们在前端可以同形、在选号侧必须异判：
+ *
+ * - 免费/标准档：响应里 `userQuota` 存在但 `{total:0, used:0, remaining:0}`
+ *   （见本文件顶部 2026-09-19 实测响应），且没有 `addOnQuota`/专用包。
+ *   这是**该计划本来不发积分**，不是「烧光了」——用它拦号会把一个仍能
+ *   服务免费模型的账号排掉。
+ * - 付费档或已领过每日积分的号：`total > 0` 而 `remaining === 0` 才是
+ *   确凿的额度用尽，该拦。
+ *
+ * ⚠️ 判据只用响应自身的算术，不引入任何外部费率表；与
+ * `fetchZcodeBalance` 用 `enterprise === true` 表达「额度无数字」同一思路。
+ */
+export function qoderPlanGrantsCredits(packages: readonly CreditPackage[]): boolean {
+  return packages.some(pkg => pkg.total > 0 || pkg.used > 0)
+}
+
 /** 把 `CreditBalance` 压成一行可读摘要（供探针与日志使用）。 */
 export function describeQoderBalance(balance: CreditBalance | null): string {
   if (balance === null) return '查询失败'

@@ -226,16 +226,25 @@ export function Channels() {
   const runCredits = useCallback(async (views: ChannelView[]) => {
     const connected = views.filter(view => view.accounts.total > 0)
     if (connected.length === 0) return
-    await Promise.all(connected.map(async view => {
-      // stale-while-revalidate：已有旧值时**不**置 loading —— worker 的 `changed`
-      // 事件（请求消耗、启停账号等）都会触发全量刷新，若每次都闪 loading，
-      // 用户看到的就是「所有渠道的积分都在刷」而不是目标渠道的加减（2026-10-30）。
-      setCredits(current => current[view.id] === undefined
-        ? { ...current, [view.id]: 'loading' }
-        : current)
-      const value = await window.electronAPI.channels.credits(view.id)
-      setCredits(current => ({ ...current, [view.id]: value }))
-    }))
+    // stale-while-revalidate：已有旧值时**不**置 loading —— worker 的 `changed`
+    // 事件（请求消耗、启停账号等）都会触发全量刷新，若每次都闪 loading，
+    // 用户看到的就是「所有渠道的积分都在刷」而不是目标渠道的加减（2026-10-30）。
+    setCredits(current => {
+      let next = current
+      for (const view of connected) {
+        if (next[view.id] === undefined) next = { ...next, [view.id]: 'loading' }
+      }
+      return next
+    })
+    try {
+      // 一次问完所有已连接渠道：管理面只花 1 笔请求（原来是逐渠道 13 笔，
+      // 每 1.5s 的去抖刷新就能把 240/分钟的程序预算打满）。
+      const values = await window.electronAPI.channels.creditsAll(connected.map(view => view.id))
+      setCredits(current => ({ ...current, ...values }))
+    } catch (error) {
+      // 保留旧读数：一次查询失败不该把已有的积分清空，也不该让整轮刷新 reject。
+      console.warn('[Channels] 批量读取渠道积分失败：', error)
+    }
   }, [])
 
   /**

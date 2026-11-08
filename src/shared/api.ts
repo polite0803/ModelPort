@@ -987,6 +987,11 @@ const channelsAPI = {
   credits: (id: string): Promise<ChannelCredits> =>
     wire.invoke(IpcChannels.CHANNELS_CREDITS, id),
 
+  // 一次问完多家渠道的积分：远程 UI 上这是 1 笔管理面请求，而不是每家 1 笔。
+  // 单家的失败在 results 里是 `error` 字段，不会让整页一起失败。
+  creditsAll: (ids: string[]): Promise<Record<string, ChannelCredits>> =>
+    wire.invoke(IpcChannels.CHANNELS_CREDITS_ALL, ids),
+
   setEnabled: (id: string, enabled: boolean): Promise<ChannelOperationResult> =>
     wire.invoke(IpcChannels.CHANNELS_SET_ENABLED, id, enabled),
 

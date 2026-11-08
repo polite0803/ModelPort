@@ -1232,6 +1232,22 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
     }
   })
 
+  // 一次刷新问完所有已连接渠道：远程 UI 上这是 1 笔管理面请求而不是 13 笔。
+  registerMainHandler(IpcChannels.CHANNELS_CREDITS_ALL, async (_, ids: unknown) => {
+    if (!Array.isArray(ids)) return {}
+    try {
+      return await accountChannelManager.creditsAll(
+        ids.filter((id): id is string => typeof id === 'string'),
+      )
+    } catch (error) {
+      console.warn(
+        '[ChannelPack] 批量读取渠道积分失败：',
+        error instanceof Error ? error.message : String(error),
+      )
+      return {}
+    }
+  })
+
   registerMainHandler(IpcChannels.CHANNELS_SET_ENABLED, async (_, id: string, enabled: boolean) => {
     return accountChannelManager.setEnabled(id, enabled)
   })

@@ -122,6 +122,7 @@ export const IpcChannels = {
   CHANNELS_ACCOUNT_COUNTS: 'channels:accountCounts',
   CHANNELS_RPC: 'channels:rpc',
   CHANNELS_CREDITS: 'channels:credits',
+  CHANNELS_CREDITS_ALL: 'channels:creditsAll',
   CHANNELS_SET_ENABLED: 'channels:setEnabled',
   CHANNELS_REMOVE: 'channels:remove',
   CHANNELS_AUTO_CHECKIN: 'channels:autoCheckin',

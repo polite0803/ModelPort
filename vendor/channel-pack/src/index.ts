@@ -35,7 +35,7 @@ import {
 } from './token-ledger.js'
 import { createTokenLedgerStore } from './token-ledger-store.js'
 import { LOBSTERAI } from './lobsterai-product.js'
-import { QODER, QODER_CN } from './qoder-product.js'
+import { QODER, QODER_CN, type QoderProduct } from './qoder-product.js'
 import { TRAE } from './trae-product.js'
 import { CLINE } from './cline-product.js'
 import { configureDeadModelStore, withDeadModelPruning } from './dead-model-store.js'
@@ -50,7 +50,7 @@ import { registerMinimaxLlm } from './minimax-adapter.js'
 import { MINIMAX } from './minimax-product.js'
 import type { MinimaxCredential } from './minimax.js'
 import { fetchTraeCreditBalance } from './trae-credits.js'
-import { fetchQoderCreditBalance } from './qoder-credits.js'
+import { fetchQoderCreditBalance, qoderPlanGrantsCredits } from './qoder-credits.js'
 import { fetchZcodeBalance } from './zcode-upstream.js'
 import { fetchClineCreditBalance } from './cline-credits.js'
 import { fetchGeminiCreditBalance } from './gemini-credits.js'
@@ -298,7 +298,9 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   //   再挂门控就是双份余额请求；
   // - opencode 不注册：匿名槽位体系没有可用的余额查询接口。
   // 各渠道「余额为 0」的判定差异：
-  // - CreditBalance 形（trae/qoder/lobsterai/raccoon/minimax）：`total <= 0`；
+  // - CreditBalance 形（trae/lobsterai/raccoon/minimax）：`total <= 0`；
+  // - qoder / qodercn：先问「这个计划发放过积分吗」（`qoderPlanGrantsCredits`），
+  //   从未发放 → 「未知」放行；发放过而剩余 0 → 确凿 0 拦截（2026-11-09）；
   // - zcode：`remaining` 数值；`enterprise === true` 表示企业额度无配额数字
   //   （桶列表为空≠没钱），按「未知」放行；
   // - cline / gemini：`ClineBalanceResult.balance === null` 是查询失败
@@ -309,10 +311,23 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   const balanceGate = (probe: BalanceProbe) => new AccountBalanceGate({ probe })
   pool.setBalanceGate(TRAE.id, balanceGate(async credential =>
     creditTotal(await fetchTraeCreditBalance(credential as TraeCredential, TRAE))))
-  pool.setBalanceGate(QODER.id, balanceGate(async credential =>
-    creditTotal(await fetchQoderCreditBalance(credential as QoderCredential, QODER))))
-  pool.setBalanceGate(QODER_CN.id, balanceGate(async credential =>
-    creditTotal(await fetchQoderCreditBalance(credential as QoderCredential, QODER_CN))))
+  // Qoder 两个产品实例共用同一判据：只有**发放过积分**的号才参与余额门控。
+  // 免费/标准档的 `userQuota` 是 `{total:0,used:0,remaining:0}`——该计划本来
+  // 不发积分，把它当成「余额为 0」拦号，会把仍能服务免费模型的账号排掉；
+  // 这与上面 zcode `enterprise === true` 返回「未知」是同一个语义，不是新通道。
+  // 发放过又烧光的号（任一包 `total>0` 或 `used>0`）照旧按确凿的 0 拦截。
+  const qoderCreditTotal = async (
+    credential: QoderCredential,
+    product: QoderProduct,
+  ): Promise<number | null> => {
+    const balance = await fetchQoderCreditBalance(credential, product)
+    if (balance === null) return null
+    return qoderPlanGrantsCredits(balance.packages) ? balance.total : null
+  }
+  pool.setBalanceGate(QODER.id, balanceGate(credential =>
+    qoderCreditTotal(credential as QoderCredential, QODER)))
+  pool.setBalanceGate(QODER_CN.id, balanceGate(credential =>
+    qoderCreditTotal(credential as QoderCredential, QODER_CN)))
   pool.setBalanceGate(ZCODE.id, balanceGate(async credential => {
     const result = await fetchZcodeBalance(credential as ZcodeCredential)
     if (result === undefined || result.enterprise === true) return null

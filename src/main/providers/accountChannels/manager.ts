@@ -19,7 +19,7 @@ import { PassThrough } from 'node:stream'
 import { getHost } from '../../runtime/host'
 import AccountManager from '../../store/accounts'
 import { storeManager } from '../../store/store'
-import type { ModelMapping, Provider } from '../../store/types'
+import type { Provider } from '../../store/types'
 import { ChannelBridge, ChannelBridgeError } from '../../channelPack/bridge'
 import type {
   ChannelAutoCheckinResult,
@@ -42,6 +42,7 @@ import { accountRuntime } from '../../proxy/accountRuntime'
 import { attachContextWindows, capabilityHintOf, qualifyChannelModel, readModelList, readModelListSource } from './modelCatalog'
 import { channelRuntimeState } from './runtimeState'
 import { resyncsAfterChannelRpc } from './rpcSync'
+import { SingleFlight } from './singleFlight'
 import { ChannelCredentialVault } from './vault'
 
 interface PackProviderStatus {
@@ -98,6 +99,8 @@ class AccountChannelManager {
   private initializing: Promise<void> | null = null
   private syncing: Promise<void> | null = null
   private modelsCache: ModelsCache | null = null
+  /** 目录扫描单飞：并发调用共享在途那一轮（见 {@link SingleFlight}）。 */
+  private modelsSweep = new SingleFlight<Map<string, ChannelModelInfo[]>>()
   private packServedCache = new Map<string, PackServedCache>()
   /** 后台刷新的单飞标记：同一轮只跑一份，逐请求只查表（见 `refreshPackServedInBackground`）。 */
   private packServedRefreshing: Promise<void> | null = null
@@ -187,14 +190,20 @@ class AccountChannelManager {
 
   async list(): Promise<ChannelView[]> {
     const bridge = await this.bridgeOrThrow()
-    const status = await this.packStatus(bridge)
+    // 13 家并发，不是串行：单次 `account.list` 实测 0.1–0.5s，串起来就是首屏
+    // 1.7–5.9s（2026-11-09 429 风暴里最慢的那一格）。worker 的 RPC 各自 await，
+    // 并发不会互相挡；返回顺序仍按 `ACCOUNT_CHANNELS`。
+    const [status, listed] = await Promise.all([
+      this.packStatus(bridge),
+      Promise.all(ACCOUNT_CHANNELS.map(channel => bridge.rpc('account.list', { provider: channel.id }))),
+    ])
     const views: ChannelView[] = []
-    for (const channel of ACCOUNT_CHANNELS) {
+    for (const [index, channel] of ACCOUNT_CHANNELS.entries()) {
       const provider = storeManager.getProviderById(channel.id)
       let accounts: PackAccount[] = []
-      const listed = await bridge.rpc('account.list', { provider: channel.id })
-      if (listed.ok) {
-        const value = listed.value as { accounts?: PackAccount[] } | undefined
+      const result = listed[index]
+      if (result?.ok === true) {
+        const value = result.value as { accounts?: PackAccount[] } | undefined
         accounts = Array.isArray(value?.accounts) ? value.accounts : []
       }
       const packStatus = status[channel.id]
@@ -312,6 +321,32 @@ class AccountChannelManager {
       }
     })
     return { reported, accounts, ...reported > 0 ? { remaining: Math.round(total * 100) / 100 } : {} }
+  }
+
+  /**
+   * 一次问完多家渠道的积分。
+   *
+   * Channels 页一次刷新原本逐渠道发 13 个 `channels:credits`，远程 UI 上就是 13
+   * 笔管理面请求（2026-11-09 429 风暴的放大器之一）。批量入口在**宿主内**并发问
+   * worker，对管理面只占一次预算；单家失败已在 `credits()` 里收敛成 `error` 字段，
+   * 这里只兜住「整个 bridge 没了」那一层，保证不把一家的异常升级成整页失败。
+   */
+  async creditsAll(ids: string[]): Promise<Record<string, ChannelCredits>> {
+    const wanted = [...new Set(ids)]
+      .filter((id): id is string => typeof id === 'string' && getChannelDefinition(id) !== undefined)
+    const results = await Promise.all(wanted.map(async id => {
+      try {
+        return [id, await this.credits(id)] as const
+      } catch (error) {
+        const entry: ChannelCredits = {
+          reported: 0,
+          accounts: [],
+          error: error instanceof Error ? error.message : '积分查询失败',
+        }
+        return [id, entry] as const
+      }
+    }))
+    return Object.fromEntries(results)
   }
 
   /**
@@ -569,6 +604,8 @@ class AccountChannelManager {
   private invalidateModelsCache(): void {
     this.modelsCache = null
     this.packServedCache.clear()
+    // 在途那一轮的结果已经过时：代次 +1，后来者另起一轮，旧轮次不回写缓存。
+    this.modelsSweep.invalidate()
   }
 
   /**
@@ -686,7 +723,7 @@ class AccountChannelManager {
    * 周期预热入口（供 `Scheduler` 调用）。
    *
    * 与 `refreshModels` 的本质区别：后者走 `resync()`（清整个缓存 → `syncProviders`
-   * 写 provider 记录 + 全局 modelMappings + 广播），那是"用户在界面里点了刷新、
+   * 写 provider 记录 + 广播），那是"用户在界面里点了刷新、
    * 期望状态立即生效"的语义。定时预热不想要这套副作用：
    *
    * - **不写持久化**：定时跑出来的目录不该覆盖用户手动的停用/恢复决策；
@@ -959,28 +996,35 @@ class AccountChannelManager {
    * 视图整轮只拉一次，12 个渠道共用，避免把同步变成 12 次往返。
    */
   private async models(bridge: ChannelBridge): Promise<Map<string, ChannelModelInfo[]>> {
-    const now = Date.now()
-    if (this.modelsCache !== null && now - this.modelsCache.at < MODELS_CACHE_MS) {
+    if (this.modelsCache !== null && Date.now() - this.modelsCache.at < MODELS_CACHE_MS) {
       return this.modelsCache.byChannel
     }
-    const view = await this.modelView(bridge)
-    const byChannel = new Map<string, ChannelModelInfo[]>()
-    const sourceByChannel = new Map<string, ChannelModelSource>()
-    await Promise.all(ACCOUNT_CHANNELS.map(async channel => {
-      const fetched = await this.fetchModels(bridge, channel.id, view ?? [])
-      byChannel.set(channel.id, fetched.models)
-      if (fetched.source !== undefined) sourceByChannel.set(channel.id, fetched.source)
-    }))
-    this.modelsCache = { at: now, byChannel, sourceByChannel }
-    // 同一次视图读取顺手填服务清单缓存：视图拿不到（`modelView` 返回 null）就**不填**，
-    // 让 `packServedIds` 落到「未知 → 不剔除」，而不是把一次目录故障读成「整家没模型」。
-    if (view !== null) this.seedPackServedCache(view, now)
-    // 一行可 grep 的诊断：哪些渠道真的报了上下文窗口、哪些没有。
-    // 用 `storeManager.addLog` 而不是 `console.log` —— 只有前者会落进
-    // `<dataDir>/logs/app-logs.ndjson`，而"窗口有没有下发"这件事恰恰只能从
-    // 那里事后核对（`/v1/models` 需要 API key，排查时不一定拿得到）。
-    this.logWindowCoverage(byChannel)
-    return byChannel
+    // 单飞：缓存只在整轮扫完才回填，并发调用若各跑一轮，就是 5 路同时读全量目录。
+    return this.modelsSweep.run(async (version) => {
+      const view = await this.modelView(bridge)
+      const byChannel = new Map<string, ChannelModelInfo[]>()
+      const sourceByChannel = new Map<string, ChannelModelSource>()
+      await Promise.all(ACCOUNT_CHANNELS.map(async channel => {
+        const fetched = await this.fetchModels(bridge, channel.id, view ?? [])
+        byChannel.set(channel.id, fetched.models)
+        if (fetched.source !== undefined) sourceByChannel.set(channel.id, fetched.source)
+      }))
+      // 途中被作废（账号池/目录刚变）：这一轮只把结果交给等它的调用方，
+      // 不回写缓存、也不再打一行诊断 —— 否则旧轮次会覆盖新一轮的扫描结果。
+      if (version === this.modelsSweep.version) {
+        const at = Date.now()
+        this.modelsCache = { at, byChannel, sourceByChannel }
+        // 同一次视图读取顺手填服务清单缓存：视图拿不到（`modelView` 返回 null）就**不填**，
+        // 让 `packServedIds` 落到「未知 → 不剔除」，而不是把一次目录故障读成「整家没模型」。
+        if (view !== null) this.seedPackServedCache(view, at)
+        // 一行可 grep 的诊断：哪些渠道真的报了上下文窗口、哪些没有。
+        // 用 `storeManager.addLog` 而不是 `console.log` —— 只有前者会落进
+        // `<dataDir>/logs/app-logs.ndjson`，而"窗口有没有下发"这件事恰恰只能从
+        // 那里事后核对（`/v1/models` 需要 API key，排查时不一定拿得到）。
+        this.logWindowCoverage(byChannel)
+      }
+      return byChannel
+    })
   }
 
   /** 记录每个渠道的窗口覆盖率；只统计"有模型的渠道"，避免空渠道刷屏。 */
@@ -1027,7 +1071,7 @@ class AccountChannelManager {
   }
 
   /**
-   * 丢弃缓存并重跑一轮同步（写入 provider 记录与全局 modelMappings）。
+   * 丢弃缓存并重跑一轮同步（写入 provider 记录及其模型账本）。
    *
    * 必须清**整个**缓存：只清一家会让 `syncProviders` 把其余渠道读成「无模型」，
    * 从而把它们的 provider 记录关掉。
@@ -1086,7 +1130,6 @@ class AccountChannelManager {
           loginKind: getChannelDefinition(id)?.loginKind,
           enabled: false,
         })
-        this.writeMappings(id, {})
       }
       return
     }
@@ -1129,7 +1172,8 @@ class AccountChannelManager {
       storeManager.addProvider(record)
     }
     this.ensureLocalAccount(id, name)
-    this.writeMappings(id, modelMappings)
+    // 展示名 → `<channel>/<内部 id>` 的接线在供应商记录的账本里（上面那份 record），
+    // 不再写全局别名表：那是用户自己的表，同步整表重写会抹掉同类名的用户钉定。
     this.migrateServedNames(id, legacyNames, servedBefore)
     this.migrateRenamedDisplayNames(id, name, servedBefore)
   }
@@ -1217,20 +1261,8 @@ class AccountChannelManager {
     const provider = storeManager.getProviderById(id)
     if (provider === undefined || provider.type !== 'account') return
     storeManager.deleteProvider(id)
-    this.writeMappings(id, {})
-  }
-
-  /** Mirrors `aggregate/manager.ts`: rewrites only this provider's global mappings. */
-  private writeMappings(providerId: string, mappings: Record<string, string>): void {
-    const config = storeManager.getConfig()
-    const next: Record<string, ModelMapping> = {}
-    for (const [requestModel, mapping] of Object.entries(config.modelMappings || {})) {
-      if (mapping.preferredProviderId !== providerId) next[requestModel] = mapping
-    }
-    for (const [requestModel, actualModel] of Object.entries(mappings)) {
-      next[requestModel] = { requestModel, actualModel, preferredProviderId: providerId }
-    }
-    storeManager.updateConfig({ modelMappings: next })
+    // 全局映射表里钉到这条渠道的行由 `normalizeModelMappingsWithDefaults` 按
+    // 「owner 已不存在」摘掉；同步不再碰用户的别名表，这里也无需整表重写。
   }
 }
 

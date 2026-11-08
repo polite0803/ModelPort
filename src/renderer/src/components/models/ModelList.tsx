@@ -354,24 +354,22 @@ export function ModelList() {
       setCredits({})
       return
     }
-    await Promise.all(connected.map(async (provider) => {
-      // stale-while-revalidate：已有旧值时不置 loading（同 Channels.tsx ——
-      // 账号启停等触发的重刷不该让所有渠道的上标一起闪）。
-      setCredits(current => current[provider.id] === undefined
-        ? { ...current, [provider.id]: 'loading' }
-        : current)
-      try {
-        const value = await window.electronAPI.channels.credits(provider.id)
-        setCredits(current => ({ ...current, [provider.id]: value }))
-      } catch (error) {
-        console.error(`Failed to load credits for ${provider.id}:`, error)
-        setCredits(current => {
-          const next = { ...current }
-          delete next[provider.id]
-          return next
-        })
+    // stale-while-revalidate：已有旧值时不置 loading（同 Channels.tsx ——
+    // 账号启停等触发的重刷不该让所有渠道的上标一起闪）。
+    setCredits(current => {
+      let next = current
+      for (const provider of connected) {
+        if (next[provider.id] === undefined) next = { ...next, [provider.id]: 'loading' }
       }
-    }))
+      return next
+    })
+    try {
+      // 批量入口：一次管理面请求问完所有已连接渠道，而不是每渠道一笔。
+      const values = await window.electronAPI.channels.creditsAll(connected.map(provider => provider.id))
+      setCredits(current => ({ ...current, ...values }))
+    } catch (error) {
+      console.error('Failed to load channel credits:', error)
+    }
   }, [providers, accounts])
 
   useEffect(() => {
@@ -441,8 +439,8 @@ export function ModelList() {
       }
     }
     
-    // A name owned by any provider catalogue is that provider's model (its sync writes a
-    // global mapping per model), so only names no provider lists are user-defined aliases.
+    // A name owned by a provider catalogue is that provider's model; the alias table
+    // only carries names no provider lists (the syncs write catalogues, not mappings).
     for (const mapping of modelMappings) {
       if (!addedModelNames.has(mapping.requestModel) && !catalogueNames.has(mapping.requestModel)) {
         const owner = providers.find(p => p.id === mapping.preferredProviderId)
