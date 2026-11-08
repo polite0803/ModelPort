@@ -96,6 +96,204 @@ export const MAX_MODEL_KEYS_PER_DAY = 200
 /** Aggregation bucket for models beyond the per-day cap. */
 export const OTHER_MODEL_KEY = '__other__'
 
+/**
+ * Compression verdict of one request, as the accounting layer needs it.
+ *
+ * Structural on purpose: the producer is the proxy's `CompressionReport`, which
+ * the renderer cannot import, and the writer must not reshape it by hand (a
+ * dropped `candidates` array silently turns every "would have won" into "no
+ * candidate").
+ */
+export interface CompressionVerdict {
+  /** Compressors that actually rewrote something. Empty means refused. */
+  applied: readonly string[]
+  /** Why nothing was applied. Only read when `applied` is empty. */
+  skipped?: string
+  candidates?: readonly CompressionCandidateReading[]
+}
+
+/** One candidate as the accept gate saw it. */
+export interface CompressionCandidateReading {
+  contentType: string
+  tokensBefore: number
+  tokensAfter: number
+  accepted: boolean
+}
+
+/**
+ * Fixed buckets for a candidate's projected `tokensAfter / tokensBefore`.
+ *
+ * The edges are not decoration: 2% is what DeepSeek's cache read discount asks
+ * for, 8% is `c / (1 + w)` for Anthropic (0.1 / 1.25). A single "below 10%"
+ * bucket could not tell the two apart, and the P3 question is exactly which
+ * side of those edges real traffic falls on.
+ */
+export const COMPRESSION_RATIO_BUCKETS = ['lt1', 'lt2', 'lt5', 'lt8', 'lt10', 'lt25', 'gte25'] as const
+
+export type CompressionRatioBucket = (typeof COMPRESSION_RATIO_BUCKETS)[number]
+
+/** Project a candidate's after/before ratio into its bucket, or null when unusable. */
+export function compressionRatioBucket(tokensBefore: number, tokensAfter: number): CompressionRatioBucket | null {
+  if (!Number.isFinite(tokensBefore) || !Number.isFinite(tokensAfter)) return null
+  if (tokensBefore <= 0 || tokensAfter < 0) return null
+  const pct = (tokensAfter / tokensBefore) * 100
+  if (pct < 1) return 'lt1'
+  if (pct < 2) return 'lt2'
+  if (pct < 5) return 'lt5'
+  if (pct < 8) return 'lt8'
+  if (pct < 10) return 'lt10'
+  if (pct < 25) return 'lt25'
+  return 'gte25'
+}
+
+/** Candidates of one content type, with their projected ratio distribution. */
+export interface CompressionContentCounters {
+  candidates: number
+  /** How many of them the accept gate let through. */
+  accepted: number
+  tokensBefore: number
+  tokensAfter: number
+  ratioBuckets: Record<CompressionRatioBucket, number>
+}
+
+/**
+ * One day of compression verdicts.
+ *
+ * Exists because the request log keeps ~1–2 days (`maxEntries` + the error
+ * floor), which cannot answer a 7-day question. Optional on the bucket: a day
+ * written before this field existed says nothing about compression, and reading
+ * that as "nothing was compressed" is the distinction the whole file protects.
+ */
+export interface CompressionDayCounters {
+  /** Requests that carried a verdict — applied or refused. */
+  analyzed: number
+  /** Requests where at least one compressor rewrote content. */
+  applied: number
+  /** Refused requests, by reason. */
+  skipped: Record<string, number>
+  byContentType: Record<string, CompressionContentCounters>
+}
+
+/** Content-type rows kept per day; overflow folds into this key. */
+const MAX_COMPRESSION_CONTENT_TYPES = 16
+/** Bucket for a content-type row beyond {@link MAX_COMPRESSION_CONTENT_TYPES}. */
+const OTHER_CONTENT_TYPE_KEY = '__other__'
+/** Distinct skip reasons kept per day; a hand-edited file cannot grow this. */
+const MAX_COMPRESSION_SKIP_REASONS = 16
+
+function emptyRatioBuckets(): Record<CompressionRatioBucket, number> {
+  return { lt1: 0, lt2: 0, lt5: 0, lt8: 0, lt10: 0, lt25: 0, gte25: 0 }
+}
+
+function emptyContentCounters(): CompressionContentCounters {
+  return { candidates: 0, accepted: 0, tokensBefore: 0, tokensAfter: 0, ratioBuckets: emptyRatioBuckets() }
+}
+
+function emptyCompressionCounters(): CompressionDayCounters {
+  return { analyzed: 0, applied: 0, skipped: {}, byContentType: {} }
+}
+
+/**
+ * Fold one request's verdict into the day's counters. Pure, like the rest.
+ *
+ * `analyzed` counts verdicts, not candidates, so a request with three tool
+ * results is one observation — that is the unit the P3 question is asked in.
+ */
+export function accumulateCompressionCounters(
+  base: CompressionDayCounters | undefined,
+  verdict: CompressionVerdict
+): CompressionDayCounters {
+  const previous = base ?? emptyCompressionCounters()
+  const skipped = { ...previous.skipped }
+
+  if (verdict.applied.length === 0) {
+    const reason = (verdict.skipped ?? '').trim() || 'unknown'
+    const known = skipped[reason] !== undefined
+    if (!known && Object.keys(skipped).length >= MAX_COMPRESSION_SKIP_REASONS) {
+      skipped.unknown = (skipped.unknown ?? 0) + 1
+    } else {
+      skipped[reason] = (skipped[reason] ?? 0) + 1
+    }
+  }
+
+  let byContentType = previous.byContentType
+  for (const candidate of verdict.candidates ?? []) {
+    const contentType = candidate.contentType.trim()
+    if (contentType.length === 0) continue
+    const key = byContentType[contentType] !== undefined
+      || Object.keys(byContentType).length < MAX_COMPRESSION_CONTENT_TYPES
+      ? contentType
+      : OTHER_CONTENT_TYPE_KEY
+    const prior = byContentType[key] ?? emptyContentCounters()
+    const bucket = compressionRatioBucket(candidate.tokensBefore, candidate.tokensAfter)
+    byContentType = {
+      ...byContentType,
+      [key]: {
+        candidates: prior.candidates + 1,
+        accepted: prior.accepted + (candidate.accepted ? 1 : 0),
+        tokensBefore: prior.tokensBefore + nonNegative(candidate.tokensBefore),
+        tokensAfter: prior.tokensAfter + nonNegative(candidate.tokensAfter),
+        ratioBuckets: bucket === null
+          ? prior.ratioBuckets
+          : { ...prior.ratioBuckets, [bucket]: prior.ratioBuckets[bucket] + 1 },
+      },
+    }
+  }
+
+  return {
+    analyzed: previous.analyzed + 1,
+    applied: previous.applied + (verdict.applied.length > 0 ? 1 : 0),
+    skipped,
+    byContentType,
+  }
+}
+
+/** Normalize one persisted compression counter block; null when absent. */
+export function normalizeCompressionCounters(input: unknown): CompressionDayCounters | undefined {
+  if (input === null || input === undefined || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const raw = input as Record<string, unknown>
+  const next = emptyCompressionCounters()
+  next.analyzed = nonNegative(raw.analyzed as number)
+  next.applied = nonNegative(raw.applied as number)
+
+  const rawSkipped = raw.skipped
+  if (rawSkipped !== null && typeof rawSkipped === 'object' && !Array.isArray(rawSkipped)) {
+    for (const [reason, count] of Object.entries(rawSkipped as Record<string, unknown>)) {
+      const key = reason.trim()
+      if (key.length === 0) continue
+      if (next.skipped[key] === undefined && Object.keys(next.skipped).length >= MAX_COMPRESSION_SKIP_REASONS) continue
+      next.skipped[key] = nonNegative(count as number)
+    }
+  }
+
+  const rawByType = raw.byContentType
+  if (rawByType !== null && typeof rawByType === 'object' && !Array.isArray(rawByType)) {
+    for (const [contentType, counters] of Object.entries(rawByType as Record<string, unknown>)) {
+      const key = contentType.trim()
+      if (key.length === 0) continue
+      if (Object.keys(next.byContentType).length >= MAX_COMPRESSION_CONTENT_TYPES) break
+      if (counters === null || typeof counters !== 'object' || Array.isArray(counters)) continue
+      const row = counters as Record<string, unknown>
+      const ratioBuckets = emptyRatioBuckets()
+      const rawBuckets = row.ratioBuckets
+      if (rawBuckets !== null && typeof rawBuckets === 'object' && !Array.isArray(rawBuckets)) {
+        for (const bucket of COMPRESSION_RATIO_BUCKETS) {
+          ratioBuckets[bucket] = nonNegative((rawBuckets as Record<string, unknown>)[bucket] as number)
+        }
+      }
+      next.byContentType[key] = {
+        candidates: nonNegative(row.candidates as number),
+        accepted: nonNegative(row.accepted as number),
+        tokensBefore: nonNegative(row.tokensBefore as number),
+        tokensAfter: nonNegative(row.tokensAfter as number),
+        ratioBuckets,
+      }
+    }
+  }
+
+  return next
+}
+
 /** One day's counters. */
 export interface DayTokenBucket {
   /** Tokens the upstream itself reported. */
@@ -134,6 +332,13 @@ export interface DayTokenBucket {
    * per-model traffic, and reading that as zero would render a false 0% hit rate.
    */
   byModel?: ModelDayUsageMap
+  /**
+   * Compression verdicts of this day. Optional for the same reason as the two
+   * splits above, and one more: it exists so a 7-day question outlives a log
+   * retention of ~2 days (`docs/plan/PLAN-prompt-cache.md` §P3). A bucket
+   * without it predates the instrument, which is not "nothing was compressed".
+   */
+  compression?: CompressionDayCounters
 }
 
 export interface DayTokenSummary extends DayTokenBucket {
@@ -335,6 +540,11 @@ export function accumulateDayBucket(
      * and only a defined value increments `costedRequests`.
      */
     costUsd?: number
+    /**
+     * This request's compression verdict. Absent means "not asked", which is
+     * not "compression was off" — the day counters keep no row in that case.
+     */
+    compression?: CompressionVerdict
   }
 ): DayTokenBucket {
   // ⚠️ 走 `normalizeDayBucket` 而不是直接信任入参：调用方喂的是**磁盘上读出来**
@@ -359,6 +569,11 @@ export function accumulateDayBucket(
     upstreamCacheRead: base.upstreamCacheRead + cacheRead,
     requests: base.requests + 1,
     upstreamRequests: base.upstreamRequests + (isUpstream ? 1 : 0),
+    ...(base.compression === undefined ? {} : { compression: base.compression }),
+  }
+
+  if (input.compression !== undefined) {
+    next.compression = accumulateCompressionCounters(base.compression, input.compression)
   }
 
   const providerId = (input.providerId ?? '').trim()
@@ -437,16 +652,18 @@ export function normalizeDayBucket(input: unknown): DayTokenBucket {
   // `Number()` 会把整张分表抹成 0 —— 而抹掉它同样是丢数据，
   // `accumulateDayBucket` 每一步都过这里。
   const next: DayTokenBucket = emptyBucket()
-  // `Exclude<…, 'byProvider' | 'byModel'>` is not a convenience: it is what keeps
-  // this loop assignable. Those two fields are maps, so the `nonNegative()` write
+  // `Exclude<…, 'byProvider' | 'byModel' | 'compression'>` is not a convenience: it is what keeps
+  // this loop assignable. Those fields are maps, so the `nonNegative()` write
   // below would type them as numbers.
-  const numericKeys = Object.keys(next) as Exclude<keyof DayTokenBucket, 'byProvider' | 'byModel'>[]
+  const numericKeys = Object.keys(next) as Exclude<keyof DayTokenBucket, 'byProvider' | 'byModel' | 'compression'>[]
   for (const key of numericKeys) {
     next[key] = nonNegative(raw[key] as number)
   }
   next.byProvider = normalizeProviderUsage(raw.byProvider)
   const byModel = normalizeModelUsage(raw.byModel)
   if (byModel !== undefined) next.byModel = byModel
+  const compression = normalizeCompressionCounters(raw.compression)
+  if (compression !== undefined) next.compression = compression
   return next
 }
 

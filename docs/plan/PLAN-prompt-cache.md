@@ -1,6 +1,6 @@
 # 方案：Prompt 缓存命中的实现与强化（P0–P3）
 
-> 成文版本：v1.7.9 ｜ 最后核对：2026-11-08 ｜ 状态：**实施中（P0/P1/P2-D/P3-A 已落地；P3 测量与真机读数待补）**
+> 成文版本：v1.7.9 ｜ 最后核对：2026-11-08 ｜ 状态：**P0/P1/P2-D/P3-A 已落地；DeepSeek 三组真机读数已取（见 §9.1）；Anthropic 真机读数待补**
 > 优先级：**DeepSeek 缓存命中率优先**；**按模型的缓存命中统计是硬交付项**。
 > 关联：[`docs/design/PLAN-token-compression.md`](../design/PLAN-token-compression.md)（缓存经济性、live-zone 硬约束）
 > 结论先行：DeepSeek 走自动前缀缓存，**不需要断点**，它的问题是"前缀被我们自己改动"和"账号/模型轮换把缓存丢在半路"；Anthropic 才需要 P0 的显式断点。两者共用 P1 的读数与仪表盘。
@@ -278,6 +278,17 @@ DeepSeek `c ≈ 0.1` ⇒ 需省 ~90%；OpenAI `c ≈ 0.25~0.5` ⇒ 需省 50–7
 1. 用 P1 的逐请求数据统计 7 天：按内容类型的压缩率分布、`cacheRead/prompt`、`R'(1+w) − cR` 的符号占比。
 2. 判据：若压缩请求中该项为负的比例 > 30%，进入 A 或 B；否则维持现状，把读数写进本计划作为"不实现"的证据。
 
+**读数落库（2026-11-08 已实现）**
+
+请求日志只留约 1–2 天（`maxEntries=200` + 100 条错误保底），7 天测量不能靠日志。压缩判决改为写进按日桶 `DayTokenBucket.compression`：
+
+- `analyzed` / `applied` / `skipped{reason}`：按请求计；`applied=0` 时把拒因记进 `skipped`；
+- `byContentType[ct]`：`candidates` / `accepted` / `tokensBefore` / `tokensAfter` / `ratioBuckets`；
+- `ratioBuckets` 的边界是 1 / 2 / 5 / 8 / 10 / 25%：2% 是 DeepSeek 的 `c`，8% 是 Anthropic 的 `c/(1+w) = 0.1/1.25`，两条判据不能被一个粗桶抹平；
+- 被拒候选原本在 `skipReport` 里被清零，现在 `CompressionReport.candidates` 保留原投影（`accepted=false` + `reason`），否则"本来会赢"永远等于"没有候选"。
+
+读法：管理 RPC `statistics:getTokenUsageDays` 返回的按日桶直接带 `compression`，不再依赖请求日志。两条局限要一起读：桶里没有该供应商的 `c`/`w`（符号判定要按 `AggregateEntry.promptCache` 离线算），候选单位是"进 accept 门的段"而不是请求。
+
 **P3-A 按家设门（小改）**
 
 - `acceptCompression`（`src/main/proxy/compression/policy.ts:37`）增加 `cacheDiscount` / `writeMultiplier`；
@@ -370,7 +381,189 @@ P0（Anthropic 断点） 与 P1 并行，不阻塞 DeepSeek
 
 仍待：
 
-1. **真机读数**：DeepSeek 三组（现状 / 缓存优先 / +亲和）与 Anthropic 三轮 `cache_read_input_tokens > 0`。本机没有可用的真实 key 会话，未伪造读数。
-2. **P3 前置测量**：需要 7 天真实流量才能判断压缩请求中 `R'(1+w) − cR` 为负的比例；A 已落地，B 未拍。
+1. **真机读数**：DeepSeek 三组已取（§9.1）；Anthropic 三轮 `cache_read_input_tokens > 0` 仍缺——本机没有直连 Anthropic 的账号（只有 bazaarlink 等转售渠道，走的是 OpenAI wire，`cache_control` 到不了真 Anthropic），未伪造读数。2026-11-08 复核了"能不能借道"：网关 25 个供应商全部 `wire=openai-chat`（无 Anthropic wire）；OpenRouter 的 24 个 Claude 型号一律 403「not available in your region」；bazaarlink 的 15 个 Claude 型号全部 402「can only afford 0」（额度为零）。三条指向同一结论：这台机器上不存在通往真 Anthropic 的通路，要取读数只能由用户提供 Anthropic wire 的端点 + key。仓库能力表里现成有三条 `wire=anthropic-messages` 的条目——`anthropic`（api.anthropic.com/v1）、`glm`（api.z.ai/api/anthropic/v1）、`minimax-cn`（api.minimaxi.com/anthropic/v1）——给任何一家的 key 即可，不必是 Anthropic 直连。
+2. **P3 前置测量**：需要 7 天真实流量才能判断压缩请求中 `R'(1+w) − cR` 为负的比例；A 已落地，B 未拍。§9.1 已经用单请求读数证明 DeepSeek 上该项为负。§9.2 另有一条硬限制：请求日志只留约 1–2 天（`maxEntries=200` + 100 条错误保底），跨天样本要靠把压缩判读写进按日桶，否则 7 天测量无从取数。
 3. **Anthropic 文档逐段复核**：`platform.claude.com` 在本机被区域网关 307 拒；能力表数值标为待复核（见 `docs/providers/anthropic.md`）。
 4. `prompt_cache_key` 代生成（P2-G）未做：原计划就是可选项，DeepSeek 不需要，先不向未知家加字段。
+
+## 9.1 DeepSeek 三组真机读数（2026-11-08，WSL 网关 1.7.9）
+
+环境：本机 WSL systemd 单元 `modelport`，HTTP 8080 / HTTPS 8443，仅 1 个 DeepSeek 官方账号（`deepseek`，account `78ab20ab…`）。夹具：`system + user + assistant(tool_calls, reasoning_content 回传) + 7.4 KB 同构 JSON 工具结果`，第 2/3 轮只在尾部追加；同一模型 `deepseek/deepseek-flash`，`temperature=0`。逐请求读上游自己的 `prompt_cache_hit_tokens / prompt_tokens`，不用账本估算。
+
+| 组 | 配置 | 第 1 轮 | 第 2 轮 | 第 3 轮 | 2+3 合计 |
+|---|---|---|---|---|---|
+| C | `cacheFirst=true`，亲和 60 | 2627 / 384 | 2647 / 2432 | 2663 / 2432 | **4864 / 5310 = 91.6%** |
+| B | `cacheFirst=true`，亲和 0 | 2633 / 384 | 2653 / 2432 | 2669 / 2432 | **4864 / 5322 = 91.4%** |
+| A | `cacheFirst=false`，亲和 0 | 2594 / 256 | 2614 / 2432 | 2630 / 2432 | **4864 / 5244 = 92.8%** |
+
+结论（三条都必须一起读，否则会误判）：
+
+1. **缓存确实在生效**：同一前缀第 2/3 轮命中 2432 / 约 2650 token（≈92%），与仪表盘今天 `deepseek::deepseek-flash` 的 93.9%（151 条请求）同向。
+2. **A 组并没有真的压缩**：关掉 `cacheFirst` 后日志写的是 `compression.skipped = "insufficient_savings"`——P3-A 的经济门按 DeepSeek `c=0.02` 要求省 `1 - 0.02/(1+0) = 98%`而该夹具只省 78%，被正确拒绝。所以 A 组与 B/C 同是未压缩路径，三组命中率一致不是"策略无效"，而是**经济门先于内容压缩生效**。要看到 A 组下降，前提是内容省幅 > 98%，这在真实工具输出里几乎不存在；这也意味着 P3-B（整段重写）在 DeepSeek 上同样过不了这道门。
+3. **亲和在这台网关不可观测**：唯一 DeepSeek 账号 ⇒ 没有第二个缓存域可漂移，亲和是空转；验收第 1 条（负控能观察到候选变化）在这里无法做，需至少两个同模型缓存候选才能复测。代码侧由 `tests/proxy/autoRouting.test.ts` 的粘结/亲和成对断言守住。
+
+顺带修正的一处口径：今天日级 `requests=1086` 而按模型明细只有 175 条（升级前的桶没有 `byModel`）。卡片现在会显式写出覆盖缺口（`dashboard.modelCache.coverageNote`），不再让表内合计静默低于旁边的日总量。（同一缺口随时间增长的读数见 §9.2。）
+
+## 9.2 真实流量读数（2026-11-08 07:55，网关 1.7.9，systemd 启动 07:18:10）
+
+来源两个，交叉核对：`/root/.modelport/request-logs/request-logs.ndjson`（294 行，2026-11-06 17:19 → 11-08 07:52）与 `tokenUsage['2026-11-08']`（经管理 RPC `statistics:getTokenUsageDays` 取回，再用 `src/shared/providerUsage.ts` 现算，不手算）。
+
+**缓存命中（只用上游自报值，token 加权）**
+
+| 模型（`provider::model`） | 请求 | prompt | cache | 命中率 |
+|---|---|---|---|---|
+| `deepseek::deepseek-flash` | 361（355 上游） | 34,605,302 | 33,566,336 | **97.0%** |
+| `loomy::loomy/GLM-5.3-Flash` | 52 | 7,410,726 | 6,897,280 | **93.1%** |
+| `bailian_token_plan::deepseek-v4.1-flash` | 19（18 上游） | 1,824,811 | 1,624,320 | **89.0%** |
+| 当日合计 | 1343（1336 上游） | 127,978,869 | 115,457,600 | **90.2%** |
+
+按会话轮次：DeepSeek 第 2 轮起普遍 97–99.9%，第 1 轮 40.8%（新会话 prefill）——"前缀不动就命中"在真实 agent 流量里成立，不是夹具特有。
+
+**覆盖缺口**：当日分模型明细只覆盖 **425 / 1336（31.8%）**。原因是 07:18:10 才换成 1.7.9，此前的请求由旧版本写入、桶里没有 `byModel`。三条证据：`deepseek` 的 byModel 行 361 条 = 该供应商当日 361 条（升级后的请求全部有归因）；`loomy` 只留下升级后的 52 条（769 − 52 = 717 条在升级前，且该账号随后已不可用）；`raccoon` 的 153 条完全不在表里。所以这是**版本边界**，不是丢数。
+
+**压缩实况（同一保留窗口）**：123 条请求带压缩判读，**全部 skipped**——`below_min_tokens` 57、`below_threshold` 53、`unsupported_type` 13；当日 `savedTokens` 仅 6,036（≈ 当日 prompt 的 0.005%）。P3-A 的新门（`insufficient_savings`）在这个窗口里一次都没成为拒因，说明真实流量的瓶颈在门外两道（最小 token、节省率门槛），缓存折扣门还没轮到发言。
+
+**P3 七天测量的可行性**：`requestLogConfig.maxEntries=200` + 100 条错误保底 ⇒ 日志只保留约 1–2 天（本次 294 行 = 1.6 天），**网关自己产不出 7 天样本**。要真的量 `R'(1+w) − cR` 的符号分布，得先把压缩判读（applied/skipped 原因、before/after、是否缓存候选）落进按日桶，才能跨天累计；该落库已在 §P3「读数落库」实现：从下一次发版起按日桶带 `compression` 计数，7 天样本改由桶累计。
+
+## 9.3 Agnes 三轮回放：能验读数通路，不能验 Anthropic 断点（2026-11-08 08:10）
+
+问题来源：本机没有任何 `wire: "anthropic-messages"` 的可用账号（`anthropic` / `glm` / `minimax-cn` 三家都没配 key；OpenRouter 的 Claude 全是 403 区域限制、bazaarlink 的 Claude 是 402 余额为零），于是提出用 `agnes` 代替。
+
+事实先摆清：`agnes`（`src/main/providers/aggregate/registry.ts:55`）是 `category: apikey`、`wire: "openai-chat"`、`baseUrl https://api.agnes-ai.cn/v1`，模型 `agnes-3.0-flash` / `agnes-2.5-flash`。它**不是** Anthropic wire。
+
+三轮回放（同一稳定前缀 ≈21 KB，第 2/3 轮仅在尾部追加，`agnes/agnes-3.0-flash`，`temperature=0`，经 8080 网关转发）：
+
+| 轮 | HTTP | 延迟 | prompt | 上游 `usage` 缓存字段 |
+|---|---|---|---|---|
+| 1 | 200 | 8102 ms | 8426 | 无 |
+| 2 | 200 | 2014 ms | 8443 | `prompt_tokens_details.cached_tokens = 8192` |
+| 3 | 200 | 2062 ms | 8460 | 无 |
+
+结论，必须分两件事说：
+
+1. **读数通路：Agnes 可以当样本。** 第 2 轮 `cached_tokens=8192/8443 ≈ 97%`，延迟 8.1s → 2.0s，走的是 `quota/usage.ts:56` 的 `prompt_tokens_details.cached_tokens` 分支，也就是 OpenAI 风格读数；它证明了网关能读、能归因、能进 `byModel` 桶。
+2. **P0 断点注入：Agnes 验不了。** `cache_control` 只在 Anthropic adapter 里由 `applyCacheBreakpoints` 写到 `wire === 'anthropic-messages'` 的请求体上；Agnes 走 `openai-chat`，那段代码一次都不会执行。P0 的验收条件（第 2 轮 `cache_creation_input_tokens` 非零、第 2/3 轮 `cache_read_input_tokens > 0`）只能由 `anthropic` / `glm` / `minimax-cn` 三者之一给出。
+3. **附带的一条真实缺口证据**：第 3 轮上游干脆不返回 `prompt_tokens_details`。这正是 `cacheReadReportedRequests` / `upstreamPromptWithCache` 存在的理由——未上报必须显示 `-`，不能在分母里当成 0% 命中。Agnes 是这条口径的现成回归样本。
+
+## 9.4 GLM 的 key 到不了 anthropic wire（2026-11-08 08:18）
+
+用用户提供的 Z.ai key 直接打上游（不经网关，key 只从 stdin 读入、不落盘、不打印），三个目标各一次：
+
+| 目标 | 路由 | 结果 |
+|---|---|---|
+| `api.z.ai/api/paas/v4/chat/completions` | OpenAI 兼容 | **200**，`prompt_tokens_details.cached_tokens` 有值 |
+| `open.bigmodel.cn/api/paas/v4/chat/completions` | OpenAI 兼容 | **200**，同上 |
+| `api.z.ai/api/anthropic/v1/messages` | Anthropic 兼容（`glm` 条目的 baseUrl） | **429 `1113` 余额不足或无可用资源包** |
+| `open.bigmodel.cn/api/anthropic/v1/messages` | Anthropic 兼容 | **429 `1113`**，同一文案 |
+
+所以不是 key 无效：同一把 key 在两条 OpenAI 兼容路由上都返回 200。z.ai 官方 Claude Code 文档（`https://docs.z.ai/devpack/tool/claude`）把 `ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic` 只写在 **GLM Coding Plan** 的配置里，从未说明按量余额可走这条路由——与 `1113` 的「无可用资源包」一致：Anthropic 路由要的是订阅资源包，不是 API 余额。
+
+**结论：这把 key 不能当 P0 的验证目标**，而且即使换成 Coding Plan key 也无法直接验收，还缺第二块：
+
+1. **z.ai 只文档化了隐式缓存**（`https://docs.z.ai/guides/capabilities/cache`：`usage.prompt_tokens_details.cached_tokens`、约 50% 折扣、无最小长度、TTL 未给数字），**没有任何 `cache_control`**。
+2. 因此 `glm` 条目（`registry.ts:560`）没有 `promptCache` 证据 ⇒ `promptCacheOf` 返回 `unknown` ⇒ `applyCacheBreakpoints` 在请求进入前就返回（`adapters/anthropic.ts:370`），网关根本不会写断点。在补上 `explicit-breakpoints` 证据之前，用 GLM 测 P0 只会得到 `cache_creation_input_tokens` 恒 0 的假失败。
+3. 唯一有 `explicit-breakpoints` 证据的条目是 `anthropic`（`registry.ts:130`，`minCacheableTokens=1024`、`readDiscount=0.1`、`writeMultiplier=0.25`）。
+
+**P0 真机验收的剩余路径**：`anthropic` 直连 key（能力表已就绪，插上即可验），或 `minimax-cn`（须先确认其 Anthropic 兼容路由是否文档化支持 `cache_control`，否则同样要先补证据）。**不要**为了凑读数给 `glm` 添加没有文档支撑的 explicit 证据。
+
+## 9.5 MiniMax CN 的 key：鉴权通过、余额为零（2026-11-08 08:26）
+
+同一把 key 直接打上游（只从 stdin 读入，不落盘、不打印）：
+
+| 目标 | 模型 | 结果 |
+|---|---|---|
+| `api.minimaxi.com/anthropic/v1/messages` | `MiniMax-M3` | **402** `insufficient_balance_error (1008)` |
+| 同上 | `MiniMax-M2.7` / `M2.5` / `M2.1` | **404** `no longer available (2069)` |
+| `api.minimaxi.com/v1/chat/completions`（OpenAI 兼容） | `MiniMax-M3` | **402 (1008)**；`M2.5` → **404 (2069)** |
+| `api.minimax.io`（国际站，两条 wire 各一次） | `MiniMax-M3` | **401** `invalid api key` |
+
+结论三条：
+
+1. **key 是真的、且只属于国内站**：国际站一律 401，国内站的失败是业务错误（402/404），不是鉴权错误。但**账户余额为零**，两条 wire 都跑不出一笔请求 ⇒ 这把 key 同样不能当 P0 的验证目标。
+2. **`minimax-cn` 的模型清单已过期**：条目里 4 个模型有 3 个（M2.1 / M2.5 / M2.7）被上游回 404「no longer available」，只有 `MiniMax-M3` 还活着。这是真机事实，与 P0 无关，单独记为待修（改清单前应先跑一次在线同步确认当前 id）。
+3. **能力证据是现成的**：MiniMax 有专门的《Anthropic 主动缓存》文档（`https://platform.minimaxi.com/docs/api-reference/anthropic-api-compatible-cache`），示例就是在 system 块上放 `cache_control: {type:'ephemeral'}`，并说明 `cache_creation_input_tokens` / `cache_read_input_tokens` 的语义。所以 `minimax-cn` 一旦账户有余额，就是合法的 P0 目标——但仍需**先补 `promptCache` 证据**（当前为 `unknown`，adapter 一次都不会注入），且补证据与真机验收必须在同一轮完成。
+
+P0 代码侧的覆盖没有缺口：`tests/proxy/anthropic-cache-breakpoints.test.ts` 的 8 条用例已经钉住断点位置、上限、1h TTL、`tool_choice:none` 不产生悬空断点、幂等，以及「剥掉 marker 后与原 body 深度相等」。**唯一缺的仍然只有上游接受度这一条真机读数。**
+
+## 9.6 复测：MiniMax 通了，但它是隐式缓存（2026-11-08 08:49）
+
+复测同一把 MiniMax CN key：账户现在能出请求（`MiniMax-M3` 200），GLM 的 Anthropic 路由仍是 `429 1113`。MiniMax 的 `usage` 自带 `cache_creation_input_tokens` / `cache_read_input_tokens`，所以用**全新前缀**做了对照实验（每轮独立 nonce，绝不复用 §9.5 的前缀）：
+
+| 轮 | 前缀 | 断点 | input | cache_creation | cache_read |
+|---|---|---|---|---|---|
+| A1 | 全新 A | `cache_control` | 3539 | **0** | 0 |
+| A2 | A 第二次 | `cache_control` | 211 | 0 | 3328 |
+| B1 | 全新 B | 无 | 3411 | 0 | 128（部分） |
+| B2 | B 第二次 | **无** | 1 | 0 | **3538** |
+| B3 | B 第三次 | `cache_control` | 1 | 0 | **3538** |
+
+结论只有一句能同时解释五行：**MiniMax 的 Anthropic 路由是隐式前缀缓存，`cache_control` 是空操作**。
+
+1. 全新前缀**带**断点首发（A1）的 `cache_creation_input_tokens` 是 0——如果它按 Anthropic 的显式语义计费，这里必须 > 0。
+2. 全新前缀**不带**断点，第二次就整段命中（B2：`cache_read=3538/3539`）——缓存与断点无关。
+3. 同一前缀加不加断点，读数完全一样（B2 vs B3）。所以断点既没有增量、也没有写成本。
+4. MiniMax 那篇《Anthropic 主动缓存》文档给了 `cache_control` 示例，但真机行为与「显式」不符——**文档不能当能力证据，这一条只能靠实测**（正是 AGENTS 里「没有证据就是 unknown」要防的坑）。
+
+**所以 MiniMax 也验不了 P0**，它和 DeepSeek / Agnes 同属隐式一类；给它（或 `glm`）加 `explicit-breakpoints` 证据都是错的。
+
+**模型清单的真机事实**（同一 Anthropic 路由，单发各一次）：`MiniMax-M3` 200、`MiniMax-M3.1-Flash` 200；`MiniMax-M2.1` / `M2.5` / `M2.7` / `M2.7-highspeed` / `M2` 全部 `404 (2069) no longer available`。注意 `/v1/models` 仍把 M2.x 列出来，那个清单**不可用于判断 Anthropic 路由能出哪些模型**。`minimax-cn` 条目现有的 4 个 id 里只有 M3 仍可用。
+
+**P0 的状态**：代码侧 8 条单测已覆盖，真机侧仍缺。本机能拿到的每一条 wire 都是隐式缓存（DeepSeek、Agnes、GLM 的 OpenAI 路由、MiniMax），要取「显式断点被上游接受」的读数，需要一个**真正按显式语义计费**的端点（Anthropic 直连，或同样支持 cache_control 写入计费的 Claude 兼容渠道）。
+
+## 9.7 落地记录：minimax-cn 按隐式缓存接入（2026-11-08 09:05）
+
+按 §9.6 的实测把 `minimax-cn` 归到隐式一类，改动四处：
+
+1. `src/main/providers/aggregate/registry.ts`（`id: minimax-cn`）
+   - `promptCache` 新增：`mode: implicit-prefix`、`readDiscount: 0.1`、`acceptsPromptCacheKey: false`，
+     `evidence.docUrl = https://platform.minimax.cn/docs/api-reference/text-prompt-caching`、`asOf: 2026-11-08`。
+   - 模型清单按真机裁剪为 `MiniMax-M3.1-Flash` + `MiniMax-M3`（M2.x 两条 wire 都回 404/2069）。
+   - `notes` 写明「缓存是自动的、M2.x 在此路由已下线」，避免下一个人照 `/v1/models` 加回来。
+2. `tests/aggregate/registry.test.ts`：目录模型总数 570 → 568，并在既有变更流水里记了原因
+   （这条断言本来就是「条数 + 变更史」的守卫，不是纯数字）。
+3. `docs/providers/minimax-cn.md`：新建，记录官方要点、五行对照实测、模型清单事实与**未取证项**（TTL、正式倍率、国际站条目）。
+4. 全仓「89 条 / 570 模型」的现行口径同步为 568（AGENTS.md、两份 README、docs/features、docs/providers/README、docs/README、repo-description、CODE_WIKI 与两处源码注释）；带日期的历史记录（`docs/design/2026-11-04-…`、`modelMetadata.ts` 的 1.7.2 回顾、`autoRouting.test.ts` 的 2026-11-04 注释）**不改**，它们是当时读数。
+
+生效面（代码层面）：
+
+- `isCacheSensitive` 对它为真 ⇒ `cacheFirst` 会跳过 live-zone 压缩；
+- `cacheEconomicsOf` 得 `{readDiscount: 0.1, writeMultiplier: 0}` ⇒ P3-A 的经济门要求省幅 > 90%；
+- `autoRouting` 的缓存亲和把它算作「已知缓存供应商」，同一会话尽量不换账号（M3 与 M3.1-Flash 是不同的缓存域）。
+
+P0 的状态不变：这仍然是隐式端点，**没有** `explicit-breakpoints` 证据；真机验收依旧等一个显式计费的端点。
+
+## 9.8 部署后线上核对（2026-11-08 09:20）
+
+**构建与门禁**：`npm run build` + `build:daemon` + 两个 `tsc -p` + 全量用例，**EXIT=0，1972 通过 / 0 失败**，daemon 产物 4605 KB（v1.7.9），两份 tsc 均 0 错误。
+
+**部署**：WSL `/root/mpd/modelport-daemon.cjs` 已换为 4,715,830 字节（旧件备份 `modelport-daemon.cjs.bak-20261108-0915`，4,709,840 字节），属主 1001:1001；`grep -c 'MiniMax-M3.1-Flash'` = 2，包内 `minimax-cn` 记录确带 `promptCache.mode = implicit-prefix`。`systemctl is-active` = active，`ActiveEnterTimestamp=2026-11-08 08:59:51 CST`，`/health` 200，journal 无异常。
+
+**代码侧运行时核对**（直接跑源码，不经猜测）：`minimax-cn` → `wire=anthropic-messages`、`models=MiniMax-M3.1-Flash,MiniMax-M3`、`mode=implicit-prefix`、`readDiscount=0.1`、`isCacheSensitive=true`、`cacheEconomicsOf={readDiscount:0.1,writeMultiplier:0}`、`explicitPathEligible=false`（即 `applyCacheBreakpoints` 不会碰它）。
+
+**读数通路的线上实证**：同一时段真实流量里 `bailian_token_plan/deepseek-v4.1-flash` 的多条记录 `usage.source=upstream`、`cacheReadTokens` 分别为 68096/68676、160000/160465、67584/68293、159488/159764（≈99%），证明新 bundle 的 `prompt_tokens_details.cached_tokens` 归因仍然工作。
+
+**新的真机事实：多账号轮换会毁掉隐式前缀复用。** 用 `agnes/agnes-3.0-flash` 发三轮同前缀（5,476 prompt，仅尾部不同）：三轮都 200，但 `cached_tokens` 三轮全缺；日志显示三轮落在**三个不同账号**（`…841 / …845 / …849`）。`agnes` 在能力表里是 `unknown`，不享受 `cacheAffinityMinutes`，于是被轮换打散。这条同时修正 §9.3 的取样口径：Agnes 第 2 轮那 8192/8443 的命中只在**恰好同账号**时成立，多账号下不可复现——读数通路照样能验，但必须先把样本钉在同一个账号上。反过来也说明 §9.7 把 `minimax-cn` 登记为已知缓存供应商是有实际收益的：它会拿到缓存亲和，不会像 Agnes 这样被轮换拆散。
+
+**minimax-cn 的端点级验收：已完成（更正上一条的"未配置"）。** 我 09:0x 盘点时门店里确实还没有这条记录；用户在 **09:06:19**（`data.json` mtime）把它添加并填了 Key，于是本次直接验收。配置：1 个账号（`2cc7f9ff-…`）、`promptCaching.enabled=true`、`compression.enabled=true`、`cacheFirst=true`；夹具约 4,000 token，按真实多轮形状逐轮追加 assistant/user，轮间隔 2 秒：
+
+| 轮 | 消息数 | prompt | `cached_tokens` | 延迟 |
+|---|---|---|---|---|
+| 1 | 1 | 3988 | 128 | 5118 ms |
+| 2 | 3 | 4005 | **未上报（null）** | 2077 ms |
+| 3 | 5 | 4022 | **3840（95.5%）** | 947 ms |
+| 4 | 7 | 4039 | **3840（95.1%）** | 1002 ms |
+| 5 | 9 | 4056 | **3840（94.7%）** | 1281 ms |
+
+第 2 轮那个 `null` 是现成的"上游没报 ⇒ 显示 `-`、不当 0%"回归样本；第 3 轮起的 3840 是 30×128 的块对齐值，延迟同步骤降。
+
+**另一条推翻直觉的真机事实：MiniMax 的隐式缓存按"完整消息"做键，不是同一消息内的任意 token 前缀。**
+
+- 只改同一条 user message 末尾 3 个 token（`Answer A.` → `Answer B.`）：公共前缀约 3840 token，读数仍是 **0**。
+- 同体重复：3840；换回 A：仍 3840；隔 10 秒：仍 3840 ⇒ 多条不同尾部的条目可以并存。
+- 真实多轮形状（历史消息字节不变、只在末尾追加）：R2/R3 都 3840。
+
+所以对这类端点，**任何改写历史消息内容的 live-zone 压缩都会让缓存从改写点起整段作废**（DeepSeek 是 token 前缀，压尾部还能吃到前半段）。P3-A 的 90.9% 门在 MiniMax 上要比 DeepSeek 更保守：省幅必须覆盖"整段失效"的风险，而不只是单请求的 `1 - c/(1+w)`。
+
+**网关不改写请求体**：直连先写、网关同文读 3840/3989；网关先写、直连同文读 3986/3987，两个方向都整段命中——所以 §9.8 前面那次"经网关只有 128"是夹具改尾所致，不是网关缺陷。
+
+**存量记录不用清理（更正上一版的"偏差"说法）**：该供应商的 `supportedModels` 仍是添加时的 9 个 id，其中 7 个 M2.x 在此路由 404。但模型管理面板里停用这些模型写的就是 `excludedModels`（`setModelEnabled → storeManager.setModelsServed`），它已被填上这 7 个名字，且 `modelServing.applyServed` 把它作为"在服务"的唯一权威——这 7 个既不在路由候选池，也不接受点名请求；线上 `/v1/models` 实测无任何 minimax 条目。`modelMappings.disabled` 是用户别名的账，与目录模型停用无关，两个都是 false 不代表"没停用"。所以这里没有待修项，只有新添加的条目会用裁剪后的 2 个模型。

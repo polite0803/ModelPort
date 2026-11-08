@@ -93,6 +93,24 @@ test('风控/凭据/限流的本仓机读 code 优先于上游 code', () => {
   assert.equal(mapForwardFailure({ status: 429 }).code, 'rate_limit_exceeded')
 })
 
+test('图片内容审核 400 原样透传：上游 code 与原文不得被改写成别的信号', () => {
+  // 2026-11-07 实测（bailian_token_plan/deepseek-v4.1-flash，6 笔）：
+  // 上游对请求里的图片做了内容审核并拒收。这是**供应商策略判定**，不是网关故障、
+  // 也不是账号故障 —— 客户端要能读到它自己的 code 与原文，否则用户只会看到一句
+  // 「网关异常」，既改不了请求也不知道该换模型。自动换一家等于替客户端绕过上游审核，
+  // 所以这里既不改写、也不作为换家理由。
+  const message = 'An error occurred in model serving, error message is: '
+    + '[Input image [0] data may contain inappropriate content.]'
+  const mapped = mapForwardFailure({
+    status: 400,
+    details: { message, type: 'invalid_request_error', code: 'data_inspection_failed' },
+  })
+  assert.equal(mapped.status, 400)
+  assert.equal(mapped.type, 'invalid_request_error')
+  assert.equal(mapped.code, 'data_inspection_failed')
+  assert.equal(mapped.message, message)
+})
+
 test('request_id 只追加一次', () => {
   assert.equal(withRequestId('boom', 'req-1'), 'boom [request_id: req-1]')
   assert.equal(withRequestId('boom [request_id: req-1]', 'req-1'), 'boom [request_id: req-1]')

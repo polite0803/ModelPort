@@ -92,12 +92,17 @@ export function isContextOverflowError(message: string | undefined): boolean {
  * 渠道就能成），不是账号故障：不记冷却、不计账号失败，换下一家继续试。
  *
  * ⚠️ 识别口径必须**窄**：要求文案同时出现 `reasoning_content` 字段名与
- * `Missing required parameter` 短语 —— 正常正文不会同时带这两者。
+ * `Missing required parameter` 短语 —— 正常正文不会同时带这两者。DeepSeek 官方
+ * 只说「必须回传」，所以第二种句式单独认（同样要求字段名，见函数内注释）。
  */
 export function isMissingReasoningHistoryError(message: string | undefined): boolean {
   if (!message) return false
+  // 两种上游文案：Vercel AI Gateway 的 `Missing required parameter:
+  // 'messages[6].reasoning_content'`，以及 DeepSeek 官方的
+  // `The reasoning_content in the thinking mode must be passed back to the API.`
+  // （2026-11-07 实测，聚合 deepseek 线）。两句都同时带字段名，口径不变。
   return /reasoning_content/i.test(message)
-    && /missing required parameter/i.test(message)
+    && (/missing required parameter/i.test(message) || /must be passed back/i.test(message))
 }
 
 /**

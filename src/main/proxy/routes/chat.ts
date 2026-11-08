@@ -55,9 +55,10 @@ import { getAggregateEntry } from '../../providers/aggregate/registry.ts'
 import { learnFromErrorBody, learnFromHeaders } from '../quota/observations'
 import { rejectionEntryFromContext } from '../rejectionLog'
 import { clientHeaderValue, identifyClientByUserAgent } from '../../../shared/clientProfile'
-import { takeCompressionReport } from '../compression'
+import { takeCompressionReport, type CompressionReport } from '../compression'
 import { takeDuplication } from '../compression/duplication.ts'
 import { takeConversationTurn } from '../compression/survivorship.ts'
+import { createReasoningEchoObserver, reasoningEchoApplies } from '../reasoningEcho.ts'
 import { clientSessionKey } from '../../../shared/clientSessionKey.ts'
 import { 
   isAnthropicToolFormat,
@@ -172,7 +173,12 @@ function meterQuota(
   accountId: string,
   modelId: string,
   reading: UsageReading,
-  savedTokens?: number
+  savedTokens?: number,
+  /**
+   * 这次请求的压缩判决。按日桶要的不是"省了多少"，而是"为什么没省"——
+   * 被拒候选的投影只活在这份报告里，请求日志一两天就滚掉了。
+   */
+  compression?: CompressionReport
 ): void {
   try {
     storeManager.getQuotaLedger().record(provider.id, accountId, modelId, reading)
@@ -192,6 +198,7 @@ function meterQuota(
       providerId: provider.id,
       modelId,
       costUsd: estimateRequestCost(provider, modelId, reading),
+      ...(compression === undefined ? {} : { compression }),
     })
   } catch (error) {
     console.error('[Chat] token usage record failed:', error)
@@ -1233,7 +1240,8 @@ router.post('/completions', async (ctx: Context) => {
         // 只计真正生效的压缩节省；跳过的请求不计入（那是反事实）。
         compressionReport && compressionReport.applied.length > 0
           ? compressionReport.saved
-          : 0
+          : 0,
+        compressionReport
       )
     }
 
@@ -1258,6 +1266,12 @@ router.post('/completions', async (ctx: Context) => {
       let heartbeat: SseHeartbeat | undefined
       let streamOutcomeReported = false
       wrapperStream.on('error', () => {})
+
+      // 聚合 DeepSeek 端点：观测我们下行发出的思考，按 tool_call.id 缓存，下一轮由
+      // 转发器回灌（`proxy/reasoningEcho.ts`）。渠道包直通路径由 worker.ts 自己观测。
+      const reasoningEcho = reasoningEchoApplies(provider)
+        ? createReasoningEchoObserver()
+        : undefined
 
       // 退化判据的阈值是设置项（默认即当前标定值）；关掉时连读数都不算。
       const repetitionGuard =
@@ -1311,6 +1325,8 @@ router.post('/completions', async (ctx: Context) => {
       const failStream = (err: Error) => {
         if (streamSettled) return
         streamSettled = true
+        // 失败也提交：已产出的思考下一轮同样要回灌（与 `channelPack/worker.ts` 同口径）。
+        reasoningEcho?.finish()
         const details = err as Error & Partial<StreamErrorFrame>
         const failureStatus = details.status ?? 502
         if (endReason === undefined) {
@@ -1468,7 +1484,8 @@ router.post('/completions', async (ctx: Context) => {
             streamReading,
             compressionReport && compressionReport.applied.length > 0
               ? compressionReport.saved
-              : 0
+              : 0,
+            compressionReport
           )
           wrapperStream.end()
           if (streamError) {
@@ -1506,12 +1523,14 @@ router.post('/completions', async (ctx: Context) => {
           failStream(err)
         })
 
-        // 断流判定必须看上游原始 SSE：转换器在上游没给结束原因时会补一个 stop，
-        // 只看输出就再也分不出「答完」和「被掐断」。结束帧都在流尾，留 8KB 够判。
+        // 断流判定必须看上游原始 SSE：交付流只保留网关实际转发出去的帧，
+        // 上游在流尾发了什么（finish_reason / [DONE]）只能从原始字节里读。
+        // 结束帧都在流尾，留 8KB 够判。
         let upstreamTail = ''
         result.stream.on('data', (chunk: Buffer) => {
           if (firstTokenAt === undefined) firstTokenAt = Date.now()
           upstreamTail = (upstreamTail + chunk.toString()).slice(-8192)
+          reasoningEcho?.push(chunk)
         })
 
         result.stream.pipe(transformStream)
@@ -1519,9 +1538,19 @@ router.post('/completions', async (ctx: Context) => {
 
         transformStream.once('end', () => {
           streamSettled = true
+          // 流正常收尾：把本轮攒到的思考提交进缓存。
+          reasoningEcho?.finish()
           const elapsed = Date.now() - startTime
           const delivered = readStreamOutcome(collectedContent)
           const upstream = readStreamOutcome(upstreamTail)
+          // 上游宣布了结束、交付流却没有结束帧，客户端会读成断流（Qoder 报 code=500），
+          // 而行状态仍是 success。两者一旦分叉就必须留下可检索的证据。
+          if (upstream.sawFinish && !delivered.sawFinish) {
+            storeManager.addLog('warn', '交付流缺少上游已发出的结束帧', {
+              requestId,
+              data: { upstreamFinishReason: upstream.finishReason ?? null, bytesOut },
+            })
+          }
           const upstreamSawDone = sawDone
           if (endReason === undefined) endReason = upstreamSawDone ? 'done' : 'eof'
           if (!sawDone && !wrapperStream.destroyed) {
@@ -1554,7 +1583,8 @@ router.post('/completions', async (ctx: Context) => {
             streamReading,
             compressionReport && compressionReport.applied.length > 0
               ? compressionReport.saved
-              : 0
+              : 0,
+            compressionReport
           )
           wrapperStream.end()
         })
@@ -1587,6 +1617,7 @@ router.post('/completions', async (ctx: Context) => {
         stopPing()
         if (ctx.res.writableEnded) return
         if (endReason === undefined) endReason = 'client_gone'
+        reasoningEcho?.finish()
         const source = result.stream as Readable
         if (!source.destroyed) source.destroy()
       })

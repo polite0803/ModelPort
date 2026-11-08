@@ -85,12 +85,17 @@ test('compression is the last thing that rewrites the outbound messages', () => 
   const compress = positionOf(/applyCompression\(\{/, 'the compression call')
   // 2026-11-03 两处改写退役（托管工具层、verbosity 引导）之后，压缩产出的那份消息就是
   // 出站装配读到的那一份。这里钉的是顺序，钉的更是「后面没有第二个往消息里写字的环节」。
+  // 2026-11-08 的唯一例外：DeepSeek 聚合线的 reasoning 回灌排在压缩之后、装配之前，
+  // 它只补 `reasoning_content` 字段（上游要求逐字回传，因此绝不能过压缩器）。
   const build = positionOf(
-    /const body = this\.buildRequestBody\(request, actualModel, account\)/,
+    /const body = this\.buildRequestBody\(outbound, actualModel, account\)/,
     'the outbound body build'
   )
+  const echo = positionOf(/const outbound = reasoningEcho/, 'the reasoning echo injection')
 
   assert.ok(compress < build, 'compression must precede the outbound body build')
+  assert.ok(compress < echo, 'the reasoning echo must not run before compression')
+  assert.ok(echo < build, 'the reasoning echo must feed the outbound body build')
   for (const dead of ['applyVerbositySteering', 'transformRequestForPromptToolUse']) {
     assert.equal(forwarder.includes(dead), false, `已退役的改写环节又出现在转发器里：${dead}`)
   }

@@ -24,7 +24,7 @@
 
 <p align="center">
   ModelPort is an Electron desktop application that runs an OpenAI-compatible API gateway on your
-  machine. It ships an aggregate catalogue of 89 endpoints / 570 models, thirteen account channels
+  machine. It ships an aggregate catalogue of 89 endpoints / 568 models, thirteen account channels
   managed by a vendored channel pack, and user-defined custom providers, so one base URL serves any
   OpenAI-compatible SDK or agent client.
 </p>
@@ -68,7 +68,7 @@
 
 | Provider class | Auth types | Count | Notes |
 | -------------- | ---------- | ----- | ----- |
-| Aggregate catalogue | API key / none / unsupported | 89 entries / 570 models | `openai-chat` and `anthropic-messages` wires; includes Kilo's key-less free pool |
+| Aggregate catalogue | API key / none / unsupported | 89 entries / 568 models | `openai-chat` and `anthropic-messages` wires; includes Kilo's key-less free pool |
 | Account channels | Browser / device-code / OAuth / API key | 13 channels | Each channel keeps its own account pool, daily credit claim and model gating |
 | Custom provider | Configured per provider | — | Any OpenAI-compatible HTTP endpoint you define yourself |
 

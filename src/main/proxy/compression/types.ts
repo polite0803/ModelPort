@@ -106,6 +106,26 @@ export interface CompressionReport {
   ratio: number
   ccrHashes?: string[]
   skipped?: CompressionSkipReason
+  /**
+   * Every candidate that reached the accept gate, accepted or refused.
+   *
+   * A refused candidate leaves no trace in `tokensBefore` / `tokensAfter`
+   * (those describe what was actually applied), yet its projection is the only
+   * evidence of what compression would have cost. The day counters need it to
+   * answer "how often would this have beaten the cache" — see
+   * `docs/plan/PLAN-prompt-cache.md` §P3.
+   */
+  candidates?: CompressionCandidate[]
+}
+
+/** One live-zone candidate as the accept gate saw it. */
+export interface CompressionCandidate {
+  contentType: ContentType
+  tokensBefore: number
+  tokensAfter: number
+  accepted: boolean
+  /** Why the gate refused. Absent when accepted. */
+  reason?: CompressionSkipReason
 }
 
 /** Outcome of one field-level compression attempt. */

@@ -323,3 +323,51 @@ export function aggregateModelTokenUsage(
 
   return totals
 }
+
+/**
+ * How much of the window the per-model split can actually speak for.
+ *
+ * Day buckets written before the split existed carry totals but no `byModel`,
+ * and even a day written across the upgrade attributes only its later requests.
+ * The card therefore has to state its coverage; without this the per-model sum
+ * silently undercuts the day totals it is displayed next to.
+ */
+export interface ModelWindowCoverage {
+  /** Requests in the window's day buckets (the totals the card sits beside). */
+  totalRequests: number
+  /** Requests inside buckets that carry a per-model split. */
+  detailedRequests: number
+  /** Earliest day in the window carrying any per-model split. */
+  coveredFrom?: string
+}
+
+export function aggregateModelCoverage(
+  days: Record<string, DayTokenBucket>,
+  window: ProviderStatsWindow,
+  now: number = Date.now()
+): ModelWindowCoverage {
+  let totalRequests = 0
+  let detailedRequests = 0
+  let coveredFrom: string | undefined
+
+  for (const key of windowDayKeys(days, window, now)) {
+    const bucket = days[key]
+    totalRequests += bucket?.requests ?? 0
+
+    const byModel = bucket?.byModel
+    if (byModel === undefined) continue
+
+    if (coveredFrom === undefined) coveredFrom = key
+    for (const usage of Object.values(byModel)) {
+      detailedRequests += usage.requests
+    }
+  }
+
+  // A bucket can attribute at most the requests it counted; a stale write must
+  // not claim more coverage than the day has traffic.
+  return {
+    totalRequests,
+    detailedRequests: Math.min(detailedRequests, totalRequests),
+    ...(coveredFrom === undefined ? {} : { coveredFrom }),
+  }
+}

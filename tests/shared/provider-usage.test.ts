@@ -7,6 +7,7 @@ process.env.TZ = 'Asia/Shanghai'
 const tzApplied = new Date('2026-06-01T00:00:00').getTimezoneOffset() === -480
 
 const {
+  aggregateModelCoverage,
   aggregateProviderUsage,
   aggregateProviderTokenUsage,
   aggregateModelTokenUsage,
@@ -343,4 +344,36 @@ test('a day without a model split contributes no model rows', () => {
   })
   assert.equal(legacy.byModel, undefined)
   assert.deepEqual(aggregateModelTokenUsage({ [TODAY]: legacy }, { kind: 'today' }, NOW), {})
+})
+
+test('per-model coverage counts the requests the split cannot attribute', () => {
+  // A day written before the split existed: totals, no model rows.
+  const legacy = accumulateDayBucket(undefined, {
+    promptTokens: 5000,
+    completionTokens: 900,
+    source: 'upstream',
+    providerId: 'deepseek',
+  })
+  // A day written across the upgrade: totals already include the pre-split part.
+  const mixed = accumulateDayBucket(legacy, {
+    promptTokens: 100,
+    completionTokens: 10,
+    source: 'upstream',
+    providerId: 'deepseek',
+    modelId: 'deepseek-chat',
+    cacheReadTokens: 80,
+    cacheReadReported: true,
+  })
+  assert.equal(mixed.requests, 2)
+  assert.equal(mixed.byModel?.['deepseek::deepseek-chat']?.requests, 1)
+
+  const coverage = aggregateModelCoverage({ [TODAY]: mixed }, { kind: 'today' }, NOW)
+  assert.equal(coverage.totalRequests, 2)
+  assert.equal(coverage.detailedRequests, 1)
+  assert.equal(coverage.coveredFrom, TODAY)
+
+  const none = aggregateModelCoverage({ [TODAY]: legacy }, { kind: 'today' }, NOW)
+  assert.equal(none.totalRequests, 1)
+  assert.equal(none.detailedRequests, 0)
+  assert.equal(none.coveredFrom, undefined)
 })

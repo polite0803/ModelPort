@@ -99,7 +99,7 @@
 | [`features/desktop-ui-updates.md`](features/desktop-ui-updates.md) | 桌面界面与更新：主/渲染进程分工、具名 IPC、单实例与托盘、开机自启对账、`electron-updater` 检查下载安装 | v1.7.3 | 现行 | 2026-11-04 |
 | [`features/https-certificate-trust.md`](features/https-certificate-trust.md) | HTTPS 与证书信任：8443 TLS 监听、托管自签与自带 PEM 两种来源、SAN 覆盖、系统信任库与 Node 客户端的 `NODE_EXTRA_CA_CERTS` 通路 | v1.7.3 | 现行 | 2026-11-04 |
 | [`features/logging-diagnostics.md`](features/logging-diagnostics.md) | 日志与诊断：请求行的尝试/`streamTrace` 读数、错误保留下限、脱敏与截断、`X-ModelPort-Trace` 与诊断包导出 | v1.7.3 | 现行 | 2026-11-04 |
-| [`features/providers-accounts.md`](features/providers-accounts.md) | 渠道与账号：聚合目录（89 条 / 570 模型）、账号渠道、自定义供应商三类的记录来源、凭据与清单归属 | v1.7.3 | 现行 | 2026-11-04 |
+| [`features/providers-accounts.md`](features/providers-accounts.md) | 渠道与账号：聚合目录（89 条 / 568 模型）、账号渠道、自定义供应商三类的记录来源、凭据与清单归属 | v1.7.3 | 现行 | 2026-11-04 |
 | [`features/wsl-daemon.md`](features/wsl-daemon.md) | 无头守护进程与远程管理：三种运行形态、WSL 安装与 systemd 常驻、`--init-host` / `--import-backup`、管理面 RPC/SSE/`/ui` 的鉴权口径与不变量 | v1.8.0 | 现行 | 2026-11-06 |
 
 ## 参考与旁支目录

@@ -232,3 +232,36 @@ test('a prose payload is skipped as below the type threshold', () => {
   assert.equal(outcome.messages, messages)
   assert.equal(outcome.report?.skipped, 'below_threshold')
 })
+
+test('a candidate the cache gate refuses still reports its projection', () => {
+  // The day counters answer "would compression have beaten the cache?", and a
+  // refused candidate is the only request that can say yes. Zeroing the
+  // projection on the skip path is what made that question unanswerable.
+  const outcome = applyCompression({
+    messages: messagesWithToolOutput(),
+    config: { enabled: true, aggressiveness: 'moderate' },
+    cachePolicy: { readDiscount: 0.02, writeMultiplier: 0 },
+    stash,
+  })
+
+  assert.equal(outcome.report?.skipped, 'insufficient_savings')
+  assert.equal(outcome.report?.tokensBefore, 0)
+  const candidates = outcome.report?.candidates ?? []
+  assert.equal(candidates.length, 1)
+  assert.equal(candidates[0].accepted, false)
+  assert.equal(candidates[0].reason, 'insufficient_savings')
+  assert.ok(candidates[0].tokensBefore > 0)
+  assert.ok(candidates[0].tokensAfter > 0)
+  assert.ok(candidates[0].tokensAfter < candidates[0].tokensBefore)
+})
+
+test('an accepted candidate is reported alongside what was applied', () => {
+  const outcome = apply(messagesWithToolOutput())
+
+  assert.ok((outcome.report?.applied.length ?? 0) > 0)
+  const candidates = outcome.report?.candidates ?? []
+  assert.equal(candidates.length, 1)
+  assert.equal(candidates[0].accepted, true)
+  assert.equal(candidates[0].reason, undefined)
+  assert.equal(candidates[0].tokensBefore, outcome.report?.tokensBefore)
+})

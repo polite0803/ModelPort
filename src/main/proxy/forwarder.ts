@@ -133,6 +133,11 @@ import { qualifyChannelModel } from '../providers/accountChannels/modelCatalog'
 import { requestDeadlines } from './requestBudget'
 import { recordCatalogMiss } from './modelCatalogCooldown'
 import { isForbiddenProviderHeader } from '../../shared/providerHeaders'
+import {
+  injectReasoningEcho,
+  reasoningEchoApplies,
+  recordReasoningEchoCompletion,
+} from './reasoningEcho.ts'
 
 function shouldDeleteSession(): boolean {
   return sessionManager.shouldDeleteAfterChat()
@@ -1065,7 +1070,13 @@ export class RequestForwarder {
       // 托管层（把工具描述写进 system、再把回复文本解析回 tool_calls）已于 2026-11-03
       // 退役：网关不写提示词，不支持工具的模型由能力路由（`autoRouting::hardFilterFailure`
       // 的 `needsTools`）在候选池阶段处理，而不是靠改写对话内容去将就。
-      const body = this.buildRequestBody(request, actualModel, account)
+      // 聚合 DeepSeek 端点：客户端不回传带 tool_calls 轮的 reasoning_content，
+      // 上游下一轮直接 400。渠道包侧由 `worker.ts` 观测并回灌，聚合线路此前缺这一步。
+      const reasoningEcho = reasoningEchoApplies(provider)
+      const outbound = reasoningEcho
+        ? this.withReplayedReasoning(request, provider)
+        : request
+      const body = this.buildRequestBody(outbound, actualModel, account)
 
       // buildRequestBody 只挑白名单字段；每模型参数里的其余键（top_k、seed、reasoning_effort…）
       // 在这里显式补进上游请求体。保留字段 model/messages/stream 不允许被覆盖。
@@ -1143,6 +1154,8 @@ export class RequestForwarder {
           latency: Date.now() - startTime,
         }
       }
+
+      if (reasoningEcho) recordReasoningEchoCompletion(response.data)
 
       return {
         success: true,
@@ -1405,6 +1418,26 @@ export class RequestForwarder {
     }
 
     return headers
+  }
+
+  /**
+   * 把缓存的思考补进入站历史（只有 DeepSeek 官方端点会走到这里）。
+   *
+   * 只补「客户端没回传」的轮次：已带回的一字节不动，没有可信思考的轮次宁可留空
+   * 也不编造（判据与有界性都在 `channelPack/reasoningReplay.ts`）。
+   */
+  private withReplayedReasoning(
+    request: ChatCompletionRequest,
+    provider: Provider
+  ): ChatCompletionRequest {
+    const { request: recovered, injected } = injectReasoningEcho(request)
+    if (injected === 0) return request
+    storeManager.addLog('info', `聚合线路补回 reasoning_content：${injected} 轮客户端未回传`, {
+      requestId: request.requestId,
+      providerId: provider.id,
+      data: { injected },
+    })
+    return recovered
   }
 
   /**

@@ -36,6 +36,11 @@
  * 空思考**不入缓存**（真无思考轮本来就不要求成对，也避免把空串当成"已补齐"）。
  *
  * ⚠️ 本模块只做"补"不做"改"：客户端已经回传 reasoning 的消息**一个字节都不动**。
+ *
+ * 2026-11-08：聚合线路（`proxy/reasoningEcho.ts`）接上了同一份缓存。渠道包这边只
+ * 覆盖 `type: 'account'` 的渠道；客户端直连聚合 `deepseek`（api.deepseek.com）时走
+ * 的是 `forwarder.ts` 的通用 openai-chat 分支，此前从来没有回灌过 —— 实测 400
+ * `The reasoning_content in the thinking mode must be passed back to the API.`
  */
 export interface ReplayLogger {
   debug?: (message: string) => void
@@ -67,13 +72,20 @@ interface PendingTurn {
 }
 
 export class ReasoningReplay {
-  /** id → 思考文本（Map 的插入顺序即淘汰顺序）。 */
-  private readonly byId = new Map<string, string>()
+  /**
+   * id → 思考文本（Map 的插入顺序即淘汰顺序）。
+   *
+   * 可由多个实例共享（见 {@link ReasoningReplayCache}）：缓存本身是跨请求的，
+   * 而 `pending` 必须是一次响应独有 —— 同一个对象既当缓存又当累积器时，两个
+   * 并发请求的增量会混在一起，把 A 的思考挂到 B 的 `tool_call.id` 上。
+   */
+  private readonly byId: Map<string, string>
   private pending: PendingTurn = { reasoning: '', ids: [] }
   private readonly maxIds: number
 
-  constructor(maxIds: number = REPLAY_MAX_IDS) {
+  constructor(maxIds: number = REPLAY_MAX_IDS, sharedById?: Map<string, string>) {
     this.maxIds = maxIds > 0 ? maxIds : REPLAY_MAX_IDS
+    this.byId = sharedById ?? new Map<string, string>()
   }
 
   /** 开始一轮新响应：清空未提交的累积。 */
@@ -202,5 +214,30 @@ export class ReasoningReplay {
       if (oldest.done === true) break
       this.byId.delete(oldest.value)
     }
+  }
+}
+
+/**
+ * 一个进程内共享的思考缓存。
+ *
+ * 用法：观测（每个响应一个 `createReplay()`）与回灌（`recover`）都指向同一份 id 表。
+ * 单独持有缓存而不是复用一个 `ReasoningReplay`，是为了让并发响应各自累积。
+ */
+export class ReasoningReplayCache {
+  private readonly byId = new Map<string, string>()
+
+  /** 缓存里的 id 数量（诊断用）。 */
+  size(): number {
+    return this.byId.size
+  }
+
+  /** 新建一个与缓存共享 id 表、但独立累积的响应观测器。 */
+  createReplay(maxIds: number = REPLAY_MAX_IDS): ReasoningReplay {
+    return new ReasoningReplay(maxIds, this.byId)
+  }
+
+  /** 在共享缓存上做一次补回（只读，不产生观测器状态）。 */
+  recover(messages: unknown): { messages: unknown; injected: number } {
+    return this.createReplay().recover(messages)
   }
 }

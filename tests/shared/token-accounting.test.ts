@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   accumulateDayBucket,
+  compressionRatioBucket,
   summarizeDay,
   trimDays,
   normalizeDayBucket,
@@ -464,4 +465,105 @@ test('a hand-edited model split is sanitized, and old buckets have none', () => 
   assert.equal(cleaned.byModel?.['a::b'].cacheReportedRequests, 0)
   assert.deepEqual(Object.keys(cleaned.byModel ?? {}), ['a::b'])
   assert.equal(normalizeDayBucket({ requests: 1 }).byModel, undefined)
+})
+
+test('a compression verdict counts one analyzed request, applied or not', () => {
+  let bucket: DayTokenBucket | undefined
+  bucket = accumulateDayBucket(bucket, {
+    promptTokens: 100,
+    completionTokens: 10,
+    source: 'upstream',
+    compression: {
+      applied: ['json'],
+      candidates: [{ contentType: 'json_array', tokensBefore: 1000, tokensAfter: 5, accepted: true }],
+    },
+  })
+  bucket = accumulateDayBucket(bucket, {
+    promptTokens: 100,
+    completionTokens: 10,
+    source: 'upstream',
+    compression: {
+      applied: [],
+      skipped: 'insufficient_savings',
+      candidates: [{ contentType: 'json_array', tokensBefore: 1000, tokensAfter: 220, accepted: false }],
+    },
+  })
+
+  const counters = bucket.compression
+  assert.equal(counters?.analyzed, 2)
+  assert.equal(counters?.applied, 1)
+  assert.deepEqual(counters?.skipped, { insufficient_savings: 1 })
+  assert.equal(counters?.byContentType.json_array.candidates, 2)
+  assert.equal(counters?.byContentType.json_array.accepted, 1)
+  assert.equal(counters?.byContentType.json_array.tokensBefore, 2000)
+  assert.equal(counters?.byContentType.json_array.tokensAfter, 225)
+  assert.equal(counters?.byContentType.json_array.ratioBuckets.lt1, 1)
+  assert.equal(counters?.byContentType.json_array.ratioBuckets.lt25, 1)
+  // The token pools are untouched by the verdict: compression is not usage.
+  assert.equal(bucket.requests, 2)
+  assert.equal(bucket.upstreamPrompt, 200)
+})
+
+test('a request that never reached compression leaves no counter row', () => {
+  const legacy = accumulateDayBucket(undefined, { promptTokens: 10, completionTokens: 1, source: 'upstream' })
+  assert.equal(legacy.compression, undefined)
+  assert.equal(normalizeDayBucket({ requests: 1, upstreamPrompt: 10 }).compression, undefined)
+})
+
+test('ratio buckets sit either side of the two cache thresholds', () => {
+  // 2% is DeepSeek's c, 8% is Anthropic's c/(1+w). A bucket edge that moves
+  // across either value silently rewrites the P3 answer.
+  const cases: Array<[number, number, string]> = [
+    [1000, 9, 'lt1'],
+    [1000, 10, 'lt2'],
+    [1000, 19, 'lt2'],
+    [1000, 20, 'lt5'],
+    [1000, 79, 'lt8'],
+    [1000, 80, 'lt10'],
+    [1000, 99, 'lt10'],
+    [1000, 100, 'lt25'],
+    [1000, 249, 'lt25'],
+    [1000, 250, 'gte25'],
+  ]
+  for (const [before, after, expected] of cases) {
+    assert.equal(compressionRatioBucket(before, after), expected, `${after}/${before}`)
+  }
+  assert.equal(compressionRatioBucket(0, 10), null)
+  assert.equal(compressionRatioBucket(Number.NaN, 10), null)
+})
+
+test('persisted compression counters survive normalization and clamp junk', () => {
+  const cleaned = normalizeDayBucket({
+    requests: 3,
+    compression: {
+      analyzed: 3,
+      applied: 'x',
+      skipped: { insufficient_savings: 2, '': 5, yes: -1 },
+      byContentType: {
+        json_array: {
+          candidates: 2,
+          accepted: 1,
+          tokensBefore: 2000,
+          tokensAfter: -5,
+          ratioBuckets: { lt1: 1, lt2: 1, bogus: 9 },
+        },
+        broken: null,
+        '': { candidates: 1 },
+      },
+    },
+  })
+
+  const counters = cleaned.compression
+  assert.equal(counters?.analyzed, 3)
+  assert.equal(counters?.applied, 0)
+  assert.deepEqual(counters?.skipped, { insufficient_savings: 2, yes: 0 })
+  const row = counters?.byContentType.json_array
+  assert.equal(row?.candidates, 2)
+  assert.equal(row?.accepted, 1)
+  assert.equal(row?.tokensBefore, 2000)
+  assert.equal(row?.tokensAfter, 0)
+  assert.equal(row?.ratioBuckets.lt1, 1)
+  assert.equal(row?.ratioBuckets.lt2, 1)
+  assert.equal(row?.ratioBuckets.gte25, 0)
+  assert.deepEqual(Object.keys(counters?.byContentType ?? {}), ['json_array'])
 })

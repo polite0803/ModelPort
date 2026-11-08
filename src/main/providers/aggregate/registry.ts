@@ -48,7 +48,7 @@ import type { AggregateEntry } from '../../../shared/aggregate'
  * Yi. A vendor's pay-as-you-go endpoint and its subscription endpoint are always
  * separate entries: the vendors isolate the API key and base URL per billing
  * channel, and mixing them either returns 401/403 or silently bills the payg
- * account. The array now carries 89 entries / 570 models.
+ * account. The array now carries 89 entries / 568 models.
  */
 export const AGGREGATE_REGISTRY: AggregateEntry[] = [
   {
@@ -923,20 +923,12 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     "wire": "anthropic-messages",
     "models": [
       {
+        "id": "MiniMax-M3.1-Flash",
+        "name": "MiniMax M3.1 Flash"
+      },
+      {
         "id": "MiniMax-M3",
         "name": "MiniMax M3"
-      },
-      {
-        "id": "MiniMax-M2.7",
-        "name": "MiniMax M2.7"
-      },
-      {
-        "id": "MiniMax-M2.5",
-        "name": "MiniMax M2.5"
-      },
-      {
-        "id": "MiniMax-M2.1",
-        "name": "MiniMax M2.1"
       }
     ],
     "authUrl": "https://platform.minimaxi.com/user-center/basic-information/interface-key",
@@ -944,7 +936,16 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     "headers": {
       "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14"
     },
-    "notes": "MiniMax mainland endpoint speaking the Anthropic Messages wire; speech ids omitted. The anthropic-beta header is declared by the 9router registry.",
+    "notes": "MiniMax mainland endpoint speaking the Anthropic Messages wire; caching is automatic (no cache_control) and only the M3 family is live - M2.x answers 404 (2069) on this route. Speech ids omitted; the anthropic-beta header is declared by the 9router registry.",
+    "promptCache": {
+      "mode": "implicit-prefix",
+      "readDiscount": 0.1,
+      "acceptsPromptCacheKey": false,
+      "evidence": {
+        "docUrl": "https://platform.minimax.cn/docs/api-reference/text-prompt-caching",
+        "asOf": "2026-11-08"
+      }
+    },
     "website": "https://www.minimaxi.com"
   },
   {

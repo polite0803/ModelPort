@@ -59,6 +59,7 @@ import {
   trimDays,
   type DayTokenBucket,
   type DayTokenSummary,
+  type CompressionVerdict,
 } from '../../shared/tokenAccounting.ts'
 import { sendRequestLog } from '../ipc/logBroadcast'
 import { RequestLogManager } from '../requestLogs/manager'
@@ -2153,6 +2154,8 @@ class StoreManager {
     modelId?: string
     /** 这次请求的美元估算；`undefined` = 没有价格证据，不是 0。 */
     costUsd?: number
+    /** 这次请求的压缩判决；缺省 = 没经过压缩层，不是"没压缩"。 */
+    compression?: CompressionVerdict
     nowMs?: number
   }): void {
     this.ensureInitialized()

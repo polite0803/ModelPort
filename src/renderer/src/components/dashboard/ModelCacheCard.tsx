@@ -18,11 +18,12 @@ import { useTranslation } from 'react-i18next'
 import { Database } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
-import type { ModelWindowTokenUsage, ProviderStatsWindow } from '@shared/providerUsage'
+import type { ModelWindowCoverage, ModelWindowTokenUsage, ProviderStatsWindow } from '@shared/providerUsage'
 import { formatTokens } from './TokenUsageCard'
 
 export interface ModelCacheCardProps {
   stats: Record<string, ModelWindowTokenUsage>
+  coverage?: ModelWindowCoverage
   statsWindow: ProviderStatsWindow
   onWindowChange: (window: ProviderStatsWindow) => void
   className?: string
@@ -49,12 +50,21 @@ function percentOf(numerator: number, denominator: number): string | null {
 
 export function ModelCacheCard({
   stats,
+  coverage,
   statsWindow,
   onWindowChange,
   className,
 }: ModelCacheCardProps) {
   const { t } = useTranslation()
   const [expanded, setExpanded] = useState(false)
+
+  // A window that spans the upgrade has day buckets without a per-model split:
+  // the table's requests would then quietly total less than the day totals it
+  // sits beside. State the gap instead of letting the reader find it.
+  const coverageGap =
+    coverage !== undefined && coverage.detailedRequests < coverage.totalRequests
+      ? coverage
+      : null
 
   const rows = useMemo(() => {
     return Object.entries(stats)
@@ -161,7 +171,17 @@ export function ModelCacheCard({
           </div>
 
           <div className="mt-2 flex items-center justify-between gap-3">
-            <p className="text-caption text-[var(--text-dim)]">{t('dashboard.modelCache.note')}</p>
+            <div>
+              <p className="text-caption text-[var(--text-dim)]">{t('dashboard.modelCache.note')}</p>
+              {coverageGap !== null && (
+                <p className="text-caption text-[var(--text-dim)]">
+                  {t('dashboard.modelCache.coverageNote', {
+                    covered: coverageGap.detailedRequests,
+                    total: coverageGap.totalRequests,
+                  })}
+                </p>
+              )}
+            </div>
             {rows.length > DEFAULT_VISIBLE_ROWS && (
               <button
                 type="button"

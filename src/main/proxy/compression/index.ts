@@ -44,6 +44,7 @@ import {
   DEFAULT_COMPRESSION_CONFIG,
   MAX_KEPT_ITEMS,
   MIN_MESSAGE_TOKENS,
+  type CompressionCandidate,
   type CompressionConfig,
   type CompressionReport,
   type CompressionSkipReason,
@@ -91,11 +92,20 @@ type TargetOutcome =
 
 function skipReport(
   reason: CompressionSkipReason,
-  messages: ChatMessage[] | undefined
+  messages: ChatMessage[] | undefined,
+  candidates?: CompressionCandidate[]
 ): ApplyCompressionOutcome {
   return {
     messages,
-    report: { applied: [], tokensBefore: 0, tokensAfter: 0, saved: 0, ratio: 0, skipped: reason },
+    report: {
+      applied: [],
+      tokensBefore: 0,
+      tokensAfter: 0,
+      saved: 0,
+      ratio: 0,
+      skipped: reason,
+      ...(candidates === undefined || candidates.length === 0 ? {} : { candidates }),
+    },
   }
 }
 
@@ -208,6 +218,7 @@ export function applyCompression(input: ApplyCompressionInput): ApplyCompression
   const deadline = Date.now() + COMPRESSION_TIMEOUT_MS
   const applied: string[] = []
   const hashes: string[] = []
+  const candidates: CompressionCandidate[] = []
   let tokensBefore = 0
   let tokensAfter = 0
   let nextMessages = messages
@@ -234,8 +245,22 @@ export function applyCompression(input: ApplyCompressionInput): ApplyCompression
     })
     if (!gate.accept) {
       lastSkip = gate.reason ?? 'not_smaller'
+      candidates.push({
+        contentType: outcome.block.contentType,
+        tokensBefore: gate.tokensBefore,
+        tokensAfter: gate.tokensAfter,
+        accepted: false,
+        reason: lastSkip,
+      })
       continue
     }
+
+    candidates.push({
+      contentType: outcome.block.contentType,
+      tokensBefore: gate.tokensBefore,
+      tokensAfter: gate.tokensAfter,
+      accepted: true,
+    })
 
     nextMessages = replaceLiveZoneText(nextMessages, target, outcome.block.text)
     applied.push(outcome.block.strategy)
@@ -245,7 +270,7 @@ export function applyCompression(input: ApplyCompressionInput): ApplyCompression
   }
 
   if (applied.length === 0) {
-    return skipReport(lastSkip ?? 'no_live_zone', messages)
+    return skipReport(lastSkip ?? 'no_live_zone', messages, candidates)
   }
 
   const saved = tokensBefore - tokensAfter
@@ -258,6 +283,7 @@ export function applyCompression(input: ApplyCompressionInput): ApplyCompression
       saved,
       ratio: tokensBefore > 0 ? saved / tokensBefore : 0,
       ...(hashes.length > 0 ? { ccrHashes: hashes } : {}),
+      ...(candidates.length > 0 ? { candidates } : {}),
     },
   }
 }

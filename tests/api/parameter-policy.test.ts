@@ -91,7 +91,13 @@ test('chat 线路原生透传工具（托管提示词层已退役）', () => {
   // 2026-11-03 退役裁定：网关不写提示词，默认分支不再经过任何工具改写引擎。
   // 正向门钉「请求原样进 buildRequestBody」与「工具三件套真的在白名单里」
   // （2026-11-01 那次修的缺陷正是白名单缺 `tools`，关掉托管＝把客户端工具静默删掉）。
-  assert.match(forwarder, /const body = this\.buildRequestBody\(request, actualModel, account\)/)
+  // 2026-11-08：出站体可能带 DeepSeek 聚合线的 reasoning 回灌，但那只是字段级补回
+  // （`withReplayedReasoning` 只许动 `reasoning_content`），默认分支仍是请求原样装配。
+  assert.match(forwarder, /const body = this\.buildRequestBody\(outbound, actualModel, account\)/)
+  assert.match(
+    forwarder,
+    /const outbound = reasoningEcho\s*\n\s*\? this\.withReplayedReasoning\(request, provider\)\s*\n\s*: request/
+  )
   assert.match(forwarder, /body\.tools = sanitizedTools/)
   assert.match(forwarder, /body\.tool_choice = request\.tool_choice/)
   assert.match(forwarder, /body\.parallel_tool_calls = request\.parallel_tool_calls/)

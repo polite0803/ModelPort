@@ -151,6 +151,12 @@ test('缺 reasoning 历史识别：命中用户报障的上游原文（2026-10-3
   assert.ok(isMissingReasoningHistoryError(
     "Missing required parameter: 'messages[2].reasoning_content'",
   ))
+  // DeepSeek 官方文案（2026-11-07 实测，聚合 deepseek 线 400）：没有
+  // 「Missing required parameter」，只说必须回传 —— 同样要求字段名同时出现。
+  assert.ok(isMissingReasoningHistoryError(
+    'The `reasoning_content` in the thinking mode must be passed back to the API. '
+    + '(request_id: 5cfc1895-47bb-4e19-9a39-ae61bfe6674d)',
+  ))
 })
 
 test('缺 reasoning 历史识别：窄口径，无关 400 不得误判', () => {

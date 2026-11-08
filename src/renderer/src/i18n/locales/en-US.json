@@ -83,7 +83,8 @@
       "noData": "No per-model token records for this period",
       "expand": "Show all ({{count}})",
       "collapse": "Collapse",
-      "note": "Cache read is what the upstream itself reported and is a subset of input. A model without upstream usage shows \"-\", not 0%."
+      "note": "Cache read is what the upstream itself reported and is a subset of input. A model without upstream usage shows \"-\", not 0%.",
+    "coverageNote": "The per-model split covers {{covered}} of {{total}} requests in this period; records written before it existed carry no model attribution."
     },
     "lastUpdated": "Last Updated",
     "refresh": "Refresh",

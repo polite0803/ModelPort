@@ -220,7 +220,7 @@ message in the UI.
 ### Aggregate Provider Catalogue
 
 `src/main/providers/aggregate/registry.ts` is data transcribed from the reference registry:
-89 entries / 570 models. Beyond dropping `openai` and `github_copilot` (browser-login account
+89 entries / 568 models. Beyond dropping `openai` and `github_copilot` (browser-login account
 channels - the class that was retired) and `fleetrelay_t1` (responses-only relay), seven model rows
 were removed on 2026-10-29 because upstream no longer serves them (3 anthropic ids the API answers
 with an error, 4 xai ids retired 2026-05-15 whose slugs still resolve and silently redirect), and
@@ -815,6 +815,24 @@ the first thing to try if an upstream ever starts validating that the replayed r
 own record. Acceptance criterion, pinned by `tests/channels/reasoning-replay.test.ts`: after replay,
 `countToolCallShapes().missingReasoning` is 0 with the `assistantWithCalls` denominator unchanged.
 
+**The aggregate lane needed the same replay, and had never been wired to it.** The mechanism above
+lives in the channel-pack worker, so it only covered `type: 'account'` channels; a client naming an
+aggregate model directly (Qoder against the aggregate `deepseek` route, `api.deepseek.com`) goes
+through `forwarder.ts`'s generic `openai-chat` branch instead. Three requests on 2026-11-07
+(`chatcmpl-mw71last-4u3cl8`, `-mw71lf3u-rh0wto`, `-mw71linp-5lqnnm`) died with 400 `The
+reasoning_content in the thinking mode must be passed back to the API.` `proxy/reasoningEcho.ts`
+closes it without a second cache: it observes the upstream SSE where the chat route already collects
+its tail (`routes/chat.ts`), splits frames **by line through a `StringDecoder`** (a chunk boundary can
+land inside a multi-byte Chinese character, and a replacement character replayed upstream is worse
+than no replay), and injects before the body is assembled (`forwarder.ts`). Scope is the **endpoint**
+(`api.deepseek.com`), not a model list: the requirement is the upstream's, and `type: 'account'`
+stays with the worker so nothing is observed twice. `ReasoningReplay` keeps one accumulator per
+response and shares only the id→reasoning map (`ReasoningReplayCache`), because a single object used
+as both cache and accumulator mixes two concurrent streams' deltas. `isMissingReasoningHistoryError`
+also recognises DeepSeek's wording (`must be passed back`) so an `auto` route still switches past the
+800 when the cache misses (e.g. right after a restart); a direct model name gets the honest 400.
+Tests: `tests/proxy/reasoning-echo.test.ts`.
+
 **The shadow counter exists because request-body logging structurally cannot answer this.**
 `countToolCallShapes()` (same file as the validator, and **pure observation** - it never affects
 validation) logs one line per request that has tool-call turns. Body logging was tried first and
@@ -1190,6 +1208,18 @@ that path.
   `Retry-After` (and the account is penalised), other 4xx → `invalid_request_error`, 5xx →
   `api_error`. A failure after the stream started is an `data: {"error": ...}` frame, never
   assistant text, and every stream carries exactly one `[DONE]`.
+- **A provider's own content-policy refusal is forwarded, never rewritten or routed around.** Bailian
+  answers a request whose image it refuses with 400 `data_inspection_failed` and `[Input image [0]
+  data may contain inappropriate content.]` (measured 2026-11-07: six rows on
+  `bailian_token_plan/deepseek-v4.1-flash`, 3.5-5.6 s each, the client retrying the same turn). The
+  upstream status, `type`, `code` and message reach the client untouched
+  (`errorMapping.ts::mapForwardFailure`; pinned by `tests/proxy/error-fidelity.test.ts`), and this
+  class is deliberately **not** in the failover exceptions: switching provider would reroute the
+  user's bytes around a moderation verdict this gateway is not entitled to overrule, and the next
+  candidate receives the same picture. What the gateway *can* decide is which models may see an
+  image at all - that is the existing `needsVision` hard filter (`autoRouting.ts::hardFilterFailure`
+  drops a candidate whose `vision` is not `'yes'`), which never applies to a request naming one
+  model directly.
 - `usage` is `null` unless the upstream reported real token counts; it is never fabricated.
 - History trimming never empties the history: `TokenLimitStrategy` always keeps the newest
   non-system message, even when that message alone exceeds `maxTokens` (and even when the system
@@ -1397,6 +1427,14 @@ live `GATEWAY-TEXT:` tags — so the provenance survives without pretending the 
   `POST /v1/management/tool-calling/*` and `tests/tool-calling/`. Tools now travel natively on every
   lane and the only "this model has no tools" handling is routing (`needsTools` → `hardFilterFailure` →
   `missing: ['tools']`), which is what the retired prompt was imitating.
+  The parser that prompt fed was left behind in `proxy/stream.ts` and survived the retirement until
+  2026-11-08: it buffered any content delta whose trailing text was a prefix of `[function_calls]`
+  (`[` alone was enough), forwarded nothing while buffering, and swallowed the upstream
+  `finish_reason` frame (`if (!isBufferingToolCall)`), so a prose answer containing a markdown link
+  ended the stream with no stop reason — Qoder read that as `code=500` (「系统发生异常」) on every
+  session-closing turn while mid-turn tool calls stayed clean. The buffer, the flush-time parse and
+  the non-stream parse are gone along with `proxy/utils/toolParser*`; a text marker is now model
+  prose like any other, and `tests/proxy/stream-finish-frame.test.ts` pins the finish frame.
   **Registry-scope lesson, kept because it generalises:** this prompt became far broader than its author
   intended without any commit touching its own text. `70ec39b` 2026-11-01 retired the OpenCode runtime,
   which deleted the only member of `providerProfiles`, so the fallback profile (`managedSupport: true`,

@@ -218,7 +218,7 @@ function coverageGapsOf(coverage: MetadataCoverage): Record<MetadataAttribute, n
  * 汇总当前目录的元数据解析与覆盖率。纯读，可随时重算。
  *
  * `providerId` 给定时只遍历这一家：逐模型/逐渠道的批量补全只要本范围的队列，
- * 不该为一次点击遍历 89 条目 × 570 模型并重建整张目录索引
+ * 不该为一次点击遍历 89 条目 × 568 模型并重建整张目录索引
  * （store 每次读取还带整份解密，见 `AGENTS.md` §Data Storage）。
  * 范围版的 `totals` / `coverage` 只描述这一家，界面不得拿它当全局覆盖率显示。
  */

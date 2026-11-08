@@ -5,7 +5,6 @@
 
 import { PassThrough, Transform } from 'stream'
 import type { SSEEvent, ChatCompletionResponse, ChatCompletionChoice, ToolCall } from './types.ts'
-import { parseToolCalls } from './utils/toolParser/index.ts'
 import { readUsageFromBody, toWireUsage, type TokenUsage } from './quota/usage.ts'
 
 /**
@@ -210,10 +209,6 @@ export class StreamHandler {
     const formatter = this.formatter
     const transformChunk = this.transformChunk.bind(this)
 
-    // Tool call buffering state
-    let contentBuffer = ''
-    let isBufferingToolCall = false
-    let toolCallIndex = 0
     let doneSent = false
 
     // 部分上游（商汤系等推理模型）只回 reasoning_content，content 恒为空。
@@ -241,15 +236,6 @@ export class StreamHandler {
 
           for (const event of events) {
             if (event.data === '[DONE]') {
-              // Flush any remaining buffer before done
-              if (contentBuffer) {
-                const finalData = transformChunk({ content: contentBuffer }, model, responseId, created, isFirstChunk)
-                if (finalData) {
-                  isFirstChunk = false
-                  this.push(formatter.formatJSON(finalData))
-                }
-                contentBuffer = ''
-              }
               if (!doneSent) {
                 const fallbackFrame = buildReasoningFallback()
                 if (fallbackFrame) {
@@ -295,132 +281,15 @@ export class StreamHandler {
               sawToolCall = true
             }
 
-            // Handle tool call buffering
-            const deltaContent = transformedData.choices[0].delta?.content || ''
-
-            if (deltaContent) {
-              contentBuffer += deltaContent
-
-              const marker = '[function_calls]'
-
-              // If we are not buffering, check if we should start
-              if (!isBufferingToolCall) {
-                const markerIdx = contentBuffer.indexOf(marker)
-
-                if (markerIdx !== -1) {
-                  isBufferingToolCall = true
-                  // If we have text before the marker, send it first
-                  if (markerIdx > 0) {
-                    const textBefore = contentBuffer.substring(0, markerIdx)
-                    const textData = {
-                      ...transformedData,
-                      choices: [{
-                        index: 0,
-                        delta: { content: textBefore },
-                        finish_reason: null
-                      }]
-                    }
-                    this.push(formatter.formatJSON(textData))
-                  }
-                  contentBuffer = contentBuffer.substring(markerIdx)
-                } else {
-                  // Check for partial marker
-                  for (let i = 0; i < contentBuffer.length; i++) {
-                    if (contentBuffer[i] === '[') {
-                      const potentialMarker = contentBuffer.substring(i)
-                      if (marker.startsWith(potentialMarker)) {
-                        isBufferingToolCall = true
-                        if (i > 0) {
-                          const textBefore = contentBuffer.substring(0, i)
-                          const textData = {
-                            ...transformedData,
-                            choices: [{
-                              index: 0,
-                              delta: { content: textBefore },
-                              finish_reason: null
-                            }]
-                          }
-                          this.push(formatter.formatJSON(textData))
-                        }
-                        contentBuffer = potentialMarker
-                        break
-                      }
-                    }
-                  }
-                }
-              }
-
-              if (isBufferingToolCall) {
-                // Try to parse tool calls from buffer
-                const { content: cleanContent, toolCalls } = parseToolCalls(contentBuffer)
-
-                if (toolCalls.length > 0) {
-                  // We found complete tool calls!
-                  for (const tc of toolCalls) {
-                    tc.index = toolCallIndex++
-                    const toolCallData = {
-                      ...transformedData,
-                      choices: [{
-                        index: 0,
-                        delta: {
-                          role: isFirstChunk ? 'assistant' : undefined,
-                          tool_calls: [tc]
-                        },
-                        finish_reason: null
-                      }]
-                    }
-                    isFirstChunk = false
-                    this.push(formatter.formatJSON(toolCallData))
-                  }
-
-                  // Reset buffer with remaining content
-                  contentBuffer = cleanContent
-                  isBufferingToolCall = contentBuffer.includes('[function_calls]')
-
-                  if (contentBuffer && !isBufferingToolCall) {
-                    const textData = {
-                      ...transformedData,
-                      choices: [{
-                        index: 0,
-                        delta: { content: contentBuffer },
-                        finish_reason: null
-                      }]
-                    }
-                    this.push(formatter.formatJSON(textData))
-                    contentBuffer = ''
-                  }
-                  continue
-                } else {
-                  // Still buffering, waiting for complete JSON or closing tag
-                  // Safety check: if buffer is too long and no tool call found, flush it
-                  if (contentBuffer.length > 10000) {
-                    isBufferingToolCall = false
-                    // Fall through to normal text output
-                  } else {
-                    continue
-                  }
-                }
-              }
-
-              // Normal text output
-              transformedData.choices[0].delta!.content = contentBuffer
-              contentBuffer = ''
+            // 正文与工具调用原样透传：网关不解析、不缓冲、不改写模型输出。
+            // 结束帧（finish_reason）无条件转发。旧的 `[function_calls]` 前缀缓冲曾让
+            // 含 markdown 链接的回答把终帧吞掉，客户端只看到「流结束但没有结束原因」。
+            const pushedDelta = transformedData.choices[0].delta || {}
+            if (typeof pushedDelta.content === 'string' && pushedDelta.content) {
+              emittedContentText += pushedDelta.content
             }
-
-            // Handle tool_calls in streaming response
-            if (parsedData.choices?.[0]?.delta?.tool_calls) {
-              transformedData.choices[0].delta!.tool_calls = parsedData.choices[0].delta.tool_calls
-            }
-
-            // Only push if we are NOT currently buffering a potential tool call
-            if (!isBufferingToolCall) {
-              const pushedDelta = transformedData.choices[0].delta || {}
-              if (typeof pushedDelta.content === 'string' && pushedDelta.content) {
-                emittedContentText += pushedDelta.content
-              }
-              isFirstChunk = false
-              this.push(formatter.formatJSON(transformedData))
-            }
+            isFirstChunk = false
+            this.push(formatter.formatJSON(transformedData))
           }
 
           callback()
@@ -430,37 +299,6 @@ export class StreamHandler {
       },
 
       flush(callback) {
-        if (contentBuffer) {
-          // Final check for tool calls in buffer
-          const { content: cleanContent, toolCalls } = parseToolCalls(contentBuffer)
-
-          if (toolCalls.length > 0) {
-            for (const tc of toolCalls) {
-              const callIndex = toolCallIndex++
-              tc.index = callIndex
-              const toolCallData = {
-                id: `call_${responseId}-${callIndex}`,
-                object: 'chat.completion.chunk',
-                created,
-                model,
-                choices: [{
-                  index: 0,
-                  delta: {
-                    tool_calls: [tc]
-                  },
-                  finish_reason: null
-                }]
-              }
-              this.push(formatter.formatJSON(toolCallData))
-            }
-          } else {
-            // No tool calls, just flush content
-            const finalData = transformChunk({ content: contentBuffer }, model, responseId, created, isFirstChunk)
-            if (finalData) {
-              this.push(formatter.formatJSON(finalData))
-            }
-          }
-        }
         if (!doneSent) {
           const fallbackFrame = buildReasoningFallback()
           if (fallbackFrame) {
@@ -632,17 +470,8 @@ export class StreamHandler {
       })
 
       stream.on('end', () => {
-        // Parse tool calls from accumulated content
-        const { content: cleanContent, toolCalls: parsedToolCalls } = parseToolCalls(content)
-
-        // Merge parsed tool calls with any native tool calls
+        // 工具调用只认上游原生 tool_calls；正文里出现的任何标记都是模型原文，不解析。
         const finalToolCalls = [...toolCalls]
-        if (parsedToolCalls.length > 0) {
-          parsedToolCalls.forEach(ptc => {
-            ptc.index = (ptc.index ?? 0) + finalToolCalls.length
-            finalToolCalls.push(ptc)
-          })
-        }
 
         const message: any = {
           role: 'assistant',
@@ -655,7 +484,7 @@ export class StreamHandler {
         message.content =
           finalToolCalls.length > 0
             ? null
-            : cleanContent || reasoningContent.trim() || null
+            : content || reasoningContent.trim() || null
 
         if (finalToolCalls.length > 0) {
           // Remove index field and sort by original index

@@ -19,7 +19,9 @@ test('the catalogue carries the entries that can actually be wired', () => {
   // plus the 2026-10-30 freellmpool port (1 + 11 + 5 + 4 + 6 = 27 models).
   // plus the 2026-11-03 domestic entries: Baichuan, Bailian payg/Token Plan,
   // SiliconFlow CN, Spark, StepFun payg/Step Plan, Volcengine platform/Agent Plan, Yi.
-  assert.equal(AGGREGATE_REGISTRY.reduce((sum, entry) => sum + entry.models.length, 0), 570)
+  // minus 2 net on 2026-11-08: minimax-cn dropped its three retired M2.x ids and
+  // gained M3.1-Flash (4 -> 2 models), per the live 404 (2069) readings.
+  assert.equal(AGGREGATE_REGISTRY.reduce((sum, entry) => sum + entry.models.length, 0), 568)
 
   // Browser-login account channels are retired; the responses-only relay is not wired.
   for (const excluded of ['openai', 'github_copilot', 'fleetrelay_t1']) {

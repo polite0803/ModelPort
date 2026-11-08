@@ -29,6 +29,7 @@ export function Dashboard() {
     chartData,
     tokenUsage,
     modelCacheStats,
+    modelCacheCoverage,
     isLoading,
     error,
     lastUpdated,
@@ -200,6 +201,7 @@ export function Dashboard() {
       <div className="mt-4">
         <ModelCacheCard
           stats={modelCacheStats}
+          coverage={modelCacheCoverage}
           statsWindow={providerWindow}
           onWindowChange={setProviderWindow}
         />

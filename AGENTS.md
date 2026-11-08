@@ -13,7 +13,7 @@ the comments in the file you are changing.
 
 ModelPort is a desktop **console** that runs, installs or connects to an OpenAI-compatible API proxy
 gateway (local / WSL / remote). Three provider
-classes ship: a 89-entry / 570-model aggregate catalogue of key-based and key-less endpoints, the
+classes ship: a 89-entry / 568-model aggregate catalogue of key-based and key-less endpoints, the
 thirteen account channels served by the vendored channel pack, and user-defined custom providers.
 Runs on macOS, Windows, Linux.
 
