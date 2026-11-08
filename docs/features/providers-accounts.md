@@ -19,7 +19,7 @@ ModelPort 把上游分成三类，界面也对应三块：聚合目录、账号�
 ## 关键行为与不变量（必守约束）
 
 - **聚合目录只写用户保存过的记录**。`manager.ts` 不会为每条目录条目预建供应商；记录字段包括 `type: 'aggregate'`、`id` = 目录 id、`wire`、`authHeader` / `authPrefix`、`aggregateId`、`supportedModels`、`modelMappings`。〔v1.4.1 起〕
-- 聚合模型显示名为 `<providerId>/<modelId>`；保存时同时写 `provider.modelMappings` 与全局 `config.modelMappings`（带 `preferredProviderId`），删除供应商时两处一起删。这是负载均衡把名字路由到唯一条目的依据。
+- 聚合模型显示名为 `<providerId>/<modelId>`；保存时只写 `provider.modelMappings`（账本：展示名 → 上游 id）。名字归哪一条目由 `<providerId>/` 前缀推导（`modelServing::derivePreferredProvider`），全局 `config.modelMappings` 是**用户数据**（别名、点名、停用），同步不写它；删除供应商后钉到它的行在下一次读配置时被归一摘掉。
 - 带 Key 的聚合条目**一个 Key 一条账号**；负载均衡在该条目的账号间轮转，限流的 Key 自然落到下一个。免密条目（`kilo`、`ollama`、`lmstudio`、`llamacpp`）也会创建空凭据的本地账号，否则负载均衡没有可路由对象。
 - `authKind: 'none'` 且 `autoProvision: true` 的条目会在启动时自动开通（例如 Pollinations、OVHcloud）；用户在界面删除后，id 记入 `dismissedAutoProviders`，下次启动不会复活。
 - `authKind: 'unsupported'` 的条目（Google ADC）会列出但拒绝保存（`unsupported_auth`），不伪装成“填个 Key 就能用”。

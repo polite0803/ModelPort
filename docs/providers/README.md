@@ -24,8 +24,8 @@ mimo / minimax / qwen / qwen-ai / zai）不再有适配文档；2026-11-01 退�
 
 1. 在**聚合渠道**页面选择条目，需要 Key 时填入密钥；Base URL 含 `{placeholders}` 的条目
    （Azure、Vertex）必须先覆盖。
-2. 保存后生成 `type: 'aggregate'` 的供应商记录，模型名为 `<providerId>/<modelId>`，并同步写入
-   `modelMappings`。
+2. 保存后生成 `type: 'aggregate'` 的供应商记录，模型名为 `<providerId>/<modelId>`，写进该记录的
+   `modelMappings` 账本（全局别名表只放用户自己的条目）。
 3. 该条目声明了 `modelsUrl` 时可在页面触发模型发现，结果写入
    `userModelOverrides[providerId].fetchedModels`。
 4. Kilo 等免密条目（`authKind: none`）保存时创建空凭据的本地账户，可立即路由；其模型只保留

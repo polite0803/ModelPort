@@ -265,9 +265,10 @@ same day (GLM-5.1 left upstream on 2026-06-30). All four subscription entries
   to the next. A key-less entry (`kilo`, `ollama`, `lmstudio`, `llamacpp`) gets a credential-less
   active account so the load balancer can route it.
 - Display names are `<providerId>/<modelId>`. `save()` writes `provider.modelMappings`
-  (displayName -> upstream id) and a global `config.modelMappings` entry with
-  `preferredProviderId`, which is what makes `loadbalancer` route a name to exactly one entry.
-  Removing the provider drops both.
+  (displayName -> upstream id), which is what the load balancer translates through; the name is
+  pinned to that entry by its `<providerId>/` prefix (`modelServing::derivePreferredProvider`), so
+  the global `config.modelMappings` table stays user data (aliases, pins, stopped names). Removing
+  the provider drops any row pinned to it the next time the config is read.
 - Wires: `openai-chat` reuses the forwarder's default branch (86 entries).
   `anthropic-messages` (`anthropic`, `glm`'s `/api/anthropic`, `minimax-cn`) uses
   `proxy/adapters/anthropic.ts`, which converts messages/system/tool_use blocks and re-emits the
@@ -711,9 +712,10 @@ pool order, so reordering is how a user picks the preferred account.
 `manager.ts` mirrors that state into provider records. It only writes one when the channel has at
 least one account, so the provider list never grows thirteen unusable rows; records are
 `type: 'account'`, `apiEndpoint: channel://<id>` (a placeholder that is never requested),
-`supportsModelFetch: false`, an identity `supportedModels` / `modelMappings` plus the global
-`config.modelMappings` entry carrying `preferredProviderId`, and a credential-less local account so
-the load balancer can route. Two rules are easy to get wrong: **zero accounts means the record is
+`supportsModelFetch: false`, an identity `supportedModels` / `modelMappings` ledger (that ledger is
+the pin - `derivePreferredProvider` returns the provider whose ledger lists the requested name - and
+the global alias table is never written by the sync), and a credential-less local account so the load
+balancer can route. Two rules are easy to get wrong: **zero accounts means the record is
 deleted**, and **accounts but an empty model list means `enabled: false`** - an enabled provider with
 no models is treated as a wildcard by `providerSupportsModel` and would swallow every model name.
 Model ids are `<channel>/<model>`; the worker splits on the first `/`, so nothing plain-prefixes
