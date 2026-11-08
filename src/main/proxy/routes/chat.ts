@@ -1620,6 +1620,23 @@ router.post('/completions', async (ctx: Context) => {
         reasoningEcho?.finish()
         const source = result.stream as Readable
         if (!source.destroyed) source.destroy()
+
+        // 补充请求日志的结束记录：collectedContent 里已攒到断点前的所有 SSE 帧，
+        // 可以从中读出 finish_reason（如果上游已发）并写出完整的 streamTrace。
+        // 不触发 meterQuota/reportStreamOutcome，保持与 accountRuntime.recordStreamOutcome(…,'client_gone')
+        // 的"不计分不扣分"策略一致。
+        if (!streamSettled && logEntryId) {
+          streamSettled = true
+          const elapsed = Date.now() - startTime
+          const outcome = readStreamOutcome(collectedContent)
+          const trace = streamTraceOf(endReason, elapsed)
+          storeManager.updateRequestLog(logEntryId, {
+            responseBody: collectedContent || undefined,
+            finishReason: outcome.finishReason,
+            streamTruncated: !outcome.sawFinish,
+            streamTrace: trace,
+          })
+        }
       })
     } else {
       ctx.set('Content-Type', 'application/json')
