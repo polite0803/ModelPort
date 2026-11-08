@@ -6,6 +6,74 @@
 条目按"为什么改、影响什么"描述；每条末尾括号里的短哈希指向产生该变更的提交，可在 `git show <哈希>` 中核对。
 版本边界与溯源说明见文末。
 
+## [1.7.12] - 2026-11-09
+
+版本边界：tag `v1.7.12`（相对 1.7.11）。管理面限流按逻辑调用分桶、模型映射表回归用户数据、
+渠道页并发与批量积分、Qoder 免费档余额判据。用户别名、地址簿与已保存口令不受影响；升级后
+首次读配置时会摘掉同步写进去的机器接线行与「owner 已不存在」的僵尸钉定，用户自己的别名与
+点名保留。
+
+### Fixed（修复）
+
+- **远程 UI 把自己打成 429，之后整块管理面一起死**：限流原来按 IP 一个桶、按 HTTP 请求计数。
+  Channels 页一次刷新会带 list + 每渠道 credits + autoCheckin + identity 十几个调用，叠加
+  5s 状态轮询后 240/分钟被自己的流量打满；被拒之后配置写入、SSE 事件流、备份导入一起失败
+  （2026-11-09 日志里 1542 条 429、持续 11 分钟）。桶键改为 `(IP, 逻辑调用)`：RPC 用
+  `<channel, args 摘要>`，其余路径用 `方法 + 路径`；同一 IP 仍保留 1200/分钟的全局上限，
+  分桶不等于放宽总量。UI 侧按同一键记住窗口释放时间，同键的后续刷新一起等。(`43d5ff0`)
+- **映射表被同步整表重写，用户的别名会被下一轮同步抹掉**：聚合与账号渠道的同步都把
+  「每模型一行」的接线写进全局 `config.modelMappings` 并整表覆盖。现在接线只写供应商记录
+  自己的 `modelMappings` 账本，归属由 `modelServing::derivePreferredProvider` 从
+  `<providerId>/<modelId>` 前缀与账本反推；全局表在读侧摘掉三类行：退役名、owner 已不存在的
+  僵尸钉定、与账本等价的机器接线行。读不到供应商表（早期启动）时不做批量删除。(`23cecfc`)
+- **映射面板教用户写通配键，而运行时只按精确名查表**：`gpt-*` 这类条目从来命中不了任何请求。
+  新建时直接拒绝并说明原因；存量通配条目仍然列出（删不删由用户决定），但标红提示它到不了。
+  (`23cecfc`)
+- **Channels 页首屏 1.7–5.9s**：13 家 `account.list` 原本串行（单次 0.1–0.5s）。现在并发问
+  worker，返回顺序仍按目录顺序。(`1743f0d`)
+- **一次刷新要发十几笔管理面请求**：新增 `channels:creditsAll`，宿主内并发问完所有已连接
+  渠道，对管理面只占一次预算；单家失败是结果里的 `error` 字段，不会让整页失败。(`1743f0d`)
+- **并发刷新把目录扫描跑成多份**：结果只在整轮结束才写缓存，并发调用各跑一轮就是多路全量
+  扫描。目录扫描加 `SingleFlight`，失效用代次保证旧轮次不回写缓存、也不清理新轮次。(`1743f0d`)
+- **Qoder 免费/标准档被余额门控读成「余额为 0」**：该计划的 `userQuota` 是
+  `{total:0, used:0, remaining:0}`——本来就不发积分，却和「发放过又烧光」同形。新增
+  `qoderPlanGrantsCredits`（任一包 `total>0` 或 `used>0`）：从未发放返回「未知」放行，
+  发放过而剩余 0 仍按确凿的 0 拦截。(`1743f0d`)
+- **客户端中途断开时请求日志缺收尾**：流在 `client_gone` 关闭时补写 `finishReason` /
+  `streamTrace` / `streamTruncated`，日志里能看出上游发到哪儿、有没有给过结束帧；不触发计分，
+  保持「既不记成功也不记失败」的口径。(`36c45bd`)
+- **`/v1/management/rpc` 的慢请求与 4xx 认不出是哪一次调用**：路由把 `channel` 挂到
+  `ctx.state`，访问日志写出 `rpc=<channel>`；限流在路由前拒绝时也写。(`43d5ff0`)
+
+### Removed（退役）
+
+- `ModelMapper` 的 `mapModel` / `getActualModel` / `addMapping` / `removeMapping` /
+  `getAllMappings` / `getProvidersForModel` 与私有通配匹配、`ConfigManager.setModelMappings` /
+  `resolveActualModel`、两侧同步里的 `writeMappings`：五条读路径各有一套「别名怎么解析」，
+  是两套写法长期并存的根源。(`23cecfc`)
+
+### Tests（判据）
+
+- `tests/channels/single-flight.test.ts`（4 例）：并发共享同一轮、结束后重开、失效后旧轮次
+  不回写且不清理新轮、失败不粘住。
+- `tests/store/model-mapping-table.test.ts`（5 例）：机器接线行被摘；用户别名（改名、点名、
+  同名钉定）三种形态都保留；owner 已删的钉定被摘；无供应商表时只做退役检查；
+  `derivePreferredProvider` 接住机器行原来的归属。
+- `tests/channels/qoder-credit-balance-free-plan.test.ts`（3 例）：免费档不被读成 0、
+  发放后烧光仍读成 0、门控两态各自放行/拦截。
+- `tests/proxy/management-rate-limit.test.ts`、`tests/renderer/headless-rpc-resilience.test.mjs`：
+  分桶键与全局上限、UI 同键等待。
+- `tests/proxy/client-abort.test.ts`：改为直接调用生产判据 `readStreamOutcome`
+  （原手写副本的正则把引号留在值里，`sawFinish` 也与生产语义相反）。(`36c45bd`)
+
+### 未取读数
+
+- **没有对着远程 UI 重放那次 429 风暴**。判据是日志取证（1542 条 429 / 11 分钟、Channels 页
+  扇出）与单测；门禁 2034/2034 绿，但「页面刷新不再自己触发限流」的端到端读数要等下一次
+  真实使用。
+- **发布前的门禁在本地镜像（`C:\mp-build`）跑，不在共享盘**：共享盘拒绝执行 `esbuild` 与
+  原生模块，在那里读到的红是环境假红。
+
 ## [1.7.11] - 2026-11-08
 
 版本边界：tag `v1.7.11`（相对 1.7.10）。账号渠道 WorkBuddy（国内版）新增「完成任务领取积分」
