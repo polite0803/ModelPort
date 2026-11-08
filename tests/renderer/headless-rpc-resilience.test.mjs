@@ -26,8 +26,13 @@ function checkHeadless(source) {
   if (!/const existing = inFlightRpc\.get\(key\)/.test(source) || !/if \(existing\) return existing/.test(source)) {
     problems.push('invoke does not return the in-flight promise for the same channel+args')
   }
-  if (!/response\.status === 429 && !retried/.test(source)) {
+  // 429 仍只自动重试一次；2026-11-09 起先把同一个调用键的窗口释放时间记下来，
+  // 让下一轮刷新一起等，而不是各自再撞一次（`gateUntilByKey` / `waitForGate`）。
+  if (!/response\.status === 429/.test(source) || !/if \(!retried\) return invokeOnce\(channel, args, key, true\)/.test(source)) {
     problems.push('429 is thrown instead of retried once')
+  }
+  if (!/gateUntilByKey/.test(source) || !/await waitForGate\(key\)/.test(source)) {
+    problems.push('the 429 window is not shared across that call key')
   }
   if (!/retryAfterMs/.test(source) || !/Retry-After/.test(source)) {
     problems.push('the retry delay is not read from the gateway contract')
@@ -66,8 +71,12 @@ test('每个判据在对应的破坏样本上会红', () => {
     /does not return the in-flight promise/,
   )
   assert.match(
-    checkHeadless(headless.replace('response.status === 429 && !retried', 'false')).join('\n'),
+    checkHeadless(headless.replace('if (!retried) return invokeOnce(channel, args, key, true)', '')).join('\n'),
     /429 is thrown/,
+  )
+  assert.match(
+    checkHeadless(headless.replace('await waitForGate(key)', '')).join('\n'),
+    /not shared across that call key/,
   )
   assert.match(
     checkPolling(channels.replace('onChanged(scheduleRefresh)', 'onChanged(() => void refresh())'), proxyStatus).join('\n'),

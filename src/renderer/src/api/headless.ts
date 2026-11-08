@@ -130,7 +130,36 @@ function retryDelayMs(response: Response, body: RpcEnvelope | null): number {
   return 1000
 }
 
-async function invokeOnce(channel: string, args: unknown[], retried = false): Promise<any> {
+/**
+ * 按调用键的 429 闸门。
+ *
+ * 只等自己那一次重试是不够的：页面的下一轮刷新（1.5s 去抖）会在同一个被限的桶上
+ * 再发一次，于是「等 5 秒再试一次」反而把窗口继续打满（2026-11-09 1542 条 429、
+ * 持续 11 分钟就是这么续上的）。网关现在按 `(channel, args)` 分桶，这里就用同一个
+ * 键记住窗口释放时间：同键的所有调用一起等，别的桶不受影响。
+ *
+ * `invoke` 在 `inFlightRpc` 里登记的是**包含闸门等待**的整段 promise，所以重叠的
+ * 刷新会共享这一次等待，不会排队制造一串请求。
+ */
+const gateUntilByKey = new Map<string, number>()
+
+async function waitForGate(key: string): Promise<void> {
+  // 循环而不是单次 sleep：等的过程里别的调用可能把同一个键的窗口又往后推了。
+  for (;;) {
+    const until = gateUntilByKey.get(key)
+    if (until === undefined) return
+    const wait = until - Date.now()
+    if (wait > 0) {
+      await new Promise((resolve) => setTimeout(resolve, wait))
+      continue
+    }
+    gateUntilByKey.delete(key)
+    return
+  }
+}
+
+async function invokeOnce(channel: string, args: unknown[], key: string, retried = false): Promise<any> {
+  await waitForGate(key)
   const response = await fetch('/v1/management/rpc', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Management-Secret': secret() },
@@ -143,9 +172,11 @@ async function invokeOnce(channel: string, args: unknown[], retried = false): Pr
   const body = (await response.json().catch(() => null)) as RpcEnvelope | null
   // 管理面限流由 UI 自己的轮询触发，不是用户操作失败：等一个窗口再试一次。
   // 第二次仍 429 就按普通失败抛出，避免把一次点击挂成无限重试。
-  if (response.status === 429 && !retried) {
-    await new Promise((resolve) => setTimeout(resolve, retryDelayMs(response, body)))
-    return invokeOnce(channel, args, true)
+  if (response.status === 429) {
+    const delay = retryDelayMs(response, body)
+    // 同键之后的调用（包括下一轮刷新）都先等这个窗口，而不是各自再撞一次。
+    gateUntilByKey.set(key, Math.max(gateUntilByKey.get(key) ?? 0, Date.now() + delay))
+    if (!retried) return invokeOnce(channel, args, key, true)
   }
   if (!body) throw new Error(`rpc ${channel}: empty response (${response.status})`)
   if (!body.success) {
@@ -162,7 +193,7 @@ function invoke(channel: string, ...args: unknown[]): Promise<any> {
   const existing = inFlightRpc.get(key)
   if (existing) return existing
 
-  const pending = invokeOnce(channel, args)
+  const pending = invokeOnce(channel, args, key)
   inFlightRpc.set(key, pending)
   const settle = (): void => {
     if (inFlightRpc.get(key) === pending) inFlightRpc.delete(key)

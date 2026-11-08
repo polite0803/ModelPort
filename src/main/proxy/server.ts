@@ -324,16 +324,27 @@ export class ProxyServer {
         (ctx.status >= 400 || latency >= SLOW_REQUEST_THRESHOLD_MS)
 
       if (shouldRecordAccessLog) {
-        storeManager.addLog('warn', `${ctx.method} ${ctx.path} ${ctx.status} ${latency}ms`, {
-          data: {
-            method: ctx.method,
-            path: ctx.path,
-            status: ctx.status,
-            latency,
-            clientIP: ctx.ip,
-            slowRequest: latency >= SLOW_REQUEST_THRESHOLD_MS,
+        // `/v1/management/rpc` 是单一不透明路径：没有 channel，一条 429 或 5s 慢
+        // 200 就只写着「某次管理调用」，无法归因（2026-11-09 那次 1542 条 429）。
+        // 名字由限流中间件（路由前的 429）或 RPC 路由挂到 state 上。
+        const rpcChannel = typeof ctx.state.managementRpcChannel === 'string'
+          ? ctx.state.managementRpcChannel
+          : undefined
+        storeManager.addLog(
+          'warn',
+          `${ctx.method} ${ctx.path} ${ctx.status} ${latency}ms${rpcChannel === undefined ? '' : ` rpc=${rpcChannel}`}`,
+          {
+            data: {
+              method: ctx.method,
+              path: ctx.path,
+              status: ctx.status,
+              latency,
+              clientIP: ctx.ip,
+              slowRequest: latency >= SLOW_REQUEST_THRESHOLD_MS,
+              ...(rpcChannel === undefined ? {} : { rpcChannel }),
+            },
           },
-        })
+        )
       }
     })
   }

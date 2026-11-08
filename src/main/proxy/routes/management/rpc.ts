@@ -67,6 +67,9 @@ router.post('/', async (ctx) => {
   const body = ctx.request.body as { channel?: unknown; args?: unknown } | undefined
   const channel = typeof body?.channel === 'string' ? body.channel : ''
   const args = Array.isArray(body?.args) ? body.args : []
+  // 访问日志在上游中间件里、拿不到这里的局部变量：挂到 state 上，慢 200 与 4xx
+  // 才能写出 `rpc=<channel>`，而不是一行认不出是谁的 `POST /v1/management/rpc`。
+  if (channel !== '') ctx.state.managementRpcChannel = channel
 
   if (channel === '') {
     ctx.body = fail(ctx, 400, 'invalid_request', 'rpc requires { channel, args }', channel)

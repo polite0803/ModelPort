@@ -1,8 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  MANAGEMENT_RATE_LIMIT_GLOBAL_MAX,
   MANAGEMENT_RATE_LIMIT_MAX,
   MANAGEMENT_RATE_LIMIT_WINDOW_MS,
+  managementBucketKey,
   managementRateLimiter,
 } from '../../src/main/proxy/middleware/rateLimiter.ts'
 
@@ -16,20 +18,28 @@ import {
 interface FakeCtx {
   path: string
   ip: string
+  method: string
   status: number
   body: unknown
   state: Record<string, unknown>
+  request: { body?: unknown }
   set: (name: string | Record<string, string | number>, value?: string | number) => void
 }
 
-function makeCtx(path: string, ip = '127.0.0.1'): { ctx: FakeCtx; headers: Record<string, string | number> } {
+function makeCtx(
+  path: string,
+  ip = '127.0.0.1',
+  rpcBody?: unknown,
+): { ctx: FakeCtx; headers: Record<string, string | number> } {
   const headers: Record<string, string | number> = {}
   const ctx: FakeCtx = {
     path,
     ip,
+    method: 'POST',
     status: 404,
     body: undefined,
     state: {},
+    request: rpcBody === undefined ? {} : { body: rpcBody },
     set: (name, value) => {
       if (typeof name === 'string') {
         headers[name] = value as string | number
@@ -117,4 +127,57 @@ test('默认窗口是 240 次 / 60 秒', () => {
   // 再叠加状态轮询。240 仍然拦得住死循环脚本。
   assert.equal(MANAGEMENT_RATE_LIMIT_MAX, 240)
   assert.equal(MANAGEMENT_RATE_LIMIT_WINDOW_MS, 60_000)
+})
+
+test('RPC 按 (channel, args) 分桶：一家渠道打满不拖累另一家', async () => {
+  const middleware = managementRateLimiter({ max: 1, windowMs: 60_000 })
+  const call = async (args: unknown[]) => {
+    const { ctx } = makeCtx('/v1/management/rpc', '10.0.0.9', { channel: 'channels:models', args })
+    await middleware(ctx as never, async () => {
+      ctx.status = 200
+    })
+    return ctx
+  }
+
+  assert.equal((await call(['trae'])).status, 200)
+  const limited = await call(['trae'])
+  assert.equal(limited.status, 429, '同一 channel+args 的第二次必须被限')
+  const body = limited.body as { error: { channel?: string } }
+  assert.equal(body.error.channel, 'channels:models', '429 信封要指明被限的调用')
+
+  // 参数不同 = 另一个逻辑调用 = 另一个桶。
+  assert.equal((await call(['qoder'])).status, 200, '另一家渠道的目录读取不该被上一家的桶连坐')
+  // 完全不同的入口同样独立。
+  const list = makeCtx('/v1/management/rpc', '10.0.0.9', { channel: 'channels:list', args: [] })
+  await middleware(list.ctx as never, async () => {
+    list.ctx.status = 200
+  })
+  assert.equal(list.ctx.status, 200, 'list 不该被 channels:models 的桶连坐')
+})
+
+test('每 IP 全局上限跨桶生效：分桶不等于放宽总量', async () => {
+  const middleware = managementRateLimiter({ max: 100, globalMax: 2, windowMs: 60_000 })
+  const call = async (path: string, body?: unknown) => {
+    const { ctx } = makeCtx(path, '10.0.0.10', body)
+    await middleware(ctx as never, async () => {
+      ctx.status = 200
+    })
+    return ctx.status
+  }
+
+  assert.equal(await call('/v1/management/rpc', { channel: 'a', args: [] }), 200)
+  assert.equal(await call('/v1/management/rpc', { channel: 'b', args: [] }), 200)
+  assert.equal(await call('/v1/management/rpc', { channel: 'c', args: [] }), 429, '换桶不能绕过每 IP 总上限')
+})
+
+test('非 RPC 路径按 方法+路径 分桶，RPC 参数摘要稳定', () => {
+  const a = makeCtx('/v1/management/config').ctx
+  const b = makeCtx('/v1/management/config').ctx
+  assert.equal(managementBucketKey(a as never), managementBucketKey(b as never))
+
+  const withBody = (args: unknown[]) =>
+    managementBucketKey(makeCtx('/v1/management/rpc', '127.0.0.1', { channel: 'channels:rpc', args }).ctx as never)
+  assert.equal(withBody(['identity.snapshot', {}]), withBody(['identity.snapshot', {}]))
+  assert.notEqual(withBody(['identity.snapshot', {}]), withBody(['usage.autoCheckin', {}]))
+  assert.equal(MANAGEMENT_RATE_LIMIT_GLOBAL_MAX, 1200)
 })
