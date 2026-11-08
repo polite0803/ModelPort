@@ -47,6 +47,18 @@ export interface ChannelDefinition {
    * 判据只有一条：**渠道包的 `credits.claimAll` 有没有这家自己的分支**。
    */
   dailyCheckin: boolean
+  /**
+   * 该渠道上游**是否有「完成任务领积分」接口**（成长中心 / 新手任务一类的逐项奖励）。
+   *
+   * 与 {@link dailyCheckin} 同样**必填**，理由也是那条先例（用户报障 2026-11-02 opencode）：
+   * 可选字段会被新渠道按「不写 = 有」填进去，于是界面照常渲染按钮，点下去只拿到
+   * 渠道包 `onboarding.claimAll` 的兜底文案。判据同样只有一条：
+   * **渠道包的 `onboarding.claimAll` 有没有这家自己的分支**。
+   *
+   * ⚠️ 与 `dailyCheckin` 语义独立：签到是每天一次的固定动作，任务奖励是每项一次性、
+   * 且要服务端先认定「做完了」。两个按钮点出去的是两套请求。
+   */
+  growthTasks: boolean
   /** One-line description of what the account unlocks. */
   description: string
   /**
@@ -115,6 +127,8 @@ export interface ChannelView {
   credentialAdd?: { withKey: string; anonymous?: string }
   /** 来自 {@link ChannelDefinition.dailyCheckin} —— 界面按它决定渲染不渲染「领取积分」。 */
   dailyCheckin: boolean
+  /** 来自 {@link ChannelDefinition.growthTasks} —— 决定渲染不渲染「领取任务积分」。 */
+  growthTasks: boolean
   description: string
   /** A provider record exists, so its models are routable. */
   configured: boolean

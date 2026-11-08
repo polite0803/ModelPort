@@ -205,6 +205,7 @@ class AccountChannelManager {
         loginKind: channel.loginKind,
         credentialAdd: channel.credentialAdd,
         dailyCheckin: channel.dailyCheckin,
+        growthTasks: channel.growthTasks,
         description: channel.description,
         upstreamIdentity: channel.upstreamIdentity,
         configured: provider !== undefined && provider.type === 'account',

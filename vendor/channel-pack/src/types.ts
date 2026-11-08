@@ -689,6 +689,98 @@ export interface RpcSubmitSmsResponse {
  * （每号只能领一次 10000 分），故有独立端点，不参与「一键签到」遍历。
  */
 
+/**
+ * 服务端下发的任务明细。
+ *
+ * ⚠️ **可选字段**：Loomy / raccoon 的任务清单是本仓库侧的固定表（key→积分），
+ * 而 WorkBuddy 成长中心的清单**由服务端下发**且**奖励有两个量纲**
+ * （`reward_credit` 积分 + `reward_energy` 能量，实测 2026-11-08）。
+ * 二者形状不同，故不为 buddy 改造上面那套 `Record<key, boolean>`，而是追加本明细：
+ * 老 provider 不产出它 ⇒ 行为逐字不变（与 `ClaimOutcome` 用 `& { … }` 追加字段的先例同型）。
+ *
+ * ⚠️ `rewardCredit` 与 `rewardEnergy` **不得相加成一个数**，也不得折算（见
+ * `buddy-growth.ts` 文件头）。展示层按域各说一句。
+ */
+export interface RpcOnboardingTaskItem {
+  /** 服务端主键（buddy 的 `task_code`）。 */
+  key: string
+  title: string
+  /** 怎么做（服务端原文，可能为空串）。 */
+  description: string
+  /** 服务端状态**原值**，不做本地翻译。 */
+  status: string
+  /** 服务端是否认可「现在可领」。 */
+  claimable: boolean
+  /** 进度；未接单时服务端下发 `null` ⇒ 本字段省略，不补 0。 */
+  progress?: { current: number; target: number }
+  rewardCredit: number
+  rewardEnergy: number
+  rewardBuddy: boolean
+  locked: boolean
+}
+
+/**
+ * RPC: 一键领取某渠道**全部账号**的任务奖励。
+ *
+ * ⚠️ 与 `onboarding.claim`（单账号）并存而不是合并：Loomy / raccoon 的界面是
+ * 逐账号面板，只有 buddy 的卡片要「和每日签到那个按钮一样，点一次把池子里所有号都领一遍」。
+ * provider 级循环放在渠道包里（与 `credits.claimAll` 同一位置），宿主只发一次调用 ——
+ * 放到宿主侧就成了「界面自己遍历账号池」的第二份实现。
+ */
+export interface RpcOnboardingClaimAllRequest {
+  provider: string
+}
+
+/** RPC: 一键领取任务奖励的响应。 */
+export interface RpcOnboardingClaimAllResponse {
+  accounts: Array<{
+    accountId: string
+    nickname: string
+    /** 本次真领到的项数。 */
+    claimed: number
+    /** 清单里本来就标记为已领取的项（未发请求）。 */
+    alreadyClaimed: number
+    /**
+     * 「还没做完」的项（未接单 / 已接单 / 进行中）—— **未发请求**。
+     *
+     * 单独成一项是因为它既不是失败也不是已领：界面必须能说清「这些要先去做完才领得到」，
+     * 否则用户读成按钮没生效。
+     */
+    notClaimable: number
+    /** 本次新增所得（两域分列，**不得相加成一个数**）。 */
+    gained: RpcOnboardingRewardTotals
+    /** 逐条失败的服务端原文。 */
+    failures: { key: string; title: string; message: string }[]
+    /**
+     * 整号失败原因（凭据失效 / 清单读不到 / 名称非法）。
+     *
+     * ⚠️ 有这个字段时其余计数全为 0，界面**必须**显示这句话而不是「无可领」——
+     * 「问不出结果」与「问出来了、确实没得领」是两件事。
+     */
+    error?: string
+  }>
+  summary: {
+    /** 真正走到领取流程的账号数（不含整号失败的）。 */
+    accounts: number
+    claimedTasks: number
+    failedTasks: number
+    alreadyClaimedTasks: number
+    notClaimableTasks: number
+    /** 整号失败的账号数（`error` 非空）。 */
+    errors: number
+    /** 本次新增所得合计（两域分列）。 */
+    gained: RpcOnboardingRewardTotals
+  }
+}
+
+/**
+ * 按量纲分组的奖励合计（**两域各自求和，永不互相折算**）。
+ */
+export interface RpcOnboardingRewardTotals {
+  credit: number
+  energy: number
+}
+
 /** RPC: 查询某账号的新手任务状态。 */
 export interface RpcOnboardingStatusRequest {
   provider: string
@@ -696,7 +788,7 @@ export interface RpcOnboardingStatusRequest {
 }
 /** RPC: 新手任务状态响应。 */
 export interface RpcOnboardingStatusResponse {
-  /** 8 个 task key 的完成状态。 */
+  /** 8 个 task key 的完成状态（对 buddy：**已领取**才算 true，进行中不算）。 */
   tasks: Record<string, boolean>
   /** 本地现算的已领积分。 */
   earned: number
@@ -706,6 +798,15 @@ export interface RpcOnboardingStatusResponse {
   titles: Record<string, string>
   /** task key → 积分。 */
   points: Record<string, number>
+  /**
+   * ★ 服务端下发的任务明细（仅 buddy 产出；loomy / raccoon 不产出 ⇒ 行为逐字不变）。
+   *
+   * ⚠️ 上面的 `tasks`/`earned`/`total` 是**积分单域**口径，能量不在其中；
+   * 需要按状态逐项呈现（未接单 / 进行中 / 可领 / 已领）时用本字段。
+   */
+  items?: RpcOnboardingTaskItem[]
+  /** ★ 与 `items` 同源的两域合计（`earned`/`total` 只覆盖 `credit`）。 */
+  totals?: RpcOnboardingRewardTotals
 }
 
 /** RPC: 领取某账号的全部新手任务。 */
@@ -716,12 +817,27 @@ export interface RpcOnboardingClaimRequest {
 /** RPC: 领取新手任务的响应。 */
 export interface RpcOnboardingClaimResponse {
   /** 本次处理的任务（含幂等重放）。 */
-  claimed: { key: string; title: string; points: number }[]
+  claimed: { key: string; title: string; points: number; energy?: number }[]
   /** 此前已完成、本次跳过的 key。 */
   skipped: string[]
-  /** 领取后本地现算的累计已领。 */
+  /** 领取后本地现算的**累计**已领（积分单域，见 `earned` 在状态响应里的同一口径）。 */
   earned: number
   total: number
+  /**
+   * ★ 本次**没领成**的任务与服务端原文（仅 buddy 产出）。
+   *
+   * ⚠️ 存在的理由：批量领取里「部分失败」既不该吞掉（用户以为全领到了），
+   * 也不该让整个 RPC 变成 `ok:false`（其余项其实已经到账）。raccoon 只有一项，
+   * 失败直接走 `ok:false`，无需本字段。
+   */
+  failed?: { key: string; title: string; message: string }[]
+  /**
+   * ★ **本次新增**所得（两域分列，仅 buddy 产出）。
+   *
+   * ⚠️ 与 `earned` 是**两个不同问题**：`earned` 答「累计领到多少」，`gained` 答
+   * 「这次点按钮加了多少」。并排显示成同一个数会自相矛盾，故字段名分开。
+   */
+  gained?: RpcOnboardingRewardTotals
 }
 
 /**

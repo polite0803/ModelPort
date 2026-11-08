@@ -418,6 +418,71 @@ export function Channels() {
     await refresh()
   }
 
+  /**
+   * 一键领取「完成任务领积分」（成长中心，与上面的签到是两套请求）。
+   *
+   * ⚠️ 结果句子按**段**拼，且**只拼非零段**：把 `0` 也写进句子会让「什么都没发生」
+   * 和「有 5 项还没做完」读起来一样。两个量纲（积分 / 能量）**各说一句、不相加**
+   * —— 渠道包与上游都是分开计量的，合成一个数就无从核对。
+   */
+  const claimTasks = async (channel: ChannelView) => {
+    setBusyId(channel.id)
+    const result = await window.electronAPI.channels.rpc('onboarding.claimAll', { provider: channel.id })
+    setBusyId(null)
+    if (!result.ok) {
+      toast({
+        title: t('common.error'),
+        description: result.error?.message ?? t('channels.claimTasksError'),
+        variant: 'destructive',
+      })
+      return
+    }
+    const value = result.value as {
+      summary?: {
+        claimedTasks?: number
+        alreadyClaimedTasks?: number
+        notClaimableTasks?: number
+        failedTasks?: number
+        errors?: number
+        gained?: { credit?: number; energy?: number }
+      }
+      accounts?: Array<{ error?: string }>
+    } | undefined
+    const summary = value?.summary ?? {}
+    const gained = summary.gained ?? {}
+    const credit = Number(gained.credit) || 0
+    const energy = Number(gained.energy) || 0
+    const claimed = Number(summary.claimedTasks) || 0
+    const gains = [
+      credit > 0 ? t('channels.claimTasksGainsCredit', { credit }) : '',
+      energy > 0 ? t('channels.claimTasksGainsEnergy', { energy }) : '',
+    ].filter((part) => part.length > 0).join(t('channels.listSeparator'))
+    const segments: string[] = []
+    if (claimed > 0) {
+      segments.push(gains.length > 0
+        ? t('channels.claimTasksClaimedWithGains', { count: claimed, gains })
+        : t('channels.claimTasksClaimed', { count: claimed }))
+    }
+    const already = Number(summary.alreadyClaimedTasks) || 0
+    if (already > 0) segments.push(t('channels.claimTasksAlready', { count: already }))
+    const pending = Number(summary.notClaimableTasks) || 0
+    if (pending > 0) segments.push(t('channels.claimTasksNotClaimable', { count: pending }))
+    const failed = Number(summary.failedTasks) || 0
+    if (failed > 0) segments.push(t('channels.claimTasksFailed', { count: failed }))
+    const errors = Number(summary.errors) || 0
+    if (errors > 0) segments.push(t('channels.claimTasksErrors', { count: errors }))
+    // 「这个账号问不出结果」的原文单独补一句：计数行只说「N 个账号失败」，
+    // 用户看不出该去重新登录（同 `actionRequired` 的那条教训）。
+    const firstError = (value?.accounts ?? []).find((account) => typeof account?.error === 'string')?.error
+    if (firstError !== undefined && firstError.length > 0) segments.push(firstError)
+    toast({
+      title: t('channels.claimTasksDone'),
+      description: segments.length > 0 ? segments.join(t('channels.listSeparator')) : t('channels.claimTasksNothing'),
+      variant: failed > 0 || errors > 0 ? 'destructive' : 'default',
+    })
+    await refresh()
+  }
+
   const loadModels = async (channel: ChannelView) => {
     setModels(current => ({ ...current, [channel.id]: 'loading' }))
     const result = await window.electronAPI.channels.models(channel.id)
@@ -1032,6 +1097,17 @@ export function Channels() {
                     >
                       <Ticket className="mr-1 h-3.5 w-3.5" />
                       {t('channels.claim')}
+                    </Button>
+                  )}
+                  {channel.growthTasks && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={busy || !connected}
+                      onClick={() => void claimTasks(channel)}
+                    >
+                      <Ticket className="mr-1 h-3.5 w-3.5" />
+                      {t('channels.claimTasks')}
                     </Button>
                   )}
                   {connected && (

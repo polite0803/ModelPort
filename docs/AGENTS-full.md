@@ -638,12 +638,23 @@ message value: the worker asks, `vault.ts` resolves from
 `{value}` / `undefined` goes back. Provider management is an in-worker HTTP route (`/api/channel-pack`)
 whose result is `{ok:true,value}` / `{ok:false,error}`; the methods used here are `provider.status`,
 `provider.setEnabled`, `account.list|create|update|delete`, `login.poll`, `credits.balances`,
-`credits.claimAll`, `model.list` and `usage.autoCheckin` (the global one-switch daily auto-claim: no
+`credits.claimAll`, `onboarding.claimAll`, `model.list` and `usage.autoCheckin` (the global one-switch daily auto-claim: no
 argument reads its state, a boolean writes it. Completion is recorded **per channel** for the current
 UTC+8 day; channels that failed or declared `retryLater` (Qoder before its 10:00 refresh) stay pending
 and are retried every 30 minutes — `DSH_CHANNEL_PACK_AUTO_CHECKIN_RETRY_MS` — while finished channels
 are not requested again; crossing midnight makes the next retry start a new day. The first round is
 still scheduled 30s after the pack starts, and the switch defaults to off).
+
+`onboarding.claimAll` is the second claim button on the channel card (「领取任务积分」) and is a
+**different capability** from `credits.claimAll`: a daily check-in is one fixed action per day, a growth
+task is one-shot and only claimable once the upstream marks it `completed`. Which channels expose it is
+`ChannelDefinition.growthTasks` — required, not optional, for the same reason `dailyCheckin` is: an
+optional flag lets a new channel simply not state it, and the UI renders a button that can only fail.
+The pack supports exactly one channel there today (`buddy`), and the case rejects the rest with a
+readable message rather than the generic `unsupported provider`. Rewards come back in **two separate
+domains** (`reward_credit` 积分 and `reward_energy` 能量, measured 2026-11-08): they are summed within a
+domain and never across one, which is why the response carries `gained: {credit, energy}` instead of a
+single number.
 
 The model catalogue comes from `model.list`, **not** from `bridge.models()` — with exactly one
 exception: `model.list` carries no context window, so `manager.models()` pulls the OpenAI-shaped

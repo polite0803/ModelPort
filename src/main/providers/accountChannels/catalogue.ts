@@ -16,6 +16,7 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
     vendor: '有道',
     loginKind: 'browser',
     dailyCheckin: true,
+    growthTasks: false,
     description: '网页登录后领取每日积分，走有道龙虾的免费模型额度。',
   },
 {
@@ -25,6 +26,7 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
     vendor: 'Qoder',
     loginKind: 'device-code',
     dailyCheckin: true,
+    growthTasks: false,
     description: '设备码登录，账号池按顺序分担请求并共享每日积分。',
 },
 {
@@ -34,6 +36,7 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
     vendor: '阿里',
     loginKind: 'device-code',
     dailyCheckin: true,
+    growthTasks: false,
     description: '中国版 Qoder，与海外版同协议、不同产品线。',
 },
   {
@@ -43,6 +46,7 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
     vendor: '字节跳动',
     loginKind: 'browser',
     dailyCheckin: true,
+    growthTasks: false,
     description: '浏览器登录 TRAE，用签到积分驱动其内置模型。',
   },
   {
@@ -53,6 +57,7 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
     loginKind: 'device-code',
     // 上游没有签到端点（整个 sidecar 扫不到 checkin/campaign），只有订阅额度窗口。
     dailyCheckin: false,
+    growthTasks: false,
     description: '设备码授权 Cline，按订阅额度（不是余额）计费；后端没有签到接口。',
     // 上游 Vercel AI Gateway 硬限 tools ≤ 128，超限 400（以流内错误帧浮现，
     // 换家循环拦不到，用户报障 2026-10-30）——auto 选候选时前置跳过。
@@ -65,6 +70,7 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
     vendor: '科大讯飞',
     loginKind: 'browser',
     dailyCheckin: true,
+    growthTasks: false,
     description: '网页登录 Loomy，每日首次登录自动发放额度。',
   },
   {
@@ -75,6 +81,7 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
     loginKind: 'browser',
     // 每日 300 积分由服务端按日自动发放，没有「领取」这个动作。
     dailyCheckin: false,
+    growthTasks: false,
     description: '浏览器登录 Raccoon，多个模型共用一份免费额度；每日积分由服务端自动发放，没有签到接口。',
   },
   {
@@ -84,6 +91,7 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
     vendor: 'MiniMax',
     loginKind: 'device-code',
     dailyCheckin: true,
+    growthTasks: false,
     description: 'OAuth 设备码授权，支持每日签到领取。',
   },
 {
@@ -93,6 +101,7 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
     vendor: '智谱',
     loginKind: 'browser',
     dailyCheckin: true,
+    growthTasks: false,
     description: '浏览器登录 ZCode，按免费套餐余额扣费。',
 },
   {
@@ -103,6 +112,7 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
     loginKind: 'oauth',
     // 免费线是配额窗口（5 小时 / 周），既没有积分也没有签到。
     dailyCheckin: false,
+    growthTasks: false,
     description: '本地回调 OAuth 授权 Google 账号，走 Cloud Code Assist 免费线；按配额窗口计量，后端没有签到接口。',
   },
   {
@@ -112,6 +122,7 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
     vendor: '腾讯',
     loginKind: 'browser',
     dailyCheckin: true,
+    growthTasks: true,
     description: 'WorkBuddy 国内版（原 CodeBuddy）：浏览器授权，支持每日签到领取免费积分（国际版没有签到接口）。',
   },
   {
@@ -121,6 +132,7 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
     vendor: '腾讯',
     loginKind: 'browser',
     dailyCheckin: false,
+    growthTasks: false,
     description: '浏览器授权 WorkBuddy 国际版账号，共享一份每日额度；后端没有签到接口。',
   },
   {
@@ -134,6 +146,7 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
     // Zen 后端既没有签到端点、也没有余额查询端点（实测 15 个候选路径全 404）：
     // 免费车道按出口 IP 限流，额度只能在官网控制台看。
     dailyCheckin: false,
+    growthTasks: false,
     description:
       'OpenCode 免费车道：匿名槽无需凭据即可用，按出口 IP 限流；粘贴 API key 可解锁收费模型。没有每日签到接口。',
   },

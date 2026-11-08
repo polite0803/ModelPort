@@ -14,7 +14,7 @@ ModelPort 把上游分成三类，界面也对应三块：聚合目录、账号�
 
 聚合目录的额度与价格是**生成旁车**，不是运行时抓取：`docs/data/**` 下的取证回执经构建脚本生成 `src/shared/aggregateQuota.ts` 与 `aggregatePricing.ts`，所以“没有公开上限”的条目标为 `undocumented`，它不阻止任何候选。实时额度是另一回事：聚合详情页点一次问一次，命中严格的“整行成立、非 unlimited、问到数、`<=0`、快照 15 分钟内”条件时只把余量折成闸门，不把美元、人民币与 token 三种计数域换算成同一个数。〔v1.5.5 起〕
 
-账号渠道的宿主只负责“把渠道包的账号池与模型目录投影成供应商记录”。登录、刷新、每日签到、额度领取都在渠道包 worker 里完成；宿主通过 RPC 读 `model.list`、`credits.claimAll` 与账号快照。账号凭据由 `vault` 加密封存（`v1:` 前缀），编辑账号时渲染层拿不到已存明文，解不开的密文按“凭据不可用”处理并留日志。〔v1.4.2 起〕
+账号渠道的宿主只负责“把渠道包的账号池与模型目录投影成供应商记录”。登录、刷新、每日签到、额度领取都在渠道包 worker 里完成；宿主通过 RPC 读 `model.list`、`credits.claimAll`、`onboarding.claimAll` 与账号快照。账号凭据由 `vault` 加密封存（`v1:` 前缀），编辑账号时渲染层拿不到已存明文，解不开的密文按“凭据不可用”处理并留日志。〔v1.4.2 起；`onboarding.claimAll` 〔v1.7.10 起〕〕
 
 ## 关键行为与不变量（必守约束）
 
@@ -30,6 +30,7 @@ ModelPort 把上游分成三类，界面也对应三块：聚合目录、账号�
 - 倍率缺失保持 `undefined`，**绝不写 0**；`isFree: true` 优先于标签；`contextWindow` 缺失保持缺失，不猜一个数字（猜小会让长上下文请求硬过滤掉整个渠道）。
 - `disabled` 与 `dead` 模型保留在目录里（否则用户再也打不开/恢复不了），但 `syncProviders` 只把两者之外的模型写进 `supportedModels` / `modelMappings`。死模型的唯一自愈是 30 天 TTL 或用户点“清除死模型”。
 - 账号渠道 **零账号时删除供应商记录**；有账号但模型列表为空时记录 `enabled: false`，因为启用但无模型的记录会被 `providerSupportsModel` 当成通配目标，吞掉所有模型名。
+- **两个领取按钮是两套能力，不共用开关**。`dailyCheckin` 对应 `credits.claimAll`（每天一次的签到），`growthTasks` 对应 `onboarding.claimAll`（每项一次性、且要上游先认定“做完了”才可领的成长任务）；两者都是**必填布尔**，判据同样只有一条——渠道包那条 case 有没有这家自己的分支。目前 `growthTasks` 只有 WorkBuddy（国内版）为 `true`：成长中心的清单由服务端下发、状态机为 `not_accepted / accepted / in_progress / completed / claimed`，客户端**只领 `completed`**、不替用户接单。奖励分**积分与能量两个量纲**，域内求和、跨域不相加（`gained: {credit, energy}`）。〔v1.7.10 起〕
 - 账号渠道记录是 `type: 'account'`、`apiEndpoint: channel://<id>`（仅占位、永不请求）、`supportsModelFetch: false`；模型名为 `<channel>/<model>`，worker 按第一个 `/` 切分，不能二次加前缀。
 - 三个模型写操作（`channels:refreshModels`、`channels:setModelDisabled`、`channels:clearDeadModels`）都会清空**整个**目录缓存并跑全量 `syncProviders`；只刷一个渠道会让其他渠道看起来“没有模型”。
 - `opencode` 不走 `account.create`：宿主必须调渠道包的 `opencode.addAccount` / `opencode.addAnonymous`，随后执行 `rpcSync` 的 resync 与 `notifyChanged()`。渠道包对这两个方法不发 `changed`，漏掉 resync 会得到“账号进了池子、供应商卡片仍显示未配置”。〔版本待考〕

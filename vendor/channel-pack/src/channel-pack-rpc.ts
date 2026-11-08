@@ -68,6 +68,7 @@ import { credentialExpiresAtMs } from './buddy.js'
 import type { BuddyCredential } from './buddy.js'
 import { decorateLoginUrl, fetchAuthState, runBuddyLoginFlow } from './buddy-oauth.js'
 import { claimDailyCheckin, fetchCheckinStatus, fetchCreditBalance } from './buddy-credits.js'
+import { claimAllGrowthTasks, fetchGrowthTasks, growthTaskItem, sumGrowthRewards, type BuddyGrowthClaimRun } from './buddy-growth.js'
 import { buddyExpiringWindowDays } from './buddy-balance-rank.js'
 import { CODEBUDDY, WORKBUDDY, productById, type BuddyProduct } from './product.js'
 import { LOOMY_TASK_POINTS, LOOMY_TASK_TITLES } from './loomy-onboarding.js'
@@ -609,6 +610,99 @@ export async function collectClaimResults<TCredential = unknown, TProduct = unkn
     results.push({ accountId: entry.id, nickname: entry.nickname, outcome })
   }
   return { results, summary: computeClaimSummary(outcomes) }
+}
+
+/**
+ * 逐账号执行「一键领取任务奖励」（顺序执行，单个账号失败不中断整体）。
+ *
+ * 与 `collectClaimResults` 同一形状的理由，也包括同一件事：**凭据解析在每号自己的
+ * `try` 之内**（`credentialRef()` 会校验名称、`resolve()` 会抛错），否则一个坏账号
+ * 会把整批变成 `handler-failed`。
+ *
+ * ⚠️ **包含已停用账号**（与签到同一口径）：停用只把它移出选号候选，不改变它名下
+ * 有没有可领的奖励。但被上游**停服**（`serviceStopped`）的号除外 —— 那是「上游已拒绝
+ * 为该号服务」，再敲一次认证接口只是白增流量。
+ */
+export async function collectGrowthClaims(
+  accounts: readonly ProviderAccountEntry[],
+  deps: {
+    resolve(ref: CredentialRef): Promise<{ value: string } | undefined>
+    warn?(message: string): void
+  },
+): Promise<RpcOnboardingClaimAllResponse> {
+  const rows: RpcOnboardingClaimAllResponse['accounts'] = []
+  const summary: RpcOnboardingClaimAllResponse['summary'] = {
+    accounts: 0,
+    claimedTasks: 0,
+    failedTasks: 0,
+    alreadyClaimedTasks: 0,
+    notClaimableTasks: 0,
+    errors: 0,
+    gained: { credit: 0, energy: 0 },
+  }
+  for (const entry of accounts) {
+    if (entry.enabled === false && entry.serviceStopped !== undefined) {
+      rows.push({
+        accountId: entry.id,
+        nickname: entry.nickname,
+        claimed: 0,
+        alreadyClaimed: 0,
+        notClaimable: 0,
+        gained: { credit: 0, energy: 0 },
+        failures: [],
+        error: '上游已停止该账号服务，未发起领取',
+      })
+      summary.errors += 1
+      continue
+    }
+    let run: BuddyGrowthClaimRun | null = null
+    let error: string | undefined
+    try {
+      const resolved = await deps.resolve(credentialRef(entry.credentialRef))
+      if (resolved === undefined) {
+        error = '凭据未配置'
+      } else {
+        const credential = JSON.parse(resolved.value) as BuddyCredential
+        run = await claimAllGrowthTasks(credential, CODEBUDDY)
+        // `null` 不是「没有任务」：清单没读出来就说没读出来。
+        if (run === null) error = '成长任务清单读取失败（凭据可能已失效，请重新登录该账号）'
+      }
+    } catch (caught) {
+      deps.warn?.(`[channel-pack] onboarding.claimAll 账号 ${entry.id} 失败: ${String(caught)}`)
+      error = caught instanceof Error ? caught.message : String(caught)
+    }
+    if (run === null || error !== undefined) {
+      rows.push({
+        accountId: entry.id,
+        nickname: entry.nickname,
+        claimed: 0,
+        alreadyClaimed: 0,
+        notClaimable: 0,
+        gained: { credit: 0, energy: 0 },
+        failures: [],
+        error: error ?? '领取失败',
+      })
+      summary.errors += 1
+      continue
+    }
+    rows.push({
+      accountId: entry.id,
+      nickname: entry.nickname,
+      claimed: run.claimed.length,
+      alreadyClaimed: run.alreadyClaimed,
+      notClaimable: run.notClaimable,
+      gained: { ...run.gained },
+      failures: run.failures.map((item) => ({ key: item.task.code, title: item.task.title, message: item.message })),
+    })
+    summary.accounts += 1
+    summary.claimedTasks += run.claimed.length
+    summary.failedTasks += run.failures.length
+    summary.alreadyClaimedTasks += run.alreadyClaimed
+    summary.notClaimableTasks += run.notClaimable
+    summary.gained.credit += run.gained.credit
+    summary.gained.energy += run.gained.energy
+  }
+  return { accounts: rows, summary }
 }
 
 /**
@@ -2164,7 +2258,7 @@ function registerChannelPackEndpoints(
        */
       case 'onboarding.status': {
         const req = payload as RpcOnboardingStatusRequest
-        if (req.provider !== LOOMY.id && req.provider !== RACCOON.id) {
+        if (req.provider !== LOOMY.id && req.provider !== RACCOON.id && req.provider !== CODEBUDDY.id) {
           return { ok: false, error: { code: 'bad-request', message: `unsupported provider: ${req.provider}` } }
         }
         const account = pool.findAccount(req.accountId)
@@ -2174,6 +2268,36 @@ function registerChannelPackEndpoints(
         const resolved = await ctx.credentials.resolve(credentialRef(account.credentialRef))
         if (!resolved) {
           return { ok: false, error: { code: 'bad-request', message: '凭据未配置' } }
+        }
+        if (req.provider === CODEBUDDY.id) {
+          // 成长中心：清单**由服务端下发**，本分支只做只读查询，绝不在此发领取请求
+          //（与上面 Loomy/raccoon 那条「面板挂载时会调用它」的约束同一条）。
+          const credential = JSON.parse(resolved.value) as BuddyCredential
+          const growthTasks = await fetchGrowthTasks(credential, CODEBUDDY)
+          if (growthTasks === null) {
+            // ⚠️ 报「读不到」而不是返回空清单：空清单会被界面渲染成「没有可领的任务」，
+            // 而真相是凭据失效或网络故障 —— 两者要说的话完全不同。
+            return {
+              ok: false,
+              error: { code: 'bad-request', message: '成长任务清单读取失败（凭据可能已失效，请重新登录该账号）' },
+            }
+          }
+          const totals = sumGrowthRewards(growthTasks)
+          return {
+            ok: true,
+            value: {
+              // 兼容上面那套 `Record<key, boolean>` 形状：**已领取**才算 true。
+              // 进行中 / 未接单不算 —— 否则老前端会把「还没做」显示成「已完成」。
+              tasks: Object.fromEntries(growthTasks.map((task) => [task.code, task.status === 'claimed'])),
+              earned: growthTasks.reduce((sum, task) => sum + (task.status === 'claimed' ? task.rewardCredit : 0), 0),
+              // ⚠️ `total` 是**积分单域**（能量不在其中，故与 `totals.energy` 不可比）。
+              total: totals.credit,
+              titles: Object.fromEntries(growthTasks.map((task) => [task.code, task.title])),
+              points: Object.fromEntries(growthTasks.map((task) => [task.code, task.rewardCredit])),
+              items: growthTasks.map(growthTaskItem),
+              totals,
+            } satisfies RpcOnboardingStatusResponse,
+          }
         }
         if (req.provider === RACCOON.id) {
           // raccoon 只有**一项**一次性奖励（桌面端登录奖励 3000 分），
@@ -2270,6 +2394,10 @@ function registerChannelPackEndpoints(
       case 'onboarding.claim': {
         const req = payload as RpcOnboardingClaimRequest
         // ⚠️ 两个 provider 共用本端点（Loomy 的新手任务 / raccoon 的登录奖励）。
+        //
+        // buddy（成长任务）**不在这里**：它的卡片要的是「点一次把池子里所有号都领一遍」，
+        // 走 provider 级的 `onboarding.claimAll`（与 `credits.claimAll` 同层）。
+        // 单号与整池两份领取实现是漂移的起点，故这里不加 buddy 分支。
         if (req.provider !== LOOMY.id && req.provider !== RACCOON.id) {
           return { ok: false, error: { code: 'bad-request', message: `unsupported provider: ${req.provider}` } }
         }
@@ -2331,6 +2459,35 @@ function registerChannelPackEndpoints(
             total: result.total,
           } satisfies RpcOnboardingClaimResponse,
         }
+      }
+
+      /**
+       * 一键领取某渠道全部账号的任务奖励（provider 级）。
+       *
+       * 与 `credits.claimAll`（每日签到）在界面上并排的另一个按钮，语义完全不同：
+       * 签到是「每天一次」，成长任务是「服务端认定做完了才领得到，且每项一次性」。
+       */
+      case 'onboarding.claimAll': {
+        const req = payload as RpcOnboardingClaimAllRequest
+        if (req.provider !== CODEBUDDY.id) {
+          // 只有成长中心有这套「清单由服务端下发 + 逐项状态机」的任务。
+          // Loomy / raccoon 的一次性任务走单号 `onboarding.claim`（它们的界面是逐号面板），
+          // 这里不替它们造一个它们没有的整池语义。
+          return {
+            ok: false,
+            error: {
+              code: 'bad-request',
+              message: req.provider === WORKBUDDY.id
+                ? 'WorkBuddy 国际版没有成长任务接口（其用户中心无此活动线）'
+                : `该渠道不支持一键领取任务奖励：${req.provider}`,
+            },
+          }
+        }
+        const value = await collectGrowthClaims(await pool.listAccounts(req.provider), {
+          resolve: (ref) => ctx.credentials.resolve(ref),
+          warn: (msg) => ctx.logger?.warn?.(msg),
+        })
+        return { ok: true, value }
       }
 
       // ── 限流标记：重测（发真实请求验证）──
