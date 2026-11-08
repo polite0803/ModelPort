@@ -1679,6 +1679,29 @@
     "claimTasksFailed": "{{count}} task(s) failed",
     "claimTasksErrors": "{{count}} account(s) returned no result",
     "listSeparator": ", ",
+    "tasks": {
+      "accept": "Accept tasks",
+      "list": "Task list",
+      "acceptDone": "Tasks accepted",
+      "acceptError": "Could not accept tasks",
+      "accepted": "Accepted {{count}} task(s)",
+      "untouched": "{{count}} need no accepting",
+      "acceptErrors": "{{count}} account(s) returned no result",
+      "acceptNote": "They will complete as you keep using the app",
+      "acceptNothing": "No task needs accepting",
+      "readFailed": "Could not read the task list",
+      "copyTerm": "Copy \"{{term}}\"",
+      "copied": "Copied",
+      "copyFailed": "Could not copy (clipboard blocked — select it manually)",
+      "gainsBuddy": "Limited Buddy",
+      "status": {
+        "not_accepted": "Not accepted",
+        "accepted": "Accepted",
+        "in_progress": "In progress",
+        "completed": "Ready to claim",
+        "claimed": "Claimed"
+      }
+    },
     "autoCheckin": {
       "title": "Auto-claim daily credits",
       "description": "Claim the check-in credits of every account on every connected channel once a day; channels that failed or have not refreshed yet are retried until the day is complete.",
@@ -1689,6 +1712,18 @@
       "ranToday": "Already claimed today ({{date}})",
       "last": "Last run: {{result}} · {{time}}",
       "channelLine": "{{name}}: {{status}}",
+      "never": "Never ran yet",
+      "unavailable": "The channel runtime is not running, so this switch cannot be read"
+    },
+    "autoGrowth": {
+      "title": "Auto-claim completed growth tasks",
+      "description": "Once a day, claim growth-task rewards that are already completed but unclaimed (claim only, never accept). Tasks you have not finished stay for you to do in the client. Off by default.",
+      "on": "On",
+      "off": "Off",
+      "running": "Claiming…",
+      "pending": "{{count}} channel(s) failed today — retrying automatically",
+      "ranToday": "Already claimed today ({{date}})",
+      "last": "Last run: {{result}} · {{time}}",
       "never": "Never ran yet",
       "unavailable": "The channel runtime is not running, so this switch cannot be read"
     },

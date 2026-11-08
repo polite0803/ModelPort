@@ -85,7 +85,7 @@ function tasksFixture() {
   }
 }
 
-const PRODUCT = { endpoint: 'https://copilot.tencent.com' }
+const PRODUCT = { endpoint: 'https://copilot.tencent.com', userAgent: 'WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/5.9.3' }
 const CREDENTIAL = { access_token: 'jwt-token-value', domain: 'www.codebuddy.cn' }
 
 /** 记录每次调用的假 fetcher，并按 URL 返回预设响应。 */
@@ -151,16 +151,20 @@ test('清单读不到时返回 null，不返回空数组（「查不到」≠「
   }
 })
 
-test('请求头：镜像官方网页那组（Bearer + X-Client-Platform + Accept-Language），不发归属头', async () => {
+test('请求头：WorkBuddy 客户端身份（显式 UA + X-Client-Platform: workbuddy），不发归属头', async () => {
   const mod = await loadGrowth()
   const { fetcher, calls } = recorder(() => ({ status: 200, body: JSON.stringify(tasksFixture()) }))
   await mod.fetchGrowthTasks({ ...CREDENTIAL, user_id: 'u-1', enterprise_id: 'e-1' }, PRODUCT, fetcher)
 
   const headers = calls[0].headers
   assert.equal(headers.get('Authorization'), 'Bearer jwt-token-value')
-  assert.equal(headers.get('X-Client-Platform'), 'web')
+  assert.equal(headers.get('X-Client-Platform'), 'workbuddy')
   assert.equal(headers.get('Accept-Language'), 'zh-CN')
   assert.equal(headers.get('Accept'), 'application/json')
+  // ⚠️ 这条是本次修复的正题：调用方不设 UA 时 Node fetch 发的是 `user-agent: node`，
+  // 而同账号的其余 buddy 请求全是 WorkBuddy 身份 —— 唯独领积分是 node 就是异常形状。
+  assert.equal(headers.get('User-Agent'), PRODUCT.userAgent)
+  assert.notEqual((headers.get('User-Agent') || '').toLowerCase(), 'node')
   // ⚠️ 这三条是签到那条路（CLI/IDE 形态）发的头。成长接口实测**不需要**它们，
   // 而官方网页从不发送它们 —— 发出去等于造一个官方客户端不存在的组合。
   for (const name of ['X-Domain', 'X-Product', 'X-Product-Code', 'X-User-Id', 'X-Enterprise-Id', 'X-Tenant-Id']) {
@@ -194,6 +198,20 @@ test('批量领取：只对服务端认可为 completed 的项发 POST，计数�
   assert.equal(calls[1].init.method, 'POST')
   assert.equal(calls[1].headers.get('Content-Type'), 'application/json')
   assert.equal(calls[1].init.body, '{}')
+})
+
+test('领取（POST）带同一套客户端身份，不因为换了方法就漏 UA', async () => {
+  const mod = await loadGrowth()
+  const { fetcher, calls } = recorder((url, method) => method === 'POST'
+    ? { status: 200, body: JSON.stringify({ code: 0, msg: 'OK' }) }
+    : { status: 200, body: JSON.stringify(tasksFixture()) })
+  await mod.claimAllGrowthTasks(CREDENTIAL, PRODUCT, fetcher)
+
+  const post = calls.find((call) => call.init?.method === 'POST')
+  assert.ok(post !== undefined, '应当发出一次 POST')
+  assert.equal(post.headers.get('User-Agent'), PRODUCT.userAgent)
+  assert.equal(post.headers.get('X-Client-Platform'), 'workbuddy')
+  assert.equal(post.headers.get('Authorization'), 'Bearer jwt-token-value')
 })
 
 test('领取响应非 0 时按失败上报并带服务端原文，不猜成「已领过」', async () => {
@@ -259,6 +277,84 @@ test('奖励文案：两个量纲各带一个 +、零的域整段不渲染', asy
   assert.equal(mod.formatGrowthGains({ credit: 0, energy: 0 }), null, '全零要返回 null，让调用方整段不渲染')
   // 小数积分按两位（与 credits.ts::formatCreditAmount 同口径）；能量整数不带小数位。
   assert.equal(mod.formatGrowthGains({ credit: 12.5, energy: 3 }), '+12.50积分, +3能量')
+})
+
+test('接单：一次批量请求只带 not_accepted 的 code，其余状态一个请求都不发', async () => {
+  const mod = await loadGrowth()
+  const fixture = tasksFixture()
+  // 造齐五种状态：只有 not_accepted 该被接。
+  fixture.data.tasks.push({
+    task_code: 'expert_5',
+    title: '召唤 5 次专家',
+    task_desc: '召唤 5 位不同的专家并发起对话。',
+    accept_status: 'in_progress',
+    progress: { current: 1, target: 5 },
+    reward_credit: 100,
+    reward_energy: 5,
+    reward_buddy: false,
+    locked: false,
+  }, {
+    task_code: 'playbook_prompt_again',
+    title: '已接单的项',
+    task_desc: '',
+    accept_status: 'accepted',
+    progress: { current: 0, target: 1 },
+    reward_credit: 100,
+    reward_energy: 5,
+    reward_buddy: false,
+    locked: false,
+  })
+  const posts = []
+  const { calls, fetcher } = recorder((url, method) => {
+    if (method === 'POST') {
+      posts.push(url)
+      return { status: 200, body: JSON.stringify({ code: 0, msg: 'OK' }) }
+    }
+    return { status: 200, body: JSON.stringify(fixture) }
+  })
+
+  const run = await mod.acceptAllPendingGrowthTasks(CREDENTIAL, PRODUCT, fetcher)
+  assert.ok(run !== null)
+  assert.equal(posts.length, 1, '接单是**一次**批量请求，不是每项一次')
+  const acceptCall = calls.find(call => call.init?.method === 'POST')
+  assert.ok(acceptCall !== undefined)
+  assert.equal(acceptCall.url, 'https://copilot.tencent.com/activity/growth/tasks/accept')
+  assert.deepEqual(JSON.parse(acceptCall.init.body), { task_codes: ['Library_read'] })
+  assert.equal(acceptCall.headers.get('User-Agent'), PRODUCT.userAgent)
+  assert.equal(acceptCall.headers.get('X-Client-Platform'), 'workbuddy')
+  assert.equal(run.accepted.length, 1)
+  // 其余四项（claimed / completed / in_progress / accepted）都不该再发。
+  assert.equal(run.untouched, 4)
+  assert.equal(run.failure, undefined)
+})
+
+test('接单被拒时带服务端原文，不报成「接了 0 项」', async () => {
+  const mod = await loadGrowth()
+  const { fetcher } = recorder((url, method) => method === 'POST'
+    ? { status: 200, body: JSON.stringify({ code: 100001, msg: 'template_id required' }) }
+    : { status: 200, body: JSON.stringify(tasksFixture()) })
+  const run = await mod.acceptAllPendingGrowthTasks(CREDENTIAL, PRODUCT, fetcher)
+  assert.equal(run.accepted.length, 0)
+  assert.match(run.failure, /template_id required/)
+  assert.match(run.failure, /code 100001/)
+})
+
+test('没有未接单项时不发任何写请求', async () => {
+  const mod = await loadGrowth()
+  const fixture = tasksFixture()
+  fixture.data.tasks = fixture.data.tasks.map(task => ({ ...task, accept_status: 'claimed' }))
+  const { calls, fetcher } = recorder(() => ({ status: 200, body: JSON.stringify(fixture) }))
+  const run = await mod.acceptAllPendingGrowthTasks(CREDENTIAL, PRODUCT, fetcher)
+  assert.equal(calls.filter(call => call.init?.method === 'POST').length, 0)
+  assert.equal(run.accepted.length, 0)
+  assert.equal(run.untouched, 3)
+})
+
+test('清单读不到时接单返回 null（不把故障说成「没有要接的」）', async () => {
+  const mod = await loadGrowth()
+  const { fetcher } = recorder(() => ({ status: 200, body: JSON.stringify({ code: 401, msg: 'no' }) }))
+  const run = await mod.acceptAllPendingGrowthTasks(CREDENTIAL, PRODUCT, fetcher)
+  assert.equal(run, null)
 })
 
 test('两域合计：各自求和，互不折算', async () => {

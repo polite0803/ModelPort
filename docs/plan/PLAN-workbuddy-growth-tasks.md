@@ -198,3 +198,210 @@ ModelPort 仍提供该渠道（`catalogue.ts:109-115`），这是既有产品决
 命中 **0**。⇒ 渠道包侧「tsc 0 error」是**空洞的绿**，它的真门只有两条：
 `scripts/build-channel-pack.mjs`（esbuild 打包，能抓语法与解析错）+ 直接 import 源码的测试。
 本次两条都跑了（bundle 里 `activity/growth` 与 `onboarding.claimAll` 均在）。
+
+## 7. 发布后复核：客户端身份（UA）与风控（2026-11-08，用户点出问题）
+
+**问题**：「领取任务积分常规是有客户端信息的，UA 和风控处理了没有？」
+**答案：没有处理到位。** 根因不是猜测，是两条读数：
+
+1. 把 `fetchGrowthTasks` 打到本地回环服务器，实际出站头是 **`user-agent: node`** ——
+   我没设 UA，而 Node 的 fetch 在调用方不设时就是发这一行。
+2. 取证那三次 200 用的是**另一个脚本**，它显式设了 Chrome UA。⇒ **我验证过的请求
+   和我发布的请求不是同一条。** 这条属于本仓库反复记过的「取数姿势造假绿」：
+   门禁 2000/2000 全绿也照不出来，因为单测用的是自己写的 stub fetcher。
+
+**现网实测（1 账号 × 5 组头，只读 `GET /v2/activity/growth/tasks`）**：
+
+| 组合 | 结果 |
+|---|---|
+| `web` + 不发 UA（= `node`，即 1.7.11 发布时的形态） | HTTP 200 `code:0` 18 项 |
+| `web` + 官方 CLI UA | HTTP 200 `code:0` 18 项 |
+| `workbuddy` + 官方 CLI UA ← **修复后采用的形态** | HTTP 200 `code:0` 18 项 |
+| `workbuddy` + 浏览器 UA | HTTP 200 `code:0` 18 项 |
+| 上一行 + `Origin` + `Referer` | HTTP 200 `code:0` 18 项 |
+
+**判据（要说清边界，不能写成「绕过风控」）**：该读端点当前**不按这些头设门槛**，
+所以修复的理由不是「不改就失败」，而是**归因一致性与异常度**：仓里每一条 buddy 出站请求
+都设 `product.userAgent`（`buddy-credits.ts:290`、`buddy-oauth.ts` 五处、`buddy-adapter.ts:1842`），
+「腾讯后台『使用端』列按出站 UA 归因」是渠道族的既有不变量；同一账号上**唯独领积分这一条
+是 `node`**，恰好是最容易被判成异常客户端的形状。
+
+**修复**：`growthHeaders(credential, product)` 显式发 `User-Agent: product.userAgent`，
+`X-Client-Platform` 从 `web` 改为 **`workbuddy`**（官方 bundle 里该头由
+`sessionStorage['growth-center-platform']` 决定：桌面内嵌 `workbuddy` / 纯浏览器 `web` /
+小程序 `miniprogram`；ModelPort 的凭据来自桌面那条授权链，故取内嵌形态）。
+**不加** `Origin`/`Referer`：实测不需要，且 `product.endpoint` 与页面 origin 不同源，
+硬造一个 referer 反而多一处不一致。
+
+**修复后的出站读数（同一台回环服务器复测）**：GET 与 POST 都是
+`user-agent: "WorkBuddy/5.9.3 WorkBuddy/5.9.3 CLI/5.9.3"`、`x-client-platform: "workbuddy"`。
+且这一组正是上表里在现网实测过的第 3 行 ⇒ **验证过的与发出去的是同一条**。
+
+**仍未取证的一项**：`X-Device-Token`（图灵盾）。`buddy-credits.ts:15` 记的是**签到**端点
+实测不需要；成长端点上面五组也都不带它且读得到，但**领取（POST）从没发过**，
+所以「claim 需要不需要设备令牌」目前没有读数，只有「不需要 ≠ 已验证」这一句实话。
+一旦真实点一次领到/失败，把结论回填这里。
+
+**取证与验证脚本**（只读、凭据不出机器，落 `%TEMP%`）：`growth_probe.py`（host 归属）、
+`growth_hdr_matrix.py`（上表五组头）、`growth_claim_probe.py`（**未执行**，等写授权）。
+
+**补一条形状差异（同一档「未取证」）**：官方前端调 claim 是
+`t.post(\`/activity/growth/tasks/${e}/claim\`)` —— **只给 URL，不带 body**（axios 传
+`undefined` 即空体），而本实现发的是 `Content-Type: application/json` + `{}`
+（沿用签到端点那条已实测可用的写法：`buddy-credits.ts` 的 `postJson` 发 `'{}'` 且
+`daily-checkin` 实测 `code:0`）。两者对多数 JSON 端点等价，但**这不是实测结论**；
+真实点一次若拿到非 0 且文案指向参数，先按「空 body」重试一次再动别的。
+
+## 8. 领取路径的真实读数（2026-11-08 23:5x，用户在 WSL 网关 + 本地 1.7.11 壳上点了一次）
+
+用户点击「领取任务积分」后的界面结果：**「领到 1 项（+100积分，+5能量），9 项此前已领，26 项还没做完」**。
+⇒ §4.1 与 §7 里那三项「未取证」现在有答案了：
+
+| 未取证项 | 结论 |
+|---|---|
+| claim 的响应形状 | **成功即 `code:0`**；本实现的分值取「清单声明值」（`reward_credit`/`reward_energy`）而不是读响应体 —— 界面显示的 `+100积分 +5能量` 与清单一致，**这条设计选择被真实读数验证为正确**（若当时去猜响应体字段名，就是 0）。 |
+| claim 要不要 `X-Device-Token`（图灵盾） | **不要**。这次领取在**不带**设备令牌的情况下成功（头：Bearer + `X-Client-Platform: workbuddy` + `User-Agent: WorkBuddy/…CLI/…` + `Accept-Language`）。与签到端点 `buddy-credits.ts:15` 的结论同形。 |
+| 请求体 `{}` vs 官方前端的不带 body | **`{}` 被接受**（领取成功）。§7 那条「先按空体重试」的预案不需要启用。 |
+| 幂等码 | 仍然**没有读数**，而且大概率永远拿不到：本实现对 `claimed` 项**跳过不发请求**，所以重复点击是 0 次 POST。这条保持「非 0 一律失败带原文」即可，不必再猜码表。 |
+
+**部署侧读数**（换包后）：`modelport.service` active + enabled；运行中的 bundle 头是
+`X-Client-Platform: "workbuddy"`；`/health` 明文 8080 与 HTTPS 8443 均 200；
+管理 RPC `channels:list` 返回 13 条渠道，`buddy` 的 `growthTasks=True`（2 个账号）、
+`workbuddy` 与其它 11 条 `False`。备份留在 `/root/mpd.bak-20261108-234015`。
+
+## 9. 提额的真实杠杆：接单（accept）
+
+用户问「这个只能领完成任务的吗？」——是，服务端只认 `completed`。但把 36 项（2 账号 × 18）按状态
+摊开后，**瓶颈在「没接单」而不是「没做完」**：
+
+| 状态 | 项数 | 实测含义 |
+|---|---|---|
+| `claimed` | 10 | 已到账，不再发请求 |
+| `not_accepted` | 20 | **进度不被计数**（清单里 `progress` 为 `null` 或无进度）——你用了也不涨 |
+| `accepted` | 4 | 已接单，进度 `0/1`、`0/3`、`0/5` —— 真去用就开始涨 |
+| `in_progress` | 4→2 | 正在涨：实测 `expert_5` 1/5、`template_5` 2/5 |
+
+⇒ `accept` 是官方流程的第一步，**不产生任何积分、也不伪造完成**：它只是让服务端开始为该任务计进度。
+真正的完成仍由上游按实际使用判定（`in_progress` 那两项就是这么涨起来的）。
+所以「一键把 20 项没接的全接上」是合规的提额动作，而「直接 claim 未完成任务」不是——后者必然失败。
+
+## 10. 「产生前置行为」的实测结论（2026-11-09，试点：`X-Expert-Id`）
+
+用户口径：既然服务端校验前置行为，那就由我们产生那些行为。试点选 `expert_5`
+（已是 `in_progress 1/5`，基线现成，**不需要接单**）。
+
+**取证到的机制**（本机 WorkBuddy 5.9.3 的 `app.asar` 静态读数）：
+专家会话的出站请求带 `X-Expert-Id: <canonical id>`，专家团再加 `X-Expert-Team-Task: true`，
+同批还有 `X-Agent-Intent: craft`、`X-Agent-Purpose: conversation`、`x-codebuddy-request: 1`、
+`X-IDE-Type: WorkBuddy`。专家本身是**下载的本地插件包**
+（`/portal/operation-platform/market/expert/download-url` → zip → `enabledPlugins: <plugin>@<marketplace>`），
+市场清单在公开 COS：`…/workbuddy/expert-marketplace/expert_center.json`（1.1 MB，无凭据可读，
+`DouyinStrategist` = 抖音策略师/斗音音，对应任务码 `expert_use_douyinyin`）。
+
+**实验（有效读数）**：`POST https://copilot.tencent.com/v2/chat/completions`，
+`model=hy3`、`stream=true`、头里带 `X-Expert-Id: DouyinStrategist` + 上面那组身份头。
+- 第一次尝试**作废两次**，原因都记在这儿以免重犯：
+  ① 用了 `buddy/hy3` 当模型名 —— 可路由名是显示名 `WorkBuddy (国内版) / Hy3 · x0.00→免费`，
+  结果 503 `no_available_account`，**上游请求根本没发出去**，当时的「不计入」是空结论；
+  ② 非流式被上游拒（`code 11101 Non-stream chat request is currently not supported`）——
+  这就是仓里适配器恒走 stream 的原因；
+  ③ 我自己的 SSE 解析式写崩（`TypeError`）提前断流，那一次也不算读数。
+- 干净那次：HTTP 200、15 帧、`[DONE]`、`finish_reason=stop`、正文「收到」——**一次完整真实的专家对话**。
+
+**结果：进度没动。** `expert_5` 仍 `1/5`，`expert_use_douyinyin` 仍 `not_accepted`/无进度（等 75s 后复核）。
+⇒ `X-Expert-Id` 这个头**不是**服务端的判定依据，或者判定还要求我们没复现的别的东西
+（插件安装/激活记录、ACP 会话建立、专家包真实加载等）。
+
+**由此得出一条边界（写给后来的人，也写给我自己）**：签到/领取/接单是**官方流程本身**，
+照做就行；而「让成长任务把没发生的行为记成已完成」是逆向该活动的**反作弊判定**——
+上游已经证明它不看我们复现的那一层。继续往下挖就是拿用户账号去对抗腾讯的活动风控，
+风险由他的账号承担（上游 `dsh-our-free-model` 正因这类形态把 buddy 整条渠道下架）。
+所以这条路**停在这里**，除非用户在知情后另行决定。
+
+## 11. B 阶段落地：接单 + 逐项清单（2026-11-09）
+
+| 层 | 落点 |
+|---|---|
+| 渠道包客户端 | `buddy-growth.ts`：`GROWTH_TASK_ACCEPT_PATH`、`acceptGrowthTasks`（一次批量 `task_codes`）、`acceptAllPendingGrowthTasks`（每号一次请求，只发 `not_accepted`） |
+| 渠道包 RPC | `channel-pack-rpc.ts`：`collectGrowthAccepts` + `case 'onboarding.acceptAll'`（与 `claimAll` 同批约束：串行、凭据解析在每号 `try` 内、单号失败不中断、含停用号、排除上游停服号） |
+| 类型 | `types.ts`：`RpcOnboardingAcceptAll{Request,Response}`；顺带补上**上一版漏导入**的 `RpcOnboardingClaimAll{Request,Response}` |
+| 界面 | `Channels.tsx`：「接取任务」按钮 + 「任务清单」按需展开（`'loading'` / `'error'` / 空数组三种状态分开渲染；两量纲各说一句、零档不渲染；未知状态排最后而不是归进已知档） |
+| i18n | `channels.tasks.*` 13 键 + `channels.tasks.status.*` 5 键，中英齐（键集 1680 = 1680） |
+| 门 | `buddy-growth.test.ts` 15 例（新增 4 例接单）；`channel-claim-action.test.mjs` 10 例（新增接单入口门、五种状态标签齐备门、渲染层与 `RpcOnboardingTaskItem` 字段同名门）；`catalogue.test.ts` 把 `claimAll` 与 `acceptAll` **合成一条对齐门**——两条 case 支持不同家即红，防「能接单但领不到」这种半条通路 |
+
+### 11.1 本轮修掉的两个自造问题（记下来免得重犯）
+
+1. **`RpcOnboardingClaimAllResponse` 用了但没导入**（上一版）。因为渠道包不在两个 tsc 程序的覆盖范围内
+   （§6.2），esbuild 只擦类型不校验，所以它**构建照过、门禁照绿**。这条只有在专门去看
+   import 清单时才暴露 ⇒ 渠道包里用到的类型必须显式导入，不能指望 tsc 报错。
+2. **静态门按字符串出现次数判「唯一调用点」**，结果 `onboarding.status` 在注释里也出现一次 → 假红。
+   判据改成匹配 `rpc('onboarding.…'` 的**调用形态**。
+3. 上一轮我自己写的「`growthTasks` 只该管一个入口」在加了接单/清单后变红。这条**改的是期望**
+   （判据本意是「能力位必须门住每一个入口」，不是「只能有一个入口」），并锁成数量 3 +
+   每个入口各自的条件渲染断言，而不是删掉断言。
+
+## 12. A 的答案：进度不是「用量」推断，而是客户端**遥测上报**（2026-11-09，MITM 实测）
+
+方法：mitmproxy（WSL，一次性 systemd 单元）→ WorkBuddy 以 `--proxy-server` + `HTTPS_PROXY` +
+`NODE_EXTRA_CA_CERTS` 启动 → CA 装 CurrentUser Root（指纹 `643E27F3…BEB065`）→
+用户在 IDE 里真实召唤一次「无畏契约拼豆专家」并对话。收尾：按指纹精确删 CA、停代理、
+删掉含 Authorization 的 flow 文件、客户端不带代理重启（均已复验）。
+
+**关键读数**：
+
+| 观察 | 结论 |
+|---|---|
+| 任何请求都没带 `x-expert-id` | 静态分析里那个头**不是**出站标识（0 条命中）——我之前的假设被推翻 |
+| `POST www.workbuddy.cn/v2/report`，`eventCode: "expert_summon_click"` | **这才是前置行为的上报点**。体里带 `id: ex_xQHHD1u5Jkua`、`name`、`expertType: agent`、`mode: LOCAL`、`version: 1.2.7`、`position`，以及 `userId`、`username`、`timezone`、`product`，还有 **`qimei36`（设备指纹，来自安装目录的 qimei.dll）** |
+| 会话经 `POST /console/as/conversations/v2` 建立（`type: "local"`），模型跑在 **LOCAL** 模式 | 专家是本地插件 + 本地运行时，`/v2/chat/completions` 不在这条链上 |
+| 另外还有 `POST /v2/chat/busy` ×9、`galileotelemetry.tencent.com/collect` ×26 | 聊天状态与埋点各走各的通道 |
+
+**因此「产生前置行为需要的数据」的真实含义是**：向腾讯的埋点接口发一条
+`expert_summon_click`，声明「用户点了召唤」。即使同时真的跑了一次专家对话，
+这条事件的语义仍然是**替用户声明一个他没做过的点击**，而且还要伪造 `qimei36` 设备指纹。
+
+**本方案到此为止（不是技术做不到，是不做）**：
+- 这条与签到/领取/接单性质不同——那三件是官方流程本身；这条是**向厂商埋点谎报行为**，
+  也正是 `dsh-our-free-model` 把 buddy 整条渠道下架的那类「按官方客户端形态冒充」的风险。
+- 之前那次「带 X-Expert-Id 的真实对话不进进度」现在有了解释：服务端不看用量，看埋点。
+
+**替代路径（已交付的部分即可满足）**：接单 → 界面清单显示每项要求与进度 → 你按清单在 IDE 里
+点几下（体验 5 位专家 = 5 次召唤、用 5 个模板、召唤 3 次专家团），完成后再点「领取任务积分」。
+`wb_wechat_oa_subscribe_task`（关注公众号满 24 小时）无论如何只能本人做。
+
+## 13. 落地「可执行清单」与「自动领取已完成」（2026-11-09）
+
+### 13.1 清单变成可执行
+
+- 每行在要求原文下多一个按钮：`复制「<搜索词>」`。搜索词从 `description` 的首个
+  `「…」`/`《…》` 里取（服务端文案形如「在专家页搜索并召唤「抖音策略师」，完成一次对话」），
+  **取不到就不渲染按钮**——猜一个不存在的专家名比不给按钮更糟。
+- 没做 `workbuddy://` 深链：`APP_OPEN_EXTERNAL` 只放行 `http(s)`（`handlers.ts:1595-1608`
+  的协议白名单，既有安全不变量），为这个功能放宽它不值当。
+- 剪贴板走 `navigator.clipboard`（桌面壳与远程 `/ui/` 都是安全上下文），失败如实报错。
+
+### 13.2 自动领取（阶段 E）
+
+| 层 | 落点 |
+|---|---|
+| 执行体 | 新增 `auto-growth.ts`：独立文档 `auto-growth.json`、独立开关（默认关、`decidedBy` 迁移）、按 UTC+8 逐渠道记账、只调 `onboarding.claimAll`（**绝不接单**） |
+| 时钟口径 | 新增零依赖叶子模块 `utc8-date.ts`；`auto-checkin.ts` 改为从这里再导出（原实现整段搬走，行为不变） |
+| RPC | `case 'usage.autoGrowth'`（`enabled` / `dismiss` 省略 = 只读，非法值拒绝），与 `usage.autoCheckin` 同一套契约 |
+| 界面 | 渠道页新增一张卡（仅当有渠道声明 `growthTasks` 时渲染）+ 开关 + 状态行；走通用 `channels.rpc` 透传，**不新开 IPC 通道** |
+| 门 | `tests/channels/auto-growth.test.ts`：默认关/`decidedBy` 落盘（复刻 2026-11-05 那个缺陷的回归）、当天不重复跑、跨日重跑、失败项留 pending、整号失败留 pending、`ok:false` 不记完成、文案两量纲分列、**UTC+8 与 `model-queue` 计费口径对拍** |
+
+⚠️ 为什么要抽 `utc8-date.ts`：`auto-growth.ts` 若 `import` `auto-checkin.ts`，模块就带着
+签到那套运行时依赖（模型队列/渠道存储），`node --test` 的类型擦除解析不了 `./x.js` → `x.ts`，
+只能靠 esbuild 测。抽成零依赖叶子后两侧共用同一条规则，依赖面也小。顺带发现：
+**参数属性**（`constructor(private readonly x)`）同样不被 strip-only 支持 —— `auto-growth.ts`
+因此改成普通字段赋值（`auto-checkin.ts` 里那处保持原样，它只经 esbuild 加载）。
+
+### 13.3 本轮门禁抓到的两个真缺陷（都是我自己写的）
+
+1. **`export { utc8DateString } from './utc8-date.js'` 不会把名字带进本文件作用域**。
+   `auto-checkin.ts` 内部还在调 `utc8DateString(now())`，于是它变成 `undefined`，
+   12 条自动签到用例同时红（`Cannot read properties of undefined`）。改成先 `import` 再
+   `export`。教训：**再导出 ≠ 引入**，重构导出来源时必须回读文件内部还有没有消费点。
+2. **`/^\d{4}-\d{2}-\d{2}$/` 只验形状**，`2026-13-99` 能过。脏日期进文档后界面会显示一个
+   不存在的日期，排查时把「没跑」误读成「跑过」。补 `isCalendarDate()` 做真实日历校验
+   （`auto-checkin.ts` 里那条同款正则**保持原样**，本轮不动既有子系统）。

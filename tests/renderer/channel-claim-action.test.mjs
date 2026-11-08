@@ -70,22 +70,27 @@ test('dailyCheckin 在目录与视图上都是必填，不是可选位', () => {
  * 服务端先认定做完），所以不共用一个开关：共用会让「这家只能签到」的渠道
  * 长出一个必然失败的第二个按钮，正如 2026-11-02 那次报障的形状。
  */
-test('渠道卡片：任务按钮包在 growthTasks 条件里，且条件只包这一个按钮', () => {
+test('渠道卡片：任务按钮包在 growthTasks 条件里，且条件只包任务这一族入口', () => {
   const source = page()
   assert.match(
     source,
     /\{channel\.growthTasks && \(\s*<Button[^]*?claimTasks\(channel\)[^]*?\)\}/,
     '领取任务按钮必须由 channel.growthTasks 条件渲染',
   )
+  // 2026-11-09 加了接单与清单两个入口，所以这里锁**数量与归属**而不是只锁一处：
+  // 判据的本意是「能力位必须门住每一个入口」，不是「只能有一个入口」。
+  // 出现第 4 处＝有人又挂了一个没被能力位管住的成长任务入口，要显式改这条。
   assert.equal(
     source.match(/\{channel\.growthTasks && \(/g)?.length,
-    1,
-    'growthTasks 只该管这一个入口，出现多处说明条件被复制了',
+    3,
+    'growthTasks 应当恰好门住三个入口：领取任务、接取任务、任务清单',
   )
+  // 锁的是**调用点**（`rpc('…'`）而不是字符串出现次数：方法名也会出现在注释里，
+  // 按字符串数会把「唯一入口」这条判据变成随机红。
   assert.equal(
-    source.match(/onboarding\.claimAll/g)?.length,
+    source.match(/rpc\('onboarding\.claimAll'/g)?.length,
     1,
-    'onboarding.claimAll 只应有一处调用点：存在第二处就有绕过能力位的领取路径',
+    'onboarding.claimAll 只应有一处调用点',
   )
 })
 
@@ -120,4 +125,62 @@ test('两个能力各自独立成句，界面文案不得共用一条 key', () =
     1,
     '签到按钮仍用 claim 这条文案',
   )
+})
+
+/**
+ * 接单按钮与任务清单的静态门（成长任务，2026-11-09）。
+ *
+ * 接单与领取是**两种不同的动作**：接单不产生积分，只让服务端开始计进度。
+ * 合成一个按钮会让结果文案不得不同时说两件事，而用户最需要分清「这次到账了吗」。
+ */
+test('渠道卡片：接单按钮包在 growthTasks 条件里，且 acceptAll 只有一处调用点', () => {
+  const source = page()
+  assert.match(
+    source,
+    /\{channel\.growthTasks && \(\s*<Button[^]*?acceptTasks\(channel\)[^]*?\)\}/,
+    '接单按钮必须由 channel.growthTasks 条件渲染',
+  )
+  assert.equal(
+    source.match(/rpc\('onboarding\.acceptAll'/g)?.length,
+    1,
+    'onboarding.acceptAll 只应有一处调用点：存在第二处就有绕过能力位的接单路径',
+  )
+  assert.equal(
+    source.match(/rpc\('onboarding\.status'/g)?.length,
+    1,
+    '任务清单是唯一的 onboarding.status 调用点',
+  )
+})
+
+test('服务端五种状态在两种语言里都有标签（动态 key 不能落空）', () => {
+  const zh = JSON.parse(readFileSync(join(root, 'src/renderer/src/i18n/locales/zh-CN.json'), 'utf8'))
+  const en = JSON.parse(readFileSync(join(root, 'src/renderer/src/i18n/locales/en-US.json'), 'utf8'))
+  // 界面用 `t(\`channels.tasks.status.${status}\`)` 拼动态键：服务端下发一个没登记的
+  // 状态时，i18next 会把**键名原样**显示出来（看着像 bug，其实是缺标签）。
+  const statuses = ['not_accepted', 'accepted', 'in_progress', 'completed', 'claimed']
+  for (const [name, locale] of [['zh-CN', zh], ['en-US', en]]) {
+    const table = locale?.channels?.tasks?.status
+    assert.ok(table !== undefined, `${name} 缺 channels.tasks.status 表`)
+    for (const status of statuses) {
+      assert.equal(
+        typeof table?.[status] === 'string' && table[status].length > 0,
+        true,
+        `${name} 缺 channels.tasks.status.${status}`,
+      )
+    }
+  }
+})
+
+test('渲染层的任务字段声明与渠道包 RpcOnboardingTaskItem 逐字同名', () => {
+  const source = page()
+  const pack = readFileSync(join(root, 'vendor/channel-pack/src/types.ts'), 'utf8')
+  const packBlock = pack.slice(pack.indexOf('export interface RpcOnboardingTaskItem'))
+  // 渲染层看不见 vendor 源码（`virtual:channel-pack` 是构建期虚模块），两边靠约定对齐：
+  // 这里锁住字段集合，任何一侧改名都会让另一侧红。
+  const fields = ['key', 'title', 'description', 'status', 'claimable', 'progress',
+    'rewardCredit', 'rewardEnergy', 'rewardBuddy', 'locked']
+  for (const field of fields) {
+    assert.match(source, new RegExp(`^\\s{2}${field}\\??:`, 'm'), `渲染层缺字段 ${field}`)
+    assert.ok(packBlock.includes(`${field}?:`) || packBlock.includes(`${field}:`), `渠道包缺字段 ${field}`)
+  }
 })

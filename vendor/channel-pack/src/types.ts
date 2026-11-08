@@ -774,6 +774,39 @@ export interface RpcOnboardingClaimAllResponse {
 }
 
 /**
+ * RPC: 一键**接单**某渠道全部账号未接的成长任务（`not_accepted` → `accepted`）。
+ *
+ * ⚠️ 与 `onboarding.claimAll` 分两个方法，因为两者对用户的意义完全不同：
+ * 接单**不产生任何积分**，只是让服务端开始为该任务计进度；领取是拿回已认可的结果。
+ * 合成一个方法会让结果文案不得不同时说两件事，而用户最需要一个清晰的「这次有没有到账」。
+ */
+export interface RpcOnboardingAcceptAllRequest {
+  provider: string
+}
+
+/** RPC: 一键接单的响应。 */
+export interface RpcOnboardingAcceptAllResponse {
+  accounts: Array<{
+    accountId: string
+    nickname: string
+    /** 本次接上的任务数（一次 `task_codes` 批量请求）。 */
+    accepted: number
+    /** 清单里已在计数 / 已完成 / 已领的项数（本次未发请求）。 */
+    untouched: number
+    /** 整号失败原因（凭据失效 / 清单读不到 / 接单被拒）。 */
+    error?: string
+  }>
+  summary: {
+    /** 真正走到接单流程的账号数。 */
+    accounts: number
+    acceptedTasks: number
+    untouchedTasks: number
+    /** 整号失败的账号数（`error` 非空）。 */
+    errors: number
+  }
+}
+
+/**
  * 按量纲分组的奖励合计（**两域各自求和，永不互相折算**）。
  */
 export interface RpcOnboardingRewardTotals {
@@ -1592,4 +1625,43 @@ export interface RpcUsageAutoCheckinRequest {
 /** RPC: 自动签到开关响应（回显写入后的生效状态）。 */
 export interface RpcUsageAutoCheckinResponse {
   autoCheckin: RpcUsageAutoCheckinState
+}
+
+/**
+ * RPC: 「自动领取已完成的成长任务」状态（**独立开关**，与自动签到互不影响）。
+ *
+ * ⚠️ 与 {@link RpcUsageAutoCheckinState} 分开的理由不是形状，而是**动作语义**：
+ * 签到是每号每天一次的固定请求；成长任务的领取是「服务端已认定完成」后的写请求。
+ * 两者共用一个开关会让用户以为打开的是同一件事。
+ *
+ * ⚠️ **本执行体绝不接单**（`accept` 会改变账号状态），只领 `completed`。
+ * 默认关：只有用户亲手拨过（`decidedBy === 'user'`）才算打开。
+ */
+export interface RpcUsageAutoGrowthState {
+  enabled: boolean
+  /** 上次**完成**的 UTC+8 日期；空串 = 从未跑过。 */
+  lastDate: string
+  /** 今天是否已经跑过并全部处理完。 */
+  ranToday: boolean
+  running: boolean
+  /** 上次结果摘要（中文短句）。 */
+  lastResult: string
+  lastAt: number
+  /** 今天仍未处理完的渠道数（有失败项或整号失败）。 */
+  pending: number
+  pendingProviders: string[]
+  nextRetryAt: number
+  /** 用户是否已手动关闭当前这一轮的状态文字。 */
+  dismissed: boolean
+}
+
+/** RPC: 读写自动领取开关（`enabled` / `dismiss` 省略 = 只读）。 */
+export interface RpcUsageAutoGrowthRequest {
+  enabled?: boolean
+  dismiss?: boolean
+}
+
+/** RPC: 自动领取开关响应（回显写入后的生效状态）。 */
+export interface RpcUsageAutoGrowthResponse {
+  autoGrowth: RpcUsageAutoGrowthState
 }

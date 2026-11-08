@@ -1679,6 +1679,29 @@
     "claimTasksFailed": "{{count}} 项领取失败",
     "claimTasksErrors": "{{count}} 个账号没问出结果",
     "listSeparator": "，",
+    "tasks": {
+      "accept": "接取任务",
+      "list": "任务清单",
+      "acceptDone": "任务接单完成",
+      "acceptError": "任务接单失败",
+      "accepted": "接了 {{count}} 项",
+      "untouched": "{{count}} 项无需接单",
+      "acceptErrors": "{{count}} 个账号没问出结果",
+      "acceptNote": "接下来正常使用就会陆续完成",
+      "acceptNothing": "没有需要接单的任务",
+      "readFailed": "任务清单读取失败",
+      "copyTerm": "复制「{{term}}」",
+      "copied": "已复制",
+      "copyFailed": "复制失败（浏览器拒绝了剪贴板写入，请手动选中）",
+      "gainsBuddy": "限定款 Buddy",
+      "status": {
+        "not_accepted": "未接单",
+        "accepted": "已接单",
+        "in_progress": "进行中",
+        "completed": "可领取",
+        "claimed": "已领取"
+      }
+    },
     "autoCheckin": {
       "title": "自动领取签到积分",
       "description": "开启后每天自动为所有已连接渠道的账号领取签到积分；未完成的渠道（失败、未到刷新时间）会自动重试，直到当天全部完成。",
@@ -1689,6 +1712,18 @@
       "ranToday": "今天已自动领取（{{date}}）",
       "last": "上次领取：{{result}} · {{time}}",
       "channelLine": "{{name}}：{{status}}",
+      "never": "尚未自动领取过",
+      "unavailable": "渠道运行时未启动，暂时读不到这个开关"
+    },
+    "autoGrowth": {
+      "title": "自动领取已完成的成长任务",
+      "description": "开启后每天自动把已完成但没领的成长任务领掉（只领不接单）；还没做完的项留给你在客户端里做。默认关闭。",
+      "on": "已开启",
+      "off": "已关闭",
+      "running": "正在领取…",
+      "pending": "今天还有 {{count}} 个渠道有失败项，稍后自动重试",
+      "ranToday": "今天已自动领取（{{date}}）",
+      "last": "上次领取：{{result}} · {{time}}",
       "never": "尚未自动领取过",
       "unavailable": "渠道运行时未启动，暂时读不到这个开关"
     },

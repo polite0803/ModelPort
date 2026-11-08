@@ -4,8 +4,10 @@ import {
   CalendarCheck,
   ChevronDown,
   ChevronUp,
+  Copy,
   Eye,
   EyeOff,
+  ListChecks,
   Loader2,
   Plus,
   RefreshCw,
@@ -40,6 +42,83 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { Input } from '@/components/ui/input'
 import { useToast } from '@/hooks/use-toast'
+
+/**
+ * 渠道包 `onboarding.status` 的一条任务（`RpcOnboardingTaskItem` 的渲染层镜像）。
+ *
+ * ⚠️ 这里**重新声明**而不是 import：渠道包在 `vendor/` 且经 `virtual:channel-pack`
+ * 构建期注入，渲染层的 tsc 程序看不见那份源码（见
+ * `docs/plan/PLAN-workbuddy-growth-tasks.md` §6.2）。字段名与可选性必须与渠道包一致，
+ * 一致性由 `tests/renderer/channel-claim-action.test.mjs` 的源码断言把住。
+ */
+interface RpcTaskItem {
+  key: string
+  title: string
+  description: string
+  /** 服务端状态**原值**：not_accepted / accepted / in_progress / completed / claimed。 */
+  status: string
+  claimable: boolean
+  /** 未接单时服务端下发 `null` ⇒ 这里没有这个键，不补 0/0。 */
+  progress?: { current: number; target: number }
+  rewardCredit: number
+  /** 第二量纲（能量），**不与 rewardCredit 相加**。 */
+  rewardEnergy: number
+  rewardBuddy: boolean
+  locked: boolean
+}
+
+/** 一行清单 = 一条任务 + 它属于哪个账号。 */
+type TaskRow = RpcTaskItem & { account: string }
+
+/**
+ * 「自动领取已完成的成长任务」状态（渠道包 `RpcUsageAutoGrowthState` 的渲染层镜像）。
+ *
+ * ⚠️ 与自动签到**分开**：签到是每号每天一次的固定请求，成长任务的领取是服务端已认定
+ * 完成后的写请求。共用一个开关会让用户以为打开的是同一件事。
+ */
+interface RpcAutoGrowthState {
+  enabled: boolean
+  lastDate: string
+  ranToday: boolean
+  running: boolean
+  lastResult: string
+  lastAt: number
+  pending: number
+  pendingProviders: string[]
+  nextRetryAt: number
+  dismissed: boolean
+}
+
+/**
+ * 清单排序权重：可领 → 进行中 → 已接单 → 未接单 → 已领 → 其它。
+ *
+ * ⚠️ 未知状态一律排在最后而不是当成「未接单」：服务端加一档新状态时，
+ * 把它错归到已有那一档会让界面说谎。
+ */
+const TASK_ORDER: Record<string, number> = {
+  completed: 0,
+  in_progress: 1,
+  accepted: 2,
+  not_accepted: 3,
+  claimed: 4,
+}
+
+function taskOrder(row: TaskRow): number {
+  if (row.claimable) return 0
+  return TASK_ORDER[row.status] ?? 9
+}
+
+/**
+ * 从要求原文里取出「要搜的那个词」：首个 `「…」` 或 `《…》`。
+ *
+ * 服务端的要求文案形如「在专家页搜索并召唤「抖音策略师」，完成一次对话」/「读完《…介绍》」，
+ * 引号里的就是用户要输入/搜索的名字。拿不到引号就返回 null —— **不猜**
+ *（猜错等于把用户引到一个不存在的专家页）。
+ */
+function taskSearchTerm(row: TaskRow): string | null {
+  const match = row.description.match(/[「《]([^」》]{2,40})[」》]/)
+  return match === null ? null : match[1].trim()
+}
 
 interface LoginState {
   channel: ChannelView
@@ -108,11 +187,21 @@ export function Channels() {
   // 读不到（worker 未起 / RPC 失败）就是空表，徽标退回纯声明文案，不报错打扰。
   const [identity, setIdentity] = useState<Record<string, ChannelIdentityEntry>>({})
   const [openModels, setOpenModels] = useState<Record<string, boolean>>({})
+  /**
+   * 成长任务清单（按渠道）。`'loading'` 与 `'error'` 是**独立状态**而不是空数组：
+   * 「还在问」「问不出结果」「问出来了、确实没有任务」是三件事，
+   * 都渲染成空列表就是本仓库反复出过的「缺席伪装成正常结果」。
+   */
+  const [tasks, setTasks] = useState<Record<string, TaskRow[] | 'loading' | 'error'>>({})
+  const [openTasks, setOpenTasks] = useState<Record<string, boolean>>({})
+  const [taskErrors, setTaskErrors] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
   const [unavailable, setUnavailable] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
   const [autoCheckin, setAutoCheckin] = useState<ChannelAutoCheckin | null>(null)
   const [autoCheckinBusy, setAutoCheckinBusy] = useState(false)
+  const [autoGrowth, setAutoGrowth] = useState<RpcAutoGrowthState | null>(null)
+  const [autoGrowthBusy, setAutoGrowthBusy] = useState(false)
   const [login, setLogin] = useState<LoginState | null>(null)
   const [credentialAdd, setCredentialAdd] = useState<CredentialAddState | null>(null)
   /**
@@ -126,6 +215,7 @@ export function Channels() {
   } | null>(null)
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const autoCheckinTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const autoGrowthTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const creditsTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const creditsPendingViews = useRef<ChannelView[] | null>(null)
@@ -204,6 +294,35 @@ export function Channels() {
     }
   }, [])
 
+  /**
+   * 自动领取（成长任务）状态。
+   *
+   * ⚠️ 走通用 `channels.rpc` 透传而不是新开 IPC 通道：宿主早就有一条直通渠道包的
+   * 方法通道，给同一件事再开一个入口只会多一处漂移点（PLAN-workbuddy-growth-tasks §6.1）。
+   */
+  const loadAutoGrowth = useCallback(async () => {
+    if (autoGrowthTimer.current !== null) {
+      clearTimeout(autoGrowthTimer.current)
+      autoGrowthTimer.current = null
+    }
+    const result = await window.electronAPI.channels.rpc('usage.autoGrowth', {})
+    if (!result.ok) {
+      setAutoGrowth(null)
+      return
+    }
+    const state = (result.value as { autoGrowth?: RpcAutoGrowthState } | undefined)?.autoGrowth
+    if (state === undefined) {
+      setAutoGrowth(null)
+      return
+    }
+    setAutoGrowth(state)
+    if (state.running) {
+      autoGrowthTimer.current = setTimeout(() => { void loadAutoGrowth() }, POLL_INTERVAL_MS)
+    } else if (state.enabled && state.pending > 0) {
+      autoGrowthTimer.current = setTimeout(() => { void loadAutoGrowth() }, PENDING_POLL_INTERVAL_MS)
+    }
+  }, [])
+
   const refresh = useCallback(async () => {
     const result = await window.electronAPI.channels.list()
     setChannels(result.channels)
@@ -211,8 +330,9 @@ export function Channels() {
     setLoading(false)
     void loadCredits(result.channels)
     void loadAutoCheckin()
+    void loadAutoGrowth()
     void loadIdentity()
-  }, [loadAutoCheckin, loadCredits, loadIdentity])
+  }, [loadAutoCheckin, loadAutoGrowth, loadCredits, loadIdentity])
 
   /**
    * `changed` 是逐请求触发的（积分/用量变化），直接 refresh 等于把流量频率
@@ -235,6 +355,7 @@ export function Channels() {
   useEffect(() => () => {
     if (pollTimer.current !== null) clearTimeout(pollTimer.current)
     if (autoCheckinTimer.current !== null) clearTimeout(autoCheckinTimer.current)
+    if (autoGrowthTimer.current !== null) clearTimeout(autoGrowthTimer.current)
     if (refreshTimer.current !== null) clearTimeout(refreshTimer.current)
     if (creditsTimer.current !== null) clearTimeout(creditsTimer.current)
   }, [])
@@ -366,6 +487,33 @@ export function Channels() {
     }
   }
 
+  /**
+   * 自动领取（成长任务）开关。
+   *
+   * ⚠️ 与自动签到同理：打开后宿主会立刻尝试一轮；失败要如实弹错，
+   * 不能把「设置没生效」显示成「保存成功」。
+   */
+  const toggleAutoGrowth = async (enabled: boolean) => {
+    setAutoGrowthBusy(true)
+    const result = await window.electronAPI.channels.rpc('usage.autoGrowth', { enabled })
+    setAutoGrowthBusy(false)
+    const state = result.ok
+      ? (result.value as { autoGrowth?: RpcAutoGrowthState } | undefined)?.autoGrowth
+      : undefined
+    if (!result.ok || state === undefined) {
+      toast({
+        title: t('common.error'),
+        description: result.ok ? t('channels.autoGrowth.unavailable') : (result.error?.message ?? ''),
+        variant: 'destructive',
+      })
+      return
+    }
+    setAutoGrowth(state)
+    if (state.running) {
+      autoGrowthTimer.current = setTimeout(() => { void loadAutoGrowth() }, POLL_INTERVAL_MS)
+    }
+  }
+
   const toggleChannel = async (channel: ChannelView, enabled: boolean) => {
     setBusyId(channel.id)
     const result = await window.electronAPI.channels.setEnabled(channel.id, enabled)
@@ -481,6 +629,121 @@ export function Channels() {
       variant: failed > 0 || errors > 0 ? 'destructive' : 'default',
     })
     await refresh()
+  }
+
+  /**
+   * 一键接单（成长任务）。**不产生积分** —— 它只让服务端开始为该任务计进度。
+   *
+   * ⚠️ 结果句子必须把这件事说明白：用户点完如果只看到「接了 20 项」而没有分数，
+   * 第一反应是「没生效」。所以这里固定带一句「接下来正常使用就会陆续完成」。
+   */
+  const acceptTasks = async (channel: ChannelView) => {
+    setBusyId(channel.id)
+    const result = await window.electronAPI.channels.rpc('onboarding.acceptAll', { provider: channel.id })
+    setBusyId(null)
+    if (!result.ok) {
+      toast({
+        title: t('common.error'),
+        description: result.error?.message ?? t('channels.tasks.acceptError'),
+        variant: 'destructive',
+      })
+      return
+    }
+    const summary = (result.value as {
+      summary?: { acceptedTasks?: number; untouchedTasks?: number; errors?: number }
+      accounts?: Array<{ error?: string }>
+    } | undefined)?.summary ?? {}
+    const accepted = Number(summary.acceptedTasks) || 0
+    const errors = Number(summary.errors) || 0
+    const untouched = Number(summary.untouchedTasks) || 0
+    const segments: string[] = []
+    if (accepted > 0) segments.push(t('channels.tasks.accepted', { count: accepted }))
+    if (untouched > 0) segments.push(t('channels.tasks.untouched', { count: untouched }))
+    if (errors > 0) segments.push(t('channels.tasks.acceptErrors', { count: errors }))
+    const firstError = (result.value as { accounts?: Array<{ error?: string }> } | undefined)?.accounts
+      ?.find(account => typeof account?.error === 'string')?.error
+    if (firstError) segments.push(firstError)
+    toast({
+      title: t('channels.tasks.acceptDone'),
+      description: segments.length > 0
+        ? `${segments.join(t('channels.listSeparator'))}${accepted > 0 ? ` · ${t('channels.tasks.acceptNote')}` : ''}`
+        : t('channels.tasks.acceptNothing'),
+      variant: errors > 0 ? 'destructive' : 'default',
+    })
+    // 清单展开着就刷新，让用户立刻看到状态从「未接单」变成「进行中」。
+    if (openTasks[channel.id] === true) await loadTasks(channel)
+  }
+
+  const loadTasks = async (channel: ChannelView) => {
+    setTasks(current => ({ ...current, [channel.id]: 'loading' }))
+    const listed = await window.electronAPI.channels.rpc('account.list', { provider: channel.id })
+    if (!listed.ok) {
+      setTasks(current => ({ ...current, [channel.id]: 'error' }))
+      setTaskErrors(current => ({ ...current, [channel.id]: listed.error?.message ?? t('channels.tasks.readFailed') }))
+      return
+    }
+    const accounts = ((listed.value as { accounts?: Array<{ id: string; nickname?: string }> } | undefined)
+      ?.accounts ?? [])
+    if (accounts.length === 0) {
+      setTasks(current => ({ ...current, [channel.id]: [] }))
+      return
+    }
+    const rows: TaskRow[] = []
+    const failures: string[] = []
+    // ⚠️ 串行：这与渠道包 `collectGrowthClaims` 同一条口径 —— 并发敲同一账号的
+    // 认证接口正是上游判「非官方客户端」时看的那个形状。
+    for (const account of accounts) {
+      const status = await window.electronAPI.channels.rpc('onboarding.status', {
+        provider: channel.id,
+        accountId: account.id,
+      })
+      if (!status.ok) {
+        failures.push(status.error?.message ?? t('channels.tasks.readFailed'))
+        continue
+      }
+      const value = status.value as { items?: RpcTaskItem[] } | undefined
+      if (value?.items === undefined) {
+        failures.push(t('channels.tasks.readFailed'))
+        continue
+      }
+      for (const item of value.items) {
+        rows.push({ ...item, account: account.nickname || account.id })
+      }
+    }
+    if (rows.length === 0 && failures.length > 0) {
+      setTasks(current => ({ ...current, [channel.id]: 'error' }))
+      setTaskErrors(current => ({ ...current, [channel.id]: failures[0] }))
+      return
+    }
+    setTaskErrors(current => ({ ...current, [channel.id]: failures[0] ?? '' }))
+    setTasks(current => ({ ...current, [channel.id]: rows }))
+  }
+
+  const toggleTasks = async (channel: ChannelView) => {
+    const next = openTasks[channel.id] !== true
+    setOpenTasks(current => ({ ...current, [channel.id]: next }))
+    // 按需拉取：折叠时不该为每个渠道都去敲一次上游清单。
+    if (next && !Array.isArray(tasks[channel.id])) await loadTasks(channel)
+  }
+
+  /**
+   * 复制「清单里那一项要搜的名字」到剪贴板。
+   *
+   * ⚠️ 用 `navigator.clipboard` 而不是新开一个 IPC 通道：桌面壳与远程 `/ui/` 都是
+   * 安全上下文，剪贴板写入只需用户手势。失败时如实报错（而不是静默成功），
+   * 因为这类失败通常意味着浏览器策略拒绝了写入。
+   */
+  const copyTaskTerm = async (term: string) => {
+    try {
+      await navigator.clipboard.writeText(term)
+      toast({ title: t('channels.tasks.copied'), description: term })
+    } catch {
+      toast({
+        title: t('common.error'),
+        description: t('channels.tasks.copyFailed'),
+        variant: 'destructive',
+      })
+    }
   }
 
   const loadModels = async (channel: ChannelView) => {
@@ -635,6 +898,25 @@ export function Channels() {
     return t('channels.autoCheckin.never')
   }, [autoCheckin, t])
 
+  const autoGrowthStatus = useMemo(() => {
+    if (autoGrowth === null) return t('channels.autoGrowth.unavailable')
+    if (autoGrowth.running) return t('channels.autoGrowth.running')
+    if (autoGrowth.enabled && autoGrowth.pending > 0) {
+      return t('channels.autoGrowth.pending', { count: autoGrowth.pending })
+    }
+    if (autoGrowth.ranToday) return t('channels.autoGrowth.ranToday', { date: autoGrowth.lastDate })
+    if (autoGrowth.lastResult !== '') {
+      return t('channels.autoGrowth.last', {
+        result: autoGrowth.lastResult,
+        time: new Date(autoGrowth.lastAt).toLocaleString(),
+      })
+    }
+    return t('channels.autoGrowth.never')
+  }, [autoGrowth, t])
+
+  /** 有渠道声明了成长任务能力才渲染这张卡：没有它时开这个开关什么也不会发生。 */
+  const hasGrowthChannel = useMemo(() => channels.some(channel => channel.growthTasks), [channels])
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
@@ -697,6 +979,36 @@ export function Channels() {
           />
         </CardContent>
       </Card>
+
+      {hasGrowthChannel && (
+        <Card>
+          <CardContent className="flex flex-col gap-3 pt-6 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-3">
+              <ListChecks className="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" />
+              <div className="space-y-1">
+                <div className="flex flex-wrap items-center gap-2 font-medium">
+                  {t('channels.autoGrowth.title')}
+                  {autoGrowth !== null && (
+                    <Badge variant={autoGrowth.enabled ? 'secondary' : 'outline'}>
+                      {autoGrowth.enabled ? t('channels.autoGrowth.on') : t('channels.autoGrowth.off')}
+                    </Badge>
+                  )}
+                </div>
+                <p className="text-sm text-muted-foreground">{t('channels.autoGrowth.description')}</p>
+                <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  {autoGrowth?.running === true && <Loader2 className="h-3 w-3 animate-spin" />}
+                  {autoGrowthStatus}
+                </p>
+              </div>
+            </div>
+            <Switch
+              checked={autoGrowth?.enabled === true}
+              disabled={autoGrowthBusy || autoGrowth === null}
+              onCheckedChange={checked => void toggleAutoGrowth(checked)}
+            />
+          </CardContent>
+        </Card>
+      )}
 
       {loading && (
         <div className="flex items-center justify-center py-16 text-muted-foreground">
@@ -903,6 +1215,81 @@ export function Channels() {
                     />
                   </div>
 
+                  {openTasks[channel.id] === true && (
+                    <div className="space-y-2">
+                      {taskErrors[channel.id] !== undefined && taskErrors[channel.id].length > 0 && (
+                        <p className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-2 text-xs text-amber-700">
+                          {taskErrors[channel.id]}
+                        </p>
+                      )}
+                      {tasks[channel.id] === 'loading' && (
+                        <div className="flex items-center justify-center rounded-md border py-4 text-xs text-muted-foreground">
+                          <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
+                          {t('common.loading')}
+                        </div>
+                      )}
+                      {tasks[channel.id] === 'error' && (
+                        <div className="rounded-md border py-4 text-center text-xs text-muted-foreground">
+                          {t('channels.tasks.readFailed')}
+                        </div>
+                      )}
+                      {Array.isArray(tasks[channel.id]) && (
+                        <div className="divide-y rounded-md border">
+                          {(tasks[channel.id] as TaskRow[])
+                            .slice()
+                            // 可领的排最前，其次进行中、未接单、已领 —— 用户先看能动手的。
+                            .sort((a, b) => taskOrder(a) - taskOrder(b))
+                            .map(row => {
+                              const term = taskSearchTerm(row)
+                              return (
+                              <div key={`${row.account}-${row.key}`} className="px-2 py-2 text-xs">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-medium">{row.title || row.key}</span>
+                                  <span className={row.claimable
+                                    ? 'rounded bg-emerald-500/15 px-1.5 py-0.5 text-emerald-700'
+                                    : 'rounded bg-muted px-1.5 py-0.5 text-muted-foreground'}>
+                                    {t(`channels.tasks.status.${row.status}`)}
+                                  </span>
+                                  {row.progress !== undefined && (
+                                    <span className="text-muted-foreground">
+                                      {`${row.progress.current}/${row.progress.target}`}
+                                    </span>
+                                  )}
+                                  <span className="ml-auto text-muted-foreground">
+                                    {/* 两个量纲各说一句、不相加；零的那一档不渲染。 */}
+                                    {[
+                                      row.rewardCredit > 0
+                                        ? t('channels.claimTasksGainsCredit', { credit: row.rewardCredit }) : '',
+                                      row.rewardEnergy > 0
+                                        ? t('channels.claimTasksGainsEnergy', { energy: row.rewardEnergy }) : '',
+                                      row.rewardBuddy ? t('channels.tasks.gainsBuddy') : '',
+                                    ].filter(part => part.length > 0).join(t('channels.listSeparator'))}
+                                  </span>
+                                </div>
+                                {row.description.length > 0 && (
+                                  <p className="mt-1 text-muted-foreground">{row.description}</p>
+                                )}
+                                {term !== null && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="mt-1 h-6 px-1.5 text-[11px]"
+                                    onClick={() => void copyTaskTerm(term)}
+                                  >
+                                    <Copy className="mr-1 h-3 w-3" />
+                                    {t('channels.tasks.copyTerm', { term })}
+                                  </Button>
+                                )}
+                                {channel.accounts.total > 1 && (
+                                  <p className="mt-0.5 text-[10px] text-muted-foreground/70">{row.account}</p>
+                                )}
+                              </div>
+                              )
+                            })}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {modelsOpen && (
                     <div className="space-y-2">
                       {connected && sourceNotice !== null && (
@@ -1108,6 +1495,27 @@ export function Channels() {
                     >
                       <Ticket className="mr-1 h-3.5 w-3.5" />
                       {t('channels.claimTasks')}
+                    </Button>
+                  )}
+                  {channel.growthTasks && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={busy || !connected}
+                      onClick={() => void acceptTasks(channel)}
+                    >
+                      <ListChecks className="mr-1 h-3.5 w-3.5" />
+                      {t('channels.tasks.accept')}
+                    </Button>
+                  )}
+                  {channel.growthTasks && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={!connected}
+                      onClick={() => void toggleTasks(channel)}
+                    >
+                      {t('channels.tasks.list')}
                     </Button>
                   )}
                   {connected && (

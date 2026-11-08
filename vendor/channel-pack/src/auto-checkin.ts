@@ -75,7 +75,6 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { QODER_BILLING_UTC_OFFSET_MS } from './model-queue.js'
 import { resolveChannelPackHome } from './channel-pack-store.js'
 import { formatClaimGains } from './credits.js'
 import { ZCODE } from './zcode-product.js'
@@ -231,17 +230,18 @@ export function sanitizeAutoCheckin(raw: unknown): AutoCheckinDoc {
   }
 }
 
+import { utc8DateString } from './utc8-date.js'
+
 /**
  * 取「UTC+8 的当天日期」（`YYYY-MM-DD`）。
  *
- * ⚠️ 必须用**算术平移**而不是本机时区：日界归服务端（各渠道的每日额度按 UTC+8
- * 结算），取本机时区会在用户出差/改系统时区时得到错的「今天」—— 偏东会提前把
- * 当天记为已跑（真的漏签），偏西会一天跑两次。偏移量复用 `model-queue.ts` 的
- * `QODER_BILLING_UTC_OFFSET_MS`（同一口径，不另立常量）。
+ * 实现与「为什么必须算术平移」的说明搬到了 `utc8-date.ts`（零依赖叶子模块）——
+ * `auto-growth.ts` 也要用同一条日界规则，而它不能 import 本文件（本文件有大量运行时
+ * 依赖，Node 的类型擦除加载不了）。这里**先 import 再 export**：只写
+ * `export { … } from` 不会把名字带进本文件作用域，本文件内部的 `today()` 会拿到
+ * undefined（2026-11-09 实测：12 条自动签到用例同时红）。
  */
-export function utc8DateString(nowMs: number = Date.now()): string {
-  return new Date(nowMs + QODER_BILLING_UTC_OFFSET_MS).toISOString().slice(0, 10)
-}
+export { utc8DateString }
 
 /** 环境变量：启动后延迟多久再尝试自动签到（毫秒）。 */
 export const DSH_CHANNEL_PACK_AUTO_CHECKIN_DELAY_MS = 'DSH_CHANNEL_PACK_AUTO_CHECKIN_DELAY_MS'

@@ -45,6 +45,8 @@ import type { RpcOnboardingTaskItem } from './types.js'
 export const GROWTH_TASKS_PATH = '/v2/activity/growth/tasks'
 /** 领取端点前缀，完整路径是 `${前缀}${task_code}/claim`。 */
 export const GROWTH_TASK_CLAIM_PREFIX = '/activity/growth/tasks/'
+/** 接单端点（body `{ task_codes: [...] }`，一次可接多项）。 */
+export const GROWTH_TASK_ACCEPT_PATH = '/activity/growth/tasks/accept'
 
 /** 服务端下发的任务状态。未知取值按「不可领」处理，不当成失败。 */
 export type BuddyGrowthStatus =
@@ -96,19 +98,33 @@ const REQUEST_TIMEOUT_MS = 15_000
 /**
  * 构造成长中心请求头。
  *
- * ⚠️ **与 `buddy-credits.ts::checkinHeaders` 有意不同**：这里镜像官方**网页**用户中心
- * 实际发出的那组头 —— `X-Client-Platform: web` + `Accept-Language: zh-CN` + Bearer，
- * **不发** `X-Domain` / `X-Product` / `X-Product-Code` / `X-User-Id`。
- * 实测（PLAN §4）这组最小头在三个 host 上都返回 `code:0`，加上归属头与否没有观测差别；
- * 签到那条路走的是 CLI/IDE 形态，两处的客户端形态本来就不同，合成一份反而造出一个
- * 官方网页从不发送的头组合。
+ * ⚠️ **必须显式发 `User-Agent`**。调用方不设时 Node 的 fetch 发的是 `user-agent: node`
+ * （实测：把请求打到本地回环服务器，收到的就是这一行），而本仓库每一条 buddy 出站请求都设
+ * `product.userAgent`（`buddy-credits.ts:290`、`buddy-oauth.ts` 五处、`buddy-adapter.ts:1842`）
+ * ——「腾讯后台的『使用端』列按出站 UA 归因」这条不变量对整个渠道族成立。漏掉它**不会**让请求
+ * 失败（见下面的实测），但会让同一账号上**唯独领积分这一条是 `node`**，那正是最容易把自己
+ * 标成异常客户端的形状：其余请求都是 WorkBuddy 身份，只这一条不是。
+ *
+ * ⚠️ `X-Client-Platform` 取 `workbuddy` —— 这是官方 bundle 里**桌面端内嵌成长中心页面**实际发的
+ * 那个值（该头由 `sessionStorage['growth-center-platform']` 决定：内嵌 = `workbuddy`、
+ * 纯浏览器 = `web`、小程序 = `miniprogram`）。ModelPort 的凭据来自桌面那条授权链，
+ * 故与本模块的 `product.userAgent` 保持同一形态。
+ *
+ * 实测（2026-11-08，1 个账号 × 5 组头，只读 `GET /v2/activity/growth/tasks`）：
+ * `web`/`workbuddy` × CLI UA/浏览器 UA/不发 UA(=node) × 带不带 `Origin`+`Referer`，
+ * **五组全部 HTTP 200、`code:0`、同样 18 项任务**。⇒ 该读端点当前不按这些头设门槛，
+ * 本模块按「与同族请求一致」发，而不是按「能过就行」发。**领取（POST）没有这条读数**（见文件头）。
+ *
+ * ⚠️ 与 `buddy-credits.ts::checkinHeaders` 相同的是 UA，不同的是归属头：这里**不发**
+ * `X-Domain` / `X-Product` / `X-Product-Code` / `X-User-Id`（实测该接口不需要它们）。
  */
-function growthHeaders(credential: BuddyCredential): Record<string, string> {
+function growthHeaders(credential: BuddyCredential, product: BuddyProduct): Record<string, string> {
   return {
     Authorization: `Bearer ${credential.access_token}`,
     Accept: 'application/json',
-    'X-Client-Platform': 'web',
     'Accept-Language': 'zh-CN',
+    'X-Client-Platform': 'workbuddy',
+    'User-Agent': product.userAgent,
   }
 }
 
@@ -131,7 +147,7 @@ async function getJson(
   try {
     const response = await fetcher(`${product.endpoint}${path}`, {
       method: 'GET',
-      headers: growthHeaders(credential),
+      headers: growthHeaders(credential, product),
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     })
     const text = await response.text()
@@ -239,6 +255,92 @@ export async function fetchGrowthTasks(
 }
 
 /**
+ * 接单（`POST /activity/growth/tasks/accept`，body `{ task_codes: [...] }`）。
+ *
+ * ⚠️ **这不是「白拿积分」**：accept 不产生任何额度，它只让服务端**开始为该任务计进度**。
+ * 实测（PLAN §9）：`not_accepted` 的项 `progress` 是 `null`/无进度 —— 用户真去用了也不涨；
+ * 接上单之后同一项才出现 `0/1`、`1/5` 这样的计数，完成后再由 `claim` 到账。
+ * 所以「接单」是官方流程的第一步，而不是绕过完成判定；直接对未完成项发 claim 才是必然失败。
+ *
+ * ⚠️ 只发 `not_accepted` 的项：`accepted`/`in_progress` 已经在计数，重复接单没有语义；
+ * `completed`/`claimed` 更不该再动。
+ */
+export async function acceptGrowthTasks(
+  credential: BuddyCredential,
+  product: BuddyProduct,
+  taskCodes: readonly string[],
+  fetcher: typeof fetch = fetch,
+): Promise<{ ok: boolean; code: number; message: string }> {
+  if (taskCodes.length === 0) {
+    return { ok: true, code: 0, message: '' }
+  }
+  try {
+    const response = await fetcher(`${product.endpoint}${GROWTH_TASK_ACCEPT_PATH}`, {
+      method: 'POST',
+      headers: { ...growthHeaders(credential, product), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_codes: [...taskCodes] }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    })
+    const text = await response.text()
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      return {
+        ok: false,
+        code: response.status,
+        message: response.status === 401 || response.status === 403
+          ? `凭据已失效（HTTP ${response.status}），请重新登录该账号`
+          : `服务端返回了非 JSON 响应（HTTP ${response.status}）：${text.trim().slice(0, 80).replace(/\s+/g, ' ')}`,
+      }
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return { ok: false, code: response.status, message: '接单响应无法解析为对象' }
+    }
+    const body = parsed as Record<string, unknown>
+    const code = typeof body.code === 'number' ? body.code : -1
+    const message = str(body, 'msg') || str(body, 'message')
+    if (code !== 0) {
+      return { ok: false, code, message: message.length > 0 ? message : `接单失败（code ${code}）` }
+    }
+    return { ok: true, code, message }
+  } catch (error) {
+    return { ok: false, code: -1, message: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/** 一个账号的接单结果。 */
+export interface BuddyGrowthAcceptRun {
+  /** 本次接上的任务。 */
+  accepted: BuddyGrowthTask[]
+  /** 清单里其它状态（已在计数 / 已完成 / 已领）的项数 —— 本次未发请求。 */
+  untouched: number
+  failure?: string
+}
+
+/**
+ * 逐账号接单：**一次请求接全部 `not_accepted` 项**（端点收 `task_codes` 数组），
+ * 所以每号只发一次写请求，不是 N 次。
+ */
+export async function acceptAllPendingGrowthTasks(
+  credential: BuddyCredential,
+  product: BuddyProduct,
+  fetcher: typeof fetch = fetch,
+): Promise<BuddyGrowthAcceptRun | null> {
+  const tasks = await fetchGrowthTasks(credential, product, fetcher)
+  if (tasks === null) return null
+  const pending = tasks.filter((task) => task.status === 'not_accepted')
+  if (pending.length === 0) {
+    return { accepted: [], untouched: tasks.length - pending.length }
+  }
+  const result = await acceptGrowthTasks(credential, product, pending.map((task) => task.code), fetcher)
+  if (!result.ok) {
+    return { accepted: [], untouched: tasks.length - pending.length, failure: `${result.message}（code ${result.code}）` }
+  }
+  return { accepted: pending, untouched: tasks.length - pending.length }
+}
+
+/**
  * 领取一条已完成的任务。
  *
  * ⚠️ 调用方**必须**先确认 `task.claimable`（即服务端 `accept_status === 'completed'`）。
@@ -261,7 +363,7 @@ export async function claimGrowthTask(
   try {
     response = await fetcher(`${product.endpoint}${path}`, {
       method: 'POST',
-      headers: { ...growthHeaders(credential), 'Content-Type': 'application/json' },
+      headers: { ...growthHeaders(credential, product), 'Content-Type': 'application/json' },
       body: '{}',
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     })

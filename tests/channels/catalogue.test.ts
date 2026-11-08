@@ -260,28 +260,31 @@ test('目录的 dailyCheckin 与渠道包 credits.claimAll 的分支逐家对齐
  */
 test('目录的 growthTasks 与渠道包 onboarding.claimAll 支持的那家对齐', () => {
   const source = readFileSync(RPC_FILE, 'utf8')
-  const start = source.indexOf("case 'onboarding.claimAll'")
-  assert.notEqual(start, -1, '渠道包里找不到 onboarding.claimAll 分支')
-  const end = source.indexOf("\n      case '", start + 5)
-  assert.notEqual(end, -1, 'onboarding.claimAll 之后没有别的 case，切片口径失效')
-  const block = source.slice(start, end)
+  // 领取与接单是同一个能力位的两个动作：**两条 case 必须支持同一家**，
+  // 否则界面会出现「能接单但领不到」或反之的半条通路。
+  const supported = ['onboarding.claimAll', 'onboarding.acceptAll'].map(method => {
+    const start = source.indexOf(`case '${method}'`)
+    assert.notEqual(start, -1, `渠道包里找不到 ${method} 分支`)
+    const end = source.indexOf("\n      case '", start + 5)
+    assert.notEqual(end, -1, `${method} 之后没有别的 case，切片口径失效`)
+    const block = source.slice(start, end)
+    const ids = [...block.matchAll(/req\.provider !== ([A-Z_]+)\.id/g)].map((match) => match[1])
+    assert.equal(ids.length, 1, `${method} 应恰好有一条「只支持一家」的守卫，实际扫到 ${ids.length} 条`)
+    assert.match(block, /不支持一键领取任务奖励|不支持一键接单|没有成长任务接口/,
+      `${method} 缺少可读拒绝文案`)
+    const providerId = productIdsByConstant().get(ids[0])
+    assert.ok(providerId !== undefined, `守卫用的产品常量 ${ids[0]} 扫不到 provider id`)
+    return providerId as string
+  })
+  assert.equal(new Set(supported).size, 1, `claimAll 与 acceptAll 支持的家不一致：${supported.join(' / ')}`)
 
-  const supported = [...block.matchAll(/req\.provider !== ([A-Z_]+)\.id/g)].map((match) => match[1])
-  assert.equal(supported.length, 1, `该 case 应恰好有一条「只支持一家」的守卫，实际扫到 ${supported.length} 条`)
-  const constants = productIdsByConstant()
-  const providerId = constants.get(supported[0])
-  assert.ok(providerId !== undefined, `守卫用的产品常量 ${supported[0]} 扫不到 provider id`)
-
-  // 其余各家必须拿到**可读**拒绝，而不是 case 末尾的泛化 `unsupported provider`。
-  assert.match(block, /不支持一键领取任务奖励|没有成长任务接口/,
-    'onboarding.claimAll 缺少可读拒绝文案')
-
+  const providerId = supported[0]
   for (const channel of ACCOUNT_CHANNELS) {
     assert.equal(
       channel.growthTasks,
       channel.id === providerId,
       `${channel.id}: 目录 growthTasks=${String(channel.growthTasks)}，`
-        + `而渠道包 onboarding.claimAll 只支持 ${providerId}`,
+        + `而渠道包 onboarding.claimAll / acceptAll 只支持 ${providerId}`,
     )
   }
 })

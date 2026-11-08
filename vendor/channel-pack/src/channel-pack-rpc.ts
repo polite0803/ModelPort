@@ -68,7 +68,16 @@ import { credentialExpiresAtMs } from './buddy.js'
 import type { BuddyCredential } from './buddy.js'
 import { decorateLoginUrl, fetchAuthState, runBuddyLoginFlow } from './buddy-oauth.js'
 import { claimDailyCheckin, fetchCheckinStatus, fetchCreditBalance } from './buddy-credits.js'
-import { claimAllGrowthTasks, fetchGrowthTasks, growthTaskItem, sumGrowthRewards, type BuddyGrowthClaimRun } from './buddy-growth.js'
+import {
+  acceptAllPendingGrowthTasks,
+  claimAllGrowthTasks,
+  fetchGrowthTasks,
+  growthTaskItem,
+  sumGrowthRewards,
+  type BuddyGrowthAcceptRun,
+  type BuddyGrowthClaimRun,
+} from './buddy-growth.js'
+import { createAutoGrowth, createAutoGrowthStore } from './auto-growth.js'
 import { buddyExpiringWindowDays } from './buddy-balance-rank.js'
 import { CODEBUDDY, WORKBUDDY, productById, type BuddyProduct } from './product.js'
 import { LOOMY_TASK_POINTS, LOOMY_TASK_TITLES } from './loomy-onboarding.js'
@@ -181,6 +190,13 @@ import type {
   RpcOnboardingStatusResponse,
   RpcOnboardingClaimRequest,
   RpcOnboardingClaimResponse,
+  // ⚠️ 这四个必须显式导入：渠道包不在两个 tsc 程序的覆盖范围内
+  //（`virtual:channel-pack` 是构建期虚模块，PLAN-workbuddy-growth-tasks.md §6.2 记过读数），
+  // esbuild 只擦类型不校验 —— 漏导入时构建照样绿，坏的是类型契约本身。
+  RpcOnboardingClaimAllRequest,
+  RpcOnboardingClaimAllResponse,
+  RpcOnboardingAcceptAllRequest,
+  RpcOnboardingAcceptAllResponse,
   RpcLoomyPermanentLockRequest,
   RpcPermanentLockRequest,
   RpcPermanentLockResponse,
@@ -218,6 +234,8 @@ import type {
   RpcUsageTokenLedgerHistoryResponse,
   RpcUsageAutoCheckinRequest,
   RpcUsageAutoCheckinResponse,
+  RpcUsageAutoGrowthRequest,
+  RpcUsageAutoGrowthResponse,
   ProviderStatus,
 
   ProviderAccountStatus,
@@ -706,6 +724,71 @@ export async function collectGrowthClaims(
 }
 
 /**
+ * 逐账号执行「一键接单」（每号**一次**批量请求，不是 N 次）。
+ *
+ * 与 `collectGrowthClaims` 同一批约束：串行、凭据解析在每号自己的 `try` 之内、
+ * 单号失败不中断整体、包含已停用账号但排除被上游停服的账号。
+ *
+ * ⚠️ 接单**不产生任何积分**：它只让服务端开始为该任务计进度（实测见
+ * `buddy-growth.ts::acceptGrowthTasks` 的注释与 PLAN §9）。结果文案必须把这件事
+ * 说清楚，否则用户会以为点了就该有分数进账。
+ */
+export async function collectGrowthAccepts(
+  accounts: readonly ProviderAccountEntry[],
+  deps: {
+    resolve(ref: CredentialRef): Promise<{ value: string } | undefined>
+    warn?(message: string): void
+  },
+): Promise<RpcOnboardingAcceptAllResponse> {
+  const rows: RpcOnboardingAcceptAllResponse['accounts'] = []
+  const summary: RpcOnboardingAcceptAllResponse['summary'] = {
+    accounts: 0,
+    acceptedTasks: 0,
+    untouchedTasks: 0,
+    errors: 0,
+  }
+  for (const entry of accounts) {
+    if (entry.enabled === false && entry.serviceStopped !== undefined) {
+      rows.push({ accountId: entry.id, nickname: entry.nickname, accepted: 0, untouched: 0, error: '上游已停止该账号服务，未发起接单' })
+      summary.errors += 1
+      continue
+    }
+    let run: BuddyGrowthAcceptRun | null = null
+    let error: string | undefined
+    try {
+      const resolved = await deps.resolve(credentialRef(entry.credentialRef))
+      if (resolved === undefined) {
+        error = '凭据未配置'
+      } else {
+        const credential = JSON.parse(resolved.value) as BuddyCredential
+        run = await acceptAllPendingGrowthTasks(credential, CODEBUDDY)
+        if (run === null) error = '成长任务清单读取失败（凭据可能已失效，请重新登录该账号）'
+      }
+    } catch (caught) {
+      deps.warn?.(`[channel-pack] onboarding.acceptAll 账号 ${entry.id} 失败: ${String(caught)}`)
+      error = caught instanceof Error ? caught.message : String(caught)
+    }
+    if (run === null || error !== undefined) {
+      rows.push({ accountId: entry.id, nickname: entry.nickname, accepted: 0, untouched: 0, error: error ?? '接单失败' })
+      summary.errors += 1
+      continue
+    }
+    if (run.failure !== undefined) {
+      // 清单读到了、接单被拒：这是整号的失败，不能报成「接了 0 项」。
+      rows.push({ accountId: entry.id, nickname: entry.nickname, accepted: 0, untouched: run.untouched, error: run.failure })
+      summary.errors += 1
+      summary.untouchedTasks += run.untouched
+      continue
+    }
+    rows.push({ accountId: entry.id, nickname: entry.nickname, accepted: run.accepted.length, untouched: run.untouched })
+    summary.accounts += 1
+    summary.acceptedTasks += run.accepted.length
+    summary.untouchedTasks += run.untouched
+  }
+  return { accounts: rows, summary }
+}
+
+/**
  * 逐账号收集积分余额（顺序执行，避免并发触发风控）。
  *
  * 与 {@link collectCreditsStatus} 的关键差异：**这里保留失败原因**。
@@ -1133,6 +1216,30 @@ function registerChannelPackEndpoints(
    * 故这里的降级只影响桩环境，不影响生产环境的清理语义。
    */
   ctx.effect?.(() => () => autoCheckin.stop(), 'channel-pack: auto checkin')
+
+  /**
+   * 「自动领取已完成的成长任务」执行体（**独立开关**，默认关）。
+   *
+   * ⚠️ 只遍历**有账号且支持成长任务**的渠道（当前只有 buddy）：遍历其余渠道只会拿到
+   * `onboarding.claimAll` 的可读拒绝，白白多一轮日志噪声。
+   * ⚠️ 它调的是 `onboarding.claimAll` —— **只领 `completed`，绝不接单**。
+   */
+  const autoGrowth = createAutoGrowth({
+    store: createAutoGrowthStore(ctx),
+    listProviderIds: async () => {
+      const accounts = await pool.listAllAccounts()
+      return [...new Set(
+        accounts
+          .filter((entry) => entry.provider === CODEBUDDY.id && isSupportedProvider(entry.provider))
+          .map((entry) => entry.provider),
+      )].sort()
+    },
+    claim: (provider) =>
+      handleMethod('onboarding.claimAll', { provider }) as Promise<BadgeRpcResult<RpcOnboardingClaimAllResponse>>,
+    warn: (message) => ctx.logger?.warn?.(message),
+  })
+  autoGrowth.start()
+  ctx.effect?.(() => () => autoGrowth.stop(), 'channel-pack: auto growth')
 
   /**
    * 用量徽标读数服务（宿主侧 TTL 缓存 + 只保留启用账号 + 附加订阅读数）。
@@ -2484,6 +2591,34 @@ function registerChannelPackEndpoints(
           }
         }
         const value = await collectGrowthClaims(await pool.listAccounts(req.provider), {
+          resolve: (ref) => ctx.credentials.resolve(ref),
+          warn: (msg) => ctx.logger?.warn?.(msg),
+        })
+        return { ok: true, value }
+      }
+
+      /**
+       * 一键**接单**某渠道全部账号未接的成长任务（provider 级）。
+       *
+       * ⚠️ 与 `onboarding.claimAll` 分两个方法、分两个按钮：接单**不产生积分**，
+       * 它只是让服务端开始为该任务计进度（实测：未接单的项 `progress` 为 `null`，
+       * 用了也不涨；接上单才出现 `0/1`、`1/5` 这样的计数）。合成一个方法的话，
+       * 结果文案不得不同时说「接了几项」和「领了几分」，而用户最需要的是分清这两件事。
+       */
+      case 'onboarding.acceptAll': {
+        const req = payload as RpcOnboardingAcceptAllRequest
+        if (req.provider !== CODEBUDDY.id) {
+          return {
+            ok: false,
+            error: {
+              code: 'bad-request',
+              message: req.provider === WORKBUDDY.id
+                ? 'WorkBuddy 国际版没有成长任务接口（其用户中心无此活动线）'
+                : `该渠道不支持一键接单：${req.provider}`,
+            },
+          }
+        }
+        const value = await collectGrowthAccepts(await pool.listAccounts(req.provider), {
           resolve: (ref) => ctx.credentials.resolve(ref),
           warn: (msg) => ctx.logger?.warn?.(msg),
         })
@@ -4317,6 +4452,48 @@ function registerChannelPackEndpoints(
           }
         }
         const value: RpcUsageAutoCheckinResponse = { autoCheckin: await autoCheckin.setEnabled(req.enabled) }
+        return { ok: true, value }
+      }
+
+      /**
+       * 「自动领取已完成的成长任务」开关（读 / 写，**独立于自动签到**）。
+       *
+       * ⚠️ 与 `usage.autoCheckin` 同一套 payload 契约（`enabled` / `dismiss` 省略 = 只读，
+       * 非法值拒绝而非静默回落），但落到**另一个文档**（`auto-growth.json`）与另一套
+       * 记账（`auto-growth.ts`）。理由见那里的文件头：签到与领取的动作代价不同级。
+       * ⚠️ 本开关**不会接单**：`accept` 会改变账号状态，无人值守下不做。
+       */
+      case 'usage.autoGrowth': {
+        const req = payload as RpcUsageAutoGrowthRequest
+        if (req.dismiss !== undefined) {
+          if (typeof req.dismiss !== 'boolean') {
+            return {
+              ok: false,
+              error: {
+                code: 'bad-request',
+                message: `dismiss 必须是布尔值（收到：${JSON.stringify(req.dismiss)}）`,
+              },
+            }
+          }
+          if (req.dismiss) {
+            const value: RpcUsageAutoGrowthResponse = { autoGrowth: await autoGrowth.dismiss() }
+            return { ok: true, value }
+          }
+        }
+        if (req.enabled === undefined) {
+          const value: RpcUsageAutoGrowthResponse = { autoGrowth: autoGrowth.state() }
+          return { ok: true, value }
+        }
+        if (typeof req.enabled !== 'boolean') {
+          return {
+            ok: false,
+            error: {
+              code: 'bad-request',
+              message: `enabled 必须是布尔值（收到：${JSON.stringify(req.enabled)}）`,
+            },
+          }
+        }
+        const value: RpcUsageAutoGrowthResponse = { autoGrowth: await autoGrowth.setEnabled(req.enabled) }
         return { ok: true, value }
       }
 
