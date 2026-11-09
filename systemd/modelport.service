@@ -1,0 +1,18 @@
+[Unit]
+Description=ModelPort gateway (headless daemon)
+After=network-online.target
+
+[Service]
+# Replace NODE and PATH below with the real install paths (`which node`).
+ExecStart=NODE /opt/modelport/modelport-daemon-CHANGE_ME/modelport-daemon.cjs
+Environment=MODELPORT_RESOURCE_ROOT=/opt/modelport/modelport-daemon-CHANGE_ME/resources
+Environment=MODELPORT_WEB_ROOT=/opt/modelport/modelport-daemon-CHANGE_ME/renderer
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+
+# System scope, not --user: a user unit dies with the login session that started it,
+# and `enable` is what brings the gateway back when the WSL distro boots.
+# Install: sudo cp modelport.service /etc/systemd/system/ && sudo systemctl enable --now modelport

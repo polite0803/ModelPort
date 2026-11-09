@@ -1,0 +1,7 @@
+#!/bin/sh
+# Launcher for the headless ModelPort gateway. All flags are passed through:
+#   --print-paths    what this host actually resolved
+#   --init-host      bind beyond loopback + API key + management API, in one step
+#   --import-backup  restore a desktop backup (password via stdin or the env var)
+DIR=$(cd "$(dirname "$0")/.." && pwd)
+exec node "$DIR/modelport-daemon.cjs" "$@"

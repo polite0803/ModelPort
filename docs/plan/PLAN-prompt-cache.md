@@ -645,6 +645,8 @@ prompt_tokens 区间 59,722–175,435（均价 105,133，合计 231 万）
 
 **门禁与部署（2026-11-09 18:11）**：镜像 `npm run gate`——build + build:daemon（`dist/modelport-daemon-1.7.13-x64.tar.gz`，18:01）+ tsc×2 全绿；套件 1984 条、1972 pass、12 条 routes 进程级 OOM（`Zone Allocation failed`）⇒ 逐文件串行重跑 **12/12 EXIT=0**。WSL 覆盖部署（备份 `/root/mpd.bak-presence-1810`）：`resources/channel-pack/worker.mjs` 内 `cachedReported`×4、`cacheField`×4；`/health` ok；18:11:07 启动日志含取证开启行。**现网端到端证据**：部署前 `requests=1505 / cacheReportedRequests=1451`（54 条差值正是 17:50–18:11「显示 `-`」窗口），部署后 3 分钟内新增 5 个 TRAE 请求 ⇒ **1505→1510 与 1451→1456 同步 +5**，`upstreamCacheRead` 保持 0（诚实零命中）。取证帧同期 22→63 条，开关仍在取证期。
 
+**取证读数（2026-11-10 00:15，累计 1391 帧，生产级全天样本）**：自 17:52 开关开启至次日 00:15（约 6.4 小时真实流量），1391/1391 帧同一键集（Anthropic 族 + 四组 `_total` 镜像 + `cluster:"normal_context"` / `name:""`），`cache_read_input_tokens` / `cache_creation_input_tokens`（含 `_total`）**全部显式 0、无一帧正数**；prompt 合计 1.34 亿（单帧最大 178,671）、completion 129.7 万、reasoning 96.5 万。上文「若 TRAE 有 long-context 等其它 cluster，需再取样本」——6.4 小时 1391 帧仍全部 `normal_context`，未见其它 cluster。结论升格：TRAE 的 0% 是上游在生产流量下的持续断言，口径①（留在分母）经受住全天样本。**开关已于 2026-11-10 关闭**（删 unit `MODELPORT_TRAE_USAGE_DUMP=1` 行 + `daemon-reload` + restart；备份 `modelport.service.bak-traeoff-20261110`；验证：`systemctl show -p Environment` 仅剩 RESOURCE_ROOT、`/health` ok）。取证文件 1391 帧原样留在 `/root/.modelport/channel-pack/trae-usage-dump.ndjson` 作证据。
+
 ## 9.11 缓存不是 TRAE 的耗分原因：切历史体量（2026-11-09 20:24）
 
 用户实测 TRAE **一天约 1000 积分**。账本对拍：1940 轮 / 2.086 亿 prompt token ⇒ 约 **20.9 万 token/积分**，每轮 107K ≈ **0.5 分**；输出仅 135 万 token（0.6%）。缓存命中率与积分无关——**消耗几乎完全由每轮 prompt 体量决定**。
