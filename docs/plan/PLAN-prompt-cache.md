@@ -616,3 +616,31 @@ trae/deepseek-v4.1-flash  requests=1360  upstreamPrompt=142,807,543
 **TRAE 到底有没有缓存：目前不可测。** 读取通路本身是对的，1360 轮 / 1.428 亿 token、单账号、70+ 轮长会话里没有出现过一个正数，与「SOLO 的 `token_usage` 不带缓存字段」一致；但因为第 1 步连显式 0 也丢，网关无法区分「不报」与「报了 0」。出站体也排除了自毁前缀：`transformToSOLOBody`（`trae.ts:1510`）是确定性转换，不注入时间戳/请求号。
 
 **修法**：`toOpenAiUsage` 增 `cacheReported = usage.cacheReadTokens !== undefined`，两个出口的 `usageJson` 仅在为真时发 details 对象；宿主无需改动（`readUsageFromBody` 本来就正确处理缺省）。改完 TRAE 显示 `-` 而不是 0%，当日总命中率回到 97.97% 那一档。**这不会让 TRAE 产生缓存**，只是停止伪造读数。残留口径：上游显式报 0 仍会被 `positive()` 当成「没报」，要彻底对齐宿主的「0 也算已上报」需让 `readCachedInput` 多返回一个 present 标志，属另一格。
+
+**实施记录（2026-11-09 17:50）**：
+
+- 修改：`openai-gateway/usage.ts`（`cacheReported` 在 `count()` 折叠前判定）、`openai-gateway/stream.ts` 与 `responses.ts`（两条出口仅在 reported 时发 details 对象）；宿主无改动。
+- 取证点：`trae-usage-dump.ts`（新）+ `trae-adapter.ts` 的 `token_usage` 分支在原样读取**之前**落一行原始 `usage`；`outboundDump.ts::resolveDumpTarget` 增 fileName 参数，`worker.ts` 解析开关并回写 env。开关 `MODELPORT_TRAE_USAGE_DUMP`：缺省/`0` 关，`1/true/on/yes` → `<dataDir>/channel-pack/trae-usage-dump.ndjson`，其它值按路径。写入失败只告警一次、不抛。
+- 测试：`tests/channels/openai-gateway-usage-reporting.test.ts`（6）与 `tests/channels/trae-usage-dump.test.ts`（6）全绿；均做过变异自检（强制 `cacheReported=true` 红 2；去掉开关守卫红 1，已复原）。
+- 门禁读数（镜像 D:\mp-build，先全量同步到 1.7.13）：build + build:daemon（`dist/modelport-daemon-1.7.13-x64.tar.gz`）+ tsc×2 全绿；套件 1907 条、1892 pass、15 条 routes/shared 进程级 OOM（`Zone Allocation failed`，无断言细节）⇒ 逐文件串行重跑 **15/15 EXIT=0**。并发/OOM 是机器余量问题（空闲 4.68G、VMware 9.7G + 内存压缩 5.9G），非代码。
+- 部署（WSL `/root/mpd`）：备份 `mpd.bak-20261109-1740` → 解包覆盖 → `chown -R 1001:1001` → 重启。实证：`resources/channel-pack/worker.mjs` 内 `cacheReported`×5、`MODELPORT_TRAE_USAGE_DUMP`×3；`/health` ok；启动日志有「TRAE 用量取证已开启 → /root/.modelport/channel-pack/trae-usage-dump.ndjson」。unit 已加 `Environment=MODELPORT_TRAE_USAGE_DUMP=1`（取证期临时开启，读数后删该行 + `daemon-reload` + restart 即关）。
+- 下一步（待样本）：跑若干轮 TRAE 会话后读 dump，枚举 `usage` 原始键，区分「SOLO 真不报缓存」与「报了但字段名不在三个已知族里」。
+
+**取证读数（2026-11-09 17:52–17:57，22 帧，同一长会话，30 秒内落盘）**：
+
+```
+models = {deepseek-v4.1-flash: 22}
+usage keys = prompt_tokens / completion_tokens / total_tokens / reasoning_tokens
+             + cache_creation_input_tokens / cache_read_input_tokens
+             + 四组 *_total 与 cluster:"normal_context" / name:""
+cache_read 值 = 22 个全 0；cache_creation 值 = 22 个全 0；非零帧 = 0
+prompt_tokens 区间 59,722–175,435（均价 105,133，合计 231 万）
+```
+
+**定性修正**：SOLO **报了**缓存字段，且读通路本来就认这个族（`cache_read_input_tokens`）。所以「不报」与「字段不认识」两个假设都不成立——上游明确报 0。旧构建对 TRAE 的 0% 是程序上伪造、事实上与上游一致；真正的伪造成本只落在「上游完全不报」的渠道。
+
+**由此浮出的口径问题（待拍板）**：当前部署件里 `positive()` 仍把显式 0 当「没报」⇒ `cacheReported=false` ⇒ TRAE 仪表盘显示 `-`、且退出总命中率分母。取证后这反而是**少算真实数据**：TRAE 的 0 是断言，应显示「已上报 0%」并留在分母（总命中率 74.68% 才是诚实的）。两个选项：①补 present 标志（`readCachedInput` 返回是否出现字段），TRAE 显示 0%、口径 74.68%；②维持现状，TRAE 显示 `-`、口径回到 97.97%（把无缓存收益的渠道移出分母）。建议 ①——与「0 是断言、缺省是事实」的既有判据一致；②若要保留「只看有缓存能力渠道」的视图，应作为独立拆分口径，而不是靠 `-` 绕过。另注：22 帧全为 `normal_context`、单一模型，若 TRAE 有 long-context 等其它 cluster，需再取样本。
+
+**口径拍板（2026-11-09 18:00，用户选 ①）与实现**：`usage-cache.ts` 增 `cachedReported`；新增 `cacheField()`——非负有限数（**含 0**）计为「字段出现」，负数 / NaN / 字符串与缺省同义（畸形值不构成「报了 0」的断言）；三族命中字段（`prompt_tokens_details.cached_tokens` / `prompt_cache_hit_tokens` / `cache_read_input_tokens`）统一走它，显式 0 时 `cachedTokens` 返回 `0`。`trae-adapter.ts` 的透传条件本就是 `cached.cachedTokens !== undefined`，无需改动；`toOpenAiUsage.cacheReported` 随之为真 → 线路发 `{cached_tokens: 0}` → 宿主读成「已上报、零命中」⇒ TRAE 显示 0% 并留在分母。加回口径不受影响：0 命中时 `uncachedInput` 得 `prompt-0`，与旧的缺省路径同值。测试：`usage-cache.test.ts` 改为三族显式 0 各自断言，并钉住「负数/畸形 = 没报」；`openai-gateway-usage-reporting.test.ts` 增两条 TRAE 端到端（原始帧 → `readCachedInput` → `toOpenAiUsage` → 宿主 `readUsageFromBody`）。相关四个测试文件 **26/26 绿**；变异自检（判据退回 `value <= 0`）红 2 条，复原后逐字节一致。
+
+**门禁与部署（2026-11-09 18:11）**：镜像 `npm run gate`——build + build:daemon（`dist/modelport-daemon-1.7.13-x64.tar.gz`，18:01）+ tsc×2 全绿；套件 1984 条、1972 pass、12 条 routes 进程级 OOM（`Zone Allocation failed`）⇒ 逐文件串行重跑 **12/12 EXIT=0**。WSL 覆盖部署（备份 `/root/mpd.bak-presence-1810`）：`resources/channel-pack/worker.mjs` 内 `cachedReported`×4、`cacheField`×4；`/health` ok；18:11:07 启动日志含取证开启行。**现网端到端证据**：部署前 `requests=1505 / cacheReportedRequests=1451`（54 条差值正是 17:50–18:11「显示 `-`」窗口），部署后 3 分钟内新增 5 个 TRAE 请求 ⇒ **1505→1510 与 1451→1456 同步 +5**，`upstreamCacheRead` 保持 0（诚实零命中）。取证帧同期 22→63 条，开关仍在取证期。

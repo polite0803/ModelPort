@@ -13,7 +13,7 @@ import { readCachedInput, uncachedInput } from '../../vendor/channel-pack/src/us
 test('OpenAI 系的 cached_tokens 是 prompt 的子集，要从 inputTokens 里减', () => {
   const u = { prompt_tokens: 1000, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 800 } }
   const reading = readCachedInput(u)
-  assert.deepEqual(reading, { cachedTokens: 800, subsetOfPrompt: true })
+  assert.deepEqual(reading, { cachedTokens: 800, cachedReported: true, subsetOfPrompt: true })
   assert.equal(uncachedInput(1000, reading), 200, 'DSH 的 inputTokens 不含缓存，网关会再加回去')
 })
 
@@ -26,7 +26,7 @@ test('平铺的 prompt_cache_hit_tokens 同样是子集', () => {
 test('Anthropic 系的 cache_read_input_tokens 与 input 并列，绝不减', () => {
   const u = { input_tokens: 400, cache_read_input_tokens: 900, cache_creation_input_tokens: 100 }
   const reading = readCachedInput(u)
-  assert.deepEqual(reading, { cachedTokens: 900, subsetOfPrompt: false, cacheWriteTokens: 100 })
+  assert.deepEqual(reading, { cachedTokens: 900, cachedReported: true, subsetOfPrompt: false, cacheWriteTokens: 100 })
   assert.equal(uncachedInput(400, reading), 400, '并列口径下减它就错了')
 })
 
@@ -37,13 +37,26 @@ test('OpenAI 与 Anthropic 字段同时出现时按子集算（details 优先）
   assert.equal(reading.cachedTokens, 100)
 })
 
-test('没报就是 undefined，不是 0', () => {
-  // `0` 是断言"这轮没命中"；缺省才是事实"上游没告诉我们"。写成 0 会让仪表盘
-  // 宣称缓存没用上，而我们没有这个测量。
-  assert.equal(readCachedInput({ prompt_tokens: 100 }).cachedTokens, undefined)
-  assert.equal(readCachedInput({ prompt_tokens: 100, prompt_tokens_details: { cached_tokens: 0 } }).cachedTokens, undefined)
-  assert.equal(readCachedInput({ prompt_tokens: 100, cache_read_input_tokens: 0 }).cachedTokens, undefined)
-  assert.equal(uncachedInput(100, readCachedInput({ prompt_tokens: 100 })), 100, '没报缓存时输入原样保留')
+test('缺省是"没报"，显式 0 是"报了且零命中"', () => {
+  // `0` 是断言"这轮没命中"；缺省才是事实"上游没告诉我们"。两者必须分开表达。
+  const absent = readCachedInput({ prompt_tokens: 100 })
+  assert.equal(absent.cachedTokens, undefined)
+  assert.equal(absent.cachedReported, false)
+  // 2026-11-09 取证：SOLO 每轮都显式报 `cache_read_input_tokens: 0`（PLAN §9.10）。
+  // 旧实现把它折成缺省，TRAE 从「已上报」分母消失 —— 那是少算，不是去伪造。
+  const zeroRead = readCachedInput({ prompt_tokens: 100, cache_read_input_tokens: 0 })
+  assert.equal(zeroRead.cachedTokens, 0)
+  assert.equal(zeroRead.cachedReported, true)
+  assert.equal(zeroRead.subsetOfPrompt, false)
+  const zeroDetails = readCachedInput({ prompt_tokens: 100, prompt_tokens_details: { cached_tokens: 0 } })
+  assert.equal(zeroDetails.cachedTokens, 0)
+  assert.equal(zeroDetails.cachedReported, true)
+  assert.equal(zeroDetails.subsetOfPrompt, true)
+  const zeroFlat = readCachedInput({ prompt_tokens: 100, prompt_cache_hit_tokens: 0 })
+  assert.equal(zeroFlat.cachedTokens, 0)
+  assert.equal(zeroFlat.cachedReported, true)
+  assert.equal(uncachedInput(100, absent), 100, '没报缓存时输入原样保留')
+  assert.equal(uncachedInput(100, zeroDetails), 100, '0 命中时输入同样原样保留')
 })
 
 test('上游报出 cached > prompt 时夹到 0，绝不返回负输入', () => {
@@ -57,8 +70,13 @@ test('畸形 usage 不抛错：null / 非对象 / 字符串 / NaN / 负数一律
   for (const bad of [null, undefined, 'x', 7, [], { cached_tokens: 'abc' }, { prompt_tokens_details: null }]) {
     const r = readCachedInput(bad as Record<string, unknown>)
     assert.equal(r.cachedTokens, undefined, JSON.stringify(bad))
+    assert.equal(r.cachedReported, false, JSON.stringify(bad))
     assert.equal(r.subsetOfPrompt, false)
   }
-  assert.equal(uncachedInput(Number.NaN, { cachedTokens: undefined, subsetOfPrompt: false }), 0)
-  assert.equal(uncachedInput(-5, { cachedTokens: undefined, subsetOfPrompt: false }), 0)
+  // 字段在但值是负数：畸形值不构成「报了 0」的断言。
+  const negative = readCachedInput({ prompt_tokens: 100, cache_read_input_tokens: -5 })
+  assert.equal(negative.cachedTokens, undefined)
+  assert.equal(negative.cachedReported, false)
+  assert.equal(uncachedInput(Number.NaN, { cachedTokens: undefined, cachedReported: false, subsetOfPrompt: false }), 0)
+  assert.equal(uncachedInput(-5, { cachedTokens: undefined, cachedReported: false, subsetOfPrompt: false }), 0)
 })

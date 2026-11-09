@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { toOpenAiUsage } from '../../vendor/channel-pack/src/openai-gateway/usage.ts'
+import { readCachedInput, uncachedInput } from '../../vendor/channel-pack/src/usage-cache.ts'
 import { readUsageFromBody } from '../../src/main/proxy/quota/usage.ts'
 
 const ROOT = process.cwd()
@@ -50,6 +51,46 @@ test('toOpenAiUsage：正数命中保持加回口径（2026-10-04 Codex 少算�
   assert.equal(normalized.cachedTokens, 800)
   assert.equal(normalized.inputTokens, 1010, '未命中 200 + 命中 800 + 写入 10')
   assert.equal(normalized.totalTokens, 1030)
+})
+
+test('TRAE 路径端到端：SOLO 显式报 0 → 宿主读成「已上报、零命中」', () => {
+  // 原始帧取自 2026-11-09 取证（PLAN §9.10）：`cache_read_input_tokens: 0` 每轮都在。
+  const raw = { prompt_tokens: 1000, completion_tokens: 20, cache_read_input_tokens: 0, cluster: 'normal_context' }
+  const reading = readCachedInput(raw)
+  assert.equal(reading.cachedReported, true, '字段出现且为 0 是上游的断言，不是缺省')
+  // 与 trae-adapter.ts 的 token_usage 分支同形。
+  const normalized = toOpenAiUsage({
+    inputTokens: uncachedInput(raw.prompt_tokens, reading),
+    outputTokens: raw.completion_tokens,
+    ...reading.cachedTokens !== undefined ? { cacheReadTokens: reading.cachedTokens } : {},
+  })
+  assert.equal(normalized.cacheReported, true, '显式 0 必须带着「已上报」走完整条链')
+  assert.equal(normalized.cachedTokens, 0)
+  assert.equal(normalized.inputTokens, 1000)
+  const host = readUsageFromBody({
+    usage: {
+      prompt_tokens: normalized.inputTokens,
+      completion_tokens: normalized.outputTokens,
+      prompt_tokens_details: { cached_tokens: normalized.cachedTokens },
+    },
+  })
+  assert.ok(host)
+  assert.equal(host.cacheReadReported, true)
+  assert.equal(host.cacheReadTokens, undefined, '0 命中不落数值，只落 reported 标志')
+  assert.equal(host.promptTokens, 1000)
+})
+
+test('TRAE 路径端到端：Anthropic 并列口径只减不减（无缓存时不双扣）', () => {
+  const raw = { input_tokens: 400, cache_read_input_tokens: 900, cache_creation_input_tokens: 0 }
+  const reading = readCachedInput(raw)
+  const normalized = toOpenAiUsage({
+    inputTokens: uncachedInput(400, reading),
+    outputTokens: 20,
+    cacheReadTokens: reading.cachedTokens,
+  })
+  assert.equal(normalized.cachedTokens, 900)
+  assert.equal(normalized.inputTokens, 1300, '并列口径：未命中 400 + 命中 900')
+  assert.equal(normalized.cacheReported, true)
 })
 
 /** 与 first-fragment 同一套基建：esbuild 按生产别名打包 vendor 源码再 import。 */
