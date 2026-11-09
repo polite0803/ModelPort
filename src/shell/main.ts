@@ -40,6 +40,7 @@ import {
   type GatewayKind,
 } from './addressBook'
 import { dropSecret, getSecret, putSecret, type SecretSealer } from './secretStore'
+import { changeGatewayTrust, describeCertificate, gatewayTrustStatus, type TrustTarget } from './gatewayTrust'
 import { checkForUpdates, runUpgrade } from './updater'
 import {
   adoptLocalHandshake,
@@ -76,6 +77,19 @@ let window: BrowserWindow | null = null
 let tray: Tray | null = null
 let listWindow: BrowserWindow | null = null
 let guideWindow: BrowserWindow | null = null
+
+/**
+ * The certificate the active gateway presented while this machine was refusing it, and the
+ * exact failure document that may ask for trust actions.
+ *
+ * Both exist for one situation: an HTTPS gateway whose certificate is not trusted has no
+ * page to click a button on, so the console has to offer the install itself. The captured
+ * PEM is what the handshake already showed the user, and the failure-page URL is compared
+ * literally because a `data:` document has no origin to gate on - a remote page cannot
+ * forge it (Chromium refuses top-level navigation to `data:` URLs) and cannot guess it.
+ */
+let refusedCertificate: { origin: string; pem: string; error: string } | null = null
+let trustFailurePageUrl: string | null = null
 
 function iconPath(): string {
   return app.isPackaged
@@ -330,8 +344,62 @@ function failurePageUrl(entry: GatewayEntry, error: string): string {
 <ul style="color:#a1a1aa">
   <li>WSL 里的服务在跑吗：<code>systemctl is-active modelport</code></li>
   <li>绑的是非回环地址吗：宿主连不上只绑 <code>127.0.0.1</code> 的 WSL 监听</li>
-  <li>https 自签证书：先在浏览器信任 CA，或从 <code>${escapeHtml(entry.url)}/v1/management/tls/ca</code> 取下来看</li>
+  <li>https 自签证书：这张证书要在<b>这台电脑</b>上被信任，在网关主机上装没有用。如果失败的原因就是证书校验，本页会直接给出「安装到本机信任并重试」；否则用 <code>${escapeHtml(entry.url)}/v1/management/tls/ca</code>（要管理口令）取 PEM 再手动信任</li>
 </ul>
+</body>`
+  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`
+}
+
+/**
+ * The HTTPS bootstrap page: the gateway answered the handshake and this machine refused its
+ * certificate. There is no gateway page to click a button on, and the management endpoint
+ * that serves the PEM is unreachable for the same reason the window is - so the certificate
+ * comes from the handshake the console just watched fail, and the install runs here.
+ *
+ * The button calls the argument-free bridge method; the PEM never crosses the page, and the
+ * document is shown only for the active gateway's own origin.
+ */
+function tlsFailurePageUrl(entry: GatewayEntry, error: string, pem: string): string {
+  const described = describeCertificate(pem)
+  const details = described
+    ? `<ul style="color:#a1a1aa;margin:0 0 14px">
+  <li>主题：<code>${escapeHtml(described.subject)}</code></li>
+  <li>SHA-256 指纹：<code>${escapeHtml(described.fingerprint256)}</code></li>
+  <li>有效期至：${escapeHtml(described.validTo)}</li>
+  <li>证书包含：<code>${escapeHtml(described.subjectAltName ?? '无 SAN')}</code></li>
+</ul>`
+    : '<p style="color:#a1a1aa">握手给出的证书无法解析，只能按网关主机上的 PEM 手动信任。</p>'
+  const html = `<!doctype html><meta charset="utf-8"><title>ModelPort Shell</title>
+<body style="font:14px/1.6 system-ui;padding:40px;background:#1a1a1a;color:#eee">
+<h2 style="font-size:16px">这台电脑不信任 ${escapeHtml(entry.name)} 的证书</h2>
+<p style="color:#f87171">${escapeHtml(error)}</p>
+<p>目标：<code>${escapeHtml(uiUrl(entry))}</code></p>
+${details}<p>安装只改<b>这台电脑</b>当前用户的根证书库；网关主机上的信任状态不会因此改变，别的电脑仍要各自安装。装完请重启客户端。</p>
+<p><button id="trust" style="font:inherit;padding:6px 12px;cursor:pointer">安装到本机信任并重试</button></p>
+<pre id="out" style="white-space:pre-wrap;color:#a1a1aa;font-size:12px;margin:8px 0 0"></pre>
+<p style="margin-top:18px"><a href="${escapeHtml(uiUrl(entry))}" style="color:#60a5fa">不安装，只重试</a></p>
+<script>
+const button = document.getElementById('trust')
+const out = document.getElementById('out')
+const host = window.modelportShell
+if (!host || typeof host.installGatewayCertificateTrust !== 'function') {
+  button.disabled = true
+  out.textContent = '这个控制台版本不能在本机安装证书：请按上面的指纹核对后手动信任。'
+} else {
+  button.addEventListener('click', async () => {
+    button.disabled = true
+    out.textContent = '正在安装…'
+    try {
+      const result = await host.installGatewayCertificateTrust()
+      out.textContent = result.message + (result.fingerprint256 ? '\\n指纹 ' + result.fingerprint256 : '')
+      if (result.ok) await host.reconnect()
+    } catch (cause) {
+      out.textContent = String((cause && cause.message) || cause)
+      button.disabled = false
+    }
+  })
+}
+</script>
 </body>`
   return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`
 }
@@ -389,12 +457,41 @@ function createWindow(): void {
     },
   })
 
+  window.webContents.on('certificate-error', (_event, url, error, certificate) => {
+    // Never accept the invalid certificate. Capture it so the failure page can offer to
+    // trust it on this machine, and let Chromium keep rejecting the connection.
+    const entry = activeEntry(readBook())
+    const origin = entry ? normalizeOrigin(entry.url) : null
+    if (origin === null || normalizeOrigin(url) !== origin) return
+    const pem = certificate.data
+    if (typeof pem !== 'string' || pem === '') return
+    refusedCertificate = { origin, pem, error }
+    trustFailurePageUrl = null
+    console.warn(`[Shell] certificate refused for ${url}: ${error}`)
+  })
+
   window.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
     if (validatedURL.startsWith('data:')) return
     const entry = activeEntry(readBook())
     if (!entry) return
     console.warn(`[Shell] load failed ${errorCode} ${errorDescription} for ${validatedURL}`)
-    window?.loadURL(failurePageUrl(entry, `${errorDescription} (${errorCode})`))
+    const error = `${errorDescription} (${errorCode})`
+    const refused =
+      refusedCertificate !== null && normalizeOrigin(validatedURL) === refusedCertificate.origin
+        ? refusedCertificate
+        : null
+    const document = refused ? tlsFailurePageUrl(entry, error, refused.pem) : failurePageUrl(entry, error)
+    if (refused) trustFailurePageUrl = document
+    void window?.loadURL(document)
+  })
+
+  // A real gateway page means this machine already trusts what the listener presents: the
+  // captured certificate and the page that was allowed to act on it are both stale from
+  // here on, and keeping them would leave a stale data: document able to install.
+  window.webContents.on('did-finish-load', () => {
+    if ((window?.webContents.getURL() ?? '').startsWith('data:')) return
+    refusedCertificate = null
+    trustFailurePageUrl = null
   })
 
   // A page that fails to mount shows a dark rectangle and leaves nothing behind: the shell
@@ -1155,4 +1252,61 @@ ipcMain.handle('shell:update-start', async (event: IpcMainInvokeEvent) => {
   return await runUpgrade(entry, (progress: ShellUpdateProgress) => {
     if (!sender.isDestroyed()) sender.send('shell:update-progress', progress)
   })
+})
+
+/**
+ * Certificate trust, for the machine this console is running on.
+ *
+ * The gateway's own `tls:install-trust` is not usable from here: it acts where the listener
+ * lives - a Linux daemon under WSL, somebody else's host when remote - while the client
+ * refusing the handshake sits on this side of the wire. So the panel asks the shell, and
+ * the shell writes its own OS store.
+ *
+ * Gated like the update actions, with one addition: the HTTPS bootstrap page is a `data:`
+ * document and therefore has no origin to compare. It is accepted by exact URL match
+ * against the document this process just loaded, which a remote page can neither navigate
+ * to (Chromium refuses top-level `data:` navigation) nor guess.
+ */
+function activeGatewayForTrust(event: IpcMainInvokeEvent): GatewayEntry {
+  const entry = activeEntry(readBook())
+  if (!entry) throw new Error('还没有配置网关')
+  const frameUrl = event.senderFrame?.url ?? ''
+  let origin: string | null = null
+  try {
+    origin = frameUrl === '' ? null : new URL(frameUrl).origin
+  } catch {
+    origin = null
+  }
+  if (origin !== null && origin === normalizeOrigin(entry.url)) return entry
+  if (trustFailurePageUrl !== null && frameUrl === trustFailurePageUrl) return entry
+  if (frameUrl.startsWith('data:') && (window?.webContents.getURL() ?? '') === frameUrl) return entry
+  throw new Error('证书信任操作只允许当前网关页面发起')
+}
+
+/** The PEM the console installs, kept under its own profile - never in the gateway's data dir. */
+const gatewayTlsCachePath = (): string => join(app.getPath('userData'), 'tls', 'gateway-ca.pem')
+
+function trustTargetFor(event: IpcMainInvokeEvent): TrustTarget {
+  const entry = activeGatewayForTrust(event)
+  const origin = normalizeOrigin(entry.url)
+  if (origin === null) throw new Error('网关地址无效')
+  const found = getSecret(secretsPath(), secretSealer, origin)
+  return {
+    origin,
+    cachePath: gatewayTlsCachePath(),
+    secret: found.status === 'found' ? (found.secret ?? null) : null,
+    captured: refusedCertificate !== null && refusedCertificate.origin === origin ? refusedCertificate.pem : null,
+  }
+}
+
+ipcMain.handle('shell:tls-status', async (event: IpcMainInvokeEvent) => {
+  return await gatewayTrustStatus(trustTargetFor(event))
+})
+
+ipcMain.handle('shell:tls-install-trust', async (event: IpcMainInvokeEvent) => {
+  return await changeGatewayTrust(trustTargetFor(event), 'install')
+})
+
+ipcMain.handle('shell:tls-uninstall-trust', async (event: IpcMainInvokeEvent) => {
+  return await changeGatewayTrust(trustTargetFor(event), 'uninstall')
 })

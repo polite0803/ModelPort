@@ -1,6 +1,6 @@
 # HTTPS 与证书信任
 
-> 适用版本：v1.7.3 ｜ 最后核对：2026-11-04 ｜ 状态：现行
+> 适用版本：v1.7.3 ｜ 最后核对：2026-11-09 ｜ 状态：现行
 
 ## 这个功能点是什么
 
@@ -12,7 +12,9 @@ HTTPS 监听不是“可选的装饰”。Claude Desktop 的网关在部分配�
 
 设置页展示证书的 subject、issuer、有效期、SHA-256 指纹、SAN 与来源，并提供“安装到系统信任”按钮。这个按钮只会写操作系统信任库（Windows 用 `certutil -user -addstore Root`，macOS 用 `security add-trusted-cert`），并且只在用户点击时执行，启动过程不会改动信任库。
 
-真正容易出错的地方是“信任”有两个消费者。Chromium/Schannel 系客户端（Claude Desktop、浏览器、Windows `curl`）读操作系统信任库；Node 系客户端（Codex CLI、WorkBuddy/CodeBuddy agent、任何基于 `node:https` 或 undici 的程序）完全不读它，只认 Node 自带的 CA 集合加上 `NODE_EXTRA_CA_CERTS`。因此面板上的 `trusted: true` 只能回答前一类客户端的问题。
+自控制台（shell）形态起，“这台机器”必须说清是哪一台：命令跑在**执行它的那台机器**上。网关进程的 `tls:install-trust` 改的是**监听器所在主机**的信任库——WSL 形态下那是一个 Linux 守护进程（它连信任命令都没有），远程形态下那是别人的电脑；而拒绝握手的浏览器坐在用户这边。因此信任操作分成两层：控制台本机那一层由 `src/shell/gatewayTrust.ts` 执行（它自己取 PEM、写进本机用户根证书库），网关主机那一层的 `TlsStatus.trusted` 只是只读诊断，面板把它单独标成“网关主机信任”。`sha1Thumbprint` / `isCertificateTrusted` / `installCertificateTrust` / `uninstallCertificateTrust` 抽到 `src/shared/certificateTrust.ts`，两边共用同一份实现——Windows 撤销信任那个坑不能有两份拷贝。
+
+真正容易出错的地方是“信任”有两个消费者。Chromium/Schannel 系客户端（Claude Desktop、浏览器、Windows `curl`）读操作系统信任库；Node 系客户端（Codex CLI、WorkBuddy/CodeBuddy agent、任何基于 `node:https` 或 undici 的程序）完全不读它，只认 Node 自带的 CA 集合加上 `NODE_EXTRA_CA_CERTS`。因此面板上的 `trusted: true` 只能回答前一类客户端的问题，而 `NODE_EXTRA_CA_CERTS` 的路径也分两台机器：网关主机上的那份在 `~/.modelport/tls/server.crt`，控制台本机的是 `<console userData>/tls/gateway-ca.pem`，面板各给一行可复制文本。
 
 排查顺序应当是：先看 `TlsStatus.running` 与 `TlsStatus.error`（监听有没有起来、端口是否被占），再看 `certificate.subjectAltName` 是否覆盖客户端实际使用的地址，最后看 `handshakeRejections.byCode`。若计数为空且请求日志有行，说明握手成功、问题在 HTTP 层；若计数非零且请求日志无行，说明失败发生在 TLS 层，客户端的证书校验根本没让请求进入网关。
 
@@ -26,6 +28,11 @@ HTTPS 监听不是“可选的装饰”。Claude Desktop 的网关在部分配�
 - `httpsPort` 默认 8443，取值 1–65535；HTTPS 开启时不能与 `proxyPort` 相同。
 - 启用 HTTPS 不会自动改写 `proxyHost`：监听地址沿用主代理配置，默认 `127.0.0.1`，需要局域网访问时必须显式调整。
 - **`TlsStatus.trusted` 只代表系统信任库**。Node 系客户端需要 `NODE_EXTRA_CA_CERTS=<certPath>`；设置面板会打印这行可复制文本，`GET /v1/management/tls/ca` 则把同一份 PEM（只有证书，绝不含私钥）交给另一台机器。〔v1.5.5 起〕
+- **信任是「哪一台机器」的属性**〔接通档，2026-11-09 起〕：网关侧的 `tls:install-trust` / `tls:uninstall-trust` / `tls:status` 都作用在**运行网关的那台主机**，面板把它的 `trusted` 单独标成“网关主机信任”并且只读；用户能点的那组按钮走控制台自己的 IPC（`shell:tls-status` / `shell:tls-install-trust` / `shell:tls-uninstall-trust`），写的是**运行控制台这台电脑**当前用户的根证书库。本地形态下两台是同一台机器，WSL 与远程形态下不是——把网关的 `trusted: true` 画在还在拒绝握手的浏览器旁边，就是一个假绿。
+- 三个信任原语（`sha1Thumbprint` / `isCertificateTrusted` / `installCertificateTrust` / `uninstallCertificateTrust`）在 `src/shared/certificateTrust.ts`，OS 命令通过 `TrustRuntime` 注入：两个主机共用一份实现，Windows 的 `certutil -delstore` 坑与指纹形状不允许出现第二份。
+- 控制台的信任 IPC **不接受页面给的 PEM 或路径**，也不接受任何参数：它自己去 `GET /v1/management/tls/ca`（用 `secrets.json` 里封装好的管理口令）取 PEM，落到 `<console userData>/tls/gateway-ca.pem`（0600），再执行系统命令。发送方按活动网关的 origin 校验，与升级操作同一套门禁。
+- https 证书不被信任时**没有页面可点按钮**：`certificate-error` 只记录握手出示的证书（绝不 `callback(true)` 放行），控制台的连接失败页给出「安装到本机信任并重试」，并按精确 URL 匹配放行这一份 `data:` 文档（`data:` 没有 origin 可比，远程页面既不能导航到它也不能猜）。
+- 非自签名证书（`selfSigned === false`）拒绝装进根证书库：叶子证书进根库不产生任何信任，要装的是签发它的 CA；此时控制台直接说明，而不是跑一次命令假装成功。
 - **客户端拒绝握手的请求在网关侧没有请求行**：没有路由执行，就没有请求日志、没有 `X-Request-Id`、没有尝试链。唯一证据是 `httpsServer.on('tlsClientError')` 交给 `createHandshakeRejectionTracker` 的计数，按 OpenSSL code 分组，暴露为 `TlsStatus.handshakeRejections`。〔v1.5.5 起〕
 - 握手拒绝计数从监听启动开始，监听停止即丢弃计数，不会留下“仍在拒绝”的陈旧读数；同一 code 在 30 秒窗口内只写一次应用日志，避免重试客户端刷爆日志。
 - `isCertificateRejection` 只把证书类 code（如 `DEPTH_ZERO_SELF_SIGNED_CERT`、`UNKNOWN_CA`、`CERT_HAS_EXPIRED`）归为信任问题；协议类失败（`ERR_SSL_WRONG_VERSION_NUMBER`、`EPROTO`，通常是 HTTP 客户端打到 HTTPS 端口）必须给出不同提示，因为修法不同。
@@ -62,11 +69,15 @@ HTTPS 监听不是“可选的装饰”。Claude Desktop 的网关在部分配�
 
 托管证书固定落在 `~/.modelport/tls/`；私钥写入时尝试 `0600` 权限（Windows 可能忽略 POSIX mode，但文件仍在用户目录下）。
 
-管理接口：`GET /v1/management/tls/status` 返回监听状态、证书信息、`trusted` 与 `handshakeRejections`；`GET /v1/management/tls/ca` 返回 `TlsCertificateBundle`（PEM 与元数据，不含私钥）。渲染层的信任操作走 IPC `tls:status`、`tls:install-trust`、`tls:uninstall-trust`，不直接调用系统命令。
+管理接口：`GET /v1/management/tls/status` 返回监听状态、证书信息、`trusted`（**网关主机**的信任库读数）与 `handshakeRejections`；`GET /v1/management/tls/ca` 返回 `TlsCertificateBundle`（PEM 与元数据，不含私钥）。渲染层的信任操作分两条路：在控制台里走 shell IPC `shell:tls-status` / `shell:tls-install-trust` / `shell:tls-uninstall-trust`（本机），在桌面宿主里仍走 `tls:status` / `tls:install-trust` / `tls:uninstall-trust`（网关与客户端同一台机器）；纯浏览器页面两条都不给按钮——它没有自己的主机可写。两条路都不直接调用系统命令，命令只在 `shared/certificateTrust.ts` 里。
 
 ## 相关代码位置
 
-- `src/main/proxy/tls.ts` — 证书加载、生成、SAN 校验、信任安装/移除、握手计数
+- `src/shared/certificateTrust.ts` — 信任原语（指纹、探测、安装、移除），OS 命令注入
+- `src/main/proxy/tls.ts` — 证书加载、生成、SAN 校验、握手计数；信任部分从 `@shared` 再导出
+- `src/shell/gatewayTrust.ts` — 控制台取 PEM、缓存到本机 userData、在**这台电脑**上安装/移除信任
+- `src/shell/main.ts` — `certificate-error` 捕获、HTTPS 失败页与 `shell:tls-*` 门禁
+- `src/shell/preload.ts` — 无参数的三个信任能力
 - `src/main/proxy/routes/management/tls.ts` — `/tls/ca` 与 `/tls/status`
 - `src/shared/httpsConfig.ts` — SAN 归一化、端口校验、URL 拼接
 - `src/main/proxy/server.ts` — HTTPS 监听与 `tlsClientError` 接线
@@ -87,3 +98,4 @@ HTTPS 监听不是“可选的装饰”。Claude Desktop 的网关在部分配�
 | v1.5.0 | 证书可加入远程地址（`httpsSanHosts`，IP 走 SAN type 7、域名 type 2）；重签判据改为“是否覆盖当前名单”；新增“从系统信任移除” | CHANGELOG「v1.5.0」条目 |
 | v1.5.0 | Windows 撤销信任改用 PowerShell 按 SHA-1 精确删除，不再使用 `certutil -delstore` | CHANGELOG「v1.5.0」条目 |
 | v1.5.5 | 补齐 `NODE_EXTRA_CA_CERTS` 通路、`GET /v1/management/tls/ca` 与 `/tls/status`（握手被拒计数） | CHANGELOG「v1.5.5」条目 |
+| 未发布（1.7.x） | 信任改成“控制台本机”：`shared/certificateTrust` 抽公共实现、shell 三个无参数信任 IPC、HTTPS 失败页可直接安装并重启连接、面板拆成网关主机／本机两块与两条 `NODE_EXTRA_CA_CERTS` | `tests/proxy/certificate-trust.test.ts`、`tests/renderer/https-machine-trust-panel.test.mjs`、`tests/build/shell-entries.test.ts` |

@@ -1,12 +1,23 @@
 import { X509Certificate, createPrivateKey, createPublicKey } from 'crypto'
-import { execFile } from 'child_process'
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 import { generate } from 'selfsigned'
-import type { TlsCertificateInfo, TlsHandshakeStats, TlsStatus, TlsTrustResult } from '../../shared/types'
+import type { TlsCertificateInfo, TlsHandshakeStats, TlsStatus } from '../../shared/types'
 import type { AppConfig } from '../store/types'
 import { buildHttpsUrl, isIpv4, isIpv6, requiredSanHosts } from '../../shared/httpsConfig.ts'
+// The trust-store commands are shared with the console: the same three operations run on
+// two different machines, and the details that fail silently (the Windows removal, the
+// thumbprint shape the probe compares) must not be copied. Re-exported below so gateway
+// callers keep one import site.
+import { isCertificateTrusted } from '../../shared/certificateTrust.ts'
+
+export {
+  installCertificateTrust,
+  isCertificateTrusted,
+  sha1Thumbprint,
+  uninstallCertificateTrust,
+} from '../../shared/certificateTrust.ts'
 
 const MANAGED_DIR = join(homedir(), '.modelport', 'tls')
 const MANAGED_CERT = 'server.crt'
@@ -33,20 +44,6 @@ export interface TlsConfigInput {
   httpsCertPath?: string
   httpsKeyPath?: string
   httpsSanHosts?: string[]
-}
-
-interface CommandResult {
-  ok: boolean
-  output: string
-}
-
-function run(file: string, args: string[]): Promise<CommandResult> {
-  return new Promise((resolve) => {
-    execFile(file, args, { windowsHide: true, timeout: 20000 }, (error, stdout, stderr) => {
-      const output = `${stdout ?? ''}${stderr ?? ''}`.trim()
-      resolve({ ok: !error, output })
-    })
-  })
 }
 
 function certificateInfo(certPem: string, source: TlsCertificateInfo['source'], certPath: string, keyPath: string): TlsCertificateInfo {
@@ -193,15 +190,6 @@ export function tryReadTlsMaterial(config: TlsConfigInput): TlsMaterial | null {
 }
 
 /**
- * SHA-1 thumbprint, formatted the way Windows certificate stores report it.
- * The trust probe and the removal both compare against this exact shape, so a
- * stray separator or lowercase hex silently matches nothing.
- */
-export function sha1Thumbprint(certPem: string): string {
-  return new X509Certificate(certPem).fingerprint.replace(/:/g, '').toUpperCase()
-}
-
-/**
  * OpenSSL codes that mean "this client does not trust the certificate we
  * presented". Everything else on `tlsClientError` is a protocol-level failure
  * (an HTTP client hitting the HTTPS port, a dead TLS version, a broken tunnel)
@@ -300,131 +288,6 @@ export function createHandshakeRejectionTracker(input: {
         })),
       }
     },
-  }
-}
-
-/**
- * Whether the certificate is trusted by the OS store. Chromium-based clients
- * (Claude Desktop) use that store on Windows and macOS, so this is the same
- * question the client will ask. null means the platform has no cheap probe.
- *
- * ⚠️ A `true` here says nothing about Node-based clients (Codex CLI, the
- * WorkBuddy/CodeBuddy agent, anything using `node:https` or undici): Node never
- * consults the OS store, it uses its bundled CA set plus `NODE_EXTRA_CA_CERTS`.
- */
-export async function isCertificateTrusted(material: TlsMaterial): Promise<boolean | null> {
-  if (process.platform === 'win32') {
-    const thumbprint = sha1Thumbprint(material.cert)
-    const command = `(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { $_.Thumbprint -eq '${thumbprint}' } | Measure-Object).Count`
-    const result = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command])
-    if (!result.ok) return null
-    return result.output.trim() === '1'
-  }
-
-  if (process.platform === 'darwin') {
-    const result = await run('security', ['verify-cert', '-c', material.certPath, '-p', 'ssl'])
-    return result.ok
-  }
-
-  return null
-}
-
-export async function installCertificateTrust(material: TlsMaterial): Promise<TlsTrustResult> {
-  if (process.platform === 'win32') {
-    const result = await run('certutil', ['-user', '-addstore', 'Root', material.certPath])
-    if (!result.ok) {
-      return { ok: false, message: result.output || 'certutil failed to install the certificate', trusted: false }
-    }
-    return {
-      ok: true,
-      message: 'Certificate installed into the current user Trusted Root store. Restart the client to pick it up.',
-      trusted: await isCertificateTrusted(material),
-    }
-  }
-
-  if (process.platform === 'darwin') {
-    const result = await run('security', ['add-trusted-cert', '-r', 'trustRoot', '-k', loginKeychainPath(), material.certPath])
-    if (!result.ok) {
-      return { ok: false, message: result.output || 'security add-trusted-cert failed', trusted: false }
-    }
-    return {
-      ok: true,
-      message: 'Certificate added to the login keychain trust settings. Restart the client to pick it up.',
-      trusted: await isCertificateTrusted(material),
-    }
-  }
-
-  return {
-    ok: false,
-    message: `On Linux, trust the certificate manually, e.g. sudo trust anchor --store "${material.certPath}" (or copy it to /usr/local/share/ca-certificates/ and run update-ca-certificates).`,
-    trusted: null,
-  }
-}
-
-function loginKeychainPath(): string {
-  const db = join(homedir(), 'Library', 'Keychains', 'login.keychain-db')
-  return existsSync(db) ? db : 'login.keychain'
-}
-
-/**
- * Takes the certificate out of the OS trust store again.
- *
- * ⚠️ Windows deliberately does **not** use `certutil -delstore`: measured on this
- * machine, a serial that matches nothing still exits 0 and removes the *first*
- * entry of the store. The PowerShell form below filters on the exact SHA-1 and
- * deletes nothing when there is no match.
- */
-export async function uninstallCertificateTrust(material: TlsMaterial): Promise<TlsTrustResult> {
-  if (process.platform === 'win32') {
-    const thumbprint = sha1Thumbprint(material.cert)
-    const command =
-      `$found = @(Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { $_.Thumbprint -eq '${thumbprint}' }); ` +
-      "if ($found.Count -eq 0) { 'NOT-INSTALLED' } else { $found | Remove-Item; 'REMOVED=' + $found.Count }"
-    const result = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command])
-    const output = result.output.trim()
-
-    if (!result.ok) {
-      return { ok: false, message: output || 'Failed to remove the certificate', trusted: null }
-    }
-    if (output.includes('NOT-INSTALLED')) {
-      return {
-        ok: true,
-        message: 'This certificate is not in the current user Trusted Root store; nothing was removed.',
-        trusted: false,
-      }
-    }
-    return {
-      ok: true,
-      message: `Removed from the current user Trusted Root store (${output}).`,
-      trusted: await isCertificateTrusted(material),
-    }
-  }
-
-  if (process.platform === 'darwin') {
-    const result = await run('security', [
-      'delete-certificate',
-      '-Z',
-      sha1Thumbprint(material.cert),
-      loginKeychainPath(),
-    ])
-    if (!result.ok) {
-      return {
-        ok: false,
-        message: result.output || `security delete-certificate failed (a trust setting added with sudo has to be removed with sudo)`,
-        trusted: null,
-      }
-    }
-    return {
-      ok: true,
-      message: 'Removed from the login keychain trust settings.',
-      trusted: await isCertificateTrusted(material),
-    }
-  }
-
-  return {
-    ok: false,
-    message: `On Linux, remove the trust anchor manually, e.g. sudo trust anchor --remove "${material.certPath}" (or delete it from /usr/local/share/ca-certificates/ and run update-ca-certificates).`,
-    trusted: null,
   }
 }
 

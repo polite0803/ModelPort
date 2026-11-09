@@ -43,6 +43,9 @@ test('the shell imports no gateway module tree', () => {
     'src/shell/preload.ts',
     'src/shell/promptPreload.ts',
     'src/shell/secretStore.ts',
+    // Certificate trust for the machine the console runs on; the OS commands themselves
+    // live in `shared/certificateTrust`, which the gateway uses for its own host.
+    'src/shell/gatewayTrust.ts',
     // The console supervises a local gateway process; it still never becomes one.
     'src/shell/localGateway.ts',
     'src/shell/localGatewayPlan.ts',
@@ -148,4 +151,43 @@ test('the address book refuses non-http origins and never stores a secret', () =
     'file://, smb:// and ms-msdt: would hand credentials to a protocol handler')
   assert.doesNotMatch(book, /safeStorage|managementApiSecret/,
     'the management secret belongs to the page in sessionStorage, not to the shell on disk')
+})
+
+test('certificate trust is the console machine\'s action, gated and argument-free', () => {
+  // The bug this fence prevents: `tls:install-trust` runs wherever the listener lives, so
+  // under WSL it shells out inside a Linux daemon and under a remote gateway it writes
+  // somebody else's computer - while the panel printed "Trusted" as if it described the
+  // machine the user is sitting at. Trust therefore moved to the shell, and three things
+  // have to stay true about it.
+  const trust = readFileSync('src/shell/gatewayTrust.ts', 'utf8')
+  const preload = readFileSync('src/shell/preload.ts', 'utf8')
+
+  // 1. The OS commands are the shared ones; a second implementation would drift.
+  assert.match(trust, /from '\.\.\/shared\/certificateTrust'/)
+  for (const command of ['certutil', 'add-trusted-cert', 'delete-certificate', 'powershell']) {
+    assert.ok(!trust.includes(command), `gatewayTrust must not re-implement ${command}`)
+  }
+
+  // 2. The page cannot name a file or hand over a PEM: every trust method takes nothing.
+  const bridge = preload.slice(preload.indexOf('const bridge: ShellBridge'))
+  for (const method of ['getGatewayCertificate', 'installGatewayCertificateTrust', 'uninstallGatewayCertificateTrust']) {
+    assert.match(bridge, new RegExp(`${method}: \\(\\)`), `${method} must not accept arguments from the page`)
+  }
+
+  // 3. Every trust channel is gated on the sender, including the data: bootstrap document.
+  for (const channel of ['shell:tls-status', 'shell:tls-install-trust', 'shell:tls-uninstall-trust']) {
+    const handler = shellMain.slice(shellMain.indexOf(`ipcMain.handle('${channel}'`))
+    assert.match(handler.slice(0, 400), /trustTargetFor\(event\)/, `${channel} must gate its sender`)
+  }
+  const gate = shellMain.slice(shellMain.indexOf('function activeGatewayForTrust'))
+  assert.match(gate, /normalizeOrigin\(entry\.url\)/, 'the active gateway origin is the first proof')
+  assert.match(gate, /frameUrl === trustFailurePageUrl/, 'the bootstrap page is the second, compared literally')
+  assert.match(gate, /throw new Error\(/, 'anything else gets a rejected promise, not a default')
+
+  // And the refused handshake is captured, never accepted: trusting it silently would
+  // make the console the one thing that ignores certificate errors on the user's machine.
+  assert.match(shellMain, /webContents\.on\('certificate-error'/)
+  assert.doesNotMatch(shellMain, /callback\(true\)/, 'the console must not accept an invalid certificate')
+  assert.match(trust, /\/v1\/management\/tls\/ca/, 'the PEM comes from the gateway, over the sealed secret')
+  assert.match(trust, /mode: 0o600/, 'the cached certificate still lands in the console profile')
 })

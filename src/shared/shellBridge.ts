@@ -70,6 +70,49 @@ export interface ShellUpgradeResult {
   error?: string
 }
 
+/**
+ * What the OS trust store of **the machine running the console** says about the active
+ * gateway's certificate.
+ *
+ * The page cannot answer this by itself: it is served by the gateway, so `tls:status`
+ * describes the machine hosting the listener - under WSL or a remote deployment that is a
+ * different computer from the one whose browser is refusing the certificate. `source`
+ * names how the console got the PEM: `gateway` from `GET /v1/management/tls/ca`,
+ * `handshake` from the certificate the TLS layer refused while loading this very page
+ * (the bootstrap case, where the management endpoint is unreachable precisely because the
+ * certificate is not trusted).
+ */
+export interface ShellCertificateTrustStatus {
+  /** False when this platform has no trust command the console can run (Linux). */
+  supported: boolean
+  /** null = no cheap probe on this platform, or no certificate to probe. */
+  trusted: boolean | null
+  fingerprint256: string | null
+  sha1: string | null
+  subject: string | null
+  issuer: string | null
+  validTo: string | null
+  subjectAltName: string | null
+  selfSigned: boolean | null
+  /** Where the PEM was read from. */
+  source: 'gateway' | 'handshake' | null
+  /**
+   * Path on this machine. `NODE_EXTRA_CA_CERTS` on the console machine must point here,
+   * not at the gateway's `~/.modelport/tls/server.crt`.
+   */
+  certPath: string | null
+  /** Why there is no certificate (offline, no management secret, none generated yet). */
+  error?: string
+}
+
+export interface ShellCertificateTrustResult {
+  ok: boolean
+  message: string
+  trusted: boolean | null
+  fingerprint256: string | null
+  certPath: string | null
+}
+
 export interface ShellBridge {
   openInBrowser(): Promise<void>
   reconnect(): Promise<void>
@@ -85,6 +128,18 @@ export interface ShellBridge {
   getGatewaySecret(origin: string): Promise<{ status: string; secret?: string }>
   setGatewaySecret(origin: string, secret: string): Promise<{ stored: boolean; result: string }>
   forgetGatewaySecret(origin: string): Promise<void>
+
+  /**
+   * Certificate trust for the console machine. Optional - a page in a plain browser has
+   * no host to ask, and a shell older than this feature has none either, so the panel
+   * must fall back to "trust it yourself with this PEM".
+   *
+   * None of these take a PEM or a path: the console fetches the certificate itself, and
+   * the remote page must not be able to aim `certutil` at a file of its choosing.
+   */
+  getGatewayCertificate?(): Promise<ShellCertificateTrustStatus>
+  installGatewayCertificateTrust?(): Promise<ShellCertificateTrustResult>
+  uninstallGatewayCertificateTrust?(): Promise<ShellCertificateTrustResult>
 
   getVersion?(): Promise<string>
   checkForUpdates?(): Promise<ShellUpdateCheck>

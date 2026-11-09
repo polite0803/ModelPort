@@ -10,6 +10,7 @@ import { useProxyStore } from '@/stores/proxyStore'
 import { useToast } from '@/hooks/use-toast'
 import { Server, AlertCircle, RefreshCw, ShieldCheck } from 'lucide-react'
 import type { TlsStatus } from '@shared/types'
+import type { ShellBridge, ShellCertificateTrustStatus } from '@shared/shellBridge'
 import { buildHttpsUrl, normalizeSanHostList, validateSanHosts } from '@shared/httpsConfig'
 import {
   Dialog,
@@ -22,6 +23,38 @@ import {
 
 interface ProxyConfigFormProps {
   onConfigChange?: () => void
+}
+
+/**
+ * The console can write the trust store of the machine it runs on, which is the machine the
+ * client refusing the handshake actually sits on. A page in a plain browser has no such
+ * host to ask - and must not get the gateway's one, because under WSL or a remote
+ * deployment `tls:install-trust` would write somebody else's computer. Presence of all
+ * three methods is the capability check; an older console simply has no machine block.
+ */
+interface MachineTrustApi {
+  getGatewayCertificate(): Promise<ShellCertificateTrustStatus>
+  installGatewayCertificateTrust(): Promise<{ ok: boolean; message: string; trusted: boolean | null }>
+  uninstallGatewayCertificateTrust(): Promise<{ ok: boolean; message: string; trusted: boolean | null }>
+}
+
+function machineTrustApi(): MachineTrustApi | null {
+  const host = window as unknown as { modelportShell?: Partial<ShellBridge> }
+  const bridge = host.modelportShell
+  if (
+    !bridge ||
+    typeof bridge.getGatewayCertificate !== 'function' ||
+    typeof bridge.installGatewayCertificateTrust !== 'function' ||
+    typeof bridge.uninstallGatewayCertificateTrust !== 'function'
+  ) {
+    return null
+  }
+  return bridge as unknown as MachineTrustApi
+}
+
+/** True when this page drives a gateway over the HTTP transport, i.e. not on this machine. */
+function pageServesRemoteGateway(): boolean {
+  return (window as unknown as { __MODELPORT_REMOTE__?: boolean }).__MODELPORT_REMOTE__ === true
 }
 
 interface FormErrors {
@@ -77,6 +110,10 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
   const [showRestartDialog, setShowRestartDialog] = useState(false)
   const [isRestarting, setIsRestarting] = useState(false)
   const [tlsStatus, setTlsStatus] = useState<TlsStatus | null>(null)
+  // What *this* computer trusts. null means there is no console to ask (plain browser) or
+  // it could not read the certificate; it is never "not trusted", and never the gateway's
+  // answer relabelled.
+  const [machineTrust, setMachineTrust] = useState<ShellCertificateTrustStatus | null>(null)
   const [tlsBusy, setTlsBusy] = useState(false)
 
   const refreshTlsStatus = async () => {
@@ -85,6 +122,16 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
       setTlsStatus(status ?? null)
     } catch {
       setTlsStatus(null)
+    }
+    const api = machineTrustApi()
+    if (!api) {
+      setMachineTrust(null)
+      return
+    }
+    try {
+      setMachineTrust(await api.getGatewayCertificate())
+    } catch {
+      setMachineTrust(null)
     }
   }
 
@@ -205,8 +252,14 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
     if (tlsBusy) return
     setTlsBusy(true)
     try {
-      const result =
-        kind === 'install'
+      // The console first, because it is the machine the clients run on; the local IPC only
+      // in the desktop host, where gateway and client are the same computer.
+      const api = machineTrustApi()
+      const result = api
+        ? kind === 'install'
+          ? await api.installGatewayCertificateTrust()
+          : await api.uninstallGatewayCertificateTrust()
+        : kind === 'install'
           ? await window.electronAPI?.tls?.installTrust?.()
           : await window.electronAPI?.tls?.uninstallTrust?.()
       const ok = result?.ok ?? false
@@ -234,15 +287,19 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
     }
   }
 
-  const copyCaEnvLine = async () => {
-    const certPath = tlsStatus?.certificate?.certPath
-    if (!certPath) return
+  const copyEnvLine = async (certPath: string) => {
     try {
       await navigator.clipboard.writeText(`NODE_EXTRA_CA_CERTS=${certPath}`)
       toast({ title: t('proxy.httpsCaCopied') })
     } catch {
       toast({ title: t('proxy.httpsCaCopyFailed'), variant: 'destructive' })
     }
+  }
+
+  const copyCaEnvLine = async () => {
+    const certPath = tlsStatus?.certificate?.certPath
+    if (!certPath) return
+    await copyEnvLine(certPath)
   }
 
   const handleSave = async () => {
@@ -595,7 +652,7 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
                         {t('proxy.httpsCertSan')}: <code>{tlsStatus.certificate.subjectAltName}</code>
                       </div>
                       <div>
-                        {t('proxy.httpsCertTrust')}:{' '}
+                        {t('proxy.httpsGatewayTrust')}:{' '}
                         {tlsStatus.trusted === null
                           ? t('proxy.httpsCertTrustUnknown')
                           : tlsStatus.trusted
@@ -618,31 +675,113 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
                               })}
                         </div>
                       )}
+                      <p>{t('proxy.httpsHandshakeGatewayNote')}</p>
                     </div>
                   ) : (
                     <p className="text-xs text-muted-foreground">{t('proxy.httpsCertNotGenerated')}</p>
                   )}
                   {errors.httpsCert && <p className="text-xs text-destructive">{errors.httpsCert}</p>}
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => runTlsTrustAction('install')}
-                      disabled={tlsBusy || !tlsStatus?.certificate}
-                    >
-                      {tlsBusy ? t('proxy.httpsInstalling') : t('proxy.httpsInstallTrust')}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() => runTlsTrustAction('uninstall')}
-                      disabled={tlsBusy || !tlsStatus?.certificate}
-                    >
-                      {tlsBusy ? t('proxy.httpsUninstalling') : t('proxy.httpsUninstallTrust')}
-                    </Button>
-                  </div>
+                  {!machineTrust && !pageServesRemoteGateway() && (
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => runTlsTrustAction('install')}
+                        disabled={tlsBusy || !tlsStatus?.certificate}
+                      >
+                        {tlsBusy ? t('proxy.httpsInstalling') : t('proxy.httpsInstallTrust')}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => runTlsTrustAction('uninstall')}
+                        disabled={tlsBusy || !tlsStatus?.certificate}
+                      >
+                        {tlsBusy ? t('proxy.httpsUninstalling') : t('proxy.httpsUninstallTrust')}
+                      </Button>
+                    </div>
+                  )}
+
+                  {machineTrust && (
+                    <div className="space-y-2 rounded-md border border-[var(--border)] p-3">
+                      <Label className="text-xs flex items-center gap-2">
+                        <ShieldCheck className="h-3.5 w-3.5" />
+                        {t('proxy.httpsMachineTrust')}
+                      </Label>
+                      <div className="space-y-1 text-xs text-muted-foreground">
+                        <div>
+                          {t('proxy.httpsMachineTrustState')}:{' '}
+                          {machineTrust.trusted === null
+                            ? t('proxy.httpsCertTrustUnknown')
+                            : machineTrust.trusted
+                              ? t('proxy.httpsCertTrusted')
+                              : t('proxy.httpsCertUntrusted')}
+                        </div>
+                        {machineTrust.fingerprint256 && (
+                          <div>
+                            {t('proxy.httpsMachineFingerprint')}:{' '}
+                            <code className="break-all">{machineTrust.fingerprint256}</code>
+                          </div>
+                        )}
+                        {machineTrust.certPath && (
+                          <div>
+                            {t('proxy.httpsMachineCertPath')}: <code className="break-all">{machineTrust.certPath}</code>
+                          </div>
+                        )}
+                        {machineTrust.error && <div className="text-destructive">{machineTrust.error}</div>}
+                      </div>
+                      {machineTrust.certPath ? (
+                        <>
+                          <div className="flex flex-wrap gap-2">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => runTlsTrustAction('install')}
+                              disabled={tlsBusy}
+                            >
+                              {tlsBusy ? t('proxy.httpsInstalling') : t('proxy.httpsInstallTrust')}
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => runTlsTrustAction('uninstall')}
+                              disabled={tlsBusy}
+                            >
+                              {tlsBusy ? t('proxy.httpsUninstalling') : t('proxy.httpsUninstallTrust')}
+                            </Button>
+                          </div>
+                          <div className="space-y-1">
+                            <Label className="text-xs">{t('proxy.httpsMachineNodeEnv')}</Label>
+                            <div className="flex items-center gap-2">
+                              <code className="block flex-1 rounded bg-[var(--bg-subtle)] px-2 py-1.5 text-xs break-all">
+                                NODE_EXTRA_CA_CERTS={machineTrust.certPath}
+                              </code>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => void copyEnvLine(machineTrust.certPath as string)}
+                              >
+                                {t('proxy.httpsCopyCa')}
+                              </Button>
+                            </div>
+                          </div>
+                        </>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">{t('proxy.httpsMachineUnavailable')}</p>
+                      )}
+                      <p className="text-xs text-muted-foreground">
+                        {machineTrust.supported
+                          ? t('proxy.httpsMachineInstallHelp')
+                          : t('proxy.httpsMachineManual')}
+                      </p>
+                      <p className="text-xs text-muted-foreground">{t('proxy.httpsBootstrapHint')}</p>
+                    </div>
+                  )}
                   {tlsStatus?.certificate && (
                     <div className="space-y-1">
                       <Label className="text-xs">{t('proxy.httpsNodeClientEnv')}</Label>
@@ -657,7 +796,9 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
                       <p className="text-xs text-muted-foreground">{t('proxy.httpsNodeClientHelp')}</p>
                     </div>
                   )}
-                  <p className="text-xs text-muted-foreground">{t('proxy.httpsInstallTrustHelp')}</p>
+                  {!machineTrust && !pageServesRemoteGateway() && (
+                    <p className="text-xs text-muted-foreground">{t('proxy.httpsInstallTrustHelp')}</p>
+                  )}
                   <p className="text-xs text-muted-foreground">{t('proxy.httpsRemoteTrustHint')}</p>
                 </div>
 
