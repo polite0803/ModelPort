@@ -40,17 +40,40 @@ test('系统提示独占预算时也不能只剩系统提示', () => {
   assert.equal(result.trimmed, false, '两条都留下了：被救回来的那条本来会被整段丢掉')
 })
 
-test('正常裁剪照旧：最新的留下，装不下的更早轮次丢掉', () => {
+test('正常裁剪：最新的留下，装不下的更早轮次丢掉，首条任务保留', () => {
   const result = strategy(2000).execute([
     msg('system', 300), // 100
-    msg('user', 3000), // 1000
+    msg('user', 3000), // 1000 —— 首条任务，预算先扣掉
     msg('assistant', 3000), // 1000
-    msg('user', 1200), // 400 → 累计 1400 ≤ 1900 可用
+    msg('user', 1200), // 400 → 累计 400 ≤ 900 可用
   ])
 
   assert.equal(result.messages.length, 3)
-  assert.deepEqual(result.messages.map(m => m.role), ['system', 'assistant', 'user'])
+  assert.deepEqual(result.messages.map(m => m.role), ['system', 'user', 'user'])
+  assert.equal(result.messages[1]?.content, 'x'.repeat(3000), '首条任务补回')
+  assert.equal(result.messages[2]?.content, 'x'.repeat(1200))
   assert.equal(result.trimmed, true)
+})
+
+test('从 tool 结果切进去时，把 assistant(tool_calls) 一起带回来（上游不接受孤儿 tool）', () => {
+  const toolCalls = [{ id: 'c1', type: 'function', function: { name: 'read', arguments: '{}' } }]
+  const messages = [
+    { role: 'system', content: 'x'.repeat(30) } as ChatMessage,
+    { role: 'user', content: 'task' } as ChatMessage,
+    { role: 'assistant', content: 'x'.repeat(900), tool_calls: toolCalls } as ChatMessage,
+    { role: 'tool', content: 'x'.repeat(900) } as ChatMessage,
+  ]
+  // 预算 400：system ~10、任务预留 ~2，只剩 ~388；tool(300) 进、assistant(300) 不进
+  const result = strategy(400).execute(messages)
+
+  const roles = result.messages.map(m => m.role)
+  assert.equal(roles[0], 'system')
+  assert.equal(roles[1], 'user')
+  const toolIndex = roles.indexOf('tool')
+  assert.ok(toolIndex > 2, 'tool 结果保留')
+  const parent = result.messages[toolIndex - 1] as ChatMessage & { tool_calls?: unknown[] }
+  assert.equal(parent.role, 'assistant')
+  assert.ok(Array.isArray(parent.tool_calls) && parent.tool_calls.length > 0)
 })
 
 test('关闭时原样透传，不做任何判断', () => {

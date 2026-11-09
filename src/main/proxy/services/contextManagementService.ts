@@ -149,6 +149,47 @@ function getMessageContent(message: ChatMessage): string {
 }
 
 /**
+ * Repair the two failure modes a head cut introduces, without writing a word
+ * of its own:
+ *
+ * 1. **Tool-group split** — a kept tail that starts with `tool` results has lost
+ *    the `assistant(tool_calls)` that produced them. OpenAI-shaped upstreams
+ *    reject that pairing ("messages with role 'tool' must be a response to a
+ *    preceding message with 'tool_calls'"), and the channel gateways turn it
+ *    into a 400 the client reads as its own mistake. Pull the requesting
+ *    assistant back in (plus any sibling tool results) so the group stays whole.
+ * 2. **Lost task statement** — when the window no longer covers the first
+ *    non-system `user` message, keep it at the front. Trimming should cost old
+ *    tool output, never "what the user actually asked for".
+ *
+ * `kept` must be a contiguous suffix of `nonSystem` (both strategies build it
+ * that way); the index math below relies on it.
+ */
+function keepToolGroupAndTask(nonSystem: ChatMessage[], kept: ChatMessage[]): ChatMessage[] {
+  if (kept.length === 0) return kept
+
+  let groupStart = nonSystem.length - kept.length
+  if (kept[0]?.role === 'tool') {
+    while (groupStart > 0 && nonSystem[groupStart - 1]?.role === 'tool') groupStart -= 1
+    const parent = nonSystem[groupStart - 1]
+    const toolCalls = (parent as { tool_calls?: unknown[] } | undefined)?.tool_calls
+    if (parent?.role === 'assistant' && Array.isArray(toolCalls) && toolCalls.length > 0) {
+      groupStart -= 1
+    }
+  }
+
+  const withGroup = nonSystem.slice(groupStart)
+  const task = nonSystem.find(message => message.role === 'user')
+  if (task !== undefined && !withGroup.includes(task)) return [task, ...withGroup]
+  return withGroup
+}
+
+/** The first user turn — the request the whole conversation exists for. */
+function firstUserMessage(nonSystem: ChatMessage[]): ChatMessage | undefined {
+  return nonSystem.find(message => message.role === 'user')
+}
+
+/**
  * Sliding Window Strategy
  * Keeps the most recent N messages, always preserving system messages
  */
@@ -182,9 +223,11 @@ export class SlidingWindowStrategy {
     // 非 system 全被裁光时保留最新一条：上游会把 `messages: []` 读成「你没传
     // 消息」而不是「历史太长」。与 TokenLimitStrategy 同一条不变量 ——
     // 裁剪永远不许把要回答的那句话裁没。
-    const keptNonSystemMessages = kept.length === 0 && nonSystemMessages.length > 0
+    const rescued = kept.length === 0 && nonSystemMessages.length > 0
       ? [nonSystemMessages[nonSystemMessages.length - 1]]
       : kept
+    // 两处断点修复：tool 组被切开（上游 400）、任务原文被切走（模型失焦）。
+    const keptNonSystemMessages = keepToolGroupAndTask(nonSystemMessages, rescued)
 
     const result = [...systemMessages, ...keptNonSystemMessages]
 
@@ -214,6 +257,18 @@ export class TokenLimitStrategy {
     this.config = { ...DEFAULT_TOKEN_LIMIT_CONFIG, ...config }
   }
 
+  /**
+   * Budget held back for the first user turn when the tail no longer contains it.
+   * Reserving here (instead of adding it after the loop) keeps the total near
+   * `maxTokens`; the newest message is always kept anyway, so it is not reserved.
+   */
+  private taskReserve(nonSystemMessages: ChatMessage[]): number {
+    const task = firstUserMessage(nonSystemMessages)
+    const newest = nonSystemMessages[nonSystemMessages.length - 1]
+    if (task === undefined || task === newest) return 0
+    return estimateTokens(task.content)
+  }
+
   execute(messages: ChatMessage[]): StrategyResult {
     const originalCount = messages.length
 
@@ -235,19 +290,19 @@ export class TokenLimitStrategy {
       0
     )
 
-    const availableTokens = this.config.maxTokens - systemTokens
+    const availableTokens = this.config.maxTokens - systemTokens - this.taskReserve(nonSystemMessages)
     // 最新一条永远保留：裁到「一条都装不下」不是省 token，而是把请求变成
     // 没有要回答的话。账号渠道的网关会直接拒（`messages must be a non-empty
     // array`），内置供应商则回一句离题的话 —— 两种都比超预算的原文更难排查。
     const newestMessage = nonSystemMessages[nonSystemMessages.length - 1]
 
     if (availableTokens <= 0) {
-      const result = newestMessage === undefined
-        ? systemMessages
-        : [...systemMessages, newestMessage]
+      const kept = newestMessage === undefined ? [] : [newestMessage]
+      const repaired = keepToolGroupAndTask(nonSystemMessages, kept)
+      const result = [...systemMessages, ...repaired]
       console.warn(
-        `[TokenLimitStrategy] System messages already exceed token limit ` +
-          `(${systemTokens} > ${this.config.maxTokens}); keeping the newest message anyway`
+        `[TokenLimitStrategy] System/task already exceed token limit ` +
+          `(${systemTokens} + reserve > ${this.config.maxTokens}); keeping the newest message anyway`
       )
       return {
         messages: result,
@@ -280,8 +335,9 @@ export class TokenLimitStrategy {
       currentTokens = estimateTokens(newestMessage.content)
     }
 
-    const result = [...systemMessages, ...keptNonSystemMessages]
-    const totalTokens = systemTokens + currentTokens
+    const repaired = keepToolGroupAndTask(nonSystemMessages, keptNonSystemMessages)
+    const result = [...systemMessages, ...repaired]
+    const totalTokens = systemTokens + repaired.reduce((sum, message) => sum + estimateTokens(message.content), 0)
 
     console.log(
       `[TokenLimitStrategy] Trimmed from ${originalCount} to ${result.length} messages ` +
