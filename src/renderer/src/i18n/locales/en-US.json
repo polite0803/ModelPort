@@ -617,6 +617,25 @@
     "routePoolSourceShort_heuristic": "guess",
     "routePoolSourceShort_unknown": "?"
   },
+  "gateways": {
+    "title": "Gateway Manager",
+    "description": "Gateways reachable from this machine, and what state each one is in.",
+    "desktopOnly": "The gateway manager is desktop-only: starting, installing and deploying happens on this machine.",
+    "refresh": "Refresh",
+    "add": "Add gateway",
+    "loading": "Reading gateway state…",
+    "empty": "No gateways configured yet.",
+    "loadFailed": "Could not read gateway state. Please try again.",
+    "current": "Current",
+    "phase": {
+      "running": "Running",
+      "stopped": "Stopped",
+      "not-installed": "Not installed",
+      "unreachable": "Unreachable",
+      "offline": "Offline",
+      "unknown": "Unknown"
+    }
+  },
   "apiKeys": {
     "title": "API Key Management",
     "description": "Manage API keys for proxy service authentication",

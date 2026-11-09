@@ -617,6 +617,25 @@
     "routePoolSourceShort_heuristic": "启发",
     "routePoolSourceShort_unknown": "?"
   },
+  "gateways": {
+    "title": "网关管理",
+    "description": "这台机器上可以连接的网关，以及每台网关的状态。",
+    "desktopOnly": "网关管理只在桌面端可用：需要在当前机器上启停、安装或部署网关。",
+    "refresh": "刷新",
+    "add": "添加网关",
+    "loading": "正在读取网关状态…",
+    "empty": "还没有配置任何网关。",
+    "loadFailed": "读取网关状态失败，请稍后重试。",
+    "current": "当前",
+    "phase": {
+      "running": "运行中",
+      "stopped": "已停止",
+      "not-installed": "未安装",
+      "unreachable": "无法连接",
+      "offline": "离线",
+      "unknown": "未知"
+    }
+  },
   "apiKeys": {
     "title": "API Key 管理",
     "description": "管理代理服务的 API Key 认证",

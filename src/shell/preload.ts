@@ -11,6 +11,7 @@
  * privilege the page never asked for and must not get for free.
  */
 import { contextBridge, ipcRenderer } from 'electron'
+import type { IpcRendererEvent } from 'electron'
 import type {
   ShellBridge,
   ShellCertificateTrustResult,
@@ -24,7 +25,33 @@ const bridge: ShellBridge = {
   openInBrowser: (): Promise<void> => ipcRenderer.invoke('shell:openInBrowser'),
   reconnect: (): Promise<void> => ipcRenderer.invoke('shell:reconnect'),
   quit: (): Promise<void> => ipcRenderer.invoke('shell:quit'),
-  openGatewayManager: (): Promise<void> => ipcRenderer.invoke('shell:gateway-list-open'),
+  gateways: {
+    snapshot: () => ipcRenderer.invoke('shell:gateways'),
+    connect: (id: string): Promise<void> => ipcRenderer.invoke('shell:gateway-connect', id),
+    add: (): Promise<void> => ipcRenderer.invoke('shell:gateway-add'),
+    edit: (id: string): Promise<void> => ipcRenderer.invoke('shell:gateway-edit', id),
+    remove: (id: string): Promise<void> => ipcRenderer.invoke('shell:gateway-remove', id),
+    installWsl: (id: string): Promise<void> => ipcRenderer.invoke('shell:gateway-install-wsl', id),
+    localAction: (id: string, action: 'start' | 'stop' | 'repair'): Promise<void> =>
+      ipcRenderer.invoke('shell:gateway-local', id, action),
+    wslAction: (id: string, action: 'start' | 'stop' | 'restart' | 'uninstall'): Promise<void> =>
+      ipcRenderer.invoke('shell:gateway-wsl', id, action),
+    upgrade: (id: string): Promise<void> => ipcRenderer.invoke('shell:gateway-upgrade', id),
+    deploy: (id: string): Promise<void> => ipcRenderer.invoke('shell:gateway-deploy', id),
+    onChanged: (callback: () => void): (() => void) => {
+      const handler = (): void => callback()
+      ipcRenderer.on('shell:gateways-changed', handler)
+      return () => ipcRenderer.removeListener('shell:gateways-changed', handler)
+    },
+  },
+
+  onNavigate: (callback: (path: string) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, path: unknown): void => {
+      if (typeof path === 'string') callback(path)
+    }
+    ipcRenderer.on('shell:navigate', handler)
+    return () => ipcRenderer.removeListener('shell:navigate', handler)
+  },
   getGatewaySecret: (origin: string): Promise<{ status: string; secret?: string }> =>
     ipcRenderer.invoke('shell:secret-get', origin),
   setGatewaySecret: (origin: string, secret: string): Promise<{ stored: boolean; result: string }> =>

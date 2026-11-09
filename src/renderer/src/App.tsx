@@ -1,10 +1,11 @@
-import { lazy, Suspense } from 'react'
-import { Navigate, Route, Routes } from 'react-router-dom'
+import { lazy, Suspense, useEffect } from 'react'
+import { Navigate, Route, Routes, useNavigate } from 'react-router-dom'
 import { MainLayout } from '@/components/layout/MainLayout'
 import { TrayView } from '@/components/Tray/TrayView'
 import { Toaster } from '@/components/ui/toaster'
 import { Skeleton } from '@/components/ui/skeleton'
 import ErrorBoundary from '@/components/ErrorBoundary'
+import type { ShellBridge } from '@shared/shellBridge'
 
 const Dashboard = lazy(() => import('@/pages/Dashboard').then(m => ({ default: m.Dashboard })))
 const Providers = lazy(() => import('@/pages/Providers').then(m => ({ default: m.Providers })))
@@ -12,6 +13,7 @@ const Aggregate = lazy(() => import('@/pages/Aggregate').then(m => ({ default: m
 const Channels = lazy(() => import('@/pages/Channels').then(m => ({ default: m.Channels })))
 const ProxySettings = lazy(() => import('@/pages/ProxySettings').then(m => ({ default: m.ProxySettings })))
 const Models = lazy(() => import('@/pages/Models').then(m => ({ default: m.Models })))
+const Gateways = lazy(() => import('@/pages/Gateways').then(m => ({ default: m.Gateways })))
 const Logs = lazy(() => import('@/pages/Logs'))
 const Settings = lazy(() => import('@/pages/Settings').then(m => ({ default: m.Settings })))
 
@@ -28,6 +30,25 @@ function PageLoader() {
   )
 }
 
+/**
+ * The menu entry and its accelerator ask for a page instead of opening a second window, so
+ * the request arrives here rather than as a new window. Only in-app paths are honoured: the
+ * bridge exists in the console, but a page must never be able to steer itself off-origin.
+ */
+function ShellNavigation(): null {
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    const bridge = (window as unknown as { modelportShell?: ShellBridge }).modelportShell
+    const off = bridge?.onNavigate?.((path) => {
+      if (typeof path === 'string' && path.startsWith('/') && !path.startsWith('//')) navigate(path)
+    })
+    return () => off?.()
+  }, [navigate])
+
+  return null
+}
+
 function App() {
   return (
     <>
@@ -40,6 +61,7 @@ function App() {
           <Route path="/channels" element={<Suspense fallback={<PageLoader />}><Channels /></Suspense>} />
           <Route path="/proxy" element={<Suspense fallback={<PageLoader />}><ProxySettings /></Suspense>} />
           <Route path="/models" element={<Suspense fallback={<PageLoader />}><Models /></Suspense>} />
+          <Route path="/gateways" element={<Suspense fallback={<PageLoader />}><Gateways /></Suspense>} />
           <Route path="/logs" element={<Suspense fallback={<PageLoader />}><Logs /></Suspense>} />
           <Route path="/settings" element={<Suspense fallback={<PageLoader />}><Settings /></Suspense>} />
           {/* 兜底：书签或深链指向已改名/已删除的路由时，之前是「有侧边栏、内容区空白」，
@@ -47,6 +69,7 @@ function App() {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
+      <ShellNavigation />
       <Toaster />
     </>
   )

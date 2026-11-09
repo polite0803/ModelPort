@@ -12,6 +12,8 @@
  * `undefined`.
  */
 
+import type { GatewayListSnapshot } from './shellList'
+
 export type ShellUpdateStage =
   | 'checking'
   | 'downloading-daemon'
@@ -113,17 +115,46 @@ export interface ShellCertificateTrustResult {
   certPath: string | null
 }
 
+/**
+ * The gateway manager as an in-page surface: the console's own `/gateways` route renders
+ * the list, so switching gateways never covers the window with a second one.
+ *
+ * Same shape as the list window's bridge (`listPreload.ts`), because both ask the same
+ * main-process functions; the difference is the gate. The list window is a `data:`
+ * document this process authored and is trusted by identity, while this surface is
+ * reachable from the remote page inside the main window - so the main process accepts it
+ * only from the active gateway's origin, exactly like the update actions.
+ *
+ * Optional: the page is also served to plain browsers, where nothing injects a bridge.
+ */
+export interface ShellGatewayAdmin {
+  snapshot(): Promise<GatewayListSnapshot>
+  connect(id: string): Promise<void>
+  add(): Promise<void>
+  edit(id: string): Promise<void>
+  remove(id: string): Promise<void>
+  installWsl(id: string): Promise<void>
+  localAction(id: string, action: 'start' | 'stop' | 'repair'): Promise<void>
+  wslAction(id: string, action: 'start' | 'stop' | 'restart' | 'uninstall'): Promise<void>
+  upgrade(id: string): Promise<void>
+  deploy(id: string): Promise<void>
+  /** Fires after the main process changed the address book or a gateway's state. */
+  onChanged(callback: () => void): () => void
+}
+
 export interface ShellBridge {
   openInBrowser(): Promise<void>
   reconnect(): Promise<void>
   quit(): Promise<void>
 
+  gateways?: ShellGatewayAdmin
+
   /**
-   * Opens the console's gateway manager window. Optional: the page is also served to
-   * plain browsers and to shells older than the panel, and both must hide the entry
-   * instead of rendering a button that calls `undefined`.
+   * Navigates the console page. The main process sends this when a menu entry or the tray
+   * asks for a page the console already has, so the request lands in the window the user
+   * is already looking at; a page loaded from a plain browser never receives it.
    */
-  openGatewayManager?(): Promise<void>
+  onNavigate?(callback: (path: string) => void): () => void
 
   getGatewaySecret(origin: string): Promise<{ status: string; secret?: string }>
   setGatewaySecret(origin: string, secret: string): Promise<{ stored: boolean; result: string }>

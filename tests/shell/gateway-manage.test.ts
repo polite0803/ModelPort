@@ -105,14 +105,49 @@ test('the sidebar offers the panel only where a console window exists', () => {
   const sidebar = read('src/renderer/src/components/layout/Sidebar.tsx')
   const bridgeType = read('src/shared/shellBridge.ts')
   const preload = read('src/shell/preload.ts')
-  assert.match(bridgeType, /openGatewayManager\?\(\): Promise<void>/, 'the method is optional by contract')
-  assert.match(preload, /openGatewayManager: .*'shell:gateway-list-open'/, 'named bridge method only')
-  assert.match(main, /ipcMain\.handle\('shell:gateway-list-open'/, 'the channel must be registered in main')
+  assert.match(bridgeType, /gateways\?: ShellGatewayAdmin/, 'the surface is optional by contract')
+  assert.match(preload, /gateways: \{/, 'named bridge surface only')
+  assert.match(preload, /'shell:gateways'/, 'the snapshot channel must be in the bridge')
   assert.match(sidebar, /modelportShell/, 'the entry must be gated on the bridge')
-  assert.match(sidebar, /openGatewayManager\(\)/)
+  assert.match(sidebar, /gateways\?\.snapshot/, 'the entry must be gated on the surface, not the page')
+  assert.match(sidebar, /href: '\/gateways'/, 'the entry is a route now')
   assert.match(sidebar, /nav\.gatewayManager/)
   for (const locale of ['en-US', 'zh-CN']) {
     const pack = read(`src/renderer/src/i18n/locales/${locale}.json`)
     assert.ok(pack.includes('"gatewayManager"'), `${locale} is missing nav.gatewayManager`)
+    assert.ok(pack.includes('"gateways"'), `${locale} is missing the gateways namespace`)
+  }
+})
+
+test('the console page and the list window ask the same main-process functions', () => {
+  const app = read('src/renderer/src/App.tsx')
+  const consolePage = read('src/renderer/src/pages/Gateways.tsx')
+  assert.match(app, /path="\/gateways"/, 'the route must exist in the console')
+  assert.match(app, /onNavigate/, 'the menu entry navigates instead of opening a window')
+  assert.match(consolePage, /gateways\.snapshot\(\)/)
+  assert.match(consolePage, /gateways\?\.onChanged/, 'the page must follow main-process changes')
+  assert.match(main, /window\.webContents\.send\('shell:gateways-changed'\)/)
+  // In the console the surface is remote: every handler must check the sender, and the
+  // check must compare it with the active gateway exactly like the update actions do.
+  assert.match(main, /function assertGatewayAdminSender\(event: IpcMainInvokeEvent\)/)
+  assert.match(main, /event\.sender === window\.webContents\) activeGatewayForSender\(event\)/)
+  const channels = [
+    'shell:gateways',
+    'shell:gateway-connect',
+    'shell:gateway-add',
+    'shell:gateway-edit',
+    'shell:gateway-remove',
+    'shell:gateway-local',
+    'shell:gateway-install-wsl',
+    'shell:gateway-wsl',
+    'shell:gateway-upgrade',
+    'shell:gateway-deploy',
+  ]
+  for (const channel of channels) {
+    const start = main.indexOf(`ipcMain.handle('${channel}',`)
+    assert.ok(start > 0, `${channel} must be registered in main`)
+    const next = main.indexOf('ipcMain.handle(', start + 1)
+    const handler = main.slice(start, next > 0 ? next : undefined)
+    assert.match(handler, /assertGatewayAdminSender\(event\)/, `${channel} must check its sender`)
   }
 })

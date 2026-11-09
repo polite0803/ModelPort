@@ -201,8 +201,10 @@ function ensureFirstRunEntry(): void {
 
 /**
  * The gateway list: one row per address-book entry, each with the actions that make sense
- * for its mode and state. It opens as its own window so switching does not disturb the
- * page the main window is showing, and so a failed gateway can still be edited.
+ * for its mode and state. In the console it is a page (`/gateways`), so the entry in the
+ * sidebar and the accelerator navigate instead of opening a second window; this function
+ * is the fallback for when no page of ours is loaded - nothing configured yet, or the
+ * gateway that should serve the page is down and the window shows a `data:` document.
  */
 function openGatewayList(): void {
   if (listWindow && !listWindow.isDestroyed()) {
@@ -235,6 +237,37 @@ function openGatewayList(): void {
 
 function notifyGatewayList(): void {
   if (listWindow && !listWindow.isDestroyed()) listWindow.webContents.send('shell:gateways-changed')
+  if (window !== null && !window.isDestroyed()) window.webContents.send('shell:gateways-changed')
+}
+
+/**
+ * Whether the main window is showing a page of ours (the console UI), and therefore whether
+ * the manager can be reached by navigating instead of by opening another window. In dev the
+ * UI comes from the vite server, not from the gateway, so the prefix to compare is that one.
+ */
+function showsConsolePage(): boolean {
+  if (window === null || window.isDestroyed()) return false
+  const current = window.webContents.getURL()
+  const dev = process.env.ELECTRON_RENDERER_URL?.trim()
+  if (dev) return current.startsWith(dev)
+  const entry = activeEntry(readBook())
+  return entry !== null && current.startsWith(viewUrl(entry.url))
+}
+
+/**
+ * The menu entry and its accelerator are the "flexible switch": they take the window the
+ * user is already looking at to `/gateways` rather than covering it with a second one.
+ * Only when that is impossible does the list window appear - it is the one surface that
+ * still works for a gateway that cannot serve a page.
+ */
+function showGatewayManager(): void {
+  if (showsConsolePage()) {
+    window?.show()
+    window?.focus()
+    window?.webContents.send('shell:navigate', '/gateways')
+    return
+  }
+  openGatewayList()
 }
 
 /**
@@ -307,7 +340,7 @@ function installAppMenu(): void {
     {
       label: '视图',
       submenu: [
-        { label: '网关管理…', accelerator: 'CommandOrControl+Shift+G', click: () => openGatewayList() },
+        { label: '网关管理…', accelerator: 'CommandOrControl+Shift+G', click: () => showGatewayManager() },
         { label: '重新连接', accelerator: 'CommandOrControl+R', click: () => void loadActive() },
         { type: 'separator' },
         { role: 'reload' },
@@ -992,7 +1025,7 @@ function buildTrayMenu(): void {
       ? gatewayItems
       : [{ label: '还没有配置的网关', enabled: false }]),
     { type: 'separator' },
-    trayAction('网关管理…', () => openGatewayList()),
+    trayAction('网关管理…', () => showGatewayManager()),
     ...(localItems.length > 0 ? [...localItems, { type: 'separator' } as MenuItemConstructorOptions] : []),
     ...(wslItems.length > 0 ? [...wslItems, { type: 'separator' } as MenuItemConstructorOptions] : []),
     trayAction('添加网关…', () => void addGateway()),
@@ -1119,9 +1152,25 @@ ipcMain.handle('shell:quit', async () => {
  * page invented is not an entry), and every action goes through the same functions the
  * tray uses - there is no second way to start, stop or install a gateway.
  */
-ipcMain.handle('shell:gateways', async () => await gatewaySnapshot())
+/**
+ * Two documents ask for these: the `data:` list window this process authored, and the
+ * console's own `/gateways` page inside the main window. The second one is served by the
+ * gateway and is therefore remote, so it must prove it is the active gateway's page - the
+ * same rule the update actions follow. The list window is trusted by identity instead:
+ * its origin is `null` by construction, and it exists for the case where no page of ours
+ * can be shown at all (gateway down, nothing configured).
+ */
+function assertGatewayAdminSender(event: IpcMainInvokeEvent): void {
+  if (window !== null && event.sender === window.webContents) activeGatewayForSender(event)
+}
 
-ipcMain.handle('shell:gateway-connect', async (_event, id: unknown) => {
+ipcMain.handle('shell:gateways', async (event) => {
+  assertGatewayAdminSender(event)
+  return await gatewaySnapshot()
+})
+
+ipcMain.handle('shell:gateway-connect', async (event, id: unknown) => {
+  assertGatewayAdminSender(event)
   const entry = findEntryById(id)
   if (!entry) return
   window?.show()
@@ -1129,19 +1178,22 @@ ipcMain.handle('shell:gateway-connect', async (_event, id: unknown) => {
   notifyGatewayList()
 })
 
-ipcMain.handle('shell:gateway-add', async () => {
+ipcMain.handle('shell:gateway-add', async (event) => {
+  assertGatewayAdminSender(event)
   await addGateway()
   notifyGatewayList()
 })
 
-ipcMain.handle('shell:gateway-edit', async (_event, id: unknown) => {
+ipcMain.handle('shell:gateway-edit', async (event, id: unknown) => {
+  assertGatewayAdminSender(event)
   const entry = findEntryById(id)
   if (!entry) return
   await editGateway(entry)
   notifyGatewayList()
 })
 
-ipcMain.handle('shell:gateway-remove', async (_event, id: unknown) => {
+ipcMain.handle('shell:gateway-remove', async (event, id: unknown) => {
+  assertGatewayAdminSender(event)
   const entry = findEntryById(id)
   if (!entry) return
   const options = {
@@ -1154,8 +1206,12 @@ ipcMain.handle('shell:gateway-remove', async (_event, id: unknown) => {
     cancelId: 1,
     noLink: true,
   }
-  const choice = listWindow
-    ? await dialog.showMessageBox(listWindow, options)
+  // Whichever window asked owns the confirm: the list window when it is open, the main
+  // window when the request came from the console page, so the dialog is never parentless
+  // over the window the user is looking at.
+  const parent = listWindow && !listWindow.isDestroyed() ? listWindow : window
+  const choice = parent
+    ? await dialog.showMessageBox(parent, options)
     : await dialog.showMessageBox(options)
   if (choice.response !== 0) return
   writeBook(removeEntry(readBook(), entry.id))
@@ -1164,7 +1220,8 @@ ipcMain.handle('shell:gateway-remove', async (_event, id: unknown) => {
   notifyGatewayList()
 })
 
-ipcMain.handle('shell:gateway-local', async (_event, id: unknown, action: unknown) => {
+ipcMain.handle('shell:gateway-local', async (event, id: unknown, action: unknown) => {
+  assertGatewayAdminSender(event)
   const entry = findEntryById(id)
   if (!entry || entry.kind !== 'local') return
   if (action === 'start') await startLocalFromTray(entry)
@@ -1173,14 +1230,16 @@ ipcMain.handle('shell:gateway-local', async (_event, id: unknown, action: unknow
   notifyGatewayList()
 })
 
-ipcMain.handle('shell:gateway-install-wsl', async (_event, id: unknown) => {
+ipcMain.handle('shell:gateway-install-wsl', async (event, id: unknown) => {
+  assertGatewayAdminSender(event)
   const entry = findEntryById(id)
   if (!entry || entry.kind !== 'wsl' || process.platform !== 'win32') return
   await offerWslInstall(entry)
   notifyGatewayList()
 })
 
-ipcMain.handle('shell:gateway-wsl', async (_event, id: unknown, action: unknown) => {
+ipcMain.handle('shell:gateway-wsl', async (event, id: unknown, action: unknown) => {
+  assertGatewayAdminSender(event)
   const entry = findEntryById(id)
   if (!entry || entry.kind !== 'wsl' || process.platform !== 'win32') return
   if (action === 'start' || action === 'stop' || action === 'restart') {
@@ -1190,7 +1249,8 @@ ipcMain.handle('shell:gateway-wsl', async (_event, id: unknown, action: unknown)
   }
 })
 
-ipcMain.handle('shell:gateway-upgrade', async (_event, id: unknown) => {
+ipcMain.handle('shell:gateway-upgrade', async (event, id: unknown) => {
+  assertGatewayAdminSender(event)
   const entry = findEntryById(id)
   // Remote rows have no upgrade: replacing the console is not managing that gateway.
   if (!entry || (entry.kind !== 'local' && entry.kind !== 'wsl')) return
@@ -1198,7 +1258,8 @@ ipcMain.handle('shell:gateway-upgrade', async (_event, id: unknown) => {
   notifyGatewayList()
 })
 
-ipcMain.handle('shell:gateway-deploy', async (_event, id: unknown) => {
+ipcMain.handle('shell:gateway-deploy', async (event, id: unknown) => {
+  assertGatewayAdminSender(event)
   const entry = findEntryById(id)
   if (!entry || entry.kind !== 'remote') return
   let release: ReleaseInfo | null = null
@@ -1213,10 +1274,6 @@ ipcMain.handle('shell:gateway-deploy', async (_event, id: unknown) => {
 
 ipcMain.handle('shell:gateway-list-close', async () => {
   listWindow?.close()
-})
-
-ipcMain.handle('shell:gateway-list-open', async () => {
-  openGatewayList()
 })
 
 /**

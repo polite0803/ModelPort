@@ -107,8 +107,10 @@ export function Sidebar() {
 
   // Only the console window injects `modelportShell`; the same page opened in a browser
   // (or in a shell older than the panel) has no bridge and shows no entry.
-  const openGatewayManager = (window as unknown as { modelportShell?: ShellBridge }).modelportShell
-    ?.openGatewayManager
+  const shellBridge = (window as unknown as { modelportShell?: ShellBridge }).modelportShell
+  // The manager is a console page now, so the entry is a route like every other one. A shell
+  // that predates the page still gets the old side-window button instead of nothing.
+  const canManageGateways = typeof shellBridge?.gateways?.snapshot === 'function'
 
   const hasBlockers = blockers.length > 0
 
@@ -160,21 +162,14 @@ export function Sidebar() {
               }
             />
           ))}
-          {openGatewayManager !== undefined && (
-            <button
-              type="button"
-              className={cn(
-                'sidebar-nav-item',
-                sidebarCollapsed ? 'collapsed' : 'expanded',
-                'inactive'
-              )}
-              aria-label={t('nav.gatewayManager')}
-              title={sidebarCollapsed ? t('nav.gatewayManager') : undefined}
-              onClick={() => void openGatewayManager()}
-            >
-              <Network className="h-[18px] w-[18px] flex-shrink-0" />
-              {!sidebarCollapsed && <span className="truncate">{t('nav.gatewayManager')}</span>}
-            </button>
+          {canManageGateways && (
+            <NavButton
+              item={{ titleKey: 'nav.gatewayManager', href: '/gateways', icon: Network }}
+              collapsed={sidebarCollapsed}
+              onNavigate={handleNavigation}
+              hasBlockers={hasBlockers}
+              isCurrent={location.pathname === '/gateways'}
+            />
           )}
         </nav>
 
