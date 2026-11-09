@@ -134,6 +134,14 @@ const logger = {
 const outboundDumpPath = resolveDumpTarget(process.env.MODELPORT_CHANNEL_PACK_DUMP, dataDir)
 
 /**
+ * TRAE 原始用量帧取证开关（默认关闭），约定同上，落 `trae-usage-dump.ndjson`。
+ * vendor 侧（trae-usage-dump.ts）只认路径，标志值 → 路径的解析在这里做完后
+ * 写回 worker 的 env —— vendor 代码在请求时读到的就是具体路径。
+ */
+const traeUsageDumpPath = resolveDumpTarget(process.env.MODELPORT_TRAE_USAGE_DUMP, dataDir, 'trae-usage-dump.ndjson')
+if (traeUsageDumpPath !== null) process.env.MODELPORT_TRAE_USAGE_DUMP = traeUsageDumpPath
+
+/**
  * 跨请求的思考回放缓存（按 `tool_call.id`、有界）。
  *
  * ⚠️ 必须是**进程级单例**：一次请求发出的思考要在**下一次**请求里补回去，所以
@@ -399,5 +407,8 @@ apply(ctx)
 if (outboundDumpPath !== null) {
   // 显式声明开关生效，避免「以为开了其实没开」——路径也打出来，直接照着取文件。
   logger.info(`渠道包出站取证已开启：每次请求写一行摘要到 ${outboundDumpPath}`)
+}
+if (traeUsageDumpPath !== null) {
+  logger.info(`TRAE 用量取证已开启：每轮 SOLO 原始 token_usage 帧写一行到 ${traeUsageDumpPath}`)
 }
 send({ type: 'ready', providers: [...adapters.keys()] })

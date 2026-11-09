@@ -66,11 +66,11 @@ export interface OutboundDumpRecord {
   overflow?: number
 }
 
-/** 解析开关值 → 落盘路径；`null` 表示关闭。 */
-export function resolveDumpTarget(envValue: string | undefined, dataDir: string): string | null {
+/** 解析开关值 → 落盘路径；`null` 表示关闭。`fileName` 供同目录的其它取证通道复用约定。 */
+export function resolveDumpTarget(envValue: string | undefined, dataDir: string, fileName = 'outbound-dump.ndjson'): string | null {
   const raw = envValue?.trim()
   if (!raw || raw === '0') return null
-  if (/^(1|true|on|yes)$/i.test(raw)) return join(dataDir, 'channel-pack', 'outbound-dump.ndjson')
+  if (/^(1|true|on|yes)$/i.test(raw)) return join(dataDir, 'channel-pack', fileName)
   return raw
 }
 

@@ -592,3 +592,27 @@ P0 的状态不变：这仍然是隐式端点，**没有** `explicit-breakpoints
 **并且 P3-A 的门把经济学用反了（本条是待修项）。** `compression/policy.ts:67-73` 把供应商的缓存折扣套到 live zone 上，官方 DeepSeek 于是要求 **98%** 省幅（`1 - 0.02/(1+0)`）。但 `liveZone.ts:86-121` 选中的正是本轮才出现、**从未被缓存过**的最新 tool/user 消息——改写它不损失任何已缓存字节，而省下的 token 从下一轮起作为前缀被反复以缓存价读。正确门槛是 `MIN_SAVINGS_RATIO`（10%）。现在这道 98% 门等于在唯一安全的改写位置上把压缩关掉，两个目标（省 token、抬命中率）同时失效。
 
 修法：live zone 不传 `cachePolicy`（或 policy 增加 zone 参数，live zone 走 10%）。第二道闸（`CONTENT_TYPE_MIN_BYTES` / `MIN_MESSAGE_TOKENS` / 未支持类型）吞掉另外 211 条，那是另一个量级的问题，需要单独定阈值。
+
+## 9.10 TRAE 的 0% 是伪造读数，不是测量结果（2026-11-09 16:54）
+
+用户报「trae 的缓存命中为 0%」。线上账本（`tokenUsage['2026-11-09'].byModel`）：
+
+```
+trae/deepseek-v4.1-flash  requests=1360  upstreamPrompt=142,807,543
+                          upstreamCacheRead=0  cacheReportedRequests=1360
+```
+
+`cacheReportedRequests == requests` 意味着网关**断言**这 1360 轮上游都报了缓存数、且全为 0。这个断言是假的，链路逐段可核：
+
+1. `trae-adapter.ts:1539` 用 `readCachedInput(ev.usage)` 读 SOLO 的 `token_usage` 事件，三个字段族（`prompt_tokens_details.cached_tokens` / `prompt_cache_hit_tokens` / `cache_read_input_tokens`）都读；读不到时 `cacheReadTokens` **缺省**（`usage-cache.ts` 的 `positive()` 连显式 0 也丢）。
+2. `openai-gateway/usage.ts::toOpenAiUsage` 里 `cachedTokens = count(usage.cacheReadTokens)`，而 `count()` 把缺省折成 **0**——「没测到」在这一步变成了「测到 0」。
+3. `openai-gateway/stream.ts:98` **无条件**写 `prompt_tokens_details: { cached_tokens: normalized.cachedTokens }`；`responses.ts:735` 同样无条件写 `input_tokens_details`。同函数第 104 行对私有字段 `prompt_cache_hit_tokens` 反而加了 `> 0` 守卫，注释写着「避免凭空多出 0」——官方字段漏了这道守卫。
+4. 宿主 `quota/usage.ts:57-63` 读到显式 0 ⇒ `cacheReadReported: true`；`tokenAccounting.ts:502-503` 于是把这轮计入「已上报」分母。
+
+**部署件实证**：`/root/mpd/resources/channel-pack/worker.mjs:51939` 与 `:52499` 就是这两句无条件发射（渠道包是独立 bundle，不在 `modelport-daemon.cjs` 里）。
+
+**影响面**（同日账本）：非账号渠道 **97.97%**，并入账号渠道后 **74.68%**；TRAE 一家 1.428 亿 prompt 占当日 6.59 亿的 **21.7%**，全部以「已上报的 0」计入分母。其余账号渠道报的是真命中（`buddy/deepseek-v4.1-flash` 98.85%、`loomy` 85.64%、`raccoon` 90.5%、`qoder` 85.12%），所以这个缺陷只咬「上游不报缓存字段」的渠道，TRAE 是其中体量最大的一家。
+
+**TRAE 到底有没有缓存：目前不可测。** 读取通路本身是对的，1360 轮 / 1.428 亿 token、单账号、70+ 轮长会话里没有出现过一个正数，与「SOLO 的 `token_usage` 不带缓存字段」一致；但因为第 1 步连显式 0 也丢，网关无法区分「不报」与「报了 0」。出站体也排除了自毁前缀：`transformToSOLOBody`（`trae.ts:1510`）是确定性转换，不注入时间戳/请求号。
+
+**修法**：`toOpenAiUsage` 增 `cacheReported = usage.cacheReadTokens !== undefined`，两个出口的 `usageJson` 仅在为真时发 details 对象；宿主无需改动（`readUsageFromBody` 本来就正确处理缺省）。改完 TRAE 显示 `-` 而不是 0%，当日总命中率回到 97.97% 那一档。**这不会让 TRAE 产生缓存**，只是停止伪造读数。残留口径：上游显式报 0 仍会被 `positive()` 当成「没报」，要彻底对齐宿主的「0 也算已上报」需让 `readCachedInput` 多返回一个 present 标志，属另一格。

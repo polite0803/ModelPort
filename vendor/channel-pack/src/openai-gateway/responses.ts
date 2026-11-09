@@ -732,7 +732,10 @@ function usageJson(usage: TokenUsage): Record<string, unknown> {
   const normalized = toOpenAiUsage(usage)
   return {
     input_tokens: normalized.inputTokens,
-    input_tokens_details: { cached_tokens: normalized.cachedTokens },
+    // ⚠️ 上游没报就整个对象不发（与 Chat 出口同一判据，见 usage.ts::cacheReported）。
+    ...normalized.cacheReported
+      ? { input_tokens_details: { cached_tokens: normalized.cachedTokens } }
+      : {},
     output_tokens: normalized.outputTokens,
     output_tokens_details: { reasoning_tokens: normalized.reasoningTokens ?? 0 },
     total_tokens: normalized.totalTokens,

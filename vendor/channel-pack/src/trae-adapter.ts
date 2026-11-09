@@ -1,6 +1,7 @@
 import { withQueueAccountRotation } from './queue-rotation.js'
 import { checkQueuedResponse } from './model-queue.js'
 import { readCachedInput, uncachedInput } from './usage-cache.js'
+import { appendTraeUsageDump } from './trae-usage-dump.js'
 /**
  * TRAE（字节跳动 TRAE IDE）LLM 适配器。
  *
@@ -1524,6 +1525,13 @@ export class TraeAdapter extends LlmAdapter {
                   break
                 }
                 case 'token_usage': {
+                  // 取证（默认关）：SOLO 原帧原样落盘，用来区分「上游不报缓存」
+                  // 与「报了但字段名不认识」。必须在读取之前 —— 读过的形状不是证据。
+                  appendTraeUsageDump(process.env.MODELPORT_TRAE_USAGE_DUMP, {
+                    ts: Date.now(),
+                    model: options.model,
+                    usage: ev.usage ?? null,
+                  })
                   if (ev.usage !== undefined) {
                     const promptTokens = typeof ev.usage.prompt_tokens === 'number' ? ev.usage.prompt_tokens : 0
                     const completionTokens = typeof ev.usage.completion_tokens === 'number' ? ev.usage.completion_tokens : 0

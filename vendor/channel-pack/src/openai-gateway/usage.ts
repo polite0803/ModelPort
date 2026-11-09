@@ -81,6 +81,16 @@ export interface OpenAiUsage {
   totalTokens: number
   /** 总输入里**命中缓存**的那部分（上者的子集）。 */
   cachedTokens: number
+  /**
+   * 上游是否报过缓存字段（含显式 0）。
+   *
+   * ⚠️ `cachedTokens` 本身无法表达「上游没报」—— `count()` 会把缺省折成 0，
+   * 而 0 是一个断言（"这轮没有命中"），缺省才是事实（"上游没告诉我们"）。
+   * 两个出口只有在它为真时才发明细对象，否则宿主的 `cacheReadReported`
+   * 会把一个伪造的 0 当成「报了且零命中」，仪表盘据此宣称 TRAE 缓存没用上
+   * （用户报障 2026-11-09，见 PLAN-prompt-cache §9.10）。
+   */
+  cacheReported: boolean
   /** 思考 token（输出的子集）；上游没报时为 `undefined`。 */
   reasoningTokens?: number
 }
@@ -102,6 +112,8 @@ function count(value: unknown): number {
  */
 export function toOpenAiUsage(usage: TokenUsage): OpenAiUsage {
   const cached = count(usage.cacheReadTokens)
+  // ⚠️ 「报没报」要在 count() 折叠之前判断：显式 0 也算报了，缺省才算没报。
+  const cacheReported = usage.cacheReadTokens !== undefined
   const written = count(usage.cacheWriteTokens)
   // ⚠️ 这一行是本次修复的核心：DSH 的 `inputTokens` 不含缓存，必须加回去。
   const inputTokens = count(usage.inputTokens) + cached + written
@@ -119,6 +131,7 @@ export function toOpenAiUsage(usage: TokenUsage): OpenAiUsage {
     // 取较大者保证「只会多算、绝不漏算」—— 漏算的代价是自动压缩永不触发。
     totalTokens: Math.max(reported ?? 0, inputTokens + outputTokens),
     cachedTokens: cached,
+    cacheReported,
     ...count(usage.reasoningTokens) > 0 ? { reasoningTokens: count(usage.reasoningTokens) } : {},
   }
 }

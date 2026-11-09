@@ -95,7 +95,11 @@ function usageJson(usage: TokenUsage): Record<string, unknown> {
     completion_tokens: normalized.outputTokens,
     total_tokens: normalized.totalTokens,
     // 官方明细：`cached_tokens` 是 `prompt_tokens` 的**子集**（见 `usage.ts`）。
-    prompt_tokens_details: { cached_tokens: normalized.cachedTokens },
+    // ⚠️ 上游没报就整个对象不发：发 `{cached_tokens: 0}` 会被宿主读成
+    // 「报了且零命中」，把 TRAE 这类从不报缓存的渠道伪造成 0% 命中率。
+    ...normalized.cacheReported
+      ? { prompt_tokens_details: { cached_tokens: normalized.cachedTokens } }
+      : {},
     ...normalized.reasoningTokens === undefined
       ? {}
       : {
