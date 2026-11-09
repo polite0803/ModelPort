@@ -1,6 +1,6 @@
 # HTTPS 与证书信任
 
-> 适用版本：v1.7.3 ｜ 最后核对：2026-11-09 ｜ 状态：现行
+> 适用版本：v1.7.13 ｜ 最后核对：2026-11-09 ｜ 状态：现行
 
 ## 这个功能点是什么
 
@@ -98,4 +98,4 @@ HTTPS 监听不是“可选的装饰”。Claude Desktop 的网关在部分配�
 | v1.5.0 | 证书可加入远程地址（`httpsSanHosts`，IP 走 SAN type 7、域名 type 2）；重签判据改为“是否覆盖当前名单”；新增“从系统信任移除” | CHANGELOG「v1.5.0」条目 |
 | v1.5.0 | Windows 撤销信任改用 PowerShell 按 SHA-1 精确删除，不再使用 `certutil -delstore` | CHANGELOG「v1.5.0」条目 |
 | v1.5.5 | 补齐 `NODE_EXTRA_CA_CERTS` 通路、`GET /v1/management/tls/ca` 与 `/tls/status`（握手被拒计数） | CHANGELOG「v1.5.5」条目 |
-| 未发布（1.7.x） | 信任改成“控制台本机”：`shared/certificateTrust` 抽公共实现、shell 三个无参数信任 IPC、HTTPS 失败页可直接安装并重启连接、面板拆成网关主机／本机两块与两条 `NODE_EXTRA_CA_CERTS` | `tests/proxy/certificate-trust.test.ts`、`tests/renderer/https-machine-trust-panel.test.mjs`、`tests/build/shell-entries.test.ts` |
+| v1.7.13 | 信任改成“控制台本机”：`shared/certificateTrust` 抽公共实现、shell 三个无参数信任 IPC、HTTPS 失败页可直接安装并重启连接、面板拆成网关主机／本机两块与两条 `NODE_EXTRA_CA_CERTS` | `tests/proxy/certificate-trust.test.ts`、`tests/renderer/https-machine-trust-panel.test.mjs`、`tests/build/shell-entries.test.ts` |

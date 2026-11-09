@@ -6,6 +6,71 @@
 条目按"为什么改、影响什么"描述；每条末尾括号里的短哈希指向产生该变更的提交，可在 `git show <哈希>` 中核对。
 版本边界与溯源说明见文末。
 
+## [1.7.13] - 2026-11-09
+
+版本边界：tag `v1.7.13`（相对 1.7.12）。两块内容：HTTPS 证书信任改到**控制台本机**执行、
+面板按主机拆开；账号渠道的 TRAE 身份与签到设备号回归、渠道包错误码结构化、流式结束帧顺序修正。
+非破坏性升级；`data.json`、地址簿、已保存口令与既有渠道凭据的字段形态不变，只有 TRAE 账号的
+`X-Ide-Version-Code` 与签到设备号被重新取值。
+
+### Fixed（修复）
+
+- **「已信任」旁边是仍在拒绝握手的浏览器**：shell 形态下 `tls:install-trust` 跑在监听器所在的
+  主机上（WSL 是没有信任命令的 Linux 守护进程，远程是别人的电脑），而面板把那份 `trusted` 画成
+  了客户端这台机器的读数。现在信任原语（指纹、探测、安装、移除）抽到
+  `src/shared/certificateTrust.ts`，OS 命令经 `TrustRuntime` 注入，网关与控制台共用一份实现；
+  控制台自己取 PEM（先 `GET /v1/management/tls/ca`，取不到回落到握手被拒时捕获的那张），落进本机
+  `userData/tls` 后才改本机当前用户的根证书库。三个 bridge 方法一律无参数，页面交不进 PEM 也
+  指不了路径。面板拆成「网关主机信任」（只读）与「本机」两块，各给自己的 `NODE_EXTRA_CA_CERTS`
+  路径；纯浏览器页面不再显示会改别人电脑的按钮。(`81f5257`)
+- **https 首连失败是死路**：`certificate-error` 只捕获不放行，连接失败页现在直接给出「安装到本机
+  信任并重试」，并按精确 URL 放行这份 `data:` 文档。非自签名证书拒绝装进根库（要信任的是签发它的
+  CA），并如实报告而不是跑一次命令。(`81f5257`)
+- **TRAE 所有模型一律 4001 `param is invalid`**：`X-Ide-Version-Code` 接的是 `product.json` 的
+  `traeVersionCode`（过期常量 `20250325`），而上游按**日期式客户端下限**卡这个头。改为取
+  `date` 的构建日期（`YYYYMMDD`，本机 `2026-11-03`）：2026-11-09 实测同账号同请求，只换该头
+  `20260805` 被拒、`20260810`/`20261103` 全部通过。这与具体模型无关——报障时是
+  `deepseek-v4.1-flash`，换任何模型都 4001。(`c3869bc`)
+- **TRAE 自动签到每 30 分钟空转一整天**：9074 的文案「签到人数过多」是误导，它由设备号决定：
+  自生成的 32 位 hex 每次都回 9074，换成官方客户端 `storage.json` 里
+  `iCubeAuthInfo://icube-dc:<16 位>` 登记的号后立即 `code:0`。9074 与 9095（本机名额已被另一个
+  账号用掉）改为终态「需修正设备号」，不再保留 pending 反复重打上游；真正的「人数过多」（非 9074）
+  仍按瞬时失败继续补领。(`c3869bc`)
+- **渠道包的额度/限流对客户端只是中文散文**：包自己的机读码（`QUOTA_EXCEEDED` / `RATE_LIMIT` /
+  `AUTH` / `MISSING_CREDENTIAL`）原本在 `worker.ts` 就被丢掉，只剩 `message`。现在 `code` 与
+  `providerRetryAfterMs` 一路带到转发器与路由层：包自己兜的 502 按 429 + `insufficient_quota` /
+  `rate_limit_exceeded` 交出，上游真给了 4xx 的保留原状态码与语义，客户端能据此判断「换一条」还是
+  「等解禁」。(`c3869bc`)
+- **严格客户端把整轮判成 `content_after_finish`**：只回 `reasoning_content` 的上游需要一帧
+  content 回填，否则只读 content 的客户端看到空响应；而这一帧原来排在结束帧**之后**（Qoder 的
+  `StreamAdapter` 等实测整轮报废）。回填改到结束帧之前，且结束帧发出后一律不再补。(`c3869bc`)
+
+### Added（新增）
+
+- TRAE 账号的「设备号」入口：Channels 页可直接填入官方客户端的 16 位设备号，经
+  `channel-pack-rpc` 落进渠道凭据；en-US / zh-CN 补齐 `channels.device.*` 文案。(`c3869bc`)
+
+### Tests（判据）
+
+- `tests/proxy/certificate-trust.test.ts`（指纹形状、非自签名拒绝、Windows 按 SHA-1 精确移除）、
+  `tests/renderer/https-machine-trust-panel.test.mjs`（两层面板与两条 `NODE_EXTRA_CA_CERTS`）、
+  `tests/build/shell-entries.test.ts`（shell 入口与 preload 产物）。(`81f5257`)
+- `tests/channels/trae-device.test.ts`（设备号发现与校验）、`tests/channels/client-identity.test.ts`
+  （TRAE 版本码取构建日期）、`tests/channels/auto-checkin-failure-text.test.ts`（设备号终态与
+  可操作文案）、`tests/proxy/stream-finish-frame.test.ts`（回填帧在结束帧之前）、
+  `tests/proxy/error-fidelity.test.ts`（渠道包机读码映射）。(`c3869bc`)
+
+### 未取读数
+
+- **没有在真实 WSL / 远程部署上重放「安装到本机信任并重试」**。判据是单测与
+  `TlsStatus.handshakeRejections` 的取证路径；`certificate-error` 的捕获分支在 Linux 上无法端到端
+  验证（那里没有信任命令，面板按 `supported:false` 呈现）。
+- **TRAE 4001 与设备号的结论来自逐一换头/换号的实测**（2026-11-09，同一账号同一 token），没有
+  覆盖面更广的客户端版本矩阵：上游下限会随时间前移，`TRAE_FALLBACK_VERSION_CODE` 需要跟着现役
+  客户端的构建日期更新。
+- 门禁读数 2063/2063 绿（`npm run build` 0、`build:daemon` 0、`tsc` ×2 各 0 error）；补齐本机
+  `@esbuild/linux-x64` 后才跑得动，缺这个原生包时报的是 193 个环境假红。
+
 ## [1.7.12] - 2026-11-09
 
 版本边界：tag `v1.7.12`（相对 1.7.11）。管理面限流按逻辑调用分桶、模型映射表回归用户数据、
