@@ -1,9 +1,10 @@
 /**
- * 自动签到把「凭据失效」与「人数过多」分开（2026-11-08）。
+ * 自动签到把失败按「可操作结论」分档（2026-11-08，2026-11-09 修订）。
  *
- * 旧行为：两者都显示「N 个失败，稍后重试」。前者再试一千次也不会变（死令牌），
- * 后者应当保留 pending 自动重试。本用例同时锁死**终态判定**：401 的渠道当天
- * 不再每 30 分钟空转，9074 的渠道继续补领。
+ * 旧行为：401、9074、真·人数过多都显示「N 个失败，稍后重试」。401 是死令牌；
+ * 9074 实测是**设备号未登记**（见 `trae-device.ts` 的 9074 表），同一假号连续多天
+ * 都回 9074，等多久都不会变 —— 两者都必须在当天记成「已处理」，只留真正瞬时的
+ * 人数过多继续补领。本用例锁死这三档的分类与终态判定。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -144,9 +145,23 @@ test('已处理渠道的逐渠道理由不会被下一轮覆盖', async (t) => {
   assert.match(state.channels[0].text, /需重新登录/, '逐渠道理由必须跨轮保留')
 })
 
-test('9074 归为「人数过多」，保留 pending 继续补领', async (t) => {
+test('9074 是设备号未登记：终态、可操作文案，当天不再空转', async (t) => {
   const state = await runOnce(t, [failure(9074, '当前参与用户太多，请稍后再试')])
-  assert.equal(state.pending, 1, '人数过多是瞬时失败，必须继续重试')
+  assert.equal(state.pending, 0, '9074 换设备号才有救，等 30 分钟不会变')
+  assert.match(state.channels[0].text, /需修正设备号/)
+  assert.doesNotMatch(state.channels[0].text, /稍后重试/)
+  assert.doesNotMatch(state.channels[0].text, /人数过多/)
+})
+
+test('9095 是「本机名额已用」：同样当天终态', async (t) => {
+  const state = await runOnce(t, [failure(9095, '本机今日名额已使用')])
+  assert.equal(state.pending, 0)
+  assert.match(state.channels[0].text, /需修正设备号/)
+})
+
+test('真·人数过多（非 9074）仍保留 pending 继续补领', async (t) => {
+  const state = await runOnce(t, [failure(-1, '当前参与用户太多，请稍后再试')])
+  assert.equal(state.pending, 1, '瞬时失败必须继续重试')
   assert.match(state.channels[0].text, /人数过多/)
   assert.match(state.channels[0].text, /稍后重试/)
 })
@@ -161,14 +176,16 @@ test('未知失败仍显示「失败 + 稍后重试」', async (t) => {
 test('describeChannel：混合失败按可操作结论分档', async (t) => {
   const { describeChannel } = await loadAutoCheckin(t)
   const text = describeChannel(
-    summary({ failed: 3 }),
+    summary({ failed: 4 }),
     [
       failure(401, '凭据已失效'),
       failure(9074, '人数过多'),
+      failure(-1, '当前参与用户太多，请稍后再试'),
       failure(-1, '网络异常'),
     ],
   )
   assert.match(text, /1 个需重新登录/)
+  assert.match(text, /1 个需修正设备号/)
   assert.match(text, /1 个人数过多/)
   assert.match(text, /1 个失败/)
   assert.match(text, /稍后重试/)

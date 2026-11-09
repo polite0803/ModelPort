@@ -411,6 +411,12 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
       + `最近一个将于 ${new Date(limited.resetAtMs).toLocaleString('zh-CN')} 解禁。`
       + `可改用其它 provider / 模型，或等待解禁后再试（无需重新登录）。`,
       'QUOTA_EXCEEDED',
+      // 这是「限流」而不是服务端故障：带 429 + 解禁时刻，宿主才能把它翻译成
+      // 客户端认识的 rate-limit 契约（含 Retry-After），而不是一句 502 散文。
+      {
+        status: 429,
+        ...(limited.resetAtMs > Date.now() ? { providerRetryAfterMs: limited.resetAtMs - Date.now() } : {}),
+      },
     )
   }
 

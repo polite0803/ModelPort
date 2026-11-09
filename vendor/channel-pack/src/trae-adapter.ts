@@ -528,23 +528,29 @@ function httpErrorCode(status: number): string {
  * 组合 SOLO **流内** `event:error` 的文案。
  *
  * `code=4001` 的上游原文是 *"We're sorry, the param is invalid. Please try with a
- * valid param."* —— 实测（2026-09-19，遍历 45 个远端模型）该码**只**由
- * **不可调用的模型**触发：5 个 `display_config.is_custom_model === true` 的条目
- * 全部报 4001，而同批次的其余模型全部正常。也就是说它与「提示词/参数格式有误」
- * 毫无关系，原文会把排查方向**完全带偏**（去查 message 结构、tools 序列化…）。
+ * valid param."* —— 实测有**两类**完全不同的成因，原文都指向「参数」，会把排查
+ * 方向带偏：
  *
- * ⚠️ **那 5 个条目的名单已过期**（复测 2026-09-20）：其中 3 个下架、2 个转为
- * `is_custom_model: false`（已可调用），全目录 custom 条目数为 0。故这里**不列
- * 具体模型名** —— 把某一刻的快照写成判据，会让后人误删合法模型。
+ * 1. **客户端版本码低于官方下限**（2026-11-09 实测）：同一账号、同一通道、
+ *    同一最小请求体，**换任何模型都 4001**；只把 `X-Ide-Version-Code` 从
+ *    `20250325` 改成 `20260810` 以上即全部通过（`20260805` 仍被拒）。
+ *    身份头由 `client-identity.ts::traeClientIdentity()` 从本机官方客户端
+ *    构建日期取值，可用 `MODELPORT_TRAE_VERSION_CODE` 覆盖。
+ * 2. **不可调用的自定义模型**（2026-09-19 遍历 45 个远端模型）：5 个
+ *    `display_config.is_custom_model === true` 的条目全部报 4001。名单已过期，
+ *    故不列具体模型名 —— 把某一刻的快照写成判据会让后人误删合法模型。
  *
- * 故对 4001 追加一句指向真实成因的可操作提示。其余错误码保持原样，
- * 不做无依据的解释。
+ * 文案按「先查版本码，再查模型归属」排列：版本码错时**每个模型**都失败，
+ * 而模型不可调用只影响单个模型。其余错误码保持原样，不做无依据的解释。
  */
 function traeStreamErrorMessage(code: number, message: string, model: string): string {
   const base = `trae: ${message} (code=${code})`
   if (code !== 4001) return base
-  return `${base} —— 模型「${model}」不被上游接受：它通常是「仅可见但不可调用」的`
-    + '自定义模型（需先在 TRAE IDE 内自行配置供应商），请改用模型列表中的其它模型'
+  return `${base} —— 上游拒绝了该请求。最常见的原因是身份头 X-Ide-Version-Code 低于`
+    + '官方客户端下限（网关按本机安装的 Trae 构建日期自动取值，可用 '
+    + 'MODELPORT_TRAE_VERSION_CODE 覆盖；低于下限时**所有模型**都会失败）；'
+    + `其次是模型「${model}」在 TRAE IDE 里「仅可见但不可调用」（自定义模型需先在 `
+    + 'IDE 内配置供应商）。'
 }
 
 /** 传输级错误判定。 */

@@ -93,6 +93,42 @@ test('风控/凭据/限流的本仓机读 code 优先于上游 code', () => {
   assert.equal(mapForwardFailure({ status: 429 }).code, 'rate_limit_exceeded')
 })
 
+/**
+ * 渠道包的机读码必须走到客户端。旧路径只搬 message/status，宿主拿到的 details.code
+ * 永远是 undefined —— 于是「模型额度用完 / 全部账号在限流」只能以 502 中文散文出现，
+ * 客户端读成服务端故障，对同一个模型反复重试，而包的原话恰恰是「可改用其它模型」。
+ */
+test('渠道包的额度/限流码：翻译成客户端契约并按 429 交出去', () => {
+  const quota = mapForwardFailure({
+    status: 502,
+    details: {
+      message: 'Raccoon (商汤)：模型 sn-x 的可用账号均在限流中，最近一个将于 20:00 解禁（无需重新登录）。',
+      code: 'QUOTA_EXCEEDED',
+    },
+    retryAfter: '600',
+  })
+  assert.equal(quota.status, 429, '包在发请求前判定的限流不是服务端故障')
+  assert.equal(quota.type, 'rate_limit_error')
+  assert.equal(quota.code, 'insufficient_quota')
+  assert.equal(quota.retryAfter, '600', '解禁时刻必须随 429 一起交给客户端')
+
+  const rate = mapForwardFailure({
+    status: 502,
+    details: { message: 'raccoon: 您的模型请求频率超限，请稍后重试', code: 'RATE_LIMIT' },
+  })
+  assert.equal(rate.status, 429)
+  assert.equal(rate.code, 'rate_limit_exceeded')
+
+  // 上游真给的 4xx 保持原状态与类型：403 额度耗尽仍然是权限问题，不被上调。
+  const upstream403 = mapForwardFailure({
+    status: 403,
+    details: { message: 'quota exhausted', code: 'QUOTA_EXCEEDED' },
+  })
+  assert.equal(upstream403.status, 403)
+  assert.equal(upstream403.type, 'permission_error')
+  assert.equal(upstream403.code, 'insufficient_quota')
+})
+
 test('图片内容审核 400 原样透传：上游 code 与原文不得被改写成别的信号', () => {
   // 2026-11-07 实测（bailian_token_plan/deepseek-v4.1-flash，6 笔）：
   // 上游对请求里的图片做了内容审核并拒收。这是**供应商策略判定**，不是网关故障、

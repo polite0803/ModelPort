@@ -21,6 +21,19 @@ const STANDARD_ERROR_TYPES = new Set([
   'server_error',
 ])
 
+/**
+ * 渠道包（`vendor/channel-pack`）自己的机读码 → 客户端认识的那一套。
+ *
+ * 包里 `QUOTA_EXCEEDED` 同时表示「模型当天额度用完」与「可用账号都在限流中」，
+ * 对客户端是同一件事：这一档现在用不了，要么等解禁，要么换一条。旧路径只把
+ * 中文散文塞进 5xx `api_error`，客户端读成服务端故障，对同一个模型反复重试。
+ * 这些情况没有上游 HTTP 事实，`status` 是包自己兜的 502 —— 按 429 交出去。
+ */
+const CHANNEL_PACK_ERROR_CODES: Record<string, { code: string; status?: number }> = {
+  QUOTA_EXCEEDED: { code: 'insufficient_quota', status: 429 },
+  RATE_LIMIT: { code: 'rate_limit_exceeded', status: 429 },
+}
+
 export interface MappedUpstreamError {
   status: number
   type: string
@@ -84,24 +97,30 @@ export function mapForwardFailure(
     (input.details?.message ?? input.message ?? '').trim() || `HTTP ${status}`
   const upstreamType = input.details?.type?.trim().toLowerCase()
 
-  let code = input.details?.code ?? null
+  const rawCode = input.details?.code ?? null
+  const channelCode = typeof rawCode === 'string' ? CHANNEL_PACK_ERROR_CODES[rawCode] : undefined
+  // 只上调「包自己合成的 5xx」：上游真给了 4xx 就保留它的状态码与语义。
+  const effectiveStatus =
+    channelCode?.status !== undefined && status >= 500 ? channelCode.status : status
+
+  let code: string | number | null = channelCode ? channelCode.code : rawCode
   if (isChannelRiskControlFailure(message)) {
     code = 'channel_risk_control'
-  } else if (status >= 500 && isChannelCredentialFailure(message)) {
+  } else if (effectiveStatus >= 500 && isChannelCredentialFailure(message)) {
     code = 'channel_relogin_required'
-  } else if (code === null && (status === 401 || status === 403)) {
+  } else if (code === null && (effectiveStatus === 401 || effectiveStatus === 403)) {
     // 上游没给机读 code 时，至少让客户端能区分这是「上游凭据」而不是它自己的 Key。
     code = 'upstream_unauthorized'
-  } else if (code === null && status === 429) {
+  } else if (code === null && effectiveStatus === 429) {
     code = 'rate_limit_exceeded'
   }
 
   return {
-    status,
+    status: effectiveStatus,
     type:
       upstreamType !== undefined && STANDARD_ERROR_TYPES.has(upstreamType)
         ? upstreamType
-        : fallbackType(status, protocol),
+        : fallbackType(effectiveStatus, protocol),
     message,
     param: input.details?.param ?? null,
     code,

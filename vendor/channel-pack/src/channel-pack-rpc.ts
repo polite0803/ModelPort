@@ -102,6 +102,7 @@ import type { QoderCredential } from './qoder.js'
 import { claimQoderDailyCheckin, fetchQoderCreditBalance } from './qoder-credits.js'
 import { isTraeRefreshable, traeCredentialExpiresAtMs, traeDisplayNickname } from './trae.js'
 import type { TraeCredential } from './trae.js'
+import { discoverTraeDevices, isTraeDeviceId } from './trae-device.js'
 import { fetchClineCreditBalance } from './cline-credits.js'
 import { fetchClineUsageLimits } from './cline-quota.js'
 import { clineUpstreamOf, readClineRequestHistory } from './cline-request-log.js'
@@ -171,6 +172,10 @@ import type {
   RpcResetAllRequest,
   RpcCreditsStatusRequest,
   RpcCreditsStatusResponse,
+  RpcTraeDevicesRequest,
+  RpcTraeDevicesResponse,
+  RpcSetTraeDeviceRequest,
+  RpcSetTraeDeviceResponse,
   RpcCreditsClaimAllRequest,
   RpcCreditsClaimAllResponse,
   RpcCreditsClaimSummary,
@@ -2806,6 +2811,75 @@ function registerChannelPackEndpoints(
           return { ok: true, value: { accounts: value } satisfies RpcCreditsStatusResponse }
         }
         return { ok: false, error: { code: 'bad-request', message: `unsupported provider: ${req.provider}` } }
+      }
+
+      /**
+       * 读取 TRAE 签到设备号候选（只读）。
+       *
+       * 9074 的真实成因是 `X-Device-Id` 不是官方客户端登记过的号
+       * （2026-11-09 实测：同一账号同一 token，换成客户端 `storage.json` 里的
+       * 16 位号后 claim 立即 `code:0`），不是「签到人数过多」。这里把客户端
+       * 登记过的号列给面板，让用户按账号指定 —— 一台客户端先后登录两个账号时
+       * 就是两个号，无法凭空推断哪个号属于哪个账号。
+       */
+      case 'credits.traeDevices': {
+        const req = (payload ?? {}) as RpcTraeDevicesRequest
+        const discovered = discoverTraeDevices()
+        let current: string | null = null
+        if (typeof req.accountId === 'string' && req.accountId.length > 0) {
+          const entry = (await pool.listAllAccounts()).find(a => a.id === req.accountId)
+          if (entry === undefined) {
+            return { ok: false, error: { code: 'bad-request', message: `账号不存在：${req.accountId}` } }
+          }
+          if (entry.provider !== TRAE.id) {
+            return { ok: false, error: { code: 'bad-request', message: '设备号只对 TRAE 账号有意义' } }
+          }
+          const resolved = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
+          if (resolved !== undefined) {
+            try {
+              const parsed = JSON.parse(resolved.value) as { device_id?: unknown }
+              if (typeof parsed?.device_id === 'string') current = parsed.device_id
+            } catch {
+              // 凭据不是 JSON 时不猜，current 保持 null。
+            }
+          }
+        }
+        return { ok: true, value: { ...discovered, current } satisfies RpcTraeDevicesResponse }
+      }
+
+      /**
+       * 给某个 TRAE 账号写入官方客户端的真设备号。
+       *
+       * 只改凭据里的 `device_id`，token / machine_id 原样保留。校验 16 位数字是
+       * **硬约束**：上游对其它形态一律回 9074，写进去等于让自动签到继续空转。
+       */
+      case 'credits.setTraeDevice': {
+        const req = payload as RpcSetTraeDeviceRequest
+        if (!isTraeDeviceId(req?.deviceId)) {
+          return { ok: false, error: { code: 'bad-request', message: '设备号必须是 16 位数字（官方客户端 storage.json 里的 iCubeAuthInfo://icube-dc:<16 位>）' } }
+        }
+        const entry = (await pool.listAllAccounts()).find(a => a.id === req.accountId)
+        if (entry === undefined) {
+          return { ok: false, error: { code: 'bad-request', message: `账号不存在：${req.accountId}` } }
+        }
+        if (entry.provider !== TRAE.id) {
+          return { ok: false, error: { code: 'bad-request', message: '设备号只对 TRAE 账号有意义' } }
+        }
+        const ref = credentialRef(entry.credentialRef)
+        const resolved = await ctx.credentials.resolve(ref)
+        if (resolved === undefined) {
+          return { ok: false, error: { code: 'bad-request', message: '账号凭据不可用，请重新登录后再设置设备号' } }
+        }
+        let credential: TraeCredential
+        try {
+          const parsed = JSON.parse(resolved.value) as TraeCredential
+          if (typeof parsed?.access_token !== 'string' || parsed.access_token.length === 0) throw new Error('missing access_token')
+          credential = parsed
+        } catch {
+          return { ok: false, error: { code: 'bad-request', message: '账号凭据不是合法的 TRAE 凭据，请重新登录' } }
+        }
+        await ctx.credentials.set(ref, JSON.stringify({ ...credential, device_id: req.deviceId }))
+        return { ok: true, value: { deviceId: req.deviceId } satisfies RpcSetTraeDeviceResponse }
       }
 
       // 一键领取：逐账号顺序执行（并发易触发风控），单个账号失败不中断整体。

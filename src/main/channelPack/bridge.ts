@@ -36,11 +36,19 @@ export class ChannelBridgeError extends Error {
    * 「冷却到期→放一笔→又 429→再冷却」的自维持循环（PLAN-channel-auto-stability 第五批）。
    */
   retryAfterMs?: number
-  constructor(message: string, status?: number, retryAfterMs?: number) {
+  /**
+   * 渠道包自己的机读错误码（`QUOTA_EXCEEDED` / `RATE_LIMIT` / `AUTH` /
+   * `MISSING_CREDENTIAL` …）。宿主用它把「额度/限流」这类事实翻译成客户端认识的
+   * 错误码，而不是让客户端对着一句中文散文猜。`undefined` = 渠道包没给（或该
+   * 错误本身来自宿主）。
+   */
+  code?: string
+  constructor(message: string, status?: number, retryAfterMs?: number, code?: string) {
     super(message)
     this.name = 'ChannelBridgeError'
     this.status = status
     this.retryAfterMs = retryAfterMs
+    this.code = code
   }
 }
 
@@ -300,6 +308,7 @@ export class ChannelBridge {
           String(message.message ?? '渠道请求失败'),
           typeof message.status === 'number' ? message.status : undefined,
           providerRetryAfterMs,
+          typeof message.code === 'string' && message.code ? message.code : undefined,
         )
         this.options.onLog?.('error', error.message, { ...job.context, jobId: String(message.id) })
         if (job.stream) {

@@ -52,10 +52,18 @@ export const WORKBUDDY_FALLBACK_VERSION = '5.9.3'
 /** 本机没有安装 Qoder、官网也取不到时的兜底值。 */
 export const QODER_FALLBACK_VERSION = '0.5.3'
 
-/** Trae 的兜底值（2026-11-05 本机 Trae CN 1.107.1 的 product.json）。 */
+/** Trae 的兜底值（本机 Trae CN 1.107.1 的 product.json）。 */
 export const TRAE_FALLBACK_APP_VERSION = '3.4.15'
 export const TRAE_FALLBACK_IDE_VERSION = '1.107.1'
-export const TRAE_FALLBACK_VERSION_CODE = '20250325'
+/**
+ * 版本码兜底值 = 官方客户端的**构建日期**（`product.json.date` = 2026-11-03）。
+ *
+ * ⚠️ **不要用 `product.json.traeVersionCode`**（本机 20250325）：它是早已过期的
+ * 常量，不是构建日期。上游按 `X-Ide-Version-Code` 卡客户端下限 —— 2026-11-09 实测
+ * `20260810` 可用、`20260805` 被拒；低于下限时**所有模型**（含 glm-5.3-flash、
+ * doubao-seed-code）一律回 `4001 param is invalid`，与具体模型无关。
+ */
+export const TRAE_FALLBACK_VERSION_CODE = '20261103'
 
 const VERSION_PATTERN = /^\d+(?:\.\d+){1,3}$/
 /** 日期式版本码（`20250325` / `20260811`），不是语义版本。 */
@@ -108,6 +116,20 @@ export function normalizeVersionCode(value: unknown): string | undefined {
   const trimmed = value.trim()
   if (VERSION_CODE_PATTERN.test(trimmed)) return trimmed
   return normalizeBuildVersion(trimmed)
+}
+
+/**
+ * `product.json` 的 `build_time` / `date`（`2026-11-03T10:29:58.368Z`）→ `20261103`。
+ *
+ * 官方工作台把 `build_time`（= `productService.date`）放进 common params 交给
+ * native 层，`X-Ide-Version-Code` 就是这种「构建日期」形态（trae-mate 抓到的
+ * `20260811` 同样是构建日期），而 `traeVersionCode` 不是。
+ */
+export function versionCodeFromBuildDate(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value.trim())
+  if (match === null) return undefined
+  return `${match[1]}${match[2]}${match[3]}`
 }
 
 function readJsonRecord(file: string): Record<string, unknown> | undefined {
@@ -228,7 +250,7 @@ export function qoderClientVersion(channel: 'qoder' | 'qodercn' = 'qoder', now =
 export interface TraeClientIdentity {
   /** `X-Ide-Version` / `Trae/<version>` 用；product.json 的 `appVersion`。 */
   appVersion: string
-  /** `X-Ide-Version-Code` / `X-App-Version-Code` 用；product.json 的 `traeVersionCode`。 */
+  /** `X-Ide-Version-Code` / `X-App-Version-Code` 用；product.json 的构建日期（`YYYYMMDD`）。 */
   versionCode: string
   /** VS Code 基线版本；market 头的 `VSCode <ver>` 用。 */
   ideVersion: string
@@ -245,8 +267,20 @@ export interface TraeClientIdentity {
  * 分别来自运行时的 `os_name` / `os_version` / `device_model`（见
  * `workbench.desktop.main.js` 的 `icube.event.getCommonParams` 映射）。
  *
- * 本机 `product.json` 还带 `version`（1.107.1，VS Code 基线）与
- * `traeVersionCode`（20250325，日期式代码），分别给 market 头与版本码用。
+ * ## 版本码必须取**构建日期**，不是 `traeVersionCode`（2026-11-09 实测）
+ *
+ * 用户报障（WorkBuddy 客户端经网关走 trae 渠道，模型 `deepseek-v4.1-flash`）：
+ * 上游回 `4001 param is invalid`。逐项排除后定位到 `X-Ide-Version-Code`：
+ *
+ * - 同一账号、同一通道、同一最小请求体，**换任何模型**（glm-5.3-flash /
+ *   doubao-seed-code / deepseek-v4.1-flash）都 4001 —— 不是「自定义模型不可调用」；
+ * - 只改该头：`20250325`（本机 `traeVersionCode`）被拒，`20260810` / `20260811` /
+ *   `20261103` 全部通过；`20260805` 被拒 ⇒ 上游按**日期式客户端下限**卡；
+ * - 本机 `product.json` 的 `traeVersionCode` 是 20250325，而同一个文件的 `date`
+ *   （构建时间）是 2026-11-03 —— 前者是过时常量，后者才与官方现役客户端同形。
+ *
+ * 因此 `versionCode` 取 `date` → `YYYYMMDD`；`traeVersionCode` 只在本机 product.json
+ * 缺 `date` 时兜底。
  */
 export function traeClientIdentity(now = Date.now()): TraeClientIdentity {
   const envApp = envVersion('MODELPORT_TRAE_VERSION')
@@ -271,13 +305,9 @@ export function traeClientIdentity(now = Date.now()): TraeClientIdentity {
 
   for (const file of files) {
     if (!existsSync(file)) continue
-    const parsed = readJsonRecord(file)
-    if (parsed === undefined) continue
-    const appVersion = normalizeBuildVersion(parsed.appVersion) ?? normalizeBuildVersion(parsed.version)
-    if (appVersion === undefined) continue
-    const versionCode = normalizeVersionCode(parsed.traeVersionCode) ?? TRAE_FALLBACK_VERSION_CODE
-    const ideVersion = normalizeBuildVersion(parsed.version) ?? TRAE_FALLBACK_IDE_VERSION
-    return { appVersion, versionCode, ideVersion, source: 'local-install', checkedAt: now }
+    const fields = readTraeProduct(file, now)
+    if (fields === undefined) continue
+    return { ...fields, source: 'local-install', checkedAt: now }
   }
 
   return {
@@ -286,6 +316,54 @@ export function traeClientIdentity(now = Date.now()): TraeClientIdentity {
     ideVersion: TRAE_FALLBACK_IDE_VERSION,
     source: 'fallback',
     checkedAt: now,
+  }
+}
+
+interface TraeProductFields {
+  appVersion: string
+  versionCode: string
+  ideVersion: string
+}
+
+let traeProductFileCache: {
+  file: string
+  mtimeMs: number
+  lastStatAt: number
+  fields: TraeProductFields
+} | undefined
+
+/**
+ * 读官方客户端 `product.json` 的三个身份字段；mtime 未变则复用缓存。
+ *
+ * 头构造点在**每笔** trae 请求上调用（聊天 / 签到 / Ug / OAuth），WSL 宿主读的是
+ * `/mnt/c` 跨盘路径，所以走 60s stat 节流而不是每笔同步读文件。
+ */
+function readTraeProduct(file: string, now: number): TraeProductFields | undefined {
+  const cached = traeProductFileCache
+  if (cached !== undefined && cached.file === file && now - cached.lastStatAt < STAT_TTL_MS) {
+    return cached.fields
+  }
+  try {
+    const mtimeMs = statSync(file).mtimeMs
+    if (cached !== undefined && cached.file === file && cached.mtimeMs === mtimeMs) {
+      cached.lastStatAt = now
+      return cached.fields
+    }
+    const parsed = readJsonRecord(file)
+    if (parsed === undefined) return undefined
+    const appVersion = normalizeBuildVersion(parsed.appVersion) ?? normalizeBuildVersion(parsed.version)
+    if (appVersion === undefined) return undefined
+    const fields: TraeProductFields = {
+      appVersion,
+      versionCode: versionCodeFromBuildDate(parsed.date)
+        ?? normalizeVersionCode(parsed.traeVersionCode)
+        ?? TRAE_FALLBACK_VERSION_CODE,
+      ideVersion: normalizeBuildVersion(parsed.version) ?? TRAE_FALLBACK_IDE_VERSION,
+    }
+    traeProductFileCache = { file, mtimeMs, lastStatAt: now, fields }
+    return fields
+  } catch {
+    return undefined
   }
 }
 
@@ -549,6 +627,7 @@ export function compareVersions(a: string, b: string): number {
 export function resetClientVersionCache(): void {
   cache.clear()
   official.clear()
+  traeProductFileCache = undefined
 }
 
 // worker 加载即开始刷新；测试环境（NODE_TEST_CONTEXT）不启动，避免网络依赖。

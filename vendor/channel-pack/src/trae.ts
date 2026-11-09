@@ -77,9 +77,11 @@ export const TRAE_LOGIN_TIMEOUT_MS = 10 * 60 * 1000
  *
  * - `machine_id`：32 位 hex 字符串（设备指纹），登录时生成，**不可每次重新生成**。
  *   上传端按 `machine_id` 标识设备，换机器需要重新登录。
- * - `device_id`：16 位纯数字（签到设备号），登录时生成。同一天内两个账号
- *   共用同一 device_id 会让签到互斥（第二个账号报已签到）。
- *   因此每个账号必须有自己的 device_id。
+ * - `device_id`：签到设备号。**必须**是官方客户端登记过的 16 位纯数字
+ *   （`storage.json` 的 `iCubeAuthInfo://icube-dc:<16 位>`）；登录时生成的
+ *   32 位 hex 只是占位值，拿它签到时上游恒回 9074（2026-11-09 实测）。
+ *   一个客户端先后登录两个账号会留下两个号，**每个账号各用一个**，否则
+ *   第二名会被「本机名额已用」(9095) 拦下。
  * - `refresh_token`：ExchangeToken 每次返回会轮换，续期后必须回写。
  */
 export interface TraeCredential {
@@ -136,10 +138,12 @@ export interface TraeCredential {
    */
   machine_id: string
   /**
-   * 签到设备号（16 位纯数字）。
+   * 签到设备号。
    *
-   * 每个账号必须互不相同。Go 端 `deviceid.go` 用 `crypto/rand` 生成。
-   * 登录时生成并持久化，签到接口需要它（空值会报 9004）。
+   * 上游只接受**官方客户端登记过的** 16 位纯数字（`storage.json` 的
+   * `iCubeAuthInfo://icube-dc:<16 位>`）。登录时生成的 32 位 hex 是占位值，
+   * 签到会恒回 9074；由 `credits.setTraeDevice` 写入真号（面板的「设备号」）。
+   * 空值会报 9004。
    */
   device_id: string
   /** 域名（如 `trae.cn`）。 */
@@ -1330,12 +1334,12 @@ export function generateMachineId(): string {
 }
 
 /**
- * 生成 32 位 hex 字符的 `device_id`。
+ * 生成 32 位 hex 的**占位** `device_id`（登录时写入凭据）。
  *
- * 对齐 `login.sh:34`：`DEVICE_ID="$(openssl rand -hex 16)"` —— **hex32**，
- * 与 `machine_id` 同格式。
- *
- * 每个账号必须互不相同 —— 同一天两个账号共用会被「该设备已签到」拦截。
+ * ⚠️ 这个值**不能签到**：2026-11-09 实测，上游校验的是「设备号是否由官方
+ * 客户端登记」，任意生成的值（含 16 位数字与 32 位 hex）claim 恒回 9074。
+ * 真号由 `credits.setTraeDevice` 写入（面板 TRAE 账号的「设备号」），
+ * 本函数只保证对话侧请求有一个稳定身份。
  */
 export function generateDeviceId(): string {
   const buf = new Uint8Array(16)

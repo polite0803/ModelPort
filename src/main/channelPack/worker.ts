@@ -372,12 +372,23 @@ parentPort?.on('message', async (message: Record<string, any>) => {
       send({ type: 'done', id })
     } else throw new Error('未知渠道操作')
   } catch (error) {
-    const failure = error as { message?: string; status?: number; failure?: { status?: number } }
+    // `code` 与 `providerRetryAfterMs` 是渠道包唯一两个机读事实（QUOTA_EXCEEDED /
+    // RATE_LIMIT / AUTH…、上游真实解禁时刻），旧实现只搬 message/status，宿主就只能
+    // 拿中文散文去猜，客户端也收不到「换一条」的结构化信号。
+    const failure = error as {
+      message?: string
+      status?: number
+      code?: string
+      providerRetryAfterMs?: number
+      failure?: { status?: number; code?: string; providerRetryAfterMs?: number }
+    }
     send({
       type: 'error',
       id,
       message: failure.message ?? '渠道请求失败',
       status: failure.status ?? failure.failure?.status,
+      code: failure.code ?? failure.failure?.code,
+      providerRetryAfterMs: failure.providerRetryAfterMs ?? failure.failure?.providerRetryAfterMs,
     })
   } finally {
     controllers.delete(id)

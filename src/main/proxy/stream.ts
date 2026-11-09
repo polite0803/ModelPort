@@ -212,18 +212,26 @@ export class StreamHandler {
     let doneSent = false
 
     // 部分上游（商汤系等推理模型）只回 reasoning_content，content 恒为空。
-    // 对只读 content 的客户端（VS Code 原生 Chat 等）这等于空响应，收尾时需要用 reasoning 回填。
+    // 对只读 content 的客户端（VS Code 原生 Chat 等）这等于空响应，结束帧之前需要用 reasoning 回填。
     let reasoningAccum = ''
     let emittedContentText = ''
     let sawToolCall = false
+    let reasoningFallbackSent = false
+    let finishSeen = false
 
-    // 上游整段正文为空时，用累积的 reasoning 补一帧 content，避免客户端判为空响应
+    // 上游整段正文为空时，用累积的 reasoning 补一帧 content，避免客户端判为空响应。
+    // 补的时机是**结束帧之前**：strict 客户端（Qoder 的 StreamAdapter 等）把
+    // 「finish_reason 之后再来非空 delta」判成 content_after_finish 并整轮拒绝，
+    // 而这帧曾经排在结束帧后面（2026-11-09 13:54 实测整轮报废）。
+    // 结束帧已经发出去之后再补同样算「finish 之后的正文」，所以那之后一律不补。
     const buildReasoningFallback = (): string | null => {
+      if (reasoningFallbackSent || finishSeen) return null
       if (emittedContentText.trim() || sawToolCall) return null
       const text = reasoningAccum.trim()
       if (!text) return null
       const data = transformChunk({ content: text }, model, responseId, created, isFirstChunk)
       if (!data) return null
+      reasoningFallbackSent = true
       isFirstChunk = false
       return formatter.formatJSON(data)
     }
@@ -282,13 +290,20 @@ export class StreamHandler {
             }
 
             // 正文与工具调用原样透传：网关不解析、不缓冲、不改写模型输出。
-            // 结束帧（finish_reason）无条件转发。旧的 `[function_calls]` 前缀缓冲曾让
-            // 含 markdown 链接的回答把终帧吞掉，客户端只看到「流结束但没有结束原因」。
+            // 结束帧（finish_reason）不吞也不推迟 —— 推迟会让「上游发完结束帧却不立刻
+            // 关闭连接」的流在客户端那边一直等不到结束。
             const pushedDelta = transformedData.choices[0].delta || {}
             if (typeof pushedDelta.content === 'string' && pushedDelta.content) {
               emittedContentText += pushedDelta.content
             }
             isFirstChunk = false
+            if (transformedData.choices[0].finish_reason) {
+              // 回填只能在结束帧**之前**写出去：strict 客户端把「finish_reason 之后的
+              // 非空 delta」判成 content_after_finish 并整轮拒绝（2026-11-09 13:54 实测）。
+              const fallbackFrame = buildReasoningFallback()
+              if (fallbackFrame) this.push(fallbackFrame)
+              finishSeen = true
+            }
             this.push(formatter.formatJSON(transformedData))
           }
 

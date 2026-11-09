@@ -424,7 +424,7 @@ export function isRecoverableChannelFailure(message: string | undefined): boolea
     || /billing\s+daily\s+count\s+exceeded/i.test(message)
     || /所有账号均受限/.test(message)
     // 渠道包在**发请求之前**就报「该模型全部启用账号都在限流中」（`index.ts` 的
-    // `QUOTA_EXCEEDED`，状态码落成 502）。它自己写着「无需重新登录」，所以这是
+    // `QUOTA_EXCEEDED`，带 429 + 解禁时刻）。它自己写着「无需重新登录」，所以这是
     // 定时限流而不是人工介入：零上游调用、不烧积分，换下一家就能成。
     // 按普通 502 计入账号故障上限的话，三家限流就把整条链判死，而池里其余候选
     // 其实都活着（2026-11-01 远程日志：这一类在真流量里排第 2 多）。

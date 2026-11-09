@@ -9,6 +9,8 @@
  * - **请求头齐全**：约 20 个客户端头，而非简单的 Ug 头
  * - **设备身份稳定**：每个账号的 device_id 基于 user_id 确定性派生
  *   （15 位数字 + UUID v4 market_user_id + 64 hex session_id）
+ *   ⚠️ 2026-11-09 实测：上游只认**官方客户端登记过的 16 位号**，派生值一律回 9074，
+ *   见 `trae-device.ts`。派生只用于「占位」，真号必须由用户指定。
  * - **领取 body 为 `{}`**，而非 `{"req_source":2}`
  * - **积分余额 body 含 `require_usage: true`**
  * - **错误分类与冷却**：PlanLimit/SoftRate/SessionDead 等有冷却时间
@@ -100,9 +102,11 @@ export function classifyTraeCheckinError(
 }
 
 /**
- * 签到业务码 **9074**：「签到人数过多」。
+ * 签到业务码 **9074**：设备号未被官方客户端登记。
  *
- * 保留此常量作为公开引用（供测试与 RPC 使用）。
+ * ⚠️ 上游文案是「签到人数过多」，但实测它由设备号决定而非排队（见
+ * `claimTraeDailyCheckin` 内注释）。保留常量名是为了不破坏既有引用，
+ * 语义以本注释为准。
  */
 export const TRAE_CHECKIN_BUSY_CODE = 9074
 
@@ -216,7 +220,8 @@ export async function fetchTraeCheckinStatus(
  * 对齐 trae-mate `checkin_engine` 流程，关键差异：
  *
  * 1. **请求头**：使用完整客户端头（含 `X-Market-User-ID` / `X-Lscbd-Aid` 等）
- * 2. **设备身份**：基于 `credential.uid` 确定性派生，每个账号独立稳定
+ * 2. **设备身份**：`X-Device-Id` 用**官方客户端登记过的** 16 位号（`trae-device.ts`），
+ *    自己生成的值（含本插件旧版的 32 位 hex）一律被上游回 9074
  * 3. **Body**：`{}` 而非 `{"req_source":2}`
  * 4. **网络重试**：网络异常（非业务码、HTTP 不可达）重试，业务码不重试
  * 5. **错误分类**：返回分类信息供调用方做冷却
@@ -260,16 +265,25 @@ export async function claimTraeDailyCheckin(
   const body = response.body!
   const code = readClaimCode(body)
 
-  // ── 9074：设备轮换已废弃，不再重试 ──
-  // trae-mate 基于 user_id 确定性派生设备身份，不同账号天然不同设备，
-  // 不再需要 9074 时换设备号重试。
-  if (code === 9074) {
+  // ── 9074 / 9095：设备号问题，当天无解，不重试 ──
+  //
+  // ⚠️ 9074 的文案「签到人数过多」是**误导**：2026-11-09 实测（同一账号、
+  // 同一 token）本插件自己生成的 32 位 hex 设备号每次（连续多天）都回 9074；
+  // 换成官方客户端 storage.json 里登记的 16 位号后 claim 立即 `code:0`。
+  // 上游校验的是「设备号是否由官方客户端登记」，不是排队人数。
+  //
+  // 9095「本机名额已用」：同一台机器一天只能给一个账号签到，换设备号或等
+  // 明天，当前账号今天签不了。
+  if (code === 9074 || code === 9095) {
+    const fallback = code === 9074
+      ? '设备号未登记：请在账号的「设备号」里填入官方客户端的 16 位设备号'
+      : '本机今日签到名额已被另一个账号使用，明天再试'
     return {
       kind: 'failed',
-      code: 9074,
-      message: readString(body, 'message') || readString(body, 'msg') || '签到人数过多，请稍后再试',
-      errorType: 'BusinessError',
-      cooldownSecs: 300,
+      code,
+      message: readString(body, 'message') || readString(body, 'msg') || fallback,
+      errorType: 'DeviceError',
+      cooldownSecs: 0,
     }
   }
 

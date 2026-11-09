@@ -2,6 +2,7 @@
 
 > 成文：2026-11-05 ｜ 状态：**B1–B4 完成；B5 部分（手动刷新就位，自动暂停待产品决策）**
 > ｜ 2026-11-05 复核：主聊天路径已闭环，**发现 5 处残余缺口**（见 §2.1）｜ 目标版本：v1.6.2
+> ｜ 2026-11-09 回归修正：trae 版本码接错字段（`traeVersionCode` → 构建日期），全部模型 4001（见 §2.2）
 >
 > 目标只有一句话：**改实际发出的身份头，让它和官方现役客户端一致；并且这个一致
 > 是随时间自动维持的，不是一次性写死的常量。**
@@ -62,7 +63,7 @@ identity = { value, source, checkedAt, expiresAt }
 | `workbuddy`（WorkBuddy 国际版） | 写死 `5.5.2` | 官方 `/v2/update` 接口（6h）→ 本机 `genieVersion` → fallback 5.9.3 |
 | `qoder`/`qodercn` | 两处硬编码 `1.0.0` | 官方 `latest.yml`（6h）→ 本机 `.qoder-versions` 最大目录 → fallback 0.5.3 |
 | `zcode` | 双 fallback 3.14.3/3.14.4；平台头写死 win32/windows | 统一 fallback；`X-Platform`/`X-Os-Category` 按 `process.platform` 实取 |
-| `trae` | 写死 `0.1.52`/`20260811`/macOS/Apple | 读本机 `product.json` 的 `appVersion`（3.4.15）/`traeVersionCode`（20250325）/'version'（1.107.1）；设备头按宿主实取，Windows 不再发 macOS/Apple |
+| `trae` | 写死 `0.1.52`/`20260811`/macOS/Apple | 读本机 `product.json` 的 `appVersion`（3.4.15）/`date` 构建日期（20261103，见 §2.2）/'version'（1.107.1）；设备头按宿主实取，Windows 不再发 macOS/Apple |
 | `loomy` | 目录声明有 UA + 签名（实际没有） | 声明改为「仅 Authorization + token」，与实际一致 |
 | `gemini` | 复核后无矛盾 | 不改 |
 
@@ -85,7 +86,7 @@ identity = { value, source, checkedAt, expiresAt }
 |---|------|------|------|--------|
 | G1 | **buddy / workbuddy 登录与积分路径未走动态链** | `buddy-oauth.ts:151/196/266/319/374`、`buddy-credits.ts:290`、`buddy.ts:237` | 这些点发 `'User-Agent': product.userAgent` —— 静态字面量（国内版 `WorkBuddy/5.9.3 ...`、国际版 `WorkBuddy/5.5.2 ...`）。只有 `buddy-adapter.ts:1842` 的聊天路径经 `resolveUserAgent()` 替换了版本号 | 官方客户端升级后，**登录（auth/state、token 轮询）与每日签到仍发旧版本号**；上游若按 UA 版本判活，这两条路径会先失效，而聊天路径正常 —— 表现为「能聊天但签到失败」，排查成本高 |
 | G2 | **zcode 登录路径写死 3.14.3** | `zcode-login.ts:166`（`options.appVersion ?? '3.14.3'`）、`zcode-login.ts:253`（默认参数 `'3.14.3'`） | 未引用 `ZCODE_APP_VERSION_FALLBACK` 常量，与 `zcode.ts:148` 的统一定义脱节 | 改 fallback 时登录路径不跟着改，两处漂移复发（B1 修过一次同型问题） |
-| G3 | **trae 无官方版本源** | `client-identity.ts:228` `traeClientIdentity()` | 只读本机 `product.json`（`appVersion`/`traeVersionCode`/`version`），**无 `official` 分支**。官方更新站接口未确认 | 未装 Trae 的机器恒定发 fallback `3.4.15 / 20250325 / 1.107.1`；官方发新版后不会跟随 |
+| G3 | **trae 无官方版本源** | `client-identity.ts:228` `traeClientIdentity()` | 只读本机 `product.json`（`appVersion` / `date` / `version`），**无 `official` 分支**。官方更新站接口未确认 | 未装 Trae 的机器恒定发 fallback `3.4.15 / 20261103 / 1.107.1`（版本码见 §2.2 修正）；官方发新版后不会跟随 |
 | G3b | **trae `plugin_version` 未动态化** | `trae-oauth.ts:111`（`plugin_version: product.pluginVersion`）、`trae-product.ts:321`（`'2.3.62834'`） | 登录 URL 的 `plugin_version` 写死。同文件 `x_app_version` 已走 `traeClientIdentity().appVersion`，两者不同源 | 官方改 plugin 版本号后，登录 URL 带旧号。注意 `plugin_version` 按注释是「插件版本号，非 IDE 版本号」，**不能**直接用 appVersion 顶替 —— 需单独确认官方插件版本源 |
 | G4 | **workbuddy 三个静态版本字段未被动态值替换** | `product.ts:412/413/416`（`clientVersion: '5.5.2'`、`cliVersion: '5.5.2'`、`pluginVersion: '5.5.2'`） | `resolveUserAgent()` 用 `base.split(product.clientVersion).join(version)` 做版本替换 —— 它依赖常量 `clientVersion` 作为**被替换的旧值**。若官方版本变化（如 5.5.2 → 5.9.3），`split('5.5.2')` 命中不到 UA 里的旧值（UA 串是 `WorkBuddy/5.5.2 ...`，能命中；但国内版常量已是 5.9.3 而 UA 也是 5.9.3，替换成同值，等于**替换失效即恒等**） | 逻辑脆弱：替换靠字符串匹配旧常量，不是结构化字段。国际版 UA 字面量 `5.5.2` 与 `WORKBUDDY_UA_CN`/`INTL` 硬耦合，官方升到 6.x 时会露出旧号 |
 | G5 | **目录声明与实际值脱节** | `src/main/providers/accountChannels/catalogue.ts:23/32`（`User-Agent: qoder/1.0.0`）、`:91`（`User-Agent: ZCode/3.14.3`） | qoder 实际发 `qoder/<动态版本>`（0.5.3），声明仍写 `qoder/1.0.0`；zcode 声明写死 `3.14.3` | UI 上「声明的身份」与「实际发包的身份」不符。B4 的 UI tooltip 已显示实际生效值，但卡片主文案仍误导 |
@@ -120,6 +121,44 @@ identity = { value, source, checkedAt, expiresAt }
   buddy.ts 却漏了 import，tsc 两套都绿（为何绿待查，疑似 vendor 路径未覆盖），
   被 esbuild bundle 测试（`workbuddy-port.test.ts`）在模块求值期抓出 ReferenceError。
   **绿构建不等于绿运行**，与记忆里「死组件坏 import 无引用文件不进 bundle」同族。
+
+---
+
+## 2.2 回归：trae 版本码取错字段 ⇒ 全部模型 4001（2026-11-09）
+
+**现象**：WorkBuddy 客户端经网关走 trae 渠道、模型 `deepseek-v4.1-flash` 时 502，
+上游流内 `code=4001 We're sorry, the param is invalid`；错误文案把它解释成
+「仅可见但不可调用的自定义模型」。
+
+**取证（真实凭据直连上游，只改一个变量）**：
+
+| 实验 | 结果 |
+|------|------|
+| 经网关发**单条 user 消息**、无工具、无历史 | 仍 4001 ⇒ 与消息形状 / 工具 / reasoning 历史无关 |
+| 同账号换模型：`glm-5.3-flash` / `doubao-seed-code` | 同样 4001 ⇒ 与具体模型无关 |
+| 同账号、同请求体，只改 `X-Ide-Version-Code` | `20250325` 拒 · `20260805` 拒 · **`20260810` 通过** · `20260811` / `20261103` 通过 |
+| 只改 `X-App-Version-Code`（Ide 码保持 `20260811`） | 不影响结果 ⇒ **闸门只有 `X-Ide-Version-Code`** |
+| 换成 `20261103` 后打用户原模型 `deepseek-v4.1-flash` | 流正常开始（`event:metadata`） |
+
+**根因**：B2/B3 把 trae 版本码接到 `product.json.traeVersionCode`（本机 `20250325`）。
+那是过期常量；官方客户端的同形值来自 `date`（构建时间 `2026-11-03`，`YYYYMMDD`
+后与 trae-mate 抓到的 `20260811` 同一形态），native 层正是从 common params 的
+`build_time = productService.date` 取它。接错字段后版本码恒在门槛之下，**每个模型**
+都被拒，而报错文案指向模型，把排查带偏。
+
+**修复**：
+
+- `client-identity.ts::traeClientIdentity()`：版本码取 `date` → `YYYYMMDD`；
+  `traeVersionCode` 只在本机 `product.json` 缺 `date` 时兜底；读 `product.json`
+  改走 60s stat 节流（头构造点在每笔请求上，WSL 读的是 `/mnt/c` 跨盘路径）。
+- `TRAE_FALLBACK_VERSION_CODE`：`20250325` → **`20261103`**（未装 Trae 的宿主
+  会发它；必须 ≥ 实测下限 `20260810`）。
+- 删除 `TraeProduct.ideVersionCode`（未被任何代码读取的过期常量）。
+- 4001 文案改为「先查版本码下限，再查模型是否可调用」，并给出
+  `MODELPORT_TRAE_VERSION_CODE` 覆盖口。
+
+**未做**：trae 仍无官方版本接口（G3 不变）。上游下限会随官方发版推进，
+未装官方客户端的宿主需要靠 fallback 常量 / env 覆盖跟进，直到找到官方源。
 
 ---
 
@@ -196,7 +235,7 @@ const headers = {
 |------|----------|----------|----------|
 | `buddy`（WorkBuddy 国内版） ✅ | `User-Agent`（国内客户端形态）、`X-IDE-Version` | 与国际版**同源**：官方 `/v2/update`（6h）→ 本机 `product.json` → fallback | `buddy.ts` 的 `BUDDY_USER_AGENT`；`buddy-adapter.ts` 的 `X-IDE-Version`；`product.ts` 的 `CODEBUDDY` |
 | `workbuddy` ✅ | `User-Agent`（国际线/国内线两档）、`X-IDE-Version`、`pluginVersion` | 官方 `/v2/update`（6h）→ 本机 `product.json` → fallback | `product.ts` 的 `WORKBUDDY`；`resolveUserAgent()` 按模型族返回 |
-| `trae` ✅ | UA、`X-Ide-Version`、`X-Ide-Version-Code`、`X-Device-Type`、`X-OS-Version`、`X-Device-Brand` | 本机 `product.json`（`appVersion`/`traeVersionCode`/`version`）；设备三项按宿主实取 | `trae.ts` 的 SOLO/签到/OAuth 头、`trae-auth.ts`、`trae-oauth.ts` |
+| `trae` ✅ | UA、`X-Ide-Version`、`X-Ide-Version-Code`、`X-Device-Type`、`X-OS-Version`、`X-Device-Brand` | 本机 `product.json`（`appVersion`/`date`/`version`；版本码取构建日期，见 §2.2）；设备三项按宿主实取 | `trae.ts` 的 SOLO/签到/OAuth 头、`trae-auth.ts`、`trae-oauth.ts` |
 | `qoder` / `qodercn` ✅ | `User-Agent: qoder/<version>` | 官方 `latest.yml`（6h）→ 本机 `.qoder-versions` → fallback | `qoder.ts`、`qoder-auth.ts` 收敛到 `qoderClientVersion()` |
 | `lobsterai` | `User-Agent: LobsterAI/<version>` | 已有 `resolveClientVersion()`（官方接口）→ fallback | `lobsterai.ts` 的 `lobsteraiChatHeaders` / `lobsteraiModelsHeaders` |
 | `zcode` ✅ | `User-Agent: ZCode/<ver>`、`X-ZCode-App-Version` | 凭据 `app_version` → 统一 fallback | `zcode-upstream.ts`、`zcode-transport.ts`、`zcode.ts` |
@@ -233,7 +272,7 @@ const headers = {
 - 落盘：`~/.modelport/identity-cache.json`（`MODELPORT_HOME` 可覆盖），启动先加载。
 - 本机兜底：WorkBuddy `product.json` 的 `genieVersion`、CodeBuddy `product.json` 的
   `version`、Qoder `.qoder-versions` 最大目录、Trae `product.json` 的
-  `appVersion`/`traeVersionCode`/`version`；60s stat 节流 + mtime 变化即重读。
+  `appVersion`/`date`（版本码）/`version`；60s stat 节流 + mtime 变化即重读。
 - 已接入：`product.ts` 的 WorkBuddy/CodeBuddy UA、`buddy-adapter.ts` 的
   `X-IDE-Version`、`buddy-oauth.ts` 的登录 `version` 参数、`qoder.ts` /
   `qoder-auth.ts` 的 `qoder/<version>` UA、`trae.ts` 的全套 SOLO/签到/OAuth 头。
@@ -310,11 +349,13 @@ const headers = {
   同为 5.9.3。两条渠道的版本号都从这条链取。
   ~~CodeBuddy IDE release notes 的 4.12.x~~ 是**另一条产品线**，与国内版客户端
   不同体系，已停止作为版本来源（中途误接，已回退）。
-- `trae`：本机 Trae CN `product.json` 三套版本各司其职：
-  `appVersion 3.4.15`（→ `X-Ide-Version` / UA）、`traeVersionCode 20250325`
-  （→ `X-Ide-Version-Code`）、`version 1.107.1`（VS Code 基线，→ market 头
+- `trae`：本机 Trae CN `product.json` 的字段各司其职：
+  `appVersion 3.4.15`（→ `X-Ide-Version` / UA）、`date`（构建时间 `2026-11-03` →
+  `X-Ide-Version-Code`，取 `YYYYMMDD`）、`version 1.107.1`（VS Code 基线，→ market 头
   `VSCode <ver>`）；官方 `getCommonParams` 映射证实设备头来自运行时
   `os_name` / `os_version` / `device_model`。
+  ~~`traeVersionCode 20250325` → `X-Ide-Version-Code`~~ 是**错的**（2026-11-09 实测，
+  见 §2.2）：它是过期常量，低于上游下限时全部模型 4001。
 
 **待确认**：
 

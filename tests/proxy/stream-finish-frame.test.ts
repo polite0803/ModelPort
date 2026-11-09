@@ -95,3 +95,59 @@ test('空流只补一个 [DONE]，不产生多余正文帧', async () => {
   assert.equal(contentFrames, 0)
   assert.equal(text.match(/data: \[DONE\]/g)?.length, 1)
 })
+
+test('reasoning 流命中 max_tokens 时，回填正文必须排在结束帧之前', async () => {
+  const text = await run([
+    `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: '只有思考' } }] })}\n\n`,
+    finish('max_tokens'),
+    DONE,
+  ])
+
+  assert.match(text, /"finish_reason":"max_tokens"/)
+  assert.ok(
+    text.indexOf('"content":"只有思考"') < text.indexOf('"finish_reason":"max_tokens"'),
+    '结束帧之后再来正文会被 strict 客户端判成 content_after_finish，整轮拒收',
+  )
+  assert.equal(text.match(/data: \[DONE\]/g)?.length, 1)
+})
+
+test('结束帧立即下发，不等 [DONE]；上游之后补发的正文照原文转发', async () => {
+  const seen: string[] = []
+  const transform = streamHandler.createTransformStream('m', 'req-no-hold')
+  transform.on('data', (chunk: Buffer) => { seen.push(chunk.toString()) })
+
+  transform.write(content('答案'))
+  transform.write(finish('stop'))
+  assert.match(seen.join(''), /"finish_reason":"stop"/, '结束帧不能为了排后面可能的正文而被扣住')
+
+  transform.write(content('尾注'))
+  transform.end()
+  await new Promise<void>((resolve) => transform.once('end', () => resolve()))
+
+  const text = seen.join('')
+  assert.ok(text.includes('"content":"尾注"'), '上游补发的正文属于模型原文，不能丢')
+  assert.equal(text.match(/data: \[DONE\]/g)?.length, 1)
+})
+
+test('结束帧之后才到的 reasoning 不再补成正文帧', async () => {
+  const text = await run([
+    finish('max_tokens'),
+    `data: ${JSON.stringify({ choices: [{ delta: { reasoning_content: '迟到的思考' } }] })}\n\n`,
+    DONE,
+  ])
+
+  assert.doesNotMatch(text, /"content":"迟到的思考"/, '结束帧之后的正文同样会被 strict 客户端整轮拒收')
+  assert.equal(text.match(/data: \[DONE\]/g)?.length, 1)
+})
+
+test('结束帧之后的 usage 尾帧跟随结束帧，且不丢 usage', async () => {
+  const usage = `data: ${JSON.stringify({
+    choices: [],
+    usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+  })}\n\n`
+  const text = await run([content('答案'), finish('stop'), usage, DONE])
+
+  assert.match(text, /"total_tokens":3/)
+  assert.ok(text.indexOf('"finish_reason":"stop"') < text.indexOf('"total_tokens":3'))
+  assert.equal(text.match(/data: \[DONE\]/g)?.length, 1)
+})

@@ -7,6 +7,7 @@ import {
   Copy,
   Eye,
   EyeOff,
+  KeyRound,
   ListChecks,
   Loader2,
   Plus,
@@ -18,6 +19,7 @@ import {
   UserMinus,
 } from 'lucide-react'
 import type {
+  ChannelAccountView,
   ChannelAutoCheckin,
   ChannelCredits,
   ChannelIdentityEntry,
@@ -141,6 +143,25 @@ interface CredentialAddState {
   error?: string
 }
 
+/**
+ * TRAE 账号的设备号编辑对话框。
+ *
+ * 上游只认官方客户端登记过的 16 位号，自己生成的号 claim 恒回 9074
+ * （见渠道包 `trae-device.ts`）。这里列出客户端 `storage.json` 里能读到的
+ * 候选号，也允许手工粘贴 —— 网关与客户端不同机时候选为空，手工是唯一路径。
+ */
+interface TraeDeviceState {
+  accountId: string
+  nickname: string
+  /** 输入框当前值；初始为该账号凭据里的 device_id。 */
+  deviceId: string
+  devices: Array<{ deviceId: string; source: string }>
+  searched: string[]
+  loading: boolean
+  saving: boolean
+  error?: string
+}
+
 // 2.5s 轮询叠加上面那次「一次刷新十几个 RPC」，会把远程 UI 自己打到 429。
 // 登录轮询 5s 仍远快于人工感知；自动签到的状态变化也不需要 2.5s 的精度。
 const POLL_INTERVAL_MS = 5000
@@ -204,6 +225,7 @@ export function Channels() {
   const [autoGrowthBusy, setAutoGrowthBusy] = useState(false)
   const [login, setLogin] = useState<LoginState | null>(null)
   const [credentialAdd, setCredentialAdd] = useState<CredentialAddState | null>(null)
+  const [traeDevice, setTraeDevice] = useState<TraeDeviceState | null>(null)
   /**
    * 标注对话框的目标行。存 `(channel, model)` 而不是算好的 displayName：
    * 展示名由 `channelModelDisplayName` 现算，和主进程写目录用的是同一个函数，
@@ -546,6 +568,65 @@ export function Channels() {
     await window.electronAPI.channels.rpc('account.delete', { accountId })
     setBusyId(null)
     await refresh()
+  }
+
+  /**
+   * 打开 TRAE 设备号对话框：先读候选（只读 RPC），再让用户挑选或粘贴。
+   *
+   * 候选可能为空（网关与官方客户端不同机）：此时保留手工输入，不把「读不到」
+   * 渲染成「没有设备号」。
+   */
+  const openTraeDevice = async (account: ChannelAccountView) => {
+    setTraeDevice({
+      accountId: account.id,
+      nickname: account.nickname,
+      deviceId: '',
+      devices: [],
+      searched: [],
+      loading: true,
+      saving: false,
+    })
+    const result = await window.electronAPI.channels.rpc('credits.traeDevices', { accountId: account.id })
+    const value = result.ok
+      ? result.value as {
+        devices?: Array<{ deviceId: string; source: string }>
+        searched?: string[]
+        current?: string | null
+      } | undefined
+      : undefined
+    setTraeDevice(current => current === null || current.accountId !== account.id
+      ? current
+      : {
+          ...current,
+          loading: false,
+          deviceId: value?.current ?? current.deviceId,
+          devices: value?.devices ?? [],
+          searched: value?.searched ?? [],
+          error: result.ok ? undefined : (result.error?.message ?? t('channels.device.readFailed')),
+        })
+  }
+
+  const saveTraeDevice = async () => {
+    const current = traeDevice
+    if (current === null) return
+    const deviceId = current.deviceId.trim()
+    if (!/^\d{16}$/.test(deviceId)) {
+      setTraeDevice({ ...current, error: t('channels.device.invalid') })
+      return
+    }
+    setTraeDevice({ ...current, saving: true, error: undefined })
+    const result = await window.electronAPI.channels.rpc('credits.setTraeDevice', {
+      accountId: current.accountId,
+      deviceId,
+    })
+    if (!result.ok) {
+      setTraeDevice(state => state === null || state.accountId !== current.accountId
+        ? state
+        : { ...state, saving: false, error: result.error?.message ?? t('channels.device.saveFailed') })
+      return
+    }
+    setTraeDevice(null)
+    toast({ title: t('channels.device.saved'), description: t('channels.device.savedHint', { name: current.nickname }) })
   }
 
   const claimCredits = async (channel: ChannelView) => {
@@ -1452,6 +1533,18 @@ export function Channels() {
                         >
                           <RefreshCw className="h-3.5 w-3.5" />
                         </Button>
+                        {channel.id === 'trae' && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="px-1"
+                            disabled={busy}
+                            title={t('channels.device.button')}
+                            onClick={() => void openTraeDevice(account)}
+                          >
+                            <KeyRound className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
                         <Switch
                           checked={account.enabled}
                           disabled={busy}
@@ -1648,6 +1741,88 @@ export function Channels() {
             >
               {credentialAdd?.busy === true && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               {t('channels.credential.addKey')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={traeDevice !== null}
+        onOpenChange={open => { if (!open && traeDevice?.saving !== true) setTraeDevice(null) }}
+      >
+        <DialogContent className="sm:max-w-[460px]">
+          <DialogHeader>
+            <DialogTitle>{t('channels.device.title', { name: traeDevice?.nickname })}</DialogTitle>
+            <DialogDescription>{t('channels.device.hint')}</DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3 text-sm">
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground" htmlFor="trae-device-id">
+                {t('channels.device.label')}
+              </label>
+              <Input
+                id="trae-device-id"
+                inputMode="numeric"
+                autoComplete="off"
+                spellCheck={false}
+                disabled={traeDevice?.loading === true || traeDevice?.saving === true}
+                value={traeDevice?.deviceId ?? ''}
+                placeholder={t('channels.device.placeholder')}
+                onChange={event => setTraeDevice(current => current === null
+                  ? null
+                  : { ...current, deviceId: event.target.value, error: undefined })}
+              />
+            </div>
+
+            {traeDevice?.loading === true && (
+              <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                {t('channels.device.reading')}
+              </p>
+            )}
+
+            {traeDevice !== null && traeDevice.loading !== true && traeDevice.devices.length > 0 && (
+              <div className="space-y-1">
+                <p className="text-xs text-muted-foreground">{t('channels.device.detected')}</p>
+                <ul className="space-y-1">
+                  {traeDevice.devices.map(device => (
+                    <li key={device.deviceId}>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="w-full justify-start font-mono text-xs"
+                        disabled={traeDevice.saving}
+                        onClick={() => setTraeDevice(current => current === null
+                          ? null
+                          : { ...current, deviceId: device.deviceId, error: undefined })}
+                      >
+                        {device.deviceId}
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {traeDevice !== null && traeDevice.loading !== true && traeDevice.devices.length === 0 && (
+              <p className="text-xs text-muted-foreground">{t('channels.device.none')}</p>
+            )}
+
+            {traeDevice?.error !== undefined && <p className="text-destructive">{traeDevice.error}</p>}
+            <p className="text-xs text-muted-foreground">{t('channels.device.where')}</p>
+          </div>
+
+          <DialogFooter className="gap-2">
+            <Button variant="outline" disabled={traeDevice?.saving === true} onClick={() => setTraeDevice(null)}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              disabled={traeDevice?.saving === true || traeDevice?.loading === true}
+              onClick={() => void saveTraeDevice()}
+            >
+              {traeDevice?.saving === true && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              {t('channels.device.save')}
             </Button>
           </DialogFooter>
         </DialogContent>

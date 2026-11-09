@@ -189,6 +189,17 @@ function errorDetailsOf(message: string): UpstreamErrorDetails {
   return { message }
 }
 
+/**
+ * 渠道包错误 → 上游错误体。
+ *
+ * 包的 `code`（QUOTA_EXCEEDED / RATE_LIMIT / AUTH / MISSING_CREDENTIAL …）是它唯一的
+ * 机读分类，旧实现只把 message 交给路由层，客户端因此拿不到「额度/限流/换一条」这类
+ * 可判断的信号，只能读中文散文。
+ */
+function channelErrorDetails(message: string, code?: unknown): UpstreamErrorDetails {
+  return typeof code === 'string' && code ? { message, code } : errorDetailsOf(message)
+}
+
 type ProviderForwarder = {
   name: string
   matches: (provider: Provider) => boolean
@@ -839,7 +850,7 @@ export class RequestForwarder {
         }
       }
       if (first.kind === 'error') {
-        const failure = first.error as { message?: string; status?: number; retryAfterMs?: number }
+        const failure = first.error as { message?: string; status?: number; retryAfterMs?: number; code?: string }
         const message = failure.message ?? '渠道请求失败'
         // 首块前的流式失败（含 429）同样要透传渠道包上报的解禁时刻，否则这段
         // 与 catch 块（非流式 / 建流阶段）两套口径，流式 429 又退回「只用自退避」。
@@ -851,7 +862,7 @@ export class RequestForwarder {
           success: false,
           status: failure.status ?? 502,
           error: message,
-          errorDetails: errorDetailsOf(message),
+          errorDetails: channelErrorDetails(message, failure.code),
           ...(retryAfter === undefined ? {} : { retryAfter }),
           latency: Date.now() - startTime,
         }
@@ -889,7 +900,7 @@ export class RequestForwarder {
             ? 400
             : 502,
           error: probe.message,
-          errorDetails: errorDetailsOf(probe.message),
+          errorDetails: channelErrorDetails(probe.message, probe.details?.code),
           latency: Date.now() - startTime,
         }
       }
@@ -930,7 +941,7 @@ export class RequestForwarder {
         providerSessionId: requestId,
       }
     } catch (error) {
-      const failure = error as { message?: string; status?: number; retryAfterMs?: number }
+      const failure = error as { message?: string; status?: number; retryAfterMs?: number; code?: string }
       const message = failure.message ?? '渠道请求失败'
       const retryAfter =
         typeof failure.retryAfterMs === 'number' && Number.isFinite(failure.retryAfterMs)
@@ -940,7 +951,7 @@ export class RequestForwarder {
         success: false,
         status: failure.status ?? 502,
         error: message,
-        errorDetails: errorDetailsOf(message),
+        errorDetails: channelErrorDetails(message, failure.code),
         ...(retryAfter === undefined ? {} : { retryAfter }),
         latency: Date.now() - startTime,
       }
@@ -965,9 +976,9 @@ export class RequestForwarder {
       return { ok: true, stream: this.withIdleWatchdog(source) }
     }
     if (first.kind === 'error') {
-      const failure = first.error as { message?: string; status?: number }
+      const failure = first.error as { message?: string; status?: number; code?: string }
       const message = failure.message ?? '上游在建流阶段失败'
-      return { ok: false, status: failure.status ?? 502, message, details: errorDetailsOf(message) }
+      return { ok: false, status: failure.status ?? 502, message, details: channelErrorDetails(message, failure.code) }
     }
     if (first.kind === 'closed') {
       const message = '上游在产出任何内容之前就结束了'

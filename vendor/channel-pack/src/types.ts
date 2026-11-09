@@ -337,6 +337,38 @@ export interface RpcCreditsStatusResponse {
   accounts: RpcCreditsAccountStatus[]
 }
 
+/**
+ * RPC: 读取 TRAE 签到设备号候选（只读）。
+ *
+ * 上游只认官方客户端登记过的 16 位设备号，自己生成的号 claim 恒回 9074。
+ * 传 `accountId` 时一并回该账号当前凭据里的设备号，供面板对照。
+ */
+export interface RpcTraeDevicesRequest {
+  accountId?: string
+}
+
+/** RPC: TRAE 设备号候选响应 */
+export interface RpcTraeDevicesResponse {
+  /** 官方客户端 `storage.json` 里登记过的设备号（已去重）。 */
+  devices: Array<{ deviceId: string; source: string }>
+  /** 实际检查过的路径（含不存在的），排障用。 */
+  searched: string[]
+  /** 该账号当前凭据里的 `device_id`；未传 `accountId` 时为 `null`。 */
+  current: string | null
+}
+
+/** RPC: 给某个 TRAE 账号写入真设备号请求 */
+export interface RpcSetTraeDeviceRequest {
+  accountId: string
+  /** 16 位纯数字；非法值直接拒绝，不写凭据。 */
+  deviceId: string
+}
+
+/** RPC: 给某个 TRAE 账号写入真设备号响应 */
+export interface RpcSetTraeDeviceResponse {
+  deviceId: string
+}
+
 /** RPC: 一键领取积分请求 */
 export interface RpcCreditsClaimAllRequest {
   provider: string

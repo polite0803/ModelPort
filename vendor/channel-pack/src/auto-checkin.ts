@@ -378,6 +378,8 @@ interface RunTotals {
   failed: number
   /** 失败里「凭据失效，需用户重新登录」的账号数（终态，不再自动重试）。 */
   authFailed: number
+  /** 失败里「设备号未登记 / 本机名额已用」的账号数（终态，需用户填真设备号）。 */
+  deviceFailed: number
   /** 失败里「上游人数过多」的账号数（瞬时，保留 pending 自动重试）。 */
   busyFailed: number
   /**
@@ -396,7 +398,7 @@ interface RunTotals {
 }
 
 function emptyTotals(): RunTotals {
-  return { providers: 0, claimed: 0, totalCredit: 0, totalByUnit: { token: 0, credit: 0 }, alreadyClaimed: 0, inactive: 0, failed: 0, authFailed: 0, busyFailed: 0, coversToday: 0, skipped: 0, errors: 0 }
+  return { providers: 0, claimed: 0, totalCredit: 0, totalByUnit: { token: 0, credit: 0 }, alreadyClaimed: 0, inactive: 0, failed: 0, authFailed: 0, deviceFailed: 0, busyFailed: 0, coversToday: 0, skipped: 0, errors: 0 }
 }
 
 /**
@@ -448,8 +450,9 @@ export function describeRun(totals: RunTotals): string {
   }
   if (totals.alreadyClaimed > 0) parts.push(`${totals.alreadyClaimed} 个今天已领`)
   if (totals.failed > 0) {
-    const other = Math.max(0, totals.failed - totals.authFailed - totals.busyFailed)
+    const other = Math.max(0, totals.failed - totals.authFailed - totals.deviceFailed - totals.busyFailed)
     if (totals.authFailed > 0) parts.push(`${totals.authFailed} 个需重新登录`)
+    if (totals.deviceFailed > 0) parts.push(`${totals.deviceFailed} 个需修正设备号`)
     if (totals.busyFailed > 0) parts.push(`${totals.busyFailed} 个人数过多`)
     if (other > 0) parts.push(`${other} 个失败`)
   }
@@ -477,10 +480,25 @@ function isAuthFailure(outcome: ClaimOutcome): boolean {
   return /凭据|重新登录|invalid access token|HTTP 40[13]/i.test(outcome.message)
 }
 
-/** 上游「人数过多」类瞬时失败（TRAE 9074）：保留 pending，稍后自动重试。 */
+/**
+ * 设备号问题（TRAE 9074 / 9095）：**再等也不会变**。
+ *
+ * ⚠️ 9074 的文案是「签到人数过多」，但它不是瞬时失败：2026-11-09 实测，
+ * 同一账号同一 token，只要 `X-Device-Id` 不是官方客户端登记过的 16 位号，
+ * 每次（连续多天）都回 9074；换成客户端 `storage.json` 里的号后立即 `code:0`。
+ * 旧实现把它当 busy 保留 pending ⇒ 每 30 分钟拿同一个假设备号重打上游一整天。
+ * 9095 是「本机今日名额已被另一个账号用掉」，同样当天无解。
+ */
+function isDeviceFailure(outcome: ClaimOutcome): boolean {
+  if (outcome.kind !== 'failed') return false
+  return outcome.code === 9074 || outcome.code === 9095
+}
+
+/** 上游「人数过多」类瞬时失败：保留 pending，稍后自动重试。 */
 function isBusyFailure(outcome: ClaimOutcome): boolean {
   if (outcome.kind !== 'failed') return false
-  if (outcome.code === 9074) return true
+  // 9074 属于设备号问题，先由 isDeviceFailure 认领，不能落进「等一会儿就好」。
+  if (isDeviceFailure(outcome)) return false
   return /人数过多|参与用户太多|稍后再试/.test(outcome.message)
 }
 
@@ -509,7 +527,7 @@ function isProviderSettled(
       .filter((outcome) => outcome.kind === 'failed')
     // 旧宿主可能不带 `results`：拿不到失败原因时保持可重试（宁多试，不误记）。
     if (failed.length === 0) return false
-    return failed.every((outcome) => isAuthFailure(outcome))
+    return failed.every((outcome) => isAuthFailure(outcome) || isDeviceFailure(outcome))
   }
   if (summary.retryLater === true) return false
   return true
@@ -542,7 +560,7 @@ export function describeChannel(summary: {
   const failedOutcomes = results
     .map((row) => row.outcome)
     .filter((outcome) => outcome.kind === 'failed')
-  const retryableFailure = failedOutcomes.some((outcome) => !isAuthFailure(outcome))
+  const retryableFailure = failedOutcomes.some((outcome) => !isAuthFailure(outcome) && !isDeviceFailure(outcome))
   if (summary.claimed > 0) {
     // ⚠️ 「领到了但 +0 分」与「今天已领」必须能分辨：前者写成「已领」会和
     // alreadyClaimed 撞词，用户无法判断这次到底有没有动作。
@@ -557,14 +575,16 @@ export function describeChannel(summary: {
   if (summary.failed > 0) {
     const auth = failedOutcomes.filter((outcome) => isAuthFailure(outcome)).length
     const busy = failedOutcomes.filter((outcome) => isBusyFailure(outcome)).length
-    const other = Math.max(0, summary.failed - auth - busy)
-    // 三类失败的可操作结论完全不同：凭据失效要人去换凭据，人数过多只需等，
-    // 其余才是「失败」。合成一句「N 个失败」会把前两类也变成无从下手的噪声。
+    const device = failedOutcomes.filter((outcome) => isDeviceFailure(outcome)).length
+    const other = Math.max(0, summary.failed - auth - busy - device)
+    // 四类失败的可操作结论完全不同：凭据失效要人去换凭据、设备号未登记要人去填真号、
+    // 人数过多只需等，其余才是「失败」。合成一句「N 个失败」会把前三类都变成无从下手的噪声。
     if (auth > 0) parts.push(`${auth} 个需重新登录`)
+    if (device > 0) parts.push(`${device} 个需修正设备号`)
     if (busy > 0) parts.push(`${busy} 个人数过多`)
     if (other > 0) parts.push(`${other} 个失败`)
     // 旧宿主不带 `results`：拿不到原因时保持原有计数，不编造分类。
-    if (auth + busy + other === 0) parts.push(`${summary.failed} 个失败`)
+    if (auth + device + busy + other === 0) parts.push(`${summary.failed} 个失败`)
   }
   if (summary.inactive > 0) parts.push(`${summary.inactive} 个未开启`)
   if (parts.length === 0) return '无可领'
@@ -761,11 +781,12 @@ export function createAutoCheckin(deps: AutoCheckinDeps): AutoCheckin {
       totals.alreadyClaimed += summary.alreadyClaimed
       totals.inactive += summary.inactive
       totals.failed += summary.failed
-      // 失败再分两档：凭据失效（终态）与人数过多（瞬时）。摘要行若仍写
-      // 「N 个失败」，就会和下面逐渠道的「需重新登录」自相矛盾。
+      // 失败再分三档：凭据失效 / 设备号问题（都是终态）与人数过多（瞬时）。
+      // 摘要行若仍写「N 个失败」，就会和下面逐渠道的「需重新登录」自相矛盾。
       for (const row of results) {
         if (row.outcome.kind !== 'failed') continue
         if (isAuthFailure(row.outcome)) totals.authFailed += 1
+        else if (isDeviceFailure(row.outcome)) totals.deviceFailed += 1
         else if (isBusyFailure(row.outcome)) totals.busyFailed += 1
       }
       // ⚠️ 记账口径**只认**这一项：渠道用 `coversToday` 自己声明「这条痕迹是不是

@@ -54,14 +54,14 @@ export interface TraeProduct {
   /** App ID（请求头 X-App-Id）。 */
   appId: string
   /**
-   * IDE 版本号（控制模型可用性：0.1.52 才能用 glm-5.3）。
+   * IDE 版本号（`X-Ide-Version` / `Trae/<version>`）。
    *
-   * 版本号是「模型可用的准入条件」—— 上游按 `X-Ide-Version` / `X-App-Version-Code`
-   * 决定哪些模型可以返回，版本过低时 glm-5.3 等新模型会报 `4001 param is invalid`。
+   * 它是一个身份字段，但**真正的准入闸门是版本码**（`X-Ide-Version-Code`，
+   * 日期式构建号）：2026-11-09 实测同一账号下 3.4.15 + 版本码 `20250325`
+   * 会让**所有模型**回 `4001 param is invalid`，把版本码换成 `20260810`
+   * 以上即恢复。版本码的取值链见 `client-identity.ts::traeClientIdentity()`。
    */
   ideVersion: string
-  /** IDE 版本号代码（日期式，如 `20260811`）。 */
-  ideVersionCode: string
   /** 设备品牌（请求头 X-Device-Brand）。 */
   deviceBrand: string
   /** 操作系统版本（请求头 X-OS-Version）。 */
@@ -309,7 +309,6 @@ export const TRAE: TraeProduct = {
   clientId: 'en1oxy7wnw8j9n',
   appId: '6eefa01c-1036-4c7e-9ca5-d891f63bfcd8',
   ideVersion: '3.4.15',
-  ideVersionCode: '20250325',
   deviceBrand: 'Apple',
   osVersion: 'macOS 15.7.4',
   function: 'solo_work_lite',

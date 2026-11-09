@@ -41,7 +41,7 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
 },
   {
     id: 'trae',
-    upstreamIdentity: { declared: 'User-Agent: Trae/<appVersion> · X-Ide-Version: <appVersion> · X-Ide-Version-Code: <traeVersionCode> · 设备头按宿主实取', risk: 'high' },
+    upstreamIdentity: { declared: 'User-Agent: Trae/<appVersion> · X-Ide-Version: <appVersion> · X-Ide-Version-Code: <构建日期 YYYYMMDD> · 设备头按宿主实取', risk: 'high' },
     name: 'TRAE (字节)',
     vendor: '字节跳动',
     loginKind: 'browser',

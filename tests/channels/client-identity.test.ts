@@ -16,7 +16,9 @@ import {
   normalizeBuildVersion,
   qoderClientVersion,
   resetClientVersionCache,
+  TRAE_FALLBACK_VERSION_CODE,
   traeClientIdentity,
+  versionCodeFromBuildDate,
   workbuddyClientVersion,
 } from '../../vendor/channel-pack/src/client-identity.ts'
 
@@ -117,6 +119,66 @@ test('Trae 请求头不再写死 macOS / 0.1.52', () => {
   assert.match(source, /traeDeviceHeaders\(/)
   assert.doesNotMatch(source, /'X-Device-Type': 'macos'/)
   assert.doesNotMatch(source, /Trae\/0\.1\.52/)
+})
+
+test('Trae 版本码取 product.json 构建日期，忽略过期的 traeVersionCode', () => {
+  const previous = {
+    localAppData: process.env.LOCALAPPDATA,
+    version: process.env.MODELPORT_TRAE_VERSION,
+    code: process.env.MODELPORT_TRAE_VERSION_CODE,
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'modelport-trae-builddate-'))
+  const productDir = join(dir, 'Programs', 'Trae CN', 'resources', 'app')
+  mkdirSync(productDir, { recursive: true })
+  // 本机真实形状：traeVersionCode 停在 2025-03-25，构建日期是 2026-11-03。
+  writeFileSync(join(productDir, 'product.json'), JSON.stringify({
+    version: '1.107.1',
+    appVersion: '3.4.15',
+    traeVersionCode: '20250325',
+    date: '2026-11-03T10:29:58.368Z',
+  }))
+  process.env.LOCALAPPDATA = dir
+  delete process.env.MODELPORT_TRAE_VERSION
+  delete process.env.MODELPORT_TRAE_VERSION_CODE
+  resetClientVersionCache()
+  try {
+    const info = traeClientIdentity()
+    assert.equal(info.versionCode, '20261103')
+    assert.equal(info.appVersion, '3.4.15')
+    assert.equal(info.source, 'local-install')
+  } finally {
+    if (previous.localAppData === undefined) delete process.env.LOCALAPPDATA
+    else process.env.LOCALAPPDATA = previous.localAppData
+    if (previous.version === undefined) delete process.env.MODELPORT_TRAE_VERSION
+    else process.env.MODELPORT_TRAE_VERSION = previous.version
+    if (previous.code === undefined) delete process.env.MODELPORT_TRAE_VERSION_CODE
+    else process.env.MODELPORT_TRAE_VERSION_CODE = previous.code
+    resetClientVersionCache()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('Trae 兜底版本码不低于上游实测下限，构建日期解析可证伪', () => {
+  // 2026-11-09 实测：X-Ide-Version-Code = 20260805 被拒、20260810 通过。
+  // 兜底值必须落在下限之上，否则未装 Trae 的宿主会全模型 4001。
+  assert.ok(
+    Number(TRAE_FALLBACK_VERSION_CODE) >= 20260810,
+    `兜底版本码 ${TRAE_FALLBACK_VERSION_CODE} 低于上游下限 20260810`,
+  )
+  assert.equal(versionCodeFromBuildDate('2026-11-03T10:29:58.368Z'), '20261103')
+  assert.equal(versionCodeFromBuildDate(' 2026-08-10'), '20260810')
+  assert.equal(versionCodeFromBuildDate('20250325'), undefined)
+  assert.equal(versionCodeFromBuildDate(undefined), undefined)
+})
+
+test('4001 文案先指向版本码下限，再提到不可调用的自定义模型', () => {
+  const source = readFileSync(
+    join(ROOT, 'vendor', 'channel-pack', 'src', 'trae-adapter.ts'),
+    'utf8',
+  )
+  assert.match(source, /X-Ide-Version-Code 低于/)
+  assert.match(source, /MODELPORT_TRAE_VERSION_CODE/)
+  assert.match(source, /仅可见但不可调用/)
 })
 
 test('本机安装发现覆盖 WSL 的 Windows 侧（Trae 不再恒 fallback）', () => {
