@@ -644,3 +644,19 @@ prompt_tokens 区间 59,722–175,435（均价 105,133，合计 231 万）
 **口径拍板（2026-11-09 18:00，用户选 ①）与实现**：`usage-cache.ts` 增 `cachedReported`；新增 `cacheField()`——非负有限数（**含 0**）计为「字段出现」，负数 / NaN / 字符串与缺省同义（畸形值不构成「报了 0」的断言）；三族命中字段（`prompt_tokens_details.cached_tokens` / `prompt_cache_hit_tokens` / `cache_read_input_tokens`）统一走它，显式 0 时 `cachedTokens` 返回 `0`。`trae-adapter.ts` 的透传条件本就是 `cached.cachedTokens !== undefined`，无需改动；`toOpenAiUsage.cacheReported` 随之为真 → 线路发 `{cached_tokens: 0}` → 宿主读成「已上报、零命中」⇒ TRAE 显示 0% 并留在分母。加回口径不受影响：0 命中时 `uncachedInput` 得 `prompt-0`，与旧的缺省路径同值。测试：`usage-cache.test.ts` 改为三族显式 0 各自断言，并钉住「负数/畸形 = 没报」；`openai-gateway-usage-reporting.test.ts` 增两条 TRAE 端到端（原始帧 → `readCachedInput` → `toOpenAiUsage` → 宿主 `readUsageFromBody`）。相关四个测试文件 **26/26 绿**；变异自检（判据退回 `value <= 0`）红 2 条，复原后逐字节一致。
 
 **门禁与部署（2026-11-09 18:11）**：镜像 `npm run gate`——build + build:daemon（`dist/modelport-daemon-1.7.13-x64.tar.gz`，18:01）+ tsc×2 全绿；套件 1984 条、1972 pass、12 条 routes 进程级 OOM（`Zone Allocation failed`）⇒ 逐文件串行重跑 **12/12 EXIT=0**。WSL 覆盖部署（备份 `/root/mpd.bak-presence-1810`）：`resources/channel-pack/worker.mjs` 内 `cachedReported`×4、`cacheField`×4；`/health` ok；18:11:07 启动日志含取证开启行。**现网端到端证据**：部署前 `requests=1505 / cacheReportedRequests=1451`（54 条差值正是 17:50–18:11「显示 `-`」窗口），部署后 3 分钟内新增 5 个 TRAE 请求 ⇒ **1505→1510 与 1451→1456 同步 +5**，`upstreamCacheRead` 保持 0（诚实零命中）。取证帧同期 22→63 条，开关仍在取证期。
+
+## 9.11 缓存不是 TRAE 的耗分原因：切历史体量（2026-11-09 20:24）
+
+用户实测 TRAE **一天约 1000 积分**。账本对拍：1940 轮 / 2.086 亿 prompt token ⇒ 约 **20.9 万 token/积分**，每轮 107K ≈ **0.5 分**；输出仅 135 万 token（0.6%）。缓存命中率与积分无关——**消耗几乎完全由每轮 prompt 体量决定**。
+
+**压缩实际只救了 0.04%**：当日 analyzed 6647 个位点、applied 仅 50（0.75%），共省 9.1 万 token。原因有二：live zone 只碰「最新一条 tool + 最新一条 user」，历史一条不动；源码/普通文本一律 `unsupported_type`。
+
+**根因**：`contextManagement.enabled = false`，完整历史每轮原样重发。该开关不能直接打开——按条数从头切会切断 `assistant(tool_calls)` 与 `tool` 结果的配对（上游 400），且会把首条任务消息切走。
+
+**修法**（`services/contextManagementService.ts`）：两条策略共用 `keepToolGroupAndTask()`——从 `tool` 结果切进去时把它所属的 `assistant(tool_calls)`（及相邻 tool 结果）一起带回；窗口不再覆盖首条非 system `user` 时把它补回最前面。`TokenLimitStrategy` 额外用 `taskReserve()` 把任务 tokens 先算进预算，避免「留下最新工具结果、丢掉用户要做什么」。只做删除，不写任何文本。
+
+**门禁**：套件 **2079/2079 全绿**（0 fail、无 OOM）；裁剪器相关 16/16；变异自检（把 `keepToolGroupAndTask` 改成空操作）红 6 条，复原后逐字节一致。
+
+**部署**：WSL 覆盖（备份 `/root/mpd.bak-trim-2020`），`modelport-daemon.cjs` 含新符号 ×4，`/health` ok。配置经管理 RPC `config:update` 落盘并重启：`enabled=true`、`slidingWindow{40}`、`tokenLimit{65536}`、顺序 `[slidingWindow, tokenLimit]`。
+
+**预期与风险**：长会话 prompt 预计从 ~107K 压到 ≤64K（估算口径 `ceil(chars/3)`；中文密集内容实际 tokens 会高于估算值）。风险是模型丢掉早期工具结果后可能重读文件，轮数上升抵消部分收益。观察指标：每日 TRAE `requests`、`upstreamPrompt/requests` 均值、积分日耗。验证点：下一轮 TRAE 会话日志出现 `[Forwarder] Context management applied: X -> Y messages`。
