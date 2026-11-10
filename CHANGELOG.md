@@ -6,6 +6,37 @@
 条目按"为什么改、影响什么"描述；每条末尾括号里的短哈希指向产生该变更的提交，可在 `git show <哈希>` 中核对。
 版本边界与溯源说明见文末。
 
+## [1.7.16] - 2026-11-10
+
+版本边界：tag `v1.7.16`（相对 1.7.15）。一块内容：**控制台窗口里的「新窗口链接」不再一律甩给系统
+浏览器**——指向网关自身路由的链接在窗口内跳转，只有跨源链接才交给浏览器。另含一条发布链路修复：
+`package-lock.json` 里 55 条 `resolved` 指向 npmmirror，把 CI 的 `npm ci` 卡在 502/504。
+
+### Fixed（修复）
+
+- **点内部链接会从应用里跳出去**：`shell/main.ts` 的 `setWindowOpenHandler` 把任何 http(s) 的
+  `window.open` / `target=_blank` 都交给 `shell.openExternal`，而页面是 HashRouter SPA、内部跳转本来
+  就写成新窗口链接，"打开渠道""打开日志"一点就跑到浏览器。新增 `decideWindowOpen()`
+  （`src/shell/openTarget.ts`）：同源且落在 `/ui` 路由 → 发 `shell:navigate` 原地跳转；证书/网关失败页
+  （`data:`）上指向 UI 的链接 → 在窗口内重新加载；跨源 → 仍然交给系统浏览器；`file:` / `smb:` /
+  `ms-msdt:` 之类直接忽略。(`5e02eea`)
+- **发布流水线卡在 `npm ci`**：`package-lock.json` 里 55 条 `resolved` 是本地用镜像安装时写进去的
+  （`registry.npmmirror.com`），CI 直连该镜像对 `mime-db` / `mime-types` 持续返回 502/504，`gate` 之后
+  的 `prepare` 与四个打包 job 全部 skipped。统一改成 `registry.npmjs.org`，integrity 一字未动。(`f0a13b7`)
+
+### Tests（判据）
+
+- `tests/shell/open-target.test.ts`：同源的 hash 路由与路径写法归一到同一条路由、跨源（含同主机不同
+  端口）仍外开、同源但非 UI 路径（`/health`）不装进窗口、`data:` 失败页的重试链接在窗口内加载、
+  非 http(s) 协议忽略。(`5e02eea`)
+
+### 未取读数
+
+- **1.7.15 的安装包不含这条修复**：`v1.7.15` 的 tag 冻结在 `f0a13b7`，本条只覆盖 `5e02eea` 之后的构建；
+  装了 1.7.15 的机器要重装 1.7.16 才有新行为。
+- **只在 WSL 形态的 `/ui` 页面上验证**：判定依赖「页面地址是 `<origin>/ui/`」，桌面端直连本地网关
+  时走同一条路径，但没在便携包/远端主机两种入口上各点一遍。
+
 ## [1.7.15] - 2026-11-10
 
 版本边界：tag `v1.7.15`（相对 1.7.14）。两块内容：**Dashboard 顶部统计卡片可以按指定日期/区间查看**；
