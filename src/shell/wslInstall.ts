@@ -12,8 +12,8 @@ import { join } from 'node:path'
 import { archFromUname, parseRelease, selectAsset, type DaemonArch } from './updatePlan'
 import {
   downloadFile,
+  fetchReleaseFeed,
   fetchText,
-  releaseFeedUrl,
   runWsl,
   sha256File,
   toWslPath,
@@ -138,7 +138,7 @@ export async function installWslGateway(input: {
     }
 
     report('detecting', '正在读取发布版本…')
-    const release = parseRelease(JSON.parse(await fetchText(releaseFeedUrl())) as unknown)
+    const release = parseRelease(JSON.parse(await fetchReleaseFeed()) as unknown)
     const assetName = `modelport-daemon-${release.version}-${probe.arch}.tar.gz`
     const daemon = selectAsset(release, assetName)
     if (!daemon) {

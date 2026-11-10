@@ -18,6 +18,7 @@ import {
 
 const ASSET_BASE = 'https://github.com/polite0803/ModelPort/releases/download/v1.7.5'
 const SHELL = 'ModelPort-1.7.5-x64-setup.exe'
+const SHELL_ARM = 'ModelPort-1.7.5-arm64-setup.exe'
 const DAEMON = 'modelport-daemon-1.7.5-x64.tar.gz'
 
 function releasePayload(extra: { omitChecksum?: string; extraAssets?: unknown[] } = {}): unknown {
@@ -62,7 +63,7 @@ test('release 解析：归一 tag、只保留 https 资源', () => {
 })
 
 test('资源选择：shell 与 daemon 都要求同名 .sha256', () => {
-  const selection = selectReleaseAssets(parseRelease(releasePayload()), 'x64')
+  const selection = selectReleaseAssets(parseRelease(releasePayload()), 'x64', 'x64')
   assert.equal(selection.shell?.name, SHELL)
   assert.equal(selection.shell?.checksumName, `${SHELL}.sha256`)
   assert.equal(selection.daemon?.name, DAEMON)
@@ -74,10 +75,26 @@ test('资源选择：缺校验文件时不给出可安装项，并点名缺的�
   const selection = selectReleaseAssets(
     parseRelease(releasePayload({ omitChecksum: `${DAEMON}.sha256` })),
     'x64',
+    'x64',
   )
   assert.equal(selection.shell?.name, SHELL)
   assert.equal(selection.daemon, null)
   assert.deepEqual(selection.missing, [`${DAEMON}.sha256`])
+})
+
+test('资源选择：控制台按自身包架构取安装包，缺 arm64 包时不拿 x64 凑数', () => {
+  const withArm = releasePayload({
+    extraAssets: [
+      { name: SHELL_ARM, browser_download_url: `${ASSET_BASE}/${SHELL_ARM}`, size: 123 },
+      { name: `${SHELL_ARM}.sha256`, browser_download_url: `${ASSET_BASE}/${SHELL_ARM}.sha256` },
+    ],
+  })
+  assert.equal(selectReleaseAssets(parseRelease(withArm), 'x64', 'arm64').shell?.name, SHELL_ARM)
+  // A release published before the arm64 row exists has no arm64 installer. An arm64 console
+  // must report that gap instead of quietly installing the x64 build over itself.
+  const armConsole = selectReleaseAssets(parseRelease(releasePayload()), 'x64', 'arm64')
+  assert.equal(armConsole.shell, null)
+  assert.deepEqual(armConsole.missing, [SHELL_ARM])
 })
 
 test('sha256 解析：支持 basename/路径/裸哈希，文件名不符即拒绝', () => {

@@ -88,6 +88,8 @@ jobs:
             arch: x64
           - os: windows-latest
             arch: x64
+          - os: windows-latest
+            arch: arm64
           - os: ubuntu-latest
             arch: x64
           - os: ubuntu-latest
@@ -132,7 +134,10 @@ jobs:
           # <=1.7.5 shells look for `ModelPort-Shell-<ver>-<arch>-setup.exe`. Their updater
           # cannot be changed remotely, so ship an identical alias until those clients are
           # gone; the upload sweep below picks it up and writes its `.sha256`.
+          # The alias names the x64 installer, so only the x64 row emits it: the arm64 row
+          # has no x64 exe to copy and must skip instead of throwing.
           # TODO: drop this once no 1.7.5 shell is left (it doubles the Windows asset size).
+          if ("${{ matrix.arch }}" -ne "x64") { exit 0 }
           $exe = Get-ChildItem dist/ModelPort-*-x64-setup.exe | Select-Object -First 1
           if (-not $exe) { throw 'windows installer not found' }
           $alias = Join-Path $exe.DirectoryName ($exe.Name -replace '^ModelPort-', 'ModelPort-Shell-')

@@ -56,7 +56,7 @@ import {
 import { installWslGateway, probeWslGateway } from './wslInstall'
 import { controlWslService, probeWslService, removeWslInstall, wslInstallDir } from './wslService'
 import type { ServiceControlAction } from './wslInstallPlan'
-import { fetchText, releaseFeedUrl } from './wslExec'
+import { fetchReleaseFeed } from './wslExec'
 import { parseRelease, type ReleaseInfo } from './updatePlan'
 import { deployGuideHtml } from './deployGuide'
 import type { LocalGatewayView } from '../shared/localGateway'
@@ -1275,7 +1275,7 @@ ipcMain.handle('shell:gateway-deploy', async (event, id: unknown) => {
   let release: ReleaseInfo | null = null
   let error: string | undefined
   try {
-    release = parseRelease(JSON.parse(await fetchText(releaseFeedUrl())) as unknown)
+    release = parseRelease(JSON.parse(await fetchReleaseFeed()) as unknown)
   } catch (cause) {
     error = cause instanceof Error ? cause.message : String(cause)
   }

@@ -74,13 +74,24 @@ test('the daemon tarball carries the UI, the resources and a unit template', () 
 })
 
 test('the artifacts match the place the updater looks for them', () => {
-  // `selectReleaseAssets` picks `ModelPort-<ver>-x64-setup.exe`; electron-builder writes
-  // exactly that name from this pattern. A rename on one side only is an updater that
-  // "cannot find the release" on a release that is right there.
+  // electron-builder writes the installer name from this pattern, and `selectReleaseAssets`
+  // rebuilds the same name from the console's own architecture. A rename on one side only is
+  // an updater that "cannot find the release" on a release that is right there. The arch stays
+  // a variable here on purpose: pinning `x64` would let an arm64 row ship while the updater
+  // still looked only at x64.
   assert.equal(mainBuild.nsis.artifactName, '${productName}-${version}-${arch}-setup.${ext}')
   assert.equal(mainBuild.win.artifactName, '${productName}-${version}-${arch}-setup.${ext}')
   const plan = readFileSync('src/shell/updatePlan.ts', 'utf8')
-  assert.ok(plan.includes('ModelPort-${release.version}-x64-setup.exe'))
+  assert.ok(
+    plan.includes('ModelPort-${release.version}-${consoleArch}-setup.exe'),
+    'the updater must derive the installer name from the same template, arch as a variable',
+  )
+  const packagedWindowsArch = mainBuild.win.target.flatMap((target: { arch: string[] }) => target.arch)
+  assert.deepEqual(
+    [...new Set<string>(packagedWindowsArch)].sort(),
+    ['arm64', 'x64'],
+    'every architecture the updater can ask for must actually be packaged',
+  )
 })
 
 test('the new feature doc and plan are registered in the index', () => {

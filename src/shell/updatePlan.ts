@@ -29,6 +29,13 @@ export interface ReleaseInfo {
 
 export type DaemonArch = 'x64' | 'arm64'
 
+/**
+ * Architecture of the console package itself. This is `process.arch` of the running
+ * console, not of the machine: an x64 package under Windows-on-Arm reports `x64` and must
+ * keep being offered the x64 installer.
+ */
+export type PackageArch = 'x64' | 'arm64'
+
 export interface AssetPair {
   name: string
   url: string
@@ -174,7 +181,11 @@ export function selectAsset(release: ReleaseInfo, name: string): AssetPair | nul
   return assetPair(release, name, [])
 }
 
-export function selectReleaseAssets(release: ReleaseInfo, arch: DaemonArch): ReleaseSelection {
+export function selectReleaseAssets(
+  release: ReleaseInfo,
+  daemonArch: DaemonArch,
+  consoleArch: PackageArch,
+): ReleaseSelection {
   const missing: string[] = []
   const pairOf = (name: string): AssetPair | null => assetPair(release, name, missing)
 
@@ -183,8 +194,8 @@ export function selectReleaseAssets(release: ReleaseInfo, arch: DaemonArch): Rel
     pageUrl: release.pageUrl,
     // One product ships one installer: the console *is* the app now, so its update asset
     // is the same NSIS package a fresh install uses.
-    shell: pairOf(`ModelPort-${release.version}-x64-setup.exe`),
-    daemon: pairOf(`modelport-daemon-${release.version}-${arch}.tar.gz`),
+    shell: pairOf(`ModelPort-${release.version}-${consoleArch}-setup.exe`),
+    daemon: pairOf(`modelport-daemon-${release.version}-${daemonArch}.tar.gz`),
     missing,
   }
 }

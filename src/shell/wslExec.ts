@@ -32,6 +32,53 @@ export function releaseFeedUrl(): string {
   return url.toString()
 }
 
+/**
+ * One release-feed read shared by every caller, with a TTL.
+ *
+ * The feed is anonymous HTTPS, so GitHub caps it at 60 requests per hour per IP. Before this
+ * existed the console asked again on startup, on every panel open, on every tray check, before
+ * every upgrade and during every WSL install - so one user's own clicking spent the whole
+ * quota and every later check reported a bare 403.
+ */
+const RELEASE_FEED_TTL_MS = 10 * 60 * 1000
+/** Fallback when the server states no reset time; asking sooner only burns the quota again. */
+const RELEASE_FEED_FAILURE_BACKOFF_MS = 60 * 1000
+/** A bogus or far-future reset must not park the console forever. */
+const RELEASE_FEED_RETRY_CAP_MS = 60 * 60 * 1000
+
+let releaseFeedSuccess: { url: string; text: string; expiresAt: number } | null = null
+let releaseFeedFailure: { url: string; message: string; retryAtMs: number } | null = null
+
+export async function fetchReleaseFeed(): Promise<string> {
+  const url = releaseFeedUrl()
+  const now = Date.now()
+  if (releaseFeedSuccess && releaseFeedSuccess.url === url && releaseFeedSuccess.expiresAt > now) {
+    return releaseFeedSuccess.text
+  }
+  if (releaseFeedFailure && releaseFeedFailure.url === url && releaseFeedFailure.retryAtMs > now) {
+    const waitSeconds = Math.ceil((releaseFeedFailure.retryAtMs - now) / 1000)
+    throw new Error(`${releaseFeedFailure.message}（已退避，${waitSeconds}s 后才会再次请求）`)
+  }
+  try {
+    const text = await fetchText(url)
+    releaseFeedSuccess = { url, text, expiresAt: now + RELEASE_FEED_TTL_MS }
+    releaseFeedFailure = null
+    return text
+  } catch (error) {
+    const failure = error as { message?: string; rateLimitResetAtMs?: number }
+    const message = failure.message ?? String(error)
+    // Honour the server's own reset time when it states one, so the console waits for the
+    // window to roll over instead of re-burning the same quota on every click.
+    const statedRetryAtMs = failure.rateLimitResetAtMs ?? now + RELEASE_FEED_FAILURE_BACKOFF_MS
+    releaseFeedFailure = {
+      url,
+      message,
+      retryAtMs: Math.min(statedRetryAtMs, now + RELEASE_FEED_RETRY_CAP_MS),
+    }
+    throw error
+  }
+}
+
 export function wslExecutable(): string {
   const root = process.env.SystemRoot
   const candidate = root ? join(root, 'System32', 'wsl.exe') : ''
@@ -80,7 +127,26 @@ export async function fetchText(url: string): Promise<string> {
     redirect: 'follow',
     headers: { accept: 'application/vnd.github+json', 'user-agent': 'ModelPort' },
   })
-  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`)
+  if (!response.ok) {
+    // The server's own reason must survive the throw. GitHub answers an exhausted anonymous
+    // quota with 403 plus a body naming the IP and a reset time; discarding that body leaves
+    // the console reporting a bare "HTTP 403", which is indistinguishable from a permission
+    // failure and tells the user nothing they can act on.
+    const body = (await response.text().catch(() => '')).trim().slice(0, 400)
+    const remaining = response.headers.get('x-ratelimit-remaining')
+    const resetHeader = response.headers.get('x-ratelimit-reset')
+    const rateLimitResetAtMs = resetHeader === null ? NaN : Number(resetHeader) * 1000
+    const details = [
+      `HTTP ${response.status} for ${url}`,
+      body === '' ? '' : `服务端响应：${body}`,
+      remaining === null ? '' : `该 IP 本小时剩余配额：${remaining}`,
+      Number.isFinite(rateLimitResetAtMs) ? `配额重置时间：${new Date(rateLimitResetAtMs).toISOString()}` : '',
+    ].filter(line => line !== '')
+    throw Object.assign(new Error(details.join(' | ')), {
+      status: response.status,
+      ...(Number.isFinite(rateLimitResetAtMs) ? { rateLimitResetAtMs } : {}),
+    })
+  }
   return await response.text()
 }
 

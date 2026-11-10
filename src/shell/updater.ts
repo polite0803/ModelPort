@@ -16,11 +16,12 @@ import {
   parseRelease,
   parseSystemdUnit,
   selectReleaseAssets,
+  type PackageArch,
   type AssetPair,
   type DaemonArch,
   type ReleaseInfo,
 } from './updatePlan'
-import { fetchText, releaseFeedUrl, runWsl, toWslPath, verifyDownload } from './wslExec'
+import { fetchReleaseFeed, runWsl, toWslPath, verifyDownload } from './wslExec'
 import { isPidAlive, readLocalGatewayView, stopLocalGateway } from './localGateway'
 
 const SERVICE = 'modelport'
@@ -120,15 +121,16 @@ export async function checkForUpdates(entry: GatewayEntry): Promise<ShellUpdateC
   let release: ReleaseInfo | null = null
   let releaseError: string | undefined
   try {
-    release = parseRelease(JSON.parse(await fetchText(releaseFeedUrl())) as unknown)
+    release = parseRelease(JSON.parse(await fetchReleaseFeed()) as unknown)
   } catch (error) {
     releaseError = error instanceof Error ? error.message : String(error)
   }
 
   const daemonCurrent = await gatewayVersion(entry.url)
   const managed = entry.manageWsl === true
-  const arch = managed ? await detectArch(entry.wslDistro) : 'x64'
-  const selection = release ? selectReleaseAssets(release, arch) : null
+  const daemonArch = managed ? await detectArch(entry.wslDistro) : 'x64'
+  const consoleArch: PackageArch = process.arch === 'arm64' ? 'arm64' : 'x64'
+  const selection = release ? selectReleaseAssets(release, daemonArch, consoleArch) : null
 
   return {
     release: release ? { version: release.version, pageUrl: release.pageUrl } : null,

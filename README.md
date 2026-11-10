@@ -176,7 +176,7 @@ unencrypted and a warning is logged, so restrict access to `~/.modelport/` in th
 | Platform | Architectures | Packages |
 | -------- | ------------- | -------- |
 | macOS | Apple Silicon (arm64) | DMG only |
-| Windows | x64 | NSIS installer, portable executable |
+| Windows | x64, arm64 | NSIS installer, portable executable |
 | Linux | x64, arm64 | AppImage; x64 also `.deb` and `.tar.gz` |
 | WSL / headless Linux | x64, arm64 | `modelport-daemon-<ver>-<arch>.tar.gz`: the gateway without Electron (bundle + resources + UI + a systemd unit template) |
 | Gateway modes | Windows: local, WSL, remote; macOS/Linux: local, remote | The console starts a windowless local gateway, installs one inside WSL, or connects to a remote gateway. A WSL/headless host runs the daemon tarball instead of the console. |
