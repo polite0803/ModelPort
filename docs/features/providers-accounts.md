@@ -6,9 +6,9 @@
 
 ModelPort 把上游分成三类，界面也对应三块：聚合目录、账号渠道、自定义供应商。三类最终都被写成同一种供应商记录（`Provider`），再由 `loadbalancer` 选账号、`modelMapper` 解析模型名、`forwarder` 转发请求；区别在于记录怎么来、凭据怎么拿、模型清单谁说了算。
 
-聚合目录是数据表：`src/main/providers/aggregate/registry.ts` 里有 89 条渠道、568 个模型，覆盖带 Key 的 HTTP 端点、免密端点，以及标记为“本应用无法提供凭据”的 Google ADC 条目（`vertex` / `vertex-partner`）。用户在聚合页面选中一条、填 Key（若需要）后保存，才会生成 `type: 'aggregate'` 的供应商记录，因此供应商列表不会预先塞进几十条不可用行。
+聚合目录是数据表：`src/main/providers/aggregate/registry.ts` 里有 92 条渠道、580 个模型，覆盖带 Key 的 HTTP 端点、免密端点，以及标记为“本应用无法提供凭据”的 Google ADC 条目（`vertex` / `vertex-partner`）。用户在聚合页面选中一条、填 Key（若需要）后保存，才会生成 `type: 'aggregate'` 的供应商记录，因此供应商列表不会预先塞进几十条不可用行。
 
-账号渠道是登录型端点：13 个渠道（`lobsterai`、`qoder`、`qodercn`、`trae`、`cline`、`loomy`、`raccoon`、`minimax`、`zcode`、`gemini`、`workbuddy`、`buddy`、`opencode`）由内置的“渠道包”托管登录、账号池、每日积分与模型目录。十二个走浏览器/设备码/OAuth，`opencode` 是唯一 `loginKind: 'api-key'` 的例外：不打开浏览器，加一条匿名槽或粘贴 `sk-` Key 即可。
+账号渠道是登录型端点：15 个渠道（`lobsterai`、`qoder`、`qodercn`、`trae`、`cline`、`loomy`、`raccoon`、`minimax`、`zcode`、`gemini`、`workbuddy`、`buddy`、`opencode`、`codearts`、`comate`）由内置的“渠道包”托管登录、账号池、每日积分与模型目录。十四个走浏览器/设备码/OAuth，`opencode` 是唯一 `loginKind: 'api-key'` 的例外：不打开浏览器，加一条匿名槽或粘贴 `sk-` Key 即可。`comate` 的对话走官方 agent 协议，因此不支持客户端工具调用（`capabilities.tools: false`）。
 
 自定义供应商由用户自建：名称、端点、认证方式、请求头、模型与凭据字段都自己填，适配器走 OpenAI 兼容的默认转发路径。内置供应商（`builtinProviders`）目前为空；2026-11-01 退役的本机 `opencode` 运行时已不再是供应商。
 
@@ -75,7 +75,7 @@ ModelPort 把上游分成三类，界面也对应三块：聚合目录、账号�
 
 - `src/main/providers/aggregate/registry.ts` — 89 条 / 568 模型目录
 - `src/main/providers/aggregate/manager.ts` — 保存、账号、同步、额度探测
-- `src/main/providers/accountChannels/catalogue.ts` — 13 个渠道元数据
+- `src/main/providers/accountChannels/catalogue.ts` — 15 个渠道元数据
 - `src/main/providers/accountChannels/manager.ts` — 供应商记录镜像与模型门禁
 - `src/main/providers/accountChannels/modelCatalog.ts` — 倍率/免费/窗口解析
 - `src/main/providers/accountChannels/rpcSync.ts` — 渠道包 RPC 后重同步

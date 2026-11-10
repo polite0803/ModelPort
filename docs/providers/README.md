@@ -9,8 +9,8 @@
 
 | 类别 | 数量 | 凭据 | 文档 / 数据源 |
 | --- | --- | --- | --- |
-| 聚合目录 | 89 条渠道 / 568 个模型 | API Key、免密，或标记为不支持（Google ADC） | 数据源为 `src/main/providers/aggregate/registry.ts`，无独立文档 |
-| 账号渠道 | 13 个渠道 | 浏览器 / 设备码 / OAuth，`opencode` 为 API Key | [`opencode.md`](opencode.md)（单渠道说明）；整体机制见 [`../AGENTS-full.md`](../AGENTS-full.md) §Account Channels |
+| 聚合目录 | 92 条渠道 / 580 个模型 | API Key、免密，或标记为不支持（Google ADC） | 数据源为 `src/main/providers/aggregate/registry.ts`，无独立文档 |
+| 账号渠道 | 15 个渠道 | 浏览器 / 设备码 / OAuth，`opencode` 为 API Key | [`opencode.md`](opencode.md)（单渠道说明）；整体机制见 [`../AGENTS-full.md`](../AGENTS-full.md) §Account Channels |
 | 自定义供应商 | 用户自建 | 自行配置 | 在应用内的供应商页面直接添加 |
 
 已单独记录提示缓存口径的聚合条目：[`anthropic.md`](anthropic.md)（显式断点）、

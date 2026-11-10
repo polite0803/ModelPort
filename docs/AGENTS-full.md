@@ -6,7 +6,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project Overview
 
-ModelPort is an Electron desktop application that provides an OpenAI-compatible API proxy for standard HTTP model endpoints. It ships three provider classes: a 89-entry aggregate catalogue of key-based / key-less endpoints (see "Aggregate Provider Catalogue"), the thirteen account channels served by the vendored channel pack (see "Account Channels"), and user-defined custom providers. It runs on macOS, Windows, and Linux.
+ModelPort is an Electron desktop application that provides an OpenAI-compatible API proxy for standard HTTP model endpoints. It ships three provider classes: a 92-entry aggregate catalogue of key-based / key-less endpoints (see "Aggregate Provider Catalogue"), the fifteen account channels served by the vendored channel pack (see "Account Channels"), and user-defined custom providers. It runs on macOS, Windows, and Linux.
 
 ## Build Commands
 
@@ -220,7 +220,7 @@ message in the UI.
 ### Aggregate Provider Catalogue
 
 `src/main/providers/aggregate/registry.ts` is data transcribed from the reference registry:
-89 entries / 568 models. Beyond dropping `openai` and `github_copilot` (browser-login account
+92 entries / 580 models. Beyond dropping `openai` and `github_copilot` (browser-login account
 channels - the class that was retired) and `fleetrelay_t1` (responses-only relay), seven model rows
 were removed on 2026-10-29 because upstream no longer serves them (3 anthropic ids the API answers
 with an error, 4 xai ids retired 2026-05-15 whose slugs still resolve and silently redirect), and
@@ -659,7 +659,7 @@ single number.
 
 The model catalogue comes from `model.list`, **not** from `bridge.models()` — with exactly one
 exception: `model.list` carries no context window, so `manager.models()` pulls the OpenAI-shaped
-`/v1/models` view **once per cache refresh** (shared by all thirteen channels) and merges only
+`/v1/models` view **once per cache refresh** (shared by all fifteen channels) and merges only
 `context_window` into the catalogue (`modelCatalog.ts::attachContextWindows`). The view cannot say a
 model's multiplier or its `disabled` / `dead` state, which is why `model.list` stays authoritative.
 `model.list` returns `{models: [{id, name, disabled, dead, isFree?}]}` and is the only place
@@ -710,7 +710,7 @@ renewed through `channels:rpc('account.refresh', {accountId})` and the pool orde
 pool order, so reordering is how a user picks the preferred account.
 
 `manager.ts` mirrors that state into provider records. It only writes one when the channel has at
-least one account, so the provider list never grows thirteen unusable rows; records are
+least one account, so the provider list never grows fifteen unusable rows; records are
 `type: 'account'`, `apiEndpoint: channel://<id>` (a placeholder that is never requested),
 `supportsModelFetch: false`, an identity `supportedModels` / `modelMappings` ledger (that ledger is
 the pin - `derivePreferredProvider` returns the provider whose ledger lists the requested name - and

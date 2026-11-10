@@ -39,8 +39,6 @@
 - OFM 的 10 个账号渠道（LobsterAI、Qoder×2、TRAE、Cline、Loomy、Raccoon、MiniMax Code、
   ZCode、Gemini Code Assist）：全部是浏览器登录 + 账号池，与被退役的类别同源。
 - EAC 渠道：桌面宿主指纹闸门 + GitHub star 授权 + 密封凭据，本仓无法也不应复制。
-- 匿名免费车道的 v2 客户端伪装：本机实测当前不可用（见 §1），且它是对
-  "free tier can only be used from within OpenCode" 这条闸门的绕过。
 
 ## 1. 已核实读数（2026-10-28，本机直连）
 
@@ -170,7 +168,7 @@
 | # | 事项 | 建议 | 代价 | 裁定结果 |
 | --- | --- | --- | --- | --- |
 | Q1 | OFM 的 10 个账号渠道是否也上线 | 不上线：与被退役的网页登录同类 | 少 10 家「登录即用」入口 | **建议被推翻**：账号渠道后来经 vendored 渠道包上线 13 个（`catalogue.ts`），见 `PLAN-workbuddy-adaptation.md`；与被退役的「宿主逆向网页接口」是两回事 |
-| Q2 | 匿名 OpenCode 免费车道是否移植（需伪造 v2 客户端指纹） | 不移植：本机实测已 429，且是对闸门的绕过；`opencode` 本机运行时提供同一批模型 | 免费模型可用性取决于该运行时额度 | **不移植，已按建议落地**；补充：`opencode` 本机运行时也已于 2026-11-01 退役（npm `opencode-ai` 线冻结 1.19.5、官方拒装 2.x，无可用分发），其模型改由渠道包 `opencode` 账号渠道提供 |
+| Q2 | 匿名 OpenCode 免费车道是否移植 | 不移植：本机实测已 429；`opencode` 本机运行时提供同一批模型 | 免费模型可用性取决于该运行时额度 | **不移植，已按建议落地**；补充：`opencode` 本机运行时也已于 2026-11-01 退役（npm `opencode-ai` 线冻结 1.19.5、官方拒装 2.x，无可用分发），其模型改由渠道包 `opencode` 账号渠道提供 |
 | Q3 | 模型名是否加 `provider/` 命名空间 | 加：502 个模型重名太多，不加则路由不可预测 | 客户端模型名变长；旧名不再广播 | **加，已落地**：`manager.ts:913` 写 `preferredProviderId` 映射，README 同步 |
 | Q4 | UI 形态 | 一个「聚合渠道」页，按需建供应商 | 新增 1 页；不动现有 ProviderCard | **已落地**：`pages/Aggregate.tsx` |
 | Q5 | 退役后是否删除已存账密 | 删除，先备份 data.json | 用户需重新填 Key（本来也要换） | **已落地**：`shared/types.ts:26` `RETIRED_PROVIDER_IDS` 八家；启动时 `store/store.ts:617-627` 清无主账号与 userModelOverrides |

@@ -13,8 +13,8 @@ the comments in the file you are changing.
 
 ModelPort is a desktop **console** that runs, installs or connects to an OpenAI-compatible API proxy
 gateway (local / WSL / remote). Three provider
-classes ship: a 89-entry / 568-model aggregate catalogue of key-based and key-less endpoints, the
-thirteen account channels served by the vendored channel pack, and user-defined custom providers.
+classes ship: a 92-entry / 580-model aggregate catalogue of key-based and key-less endpoints, the
+fifteen account channels served by the vendored channel pack, and user-defined custom providers.
 Runs on macOS, Windows, Linux.
 
 ## Build \& Verification
@@ -333,10 +333,28 @@ interface - each `chatCompletion()` returns its own shape, and the forwarder onl
 
 
 
-## Global user rules (bootstrap, added 2026-11-10, updated 2026-11-10)
+## Session bootstrap by host (added 2026-11-10, updated 2026-11-11)
+
+This repository is opened in three ways. They share **one checkout** but differ in execution
+host and rule set. Identify the session first, then follow only its row - do not mix them.
+
+| Session | Working dir the agent sees | Where commands run | Rules to load at session start |
+|-|-|-|-|
+| CodeBuddy WSL remote (`vscode-remote://...+ubuntu-24.04`) | `/home/polit/projects/ModelPort` | Linux directly, no SSH wrapper | `/home/polit/.codebuddy/rules/\*.mdc`, `CODEBUDDY.md`, `memory/MEMORY.md` |
+| Qoder local workspace on `Z:\ModelPort` | `Z:\ModelPort` | WSL via `ssh -o BatchMode=yes wsl "cd /home/polit/projects/ModelPort && <cmd>"` | `.qoder/rules/00-execution-ssh.md` (`alwaysApply`) |
+| WorkBuddy local workspace on `Z:\ModelPort` | `Z:\ModelPort` | per `.workbuddy/` project rules | `.workbuddy/` rules |
+
+`Z:` is a Samba/SMB mapping of WSL `/home/polit/projects`, not a second checkout: no sync,
+no copy, no second git worktree. Linux paths such as `/home/polit/.codebuddy/...` are **not
+resolvable** from a local `Z:` session - never try to read them there. Conversely, in a
+WSL-remote session the shell is already on the Linux host - never wrap commands in `ssh`.
+BYOK / third-party models are only available in the two local-workspace rows; the Qoder SSH
+workspace mode is deliberately not used.
+
+### CodeBuddy WSL remote only
 
 This file carries the project-level constraints for `/home/polit/projects/ModelPort`.
-User-level rules live in `/home/polit/.codebuddy/rules/*.mdc` and are injected at session
+User-level rules live in `/home/polit/.codebuddy/rules/\*.mdc` and are injected at session
 start, but are not re-injected after context compaction. At the start of every conversation,
 and again after any compaction or noticeable memory loss, read those `.mdc` files plus
 `/home/polit/.codebuddy/CODEBUDDY.md` and `/home/polit/.codebuddy/memory/MEMORY.md`, and

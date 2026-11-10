@@ -24,7 +24,7 @@
 
 <p align="center">
   ModelPort is an Electron desktop application that runs an OpenAI-compatible API gateway on your
-  machine. It ships an aggregate catalogue of 89 endpoints / 568 models, thirteen account channels
+  machine. It ships an aggregate catalogue of 92 endpoints / 580 models, fifteen account channels
   managed by a vendored channel pack, and user-defined custom providers, so one base URL serves any
   OpenAI-compatible SDK or agent client.
 </p>
@@ -38,7 +38,7 @@
   are translated onto the same routing, failover, quota and logging path. A management HTTP API
   lives under `/v1/management/*`.
 - **Three provider classes.** 89 aggregate entries (key-based, key-less, and `unsupported` entries
-  that need Google ADC), thirteen account channels with their own account pools and credit
+  that need Google ADC), fifteen account channels with their own account pools and credit
   accounting, and custom providers pointing at any OpenAI-compatible endpoint.
 - **Failover and routing.** Round-robin, fill-first, failover, smart and pace strategies, plus a
   virtual `auto` model that picks a candidate by capability, context size and live health. Client
@@ -68,7 +68,7 @@
 
 | Provider class | Auth types | Count | Notes |
 | -------------- | ---------- | ----- | ----- |
-| Aggregate catalogue | API key / none / unsupported | 89 entries / 568 models | `openai-chat` and `anthropic-messages` wires; includes Kilo's key-less free pool |
+| Aggregate catalogue | API key / none / unsupported | 92 entries / 580 models | `openai-chat` and `anthropic-messages` wires; includes Kilo's key-less free pool |
 | Account channels | Browser / device-code / OAuth / API key | 13 channels | Each channel keeps its own account pool, daily credit claim and model gating |
 | Custom provider | Configured per provider | — | Any OpenAI-compatible HTTP endpoint you define yourself |
 
