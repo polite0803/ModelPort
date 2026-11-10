@@ -507,6 +507,11 @@ export interface RankCandidate {
   /** 成本档；缺省按 unknown 参与打分（中性） */
   costBucket?: CostBucket
   /**
+   * 渠道目录报的原始倍率（`channels.ts` 从 `· x0.2` 解析出来的数）。
+   * 只用于预览展示「这条要花多少」，打分仍然只读 `costBucket`。
+   */
+  weight?: number
+  /**
    * 聚合条目的原始消耗分类（`AggregateCostClass`）。只对聚合供应商的候选填写：
    * `costBucket` 把套餐内折成免费（请求时刻现金支出都是 0），但策略筛选要能
    * 把「订阅额度内」与「完全免费」分开，所以这里保留未折叠的分类。非聚合候选不携带。

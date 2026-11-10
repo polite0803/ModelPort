@@ -205,10 +205,12 @@ function costSignalFor(
   provider: Provider,
   actualModelId: string,
   hint: ModelCapabilityHint | undefined
-): { bucket: CostBucket; costClass?: AggregateCostClass } {
+): { bucket: CostBucket; costClass?: AggregateCostClass; weight?: number } {
   const free = hint?.free === true
-  if (free) return { bucket: 'free' }
-  if (hint?.weight !== undefined) return { bucket: costBucketOf(hint.weight, free) }
+  // 倍率原样带出去给预览显示（`×0.06`），档位仍按 `costBucketOf` 归类。
+  const weight = hint?.weight
+  if (free) return { bucket: 'free', ...(weight === undefined ? {} : { weight }) }
+  if (weight !== undefined) return { bucket: costBucketOf(weight, free), weight }
 
   if (provider.type === 'aggregate') {
     const entry = getAggregateEntry(provider.aggregateId ?? provider.id)
@@ -599,6 +601,7 @@ class AutoRouter {
             contractCapable,
             costBucket: costSignal.bucket,
             ...(costSignal.costClass === undefined ? {} : { costClass: costSignal.costClass }),
+            ...(costSignal.weight === undefined ? {} : { weight: costSignal.weight }),
             ...(quotaHeadroom === undefined ? {} : { quotaHeadroom }),
             ...(live === undefined ? {} : { live }),
             dispatchCount: dispatches.counts.get(dispatchKeyOf(provider.id, model.actualModelId)) ?? 0,
@@ -896,6 +899,7 @@ class AutoRouter {
         capability,
         ...(candidate.costBucket === undefined ? {} : { costBucket: candidate.costBucket }),
         ...(candidate.costClass === undefined ? {} : { costClass: candidate.costClass }),
+        ...(candidate.weight === undefined ? {} : { weight: candidate.weight }),
       }
       index.set(key, row)
       models.push(row)

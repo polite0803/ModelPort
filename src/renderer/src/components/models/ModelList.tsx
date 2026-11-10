@@ -24,6 +24,7 @@ import { useProxyStore } from '@/stores/proxyStore'
 import { useToast } from '@/hooks/use-toast'
 import { Search, Copy, CheckCircle2, XCircle, Cpu, Check, Square, Database, ChevronLeft, ChevronRight, Loader2, Ban } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { weightTone } from '@/lib/costTone'
 import { Switch } from '@/components/ui/switch'
 import type { Account, CatalogueModel } from '@/types/electron'
 import type { ChannelCredits, CostBucket } from '@shared/channels'
@@ -47,16 +48,7 @@ function toModality(declared: boolean | undefined): Modality {
   return 'unknown'
 }
 
-/**
- * 消耗权重的颜色分档：0 免费（绿）、打折（主色）、基础 1 倍（灰）、
- * 加价（警告色）。只影响观感，不参与任何计费/筛选判断。
- */
-function weightTone(weight: number): string {
-  if (weight === 0) return 'text-success'
-  if (weight < 1) return 'text-primary'
-  if (weight === 1) return 'text-muted-foreground'
-  return 'text-warning'
-}
+/** 颜色分档与路由编辑器共用（`lib/costTone.ts`），分档判据仍是 `costBucketOf`。 */
 
 interface ModelInfo {
   id: string

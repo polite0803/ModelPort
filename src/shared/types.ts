@@ -198,6 +198,14 @@ export interface RoutePreviewModel {
   capability: ModelCapability
   costBucket?: CostBucket
   costClass?: AggregateCostClass
+  /**
+   * 渠道目录报的消耗权重（倍率，`1` 为基准价）。
+   *
+   * 只有账号渠道会在模型名里带这个数（`Kimi-K3 · x0.2`），所以它缺失**不代表免费**，
+   * 只代表上游没报价；聚合/内置/自定义供应商没有倍率概念，永远是 `undefined`。
+   * 展示用（路由编辑里直接看到这条要花多少钱），不参与打分——打分读 `costBucket`。
+   */
+  weight?: number
 }
 
 /**

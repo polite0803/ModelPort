@@ -631,3 +631,29 @@ test('C/preview：空池点名是哪一步清空的 —— 策略筛空 vs 手�
     ['excluded', 'excluded', 'excluded'],
   )
 })
+
+/**
+ * 路由编辑器要在每个模型行上显示「消耗权重」，数据必须来自这里 —— 预览行只带
+ * `costBucket`（打分口径）是不够的：`below-base` 说不出是 x0.06 还是 x0.83。
+ *
+ * 口径与「模型管理」页一致：倍率原样透出，缺失就是 `undefined`（界面写「未标注倍率」），
+ * 绝不补成 0 或 1 —— 补 0 会被当成免费，补 1 会被当成基准价。
+ */
+test('C/preview：消耗权重原样透出，缺倍率时留空而不是 0/1', () => {
+  sm.addProvider(providerFixture('pd', 'Delta-Weighted', { tier: 'fast', weight: 0.06 }) as never)
+  sm.addAccount(accountFixture('pd') as never)
+
+  const preview = autoRouter.preview(makeRoute({ poolStrategies: [] }))
+  const rowOf = (displayName: string) => preview.models.find(model => model.displayName === displayName)
+
+  const weighted = rowOf('Delta-Weighted')
+  assert.equal(weighted?.weight, 0.06, '渠道报的倍率必须原样带出来给界面显示')
+  assert.equal(weighted?.costBucket, 'below-base')
+
+  const freeOne = rowOf('Alpha-Flash')
+  assert.equal(freeOne?.costBucket, 'free', 'fixture 里 Alpha-Flash 标了 free:true')
+
+  const noRatio = rowOf('Gamma-Mini')
+  assert.equal(noRatio?.weight, undefined, '没报倍率就是没有，不能零填充')
+  assert.equal(noRatio?.costBucket, 'unknown')
+})

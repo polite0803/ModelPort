@@ -14,6 +14,8 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { RefreshCw, Plus, Minus, RotateCcw, Pencil, Pin } from 'lucide-react'
 import { ModelMarkEditor } from '@/components/models/ModelAnnotationDialog'
+import { weightTone } from '@/lib/costTone'
+import { costBucketOf, type CostBucket } from '@shared/channels'
 import type {
   CapabilitySource,
   ModelCapability,
@@ -71,6 +73,13 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  /**
+   * 消耗权重筛选。分档与「模型管理」页**同一套**：
+   * `costBucketOf(weight, free)` —— 免费（0，含渠道标的免费/套餐内）、打折（<1×）、
+   * 基准（=1×）、加价（>1×）、未标注（渠道没报倍率）。`unknown` 自成一档，
+   * 绝不并进免费或任何付费档。
+   */
+  const [costFilter, setCostFilter] = useState<'all' | CostBucket>('all')
   const [needsVision, setNeedsVision] = useState(false)
   const [needsTools, setNeedsTools] = useState(false)
   const [estimatedTokens, setEstimatedTokens] = useState('')
@@ -224,16 +233,28 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
       if (statusFilter === 'kept' && model.status !== 'kept' && model.status !== 'included') return false
       if (statusFilter === 'dropped' && model.status !== 'filtered' && model.status !== 'excluded' && model.status !== 'not-pinned') return false
       if (statusFilter === 'unavailable' && model.status !== 'unavailable') return false
+      // 与模型管理页同一个判据：渠道报的倍率 + 是否免费（聚合侧由成本台账给出免费标记）。
+      // 没有倍率也不是免费的模型自成一档 —— 折进免费会让人以为不要钱，折进付费则是凭空定价。
+      if (costFilter !== 'all' && costBucketOf(model.weight, model.costBucket === 'free') !== costFilter) {
+        return false
+      }
       if (query === '') return true
       return (
         model.displayName.toLowerCase().includes(query) ||
         model.providerName.toLowerCase().includes(query)
       )
     })
-  }, [preview, search, statusFilter])
+  }, [preview, search, statusFilter, costFilter])
 
   const statusLabel = (status: RoutePreviewModel['status']): string =>
     t(`proxy.routePoolStatus_${status}`)
+
+  /**
+   * 这一行是不是免费：渠道报的倍率为 0，或聚合侧的成本台账判定为免费。
+   * 与「模型管理」页的 `free === true` 同一口径。
+   */
+  const isFree = (model: RoutePreviewModel): boolean =>
+    model.costBucket === 'free' || model.weight === 0
 
   const statusVariant = (status: RoutePreviewModel['status']) => {
     switch (status) {
@@ -416,6 +437,20 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
             <SelectItem value="unavailable">{t('proxy.routePoolFilter_unavailable')}</SelectItem>
           </SelectContent>
         </Select>
+        <Select value={costFilter} onValueChange={(value) => setCostFilter(value as 'all' | CostBucket)}>
+          <SelectTrigger className="h-8 w-[170px] text-xs" title={t('models.costHint')}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {/* 选项与「模型管理」页共用一个词表：两处对同一档的叫法必须一样，否则没法对照 */}
+            <SelectItem value="all">{t('models.allCosts')}</SelectItem>
+            <SelectItem value="free">{t('models.costFreeOnly')}</SelectItem>
+            <SelectItem value="below-base">{t('models.costBelowBase')}</SelectItem>
+            <SelectItem value="base">{t('models.costBase')}</SelectItem>
+            <SelectItem value="above-base">{t('models.costAboveBase')}</SelectItem>
+            <SelectItem value="unknown">{t('models.costUnknown')}</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
 
       <div className="max-h-80 overflow-y-auto rounded-md border">
@@ -437,6 +472,31 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
                 {statusLabel(model.status)}
               </Badge>
               <span className="text-xs font-medium">{model.displayName}</span>
+              {/* 消耗权重：与「模型管理」页同一套徽标与颜色分档，缺倍率就写「未标注倍率」，不拿 1 倍冒充 */}
+              <Badge
+                variant="outline"
+                className={
+                  isFree(model)
+                    ? 'text-[10px] font-normal tabular-nums text-success'
+                    : model.weight === undefined
+                      ? 'text-[10px] font-normal tabular-nums text-muted-foreground'
+                      : `text-[10px] font-normal tabular-nums ${weightTone(model.weight)}`
+                }
+                title={
+                  isFree(model) || model.weight !== undefined ? undefined : t('models.weightUnknownHint')
+                }
+              >
+                {isFree(model)
+                  ? 'x0'
+                  : model.weight === undefined
+                    ? t('models.costUnknown')
+                    : `x${model.weight}`}
+              </Badge>
+              {isFree(model) && (
+                <Badge variant="outline" className="text-[10px] font-normal text-success">
+                  {t('models.free')}
+                </Badge>
+              )}
               <span className="text-[10px] text-muted-foreground">{model.providerName}</span>
               {pinned && (
                 <span className="text-[10px] text-muted-foreground">{t('proxy.routePoolPinnedFlag')}</span>
