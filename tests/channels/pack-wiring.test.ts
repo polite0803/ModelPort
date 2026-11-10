@@ -107,3 +107,8 @@ test('Comate 工具由客户端执行：桥接层不碰 shell/文件，适配器
   assert.doesNotMatch(adapter, /does not support client tool calling/)
   assert.doesNotMatch(adapter, /comate-tools\.js/)
 })
+
+test('Comate 的 finish.reason 必须是 {kind} 对象，字符串会触发 incomplete_stream', () => {
+  const source = readFileSync(COMATE_ADAPTER_FILE, 'utf8')
+  assert.match(source, /type: 'finish', reason: \{ kind: reason \}/)
+})

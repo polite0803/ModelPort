@@ -866,7 +866,10 @@ export class ComateAdapter extends LlmAdapter {
         },
       }
     }
-    yield { type: 'finish', reason }
+    // StreamChunk 的 finish.reason 是 `{kind}` 对象，不是字符串；发字符串会让
+    // 渠道包投影读不到 finishReason，最终以 `incomplete_stream` 收场（Qoder
+    // 显示 “upstream stream ended before finish”）。
+    yield { type: 'finish', reason: { kind: reason } }
   }
 
 }
