@@ -19,7 +19,10 @@ test('the provider counters come from the daily buckets, not the log window', ()
   // from it is really "the last 30 rows". The day buckets are the only
   // time-addressed source that is not row-capped.
   assert.match(storeSource, /aggregateProviderUsage\(inputs\.days, window\)/)
-  assert.match(storeSource, /days: \(persistentStats\?\.dailyStats \?\? \{\}\)/)
+  // The day map is read once from the persistent stats payload and then bound,
+  // so the card cannot disagree with the headline cards about the same day.
+  assert.match(storeSource, /const dayBuckets = \(persistentStats\?\.dailyStats \?\? \{\}\)/)
+  assert.match(storeSource, /days: dayBuckets/)
   assert.doesNotMatch(storeSource, /providerSuccessCount|providerTotalCount/,
     'the per-provider loop over request-log rows must not come back')
 })
@@ -65,7 +68,10 @@ test('the token and cost numbers are re-bucketed locally, not refetched', () => 
   // round trip, so the whole day map ships once per refresh.
   assert.match(storeSource, /aggregateProviderTokenUsage\(inputs\.tokenDays, window\)/)
   assert.match(storeSource, /getTokenUsageDays\?\.\(\) \?\? Promise\.resolve\(\{\}\)/)
-  assert.match(storeSource, /tokenDays: tokenDays \?\? \{\}/)
+  // Same shape as the request counters: the whole day map lands in the store
+  // once, and the provider card is re-bucketed from that stored copy.
+  assert.match(storeSource, /const tokenDayBuckets = \(tokenDays \?\? \{\}\)/)
+  assert.match(storeSource, /tokenDays: tokenDayBuckets/)
 })
 
 test('changing the period re-buckets without a second fetch', () => {
