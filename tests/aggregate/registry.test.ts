@@ -10,7 +10,7 @@ import {
 } from '../../src/main/providers/aggregate/registry.ts'
 
 test('the catalogue carries the entries that can actually be wired', () => {
-  assert.equal(AGGREGATE_REGISTRY.length, 89)
+  assert.equal(AGGREGATE_REGISTRY.length, 92)
   // 473 transcribed, minus 7 retired upstream on 2026-10-29 (3 anthropic + 4 xai),
   // minus the withdrawn mistral_codestral entry (its single model went with it),
   // plus the Agnes CN switch (agnes-2.0-flash -> agnes-3.0-flash + agnes-2.5-flash),
@@ -21,7 +21,10 @@ test('the catalogue carries the entries that can actually be wired', () => {
   // SiliconFlow CN, Spark, StepFun payg/Step Plan, Volcengine platform/Agent Plan, Yi.
   // minus 2 net on 2026-11-08: minimax-cn dropped its three retired M2.x ids and
   // gained M3.1-Flash (4 -> 2 models), per the live 404 (2069) readings.
-  assert.equal(AGGREGATE_REGISTRY.reduce((sum, entry) => sum + entry.models.length, 0), 568)
+  // plus 3 entries / 12 models on 2026-11-10: PPIO (12 transcribed from its live
+  // /models), Huawei ModelArts Studio and Infini-AI (0 each - empty baselines,
+  // ids arrive through modelsUrl once a key is saved).
+  assert.equal(AGGREGATE_REGISTRY.reduce((sum, entry) => sum + entry.models.length, 0), 580)
 
   // Browser-login account channels are retired; the responses-only relay is not wired.
   for (const excluded of ['openai', 'github_copilot', 'fleetrelay_t1']) {
@@ -214,4 +217,29 @@ test('the withdrawn codestral entry is gone, but its model stays reachable via m
     getAggregateEntry('mistral')!.models.some(model => model.id === 'codestral-latest'),
     'withdrawing the duplicate entry must not take codestral-latest away from the mistral entry'
   )
+})
+
+/**
+ * 2026-11-10 新增的三家，端点都用无凭据请求实测过（403/400/401 只能证明
+ * "路径存在、缺 Authorization"，不能证明模型可用）。华为与无问芯穹故意不写
+ * 基线模型：它们的 id 需要 Key 才拿得到，编一个假 slug 只会换来请求时 404。
+ */
+test('the 2026-11-10 endpoints keep their probed base URLs and empty baselines', () => {
+  const ppio = getAggregateEntry('ppio')!
+  assert.equal(ppio.baseUrl, 'https://api.ppio.com/openai')
+  assert.equal(ppio.modelsUrl, 'https://api.ppio.com/openai/models')
+  assert.ok(ppio.models.length > 0, 'PPIO has a live /models list, so its baseline must not be empty')
+  assert.ok(ppio.models.some(model => model.id === 'deepseek/deepseek-v4-pro'))
+
+  for (const [id, baseUrl, modelsUrl] of [
+    ['huawei_maas', 'https://api.modelarts-maas.com/v1', 'https://api.modelarts-maas.com/v1/models'],
+    ['infini_ai', 'https://cloud.infini-ai.com/maas/v1', 'https://cloud.infini-ai.com/maas/v1/models'],
+  ]) {
+    const entry = getAggregateEntry(id)!
+    assert.equal(entry.baseUrl, baseUrl, `${id} base URL`)
+    assert.equal(entry.modelsUrl, modelsUrl, `${id} discovery endpoint`)
+    assert.equal(entry.models.length, 0, `${id} must not ship invented model ids`)
+    assert.equal(entry.authKind, 'apiKey')
+    assert.ok(entry.authUrl, `${id} must say where to get its key`)
+  }
 })

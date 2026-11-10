@@ -11,6 +11,7 @@ const {
   computeMetadataCoverage,
   deriveModelType,
   isAttributeApplicable,
+  isChatInapplicable,
   isNonChatModel,
   isRoutingComplete,
   mergeModelMetadata,
@@ -402,5 +403,78 @@ test('缺口分桶优先级：不适用 > 能补 > 库里有但缺项 > 库里�
   assert.equal(
     classifyModelGap({ modelId: 'Qoder / Ultimate', hasAutoMatch: false, canFillAny: false }),
     'no-candidate',
+  )
+})
+
+/**
+ * 2026-11-10：ASR / 合成 / 图像生成这些模型**名字**上看不出来（`qwen-audio-3.0-asr-flash`
+ * 命中 `audio`，但 `MiniMax/speech-2.8-hd`、`CosyVoice2-0.5B` 不命中窄口径正则），
+ * 只有 `modalities` 是硬证据。已知输入模态不含 `text` 时，聊天能力属性算「不适用」，
+ * 于是它们不再计入「关键属性待补」——否则 `contextTokens` 这项永远补不上，
+ * 队列里就永远挂着几十行补不完的活。
+ */
+test('已知 modalities 不含 text：聊天属性算不适用，退出待补队列', () => {
+  const audioOnly = mergeModelMetadata({
+    providerId: 'p',
+    displayName: 'p/qwen3-asr-flash',
+    actualModelId: 'qwen3-asr-flash',
+    providerType: 'aggregate',
+    layers: [base({ hint: { modalities: ['audio'] } })],
+  })
+  const imageOnly = mergeModelMetadata({
+    providerId: 'p',
+    displayName: 'p/wan3.0-video',
+    actualModelId: 'wan3.0-video',
+    providerType: 'aggregate',
+    layers: [base({ hint: { modalities: ['image'] } })],
+  })
+  // omni 同时吃文本：仍是对话模型，缺的能力是真的缺。
+  const omni = mergeModelMetadata({
+    providerId: 'p',
+    displayName: 'p/qwen3.5-omni-plus-realtime',
+    actualModelId: 'qwen3.5-omni-plus-realtime',
+    providerType: 'aggregate',
+    layers: [base({ hint: { modalities: ['text', 'audio', 'image'] } })],
+  })
+  // 「不知道模态」不等于「不适用」：没有任何证据的行照旧算待补。
+  const unknown = mergeModelMetadata({
+    providerId: 'p',
+    displayName: 'p/mystery-model',
+    actualModelId: 'mystery-model',
+    providerType: 'aggregate',
+    layers: [],
+  })
+
+  assert.equal(isChatInapplicable(audioOnly), true)
+  assert.equal(isChatInapplicable(imageOnly), true)
+  assert.equal(isChatInapplicable(omni), false, 'modalities 含 text 就是对话模型')
+  assert.equal(isChatInapplicable(unknown), false, '未知不是不适用')
+
+  assert.deepEqual(routingGapsOf(audioOnly), [])
+  assert.equal(isRoutingComplete(audioOnly), true)
+  assert.ok(routingGapsOf(omni).length > 0)
+  assert.ok(routingGapsOf(unknown).length > 0)
+
+  // 关键属性对该行不适用；参考项（free / weight）照旧适用。
+  assert.equal(isAttributeApplicable('vision', 'aggregate', audioOnly), false)
+  assert.equal(isAttributeApplicable('contextTokens', 'aggregate', audioOnly), false)
+  assert.equal(isAttributeApplicable('free', 'aggregate', audioOnly), true)
+  assert.equal(isAttributeApplicable('vision', 'aggregate', unknown), true)
+
+  // 覆盖率分母也剔掉这些行：否则 rate 会被一批永远填不上的行永久压低。
+  const coverage = computeMetadataCoverage([audioOnly, omni, unknown])
+  assert.equal(coverage.contextTokens.total, 3)
+  assert.equal(coverage.contextTokens.applicable, 2)
+  assert.equal(coverage.contextTokens.notApplicable, 1)
+
+  assert.equal(
+    classifyModelGap({
+      modelId: 'MiniMax/speech-2.8-hd',
+      hasAutoMatch: false,
+      canFillAny: false,
+      chatApplicable: false,
+    }),
+    'not-chat',
+    '证据判定的不适用优先于名字正则',
   )
 })

@@ -48,7 +48,25 @@ import type { AggregateEntry } from '../../../shared/aggregate'
  * Yi. A vendor's pay-as-you-go endpoint and its subscription endpoint are always
  * separate entries: the vendors isolate the API key and base URL per billing
  * channel, and mixing them either returns 401/403 or silently bills the payg
- * account. The array now carries 89 entries / 568 models.
+ * account.
+ *
+ * Three endpoints were added on 2026-11-10 after probing them without a key:
+ * PPIO (`/openai/chat/completions` answered 403 INVALID_API_KEY and
+ * `/openai/models` answered 200 with 67 chat rows, base URL taken verbatim from
+ * the vendor's own integration guide), Huawei ModelArts Studio (`/v1/chat/completions`
+ * answered 400 ModelArts.81002 "Failed to get the authorization header") and
+ * Infini-AI (`/maas/v1/chat/completions` answered 401 "Not login"). The last two
+ * ship an **empty baseline on purpose**: their catalogue needs a key, so the ids
+ * arrive through `modelsUrl` once the user saves one; inventing slugs would only
+ * ship rows that 404. Their free allowance is a signup promotion, not a permanent
+ * free pool, so all three stay `category: 'apikey'`.
+ *
+ * GitHub Models was considered and left out: `models.github.ai` answers a
+ * text/plain "OK" placeholder to every path from this host (root, `/catalog/models`
+ * and even an unauthenticated chat POST), so its catalogue could not be
+ * transcribed, and its terms restrict the free tier to prototyping anyway.
+ *
+ * The array now carries 92 entries / 580 models.
  */
 export const AGGREGATE_REGISTRY: AggregateEntry[] = [
   {
@@ -3515,6 +3533,61 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     "envVar": "YI_API_KEY",
     "notes": "零一万物 OpenAI 兼容端点。官方文档注明自 2025-08-07 起 Yi-Lightning / Yi-Vision-V2 由智能路由承载，可能落到 DeepSeek / Qwen 等后端。",
     "website": "https://platform.lingyiwanwu.com/docs"
+  },
+  {
+    "id": "ppio",
+    "name": "PPIO 派欧云",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://api.ppio.com/openai",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "deepseek/deepseek-v4-pro", "name": "DeepSeek V4 Pro" },
+      { "id": "deepseek/deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash" },
+      { "id": "qwen/qwen3.8-max", "name": "Qwen3.8 Max" },
+      { "id": "qwen/qwen3.8-flash", "name": "Qwen3.8 Flash" },
+      { "id": "zai-org/glm-5.3", "name": "GLM 5.3" },
+      { "id": "zai-org/glm-5.3-flash", "name": "GLM 5.3 Flash" },
+      { "id": "moonshotai/kimi-k3.1-pro", "name": "Kimi K3.1 Pro" },
+      { "id": "moonshotai/kimi-k2.7-code", "name": "Kimi K2.7 Code" },
+      { "id": "minimax/minimax-m3.1-flash", "name": "MiniMax M3.1 Flash" },
+      { "id": "tencent/hy4", "name": "Tencent HY4" },
+      { "id": "stepfun/step-5-preview", "name": "Step 5 Preview" },
+      { "id": "xiaomimimo/mimo-v2.6-pro", "name": "MiMo V2.6 Pro" }
+    ],
+    "authUrl": "https://ppio.com/console",
+    "envVar": "PPIO_API_KEY",
+    "modelsUrl": "https://api.ppio.com/openai/models",
+    "notes": "Base URL 逐字取自官方接入文档（ppio.com/docs/third-party/qode.md 写明 https://api.ppio.com/openai）。2026-11-10 无凭据实测：/openai/models 返回 67 条 chat 行，/openai/chat/completions 返回 403 INVALID_API_KEY（路径存在、只缺 Key）。新注册赠送 ¥50 代金券，属活动口径，不是永久免费池。",
+    "website": "https://ppio.com/docs/home"
+  },
+  {
+    "id": "huawei_maas",
+    "name": "华为云 ModelArts Studio",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://api.modelarts-maas.com/v1",
+    "wire": "openai-chat",
+    "models": [],
+    "authUrl": "https://console.huaweicloud.com/modelarts/",
+    "envVar": "HUAWEI_MAAS_API_KEY",
+    "modelsUrl": "https://api.modelarts-maas.com/v1/models",
+    "notes": "华为云 ModelArts Studio 的 OpenAI 兼容入口。2026-11-10 无凭据实测 /v1/chat/completions 与 /v1/models 均返回 400 ModelArts.81002「Failed to get the authorization header」，证明路径存在、只缺 Authorization。基线模型清单故意留空：该平台的模型 id 随区域与已开通的模型授权变化，保存 Key 后用 modelsUrl 同步发现。新用户赠送额度属活动口径，不是永久免费。",
+    "website": "https://www.huaweicloud.com/product/modelarts/studio.html"
+  },
+  {
+    "id": "infini_ai",
+    "name": "无问芯穹 Infini-AI",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://cloud.infini-ai.com/maas/v1",
+    "wire": "openai-chat",
+    "models": [],
+    "authUrl": "https://cloud.infini-ai.com/",
+    "envVar": "INFINI_API_KEY",
+    "modelsUrl": "https://cloud.infini-ai.com/maas/v1/models",
+    "notes": "无问芯穹 Infini-AI 的 OpenAI 兼容入口。2026-11-10 无凭据实测 /maas/v1/chat/completions 返回 401「Not login」、/maas/v1/models 返回 code 60000「Wrong Bearer Token or Token is nil」，证明路径存在、只缺 Bearer。基线留空，保存 Key 后由 modelsUrl 同步。注册赠送额度属活动口径。",
+    "website": "https://cloud.infini-ai.com/"
   },
 ]
 

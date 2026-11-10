@@ -16,6 +16,7 @@ import {
   buildUnclassifiedQueue,
   classifyModelGap,
   computeMetadataCoverage,
+  isChatInapplicable,
   isRoutingComplete,
   mergeModelMetadata,
   routingGapsOf,
@@ -274,6 +275,7 @@ export async function getModelMetadataReport(
         modelId: metadata.actualModelId,
         hasAutoMatch: check.hasAutoMatch,
         canFillAny: check.canFillAny,
+        chatApplicable: !isChatInapplicable(metadata),
       })
       gapKindByKey.set(`${provider.id}\u0000${metadata.displayName}`, kind)
       if (routingGaps.length > 0) incompleteByKind[kind] += 1

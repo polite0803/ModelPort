@@ -74,11 +74,29 @@ export const REFERENCE_METADATA_ATTRIBUTES = [
  */
 export function isAttributeApplicable(
   attribute: MetadataAttribute,
-  providerType: ProviderType
+  providerType: ProviderType,
+  metadata?: Pick<ModelMetadata, 'modalities'>
 ): boolean {
   if (attribute === 'weight') return providerType === 'account'
   if (attribute === 'free') return providerType === 'account' || providerType === 'aggregate'
+  // 已知输入模态里没有文本 ⇒ 这条模型不接 chat completions（ASR / TTS / 图像生成 / 向量）。
+  // 语音翻译、omni、realtime 这类仍以文本为输入之一，`modalities` 含 `text`，照常计缺口。
+  if (metadata !== undefined && isChatInapplicable(metadata)) {
+    return !(ROUTING_METADATA_ATTRIBUTES as readonly string[]).includes(attribute)
+  }
   return true
+}
+
+/**
+ * 输入模态**已知**且不含 `text` —— 聊天能力对它不适用。
+ *
+ * 只认已解析出来的 `modalities`，不猜名字：名字推断是 `isNonChatModel` 的窄口径正则干的活，
+ * 这里回答的是「这份证据已经证明它不接文本」这一更硬的判断。未知（`unclassified`）不算，
+ * 因为「不知道」不等于「不适用」。
+ */
+export function isChatInapplicable(metadata: Pick<ModelMetadata, 'modalities'>): boolean {
+  const fact = metadata.modalities
+  return fact.state === 'known' && !fact.value.includes('text')
 }
 
 /**
@@ -261,7 +279,7 @@ export function mergeModelMetadata(input: {
  */
 export function unclassifiedAttributes(metadata: ModelMetadata): MetadataAttribute[] {
   return METADATA_ATTRIBUTES.filter((attribute) => {
-    if (!isAttributeApplicable(attribute, metadata.providerType)) return false
+    if (!isAttributeApplicable(attribute, metadata.providerType, metadata)) return false
     const fact: Fact<unknown> = metadata[attribute]
     return fact.state === 'unclassified'
   })
@@ -269,6 +287,9 @@ export function unclassifiedAttributes(metadata: ModelMetadata): MetadataAttribu
 
 /** 关键属性里仍缺失的部分；空数组即「这一行路由用得上了」。 */
 export function routingGapsOf(metadata: ModelMetadata): MetadataAttribute[] {
+  // 证据已证明它不接文本（ASR / 合成 / 图像生成），聊天能力对它不适用：
+  // 把 `vision`/`tools` 记成缺口就是给一个永远补不完的任务计数。
+  if (isChatInapplicable(metadata)) return []
   return ROUTING_METADATA_ATTRIBUTES.filter(
     (attribute) => (metadata[attribute] as Fact<unknown>).state === 'unclassified'
   )
@@ -308,7 +329,10 @@ export function classifyModelGap(input: {
   modelId: string
   hasAutoMatch: boolean
   canFillAny: boolean
+  /** 证据已证明它不接文本（见 {@link isChatInapplicable}）；未知时按对话模型算。 */
+  chatApplicable?: boolean
 }): ModelGapKind {
+  if (input.chatApplicable === false) return 'not-chat'
   if (isNonChatModel(input.modelId)) return 'not-chat'
   if (input.canFillAny) return 'adoptable'
   return input.hasAutoMatch ? 'missing-field' : 'no-candidate'
@@ -341,7 +365,7 @@ export function computeMetadataCoverage(
     let known = 0
     let applicable = 0
     for (const record of records) {
-      if (!isAttributeApplicable(attribute, record.providerType)) continue
+      if (!isAttributeApplicable(attribute, record.providerType, record)) continue
       applicable += 1
       if (record[attribute].state === 'known') known += 1
     }
