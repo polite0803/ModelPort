@@ -28,8 +28,11 @@ import type {
   ChannelView,
 } from '../../../shared/channels'
 import { channelAddFlowOf, channelModelDisplayName } from '../../../shared/channels'
+import type { CatalogAdoption } from '../../../shared/modelCatalog'
+import type { ModelMetadata } from '../../../shared/modelMetadata'
 import { CatalogScopeBatchButton } from '@/components/models/CatalogScopeBatchButton'
 import { ModelAnnotationDialog } from '@/components/models/ModelAnnotationDialog'
+import { ModelAnnotationSummary } from '@/components/models/ModelAnnotationSummary'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
@@ -242,6 +245,58 @@ export function Channels() {
     channel: ChannelView
     model: ChannelModelInfo
   } | null>(null)
+  /**
+   * 标准库采用台账：批量补全写的是 catalogAdoptions，不是供应商记录本身。
+   * 模型行要能显示「已采用 N 项」，否则一次几十毫秒跑完的批量只剩一条一闪而过的提示。
+   */
+  const [adoptions, setAdoptions] = useState<CatalogAdoption[]>([])
+  const refreshAdoptions = useCallback(async () => {
+    const api = window.electronAPI?.providers
+    if (!api?.getCatalogAdoptions) return
+    try {
+      setAdoptions(await api.getCatalogAdoptions())
+    } catch {
+      // 台账读不到只影响徽标，不阻断渠道页其它操作。
+    }
+  }, [])
+  useEffect(() => {
+    void refreshAdoptions()
+  }, [refreshAdoptions])
+  const adoptedCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const item of adoptions) {
+      const key = `${item.providerId}\u0000${item.displayName}`
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    }
+    return counts
+  }, [adoptions])
+  const adoptedCountOf = useCallback(
+    (channel: ChannelView, model: ChannelModelInfo): number =>
+      adoptedCounts.get(
+        `${channel.id}\u0000${channelModelDisplayName(channel.name, channel.id, model)}`,
+      ) ?? 0,
+    [adoptedCounts],
+  )
+  /**
+   * 每家的解析结果（含批量补全刚采用的值）。按渠道收口一次读回全部行：
+   * 行上要显示「补成了什么」，逐模型 `getModelMetadataOne` 会为每个模型各解密一次 store。
+   */
+  const [metadataByChannel, setMetadataByChannel] = useState<
+    Record<string, Record<string, ModelMetadata>>
+  >({})
+  const loadMetadata = useCallback(async (providerId: string) => {
+    const api = window.electronAPI?.providers
+    if (!api?.getModelMetadata) return
+    try {
+      const result = await api.getModelMetadata(providerId)
+      if (!('totals' in result)) return
+      const byModel: Record<string, ModelMetadata> = {}
+      for (const row of result.records ?? []) byModel[row.displayName] = row
+      setMetadataByChannel(current => ({ ...current, [providerId]: byModel }))
+    } catch {
+      // 元数据只影响行上的摘要，不阻断渠道页其它操作。
+    }
+  }, [])
   const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const autoCheckinTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const autoGrowthTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -879,6 +934,8 @@ export function Channels() {
 
   const loadModels = async (channel: ChannelView) => {
     setModels(current => ({ ...current, [channel.id]: 'loading' }))
+    // 元数据与目录并行读：行上的标注摘要跟着这次目录刷新一起换新。
+    void loadMetadata(channel.id)
     const result = await window.electronAPI.channels.models(channel.id)
     setModels(current => ({ ...current, [channel.id]: result.success ? result.models : [] }))
     setModelSources(current => {
@@ -1392,7 +1449,10 @@ export function Channels() {
                       providerId={channel.id}
                       scopeLabel={channel.name}
                       disabled={!connected}
-                      onFinished={() => void loadModels(channel)}
+                      onFinished={() => {
+                        void loadModels(channel)
+                        void refreshAdoptions()
+                      }}
                     />
                   </div>
 
@@ -1493,11 +1553,16 @@ export function Channels() {
                         )
                         : (
                           <div className="max-h-56 space-y-1 overflow-y-auto rounded-md border p-2">
-                            {modelList.map(model => (
+                            {modelList.map(model => {
+                              const displayName = channelModelDisplayName(channel.name, channel.id, model)
+                              return (
                               <div key={model.id} className="flex items-center gap-2 text-sm">
-                                <span className={`min-w-0 flex-1 truncate${model.disabled || model.dead ? ' text-muted-foreground line-through' : ''}`}>
-                                  {model.name}
-                                </span>
+                                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                                  <span className={`truncate${model.disabled || model.dead ? ' text-muted-foreground line-through' : ''}`}>
+                                    {model.name}
+                                  </span>
+                                  <ModelAnnotationSummary metadata={metadataByChannel[channel.id]?.[displayName]} />
+                                </div>
                                 {model.free && (
                                   <Badge variant="outline" className="shrink-0 border-emerald-500/40 text-emerald-600">
                                     {t('channels.models.free')}
@@ -1518,6 +1583,13 @@ export function Channels() {
                                 {model.disabled && !model.dead && (
                                   <Badge variant="outline" className="shrink-0">
                                     {t('channels.models.disabled')}
+                                  </Badge>
+                                )}
+                                {adoptedCountOf(channel, model) > 0 && (
+                                  <Badge variant="outline" className="shrink-0 text-[10px] text-info">
+                                    {t('channels.models.adoptedBadge', {
+                                      count: adoptedCountOf(channel, model),
+                                    })}
                                   </Badge>
                                 )}
                                 {/*
@@ -1569,7 +1641,8 @@ export function Channels() {
                                     </Button>
                                   )}
                               </div>
-                            ))}
+                              )
+                            })}
                           </div>
                         )}
                     </div>
@@ -1943,7 +2016,10 @@ export function Channels() {
           )}
           modelLabel={annotateTarget.model.name}
           onClose={() => setAnnotateTarget(null)}
-          onChanged={() => void loadModels(annotateTarget.channel)}
+          onChanged={() => {
+            void loadModels(annotateTarget.channel)
+            void refreshAdoptions()
+          }}
         />
       )}
     </div>

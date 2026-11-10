@@ -245,7 +245,7 @@ interface ProvidersAPI {
     error?: string
   }>
   /** 元数据解析报表：覆盖率 + 待标注队列（按调用量排序）。 */
-  getModelMetadata: () => Promise<ModelMetadataReport | { success: false; error: string }>
+  getModelMetadata: (providerId?: string) => Promise<ModelMetadataReport | { success: false; error: string }>
   /** 单个模型的解析结果（逐模型标注入口用）。模型不在目录里时 `success: false`。 */
   getModelMetadataOne: (
     providerId: string,

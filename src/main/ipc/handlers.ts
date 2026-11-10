@@ -779,9 +779,12 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
     }
   )
 
-  registerMainHandler(IpcChannels.PROVIDERS_GET_MODEL_METADATA, async () => {
+  registerMainHandler(IpcChannels.PROVIDERS_GET_MODEL_METADATA, async (_, providerId?: string) => {
     try {
-      return await getModelMetadataReport()
+      return await getModelMetadataReport(
+        Date.now(),
+        typeof providerId === 'string' && providerId.length > 0 ? providerId : undefined,
+      )
     } catch (error) {
       console.error('[IPC] Failed to build model metadata report:', error)
       return { success: false, error: 'Failed to build model metadata report' }

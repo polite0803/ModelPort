@@ -309,6 +309,7 @@ export async function getModelMetadataReport(
     },
     coverage,
     queue,
+    ...(providerId === undefined ? {} : { records }),
     coverageGaps: coverageGapsOf(coverage),
   }
 }

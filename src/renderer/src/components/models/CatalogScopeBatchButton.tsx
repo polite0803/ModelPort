@@ -57,6 +57,14 @@ export function CatalogScopeBatchButton({
   const [snapshot, setSnapshot] = useState<CatalogBatchSnapshot | null>(null)
   /** 另一个范围的 active job：全局补齐或别的渠道。它挡住本家启动时必须可见、可取消。 */
   const [otherJob, setOtherJob] = useState<CatalogBatchSnapshot | null>(null)
+  /**
+   * 本组件是否发起/接管过一个任务。
+   *
+   * 采用是本地写盘，一家渠道的量级常在几十毫秒内跑完：React 可能把「running」和「done」
+   * 合并成一次渲染，`active` 从未为 true。若只靠观察 running→done 这条边弹收尾提示，
+   * 快速任务就会完全没有进度、也没有成败 —— 所以启动成功时先立起这个标记。
+   */
+  const wasActiveRef = useRef(false)
 
   // 只认领本范围启动的任务：全局「全部补齐」的进度不该显示在这个渠道的卡片上。
   // 其它范围的任务单独收进 `otherJob`，否则用户只会收到一句「已有任务在进行」却看不到它。
@@ -118,7 +126,10 @@ export function CatalogScopeBatchButton({
       }
       setConfirmOpen(false)
       setEstimate(null)
-      if (result.snapshot) setSnapshot(result.snapshot)
+      if (result.snapshot) {
+        wasActiveRef.current = true
+        setSnapshot(result.snapshot)
+      }
     } catch (error) {
       toast({
         title: t('models.metadata.batchScopeFailedStart'),
@@ -159,8 +170,17 @@ export function CatalogScopeBatchButton({
   }, [providerId, t, toast])
 
   // 任务收尾：一次通知宿主刷新，一次把结果说清。
-  // 只在「进行中 → 结束」这条边上触发：回显出来的历史任务不能再弹一次吐司。
-  const wasActiveRef = useRef(false)
+  // 只在「本组件发起/接管的任务已结束」时触发：回显出来的历史任务不能再弹一次吐司。
+  const resultTitleOf = useCallback((job: CatalogBatchSnapshot): string => {
+    if (job.status === 'cancelled') return t('models.metadata.batchScopeCancelled')
+    if (job.status === 'failed') return t('models.metadata.batchScopeFailed')
+    // 三态里的 `done` 包含「没有可做的事」：只报成功数会让一次空跑看起来像补全成功。
+    if (job.adoptedFields === 0 && job.measuredFields === 0) {
+      return t('models.metadata.batchScopeNoChangeTitle')
+    }
+    return t('models.metadata.batchScopeDone')
+  }, [t])
+
   useEffect(() => {
     if (active) {
       wasActiveRef.current = true
@@ -168,21 +188,8 @@ export function CatalogScopeBatchButton({
     }
     if (!wasActiveRef.current || snapshot === null) return
     wasActiveRef.current = false
-    // 三态里的 `done` 包含「没有可做的事」：只报成功数会让一次空跑看起来像补全成功。
-    // 采用了 0 个字段且没有实测时换一句标题，并始终把 adopted 数写进汇总。
-    const noChange =
-      snapshot.status === 'done'
-      && snapshot.adoptedFields === 0
-      && snapshot.measuredFields === 0
-    const title = snapshot.status === 'cancelled'
-      ? t('models.metadata.batchScopeCancelled')
-      : snapshot.status === 'failed'
-        ? t('models.metadata.batchScopeFailedStart')
-        : noChange
-          ? t('models.metadata.batchScopeNoChangeTitle')
-          : t('models.metadata.batchScopeDone')
     toast({
-      title,
+      title: resultTitleOf(snapshot),
       description: t('models.metadata.batchScopeSummary', {
         success: snapshot.success,
         skipped: snapshot.skipped,
@@ -192,7 +199,7 @@ export function CatalogScopeBatchButton({
       variant: snapshot.failed > 0 ? 'destructive' : 'default',
     })
     onFinished?.()
-  }, [active, onFinished, snapshot, t, toast])
+  }, [active, onFinished, resultTitleOf, snapshot, t, toast])
 
   const control = useCallback(async (action: 'pause' | 'resume' | 'cancel') => {
     const api = window.electronAPI?.providers
@@ -346,6 +353,21 @@ export function CatalogScopeBatchButton({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* 结束后的结果行：快速任务可能一帧都画不出进度条，成败必须留在页面上。 */}
+      {snapshot && !active && (
+        <div className="flex w-full flex-wrap items-center gap-2 rounded-md border bg-muted/20 px-2 py-1.5 text-xs">
+          <span className="font-medium">{resultTitleOf(snapshot)}</span>
+          <span className="text-muted-foreground">
+            {t('models.metadata.batchScopeSummary', {
+              success: snapshot.success,
+              skipped: snapshot.skipped,
+              failed: snapshot.failed,
+              fields: snapshot.adoptedFields,
+            })}
+          </span>
+        </div>
+      )}
 
       {otherActive && otherJob && (
         <div className="flex w-full flex-wrap items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-xs">

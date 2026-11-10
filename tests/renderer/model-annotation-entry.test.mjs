@@ -126,7 +126,7 @@ test('新文案两种语言各写全，插值槽不多不少', () => {
     const metadata = json.models.metadata
     for (const key of ['batchScopeButton', 'batchScopeTitle', 'batchScopeDesc', 'batchScopeNone',
       'batchScopeProgressTitle', 'batchScopeDone', 'batchScopeCancelled', 'batchScopeFailedStart',
-      'batchScopeEstimateFailed', 'batchScopeNoChangeTitle', 'batchScopeSummary',
+      'batchScopeFailed', 'batchScopeEstimateFailed', 'batchScopeNoChangeTitle', 'batchScopeSummary',
       'batchScopeNothingAdoptable', 'batchScopeNothingAtAll', 'batchOtherJobTitle',
       'batchOtherJobCancel']) {
       assert.equal(typeof metadata[key], 'string', `${name} 缺 models.metadata.${key}`)
@@ -138,6 +138,10 @@ test('新文案两种语言各写全，插值槽不多不少', () => {
       `${name} 的「可探测」提示只该带 count 一个槽`)
     assert.equal(slots(metadata.batchOtherJobTitle), '{{scope}}',
       `${name} 的其它任务提示只该带 scope 一个槽`)
+    for (const key of ['attrShortContextTokens', 'attrShortMaxOutputTokens', 'attrShortTools',
+      'attrShortVision', 'attrShortReasoning', 'attrShortModalities']) {
+      assert.equal(typeof metadata[key], 'string', `${name} 缺模型行摘要的 ${key}`)
+    }
 
     // 范围说法必须中性：同一个按钮既挂在账号渠道上也挂在聚合条目上。
     for (const key of ['batchScopeButton', 'batchScopeProgressTitle', 'batchScopeDone']) {
@@ -150,9 +154,11 @@ test('新文案两种语言各写全，插值槽不多不少', () => {
       `${name} 缺聚合侧的「已采用」徽标文案`)
     assert.equal(slots(json.aggregate.manage.models.adoptedBadge), '{{count}}',
       `${name} 的「已采用」徽标只该带 count 一个槽`)
-    for (const key of ['annotate', 'annotateHint', 'annotateBlocked']) {
+    for (const key of ['annotate', 'annotateHint', 'annotateBlocked', 'adoptedBadge']) {
       assert.equal(typeof json.channels.models[key], 'string', `${name} 缺 channels.models.${key}`)
     }
+    assert.equal(slots(json.channels.models.adoptedBadge), '{{count}}',
+      `${name} 的渠道「已采用」徽标只该带 count 一个槽`)
     // 禁用说明只该出现在渠道侧：聚合目录里没有「失效但仍列出」的模型。
     assert.equal(json.aggregate.manage.models.annotateBlocked, undefined,
       `${name} 不该给聚合侧一条它用不上的禁用说明`)
@@ -232,4 +238,40 @@ test('批量入口拦住空跑，并把挡住它的其它任务摆出来可取�
   assert.match(batchButton, /cancelCatalogBatch\?\.\(jobId\)/,
     '被挡住时必须能在当前页面取消那个任务')
   assert.match(batchButton, /probeRequests/, '确认框要显示探测请求条数')
+})
+
+test('任务几十毫秒跑完也有成败反馈：启动即认领，结束后保留结果行', () => {
+  // 采用是本地写盘，一家渠道常在 100ms 内结束；React 可能把 running/done 合并成一次渲染，
+  // 只观察 running→done 的边会让收尾 toast 永远不触发。
+  assert.match(batchButton, /wasActiveRef\.current = true[\s\S]{0,80}setSnapshot\(result\.snapshot\)/,
+    '启动成功就必须认领任务，不能等观察到 running 才认领')
+  assert.match(batchButton, /snapshot && !active/,
+    '结束后要在页面上保留一条结果行，不能只留一闪而过的进度条')
+  assert.match(batchButton, /batchScopeFailed\b/,
+    '运行期失败与「未能开始」要用不同文案')
+})
+
+test('账号渠道也回显批量采用结果', () => {
+  assert.match(channels, /getCatalogAdoptions\(\)/, '渠道页必须读采用台账')
+  assert.match(channels, /adoptedCountOf\(channel, model\)/,
+    '采用数必须按渠道现算的展示名查，不能用 model.name 猜')
+  assert.match(channels, /channels\.models\.adoptedBadge/, '渠道模型行要显示已采用徽标')
+  assert.match(channels, /void refreshAdoptions\(\)/,
+    '批量结束与标注保存后都要重读台账，否则徽标不出现')
+})
+
+test('模型行直接显示更新后的标注值，而不只是「已采用 N 项」', () => {
+  const summary = read('src/renderer/src/components/models/ModelAnnotationSummary.tsx')
+  assert.match(api, /getModelMetadata: \(providerId\?: string\)/,
+    '报表接口必须能按供应商收口')
+  assert.match(metadataService, /providerId === undefined \? \{\} : \{ records \}/,
+    '完整解析行只在范围报表里返回，全局报表不许背近千行')
+  assert.match(aggregate, /getModelMetadata\(entry\.id\)/, '聚合页要按条目读解析结果')
+  assert.match(channels, /getModelMetadata\(providerId\)/, '渠道页要按渠道读解析结果')
+  assert.match(aggregate, /<ModelAnnotationSummary metadata=\{metadataByModel\[model\.displayName\]\}/,
+    '聚合模型行必须渲染标注值')
+  assert.match(channels, /<ModelAnnotationSummary metadata=\{metadataByChannel\[channel\.id\]\?\.\[displayName\]\}/,
+    '渠道模型行必须用现算的展示名查标注值')
+  assert.match(summary, /fact\.state !== 'known'/, '未知字段必须省略，不许输出占位值')
+  assert.match(summary, /SOURCE_LABEL_KEYS/, '摘要的悬停说明要带出处')
 })

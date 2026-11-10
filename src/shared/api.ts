@@ -293,8 +293,9 @@ const providersAPI = {
   }> =>
     wire.invoke(IpcChannels.PROVIDERS_SET_MODEL_MARK, providerId, displayName, mark),
 
-  getModelMetadata: (): Promise<ModelMetadataReport | { success: false; error: string }> =>
-    wire.invoke(IpcChannels.PROVIDERS_GET_MODEL_METADATA),
+  /** 元数据解析报表；给 `providerId` 时收口到这一家，并带回该家全部解析行（`records`）。 */
+  getModelMetadata: (providerId?: string): Promise<ModelMetadataReport | { success: false; error: string }> =>
+    wire.invoke(IpcChannels.PROVIDERS_GET_MODEL_METADATA, providerId),
 
   /** 单个模型的元数据解析结果（逐模型标注入口用，不重算整张报表）。 */
   getModelMetadataOne: (

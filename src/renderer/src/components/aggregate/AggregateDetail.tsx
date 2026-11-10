@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import { CatalogScopeBatchButton } from '@/components/models/CatalogScopeBatchButton'
 import { ModelAnnotationDialog } from '@/components/models/ModelAnnotationDialog'
+import { ModelAnnotationSummary } from '@/components/models/ModelAnnotationSummary'
 import type {
   AggregateDetail,
   AggregateEntry,
@@ -43,6 +44,7 @@ import { getTermsWarning } from '../../../../shared/aggregateTerms'
 import { quotaRows, quotaViewOf, WINDOW_OF_METRIC } from '../../../../shared/aggregateQuotaView'
 import type { ModelCapabilityHint } from '../../../../shared/types'
 import type { CatalogAdoption } from '../../../../shared/modelCatalog'
+import type { ModelMetadata } from '../../../../shared/modelMetadata'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -1060,6 +1062,28 @@ function ModelsCard(props: {
     return counts
   }, [adoptions, entry.id])
 
+  /**
+   * 这一家的解析结果（含批量补全刚采用的值）。
+   *
+   * 采用台账只回答「补了几项」，行上要看到「补成了什么」必须读解析后的六项属性；
+   * 按供应商一次读回全部行，避免逐模型 N 次 store 解密。
+   */
+  const [metadataByModel, setMetadataByModel] = useState<Record<string, ModelMetadata>>({})
+  useEffect(() => {
+    const api = window.electronAPI?.providers
+    if (!api?.getModelMetadata) return
+    let cancelled = false
+    void api.getModelMetadata(entry.id)
+      .then((result) => {
+        if (cancelled || !('totals' in result)) return
+        const next: Record<string, ModelMetadata> = {}
+        for (const row of result.records ?? []) next[row.displayName] = row
+        setMetadataByModel(next)
+      })
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [entry.id, models])
+
   const servedCount = models.filter(model => model.served).length
 
   /**
@@ -1415,6 +1439,7 @@ function ModelsCard(props: {
                               </Badge>
                             )}
                           </div>
+                          <ModelAnnotationSummary metadata={metadataByModel[model.displayName]} />
                           {summary && (
                             <span className="truncate font-mono text-[11px] text-muted-foreground" title={summary}>
                               {summary}

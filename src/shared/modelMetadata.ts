@@ -468,6 +468,14 @@ export interface ModelMetadataReport {
   }
   coverage: MetadataCoverage
   queue: ModelMetadataRow[]
+  /**
+   * 按供应商收口时返回该家的**全部**解析行（含已补全的行）。
+   *
+   * 全局报表不带它：近千行的完整证据链只会把 IPC 撑大，而全局页面只需要待标注队列。
+   * 渠道/聚合的模型行要显示「更新后的标注值」，一次范围读比逐行 `getModelMetadataOne`
+   * 少 N 次整份 store 解密。
+   */
+  records?: ModelMetadata[]
   /** 每项属性仍有缺失的模型数：适用行数减去已知数（不适用的行不计入缺口）。 */
   coverageGaps: Record<MetadataAttribute, number>
 }
