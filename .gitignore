@@ -79,3 +79,6 @@ src/renderer/next-app/
 
 # npx artifact cache created in the repo root by the local npm config
 .npm-cache/
+
+# Local Qoder/IDE workspace rules (machine-specific, not part of the product)
+.qoder/
