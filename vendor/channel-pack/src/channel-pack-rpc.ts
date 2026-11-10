@@ -36,6 +36,13 @@ import type { LobsteraiAuth } from './lobsterai-auth.js'
 import type { QoderAuth } from './qoder-auth.js'
 import type { TraeAuth } from './trae-auth.js'
 import type { ClineAuth } from './cline-auth.js'
+import type { CodeArtsAuth } from './service.js'
+import { CODEARTS } from './codearts-product.js'
+import type { CodeArtsCredential } from './types.js'
+import { claimCodeArtsDailyCheckin, fetchCodeArtsAccountInfoDetailed } from './codearts-credits.js'
+import type { ComateAuth } from './comate-auth.js'
+import { COMATE } from './comate-product.js'
+import { parseComateCredential, readComateFreeQuota } from './comate.js'
 import { LOOMY } from './loomy-product.js'
 import { creditExpiringWindowDays } from './credit-expiry-window.js'
 import type { LoomyAuth } from './loomy-auth.js'
@@ -308,6 +315,18 @@ export function normalizeZcodeLoginProvider(raw: string | undefined): ZcodeLogin
     }
   }
   return ZCODE_LOGIN_PROVIDER
+}
+
+/** 解析 CodeArts 凭据 JSON；解析失败返回 undefined。 */
+function parseCodeArtsCredential(raw: string): CodeArtsCredential | undefined {
+  try {
+    const parsed = JSON.parse(raw) as CodeArtsCredential
+    return typeof parsed === 'object' && parsed !== null && typeof parsed.access_key_id === 'string'
+      ? parsed
+      : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** 解析 LobsterAI 凭据 JSON；解析失败返回 undefined。 */
@@ -1014,6 +1033,10 @@ export function registerChannelPackRpc(
    * 因此必须单独注册（国际版拿不到每日积分）。
    */
   buddy: BuddyAuth,
+  /** CodeArts（华为云码道）实例（华为 IAM OAuth + DPoP，AK/SK 临时凭据）。 */
+  codearts: CodeArtsAuth,
+  /** 文心快码（百度 Comate）实例（浏览器设备绑定 + License）。 */
+  comate: ComateAuth,
   /**
    * provider → 适配器实例（可选）。
    *
@@ -1027,7 +1050,7 @@ export function registerChannelPackRpc(
   ctx.inject(['connection'], (connectionCtx) => {
     registerChannelPackEndpoints(
       connectionCtx as Context, pool, lobsterai,
-      qoder, qoderCn, trae, cline, loomy, raccoon, minimax, zcode, gemini, workbuddy, buddy, modelAdapters, config,
+      qoder, qoderCn, trae, cline, loomy, raccoon, minimax, zcode, gemini, workbuddy, buddy, codearts, comate, modelAdapters, config,
     )
   })
 }
@@ -1127,6 +1150,8 @@ function registerChannelPackEndpoints(
   gemini: GeminiAuth,
   workbuddy: BuddyAuth,
   buddy: BuddyAuth,
+  codearts: CodeArtsAuth,
+  comate: ComateAuth,
   modelAdapters?: Readonly<Record<string, ModelCatalogSource>>,
   config: ChannelPackRpcConfig = {},
 ): void {
@@ -1604,6 +1629,62 @@ function registerChannelPackEndpoints(
             void pool.removeAccount(id).catch(() => {})
           })
           return { ok: true, value: { accountId: id, loginUrl: authUrl } }
+        } else if (provider === COMATE.id) {
+          // 浏览器设备绑定：先返回登录页地址，后台轮询 token → License。
+          // 与 codearts/buddy 同款两步式，避免阻塞调用方的手势窗口。
+          const started = await comate.startLogin({ refName })
+          await pool.addAccount({
+            id,
+            provider: COMATE.id,
+            nickname: id,
+            enabled: true,
+            credentialRef: refName,
+            refreshable: false,
+            createdAt: Date.now(),
+          })
+          started.result.then(async (loginResult) => {
+            const credential = parseComateCredential(loginResult.access)
+            await pool.updateAccount(id, {
+              nickname: credential?.displayName !== undefined && credential.displayName.length > 0
+                ? credential.displayName
+                : id,
+              // License 不过期，也没有续期材料。
+              refreshable: false,
+            })
+          }).catch((error: unknown) => {
+            ctx.logger.warn(`[channel-pack] background comate login failed for ${id}: ${String(error)}`)
+            void pool.removeAccount(id).catch(() => {})
+          })
+          return { ok: true, value: { accountId: id, loginUrl: started.loginUrl } }
+        } else if (provider === 'codearts') {
+          // CodeArts 与 LobsterAI 同款：回调式登录 + 两步式返回，理由见上面的
+          // buddy 分支（弹窗拦截导致主页面被跳转）。
+          const started = await codearts.startLogin({ refName })
+          await pool.addAccount({
+            id,
+            provider: 'codearts',
+            nickname: id,
+            enabled: true,
+            credentialRef: refName,
+            refreshable: false,
+            createdAt: Date.now(),
+          })
+          started.result.then(async (loginResult) => {
+            const credential = parseCodeArtsCredential(loginResult.access)
+            await pool.updateAccount(id, {
+              nickname: credential?.user_name !== undefined && credential.user_name.length > 0
+                ? credential.user_name
+                : id,
+              expiresAt: credential?.expires_at !== undefined
+                ? (Number.isNaN(Date.parse(credential.expires_at)) ? undefined : Date.parse(credential.expires_at))
+                : undefined,
+              refreshable: Boolean(credential?.refresh_token),
+            })
+          }).catch((error: unknown) => {
+            ctx.logger.warn(`[channel-pack] background codearts login failed for ${id}: ${String(error)}`)
+            void pool.removeAccount(id).catch(() => {})
+          })
+          return { ok: true, value: { accountId: id, loginUrl: started.loginUrl } }
         } else if (provider === LOBSTERAI.id) {
 
           const started = await lobsterai.startLogin({ refName })
@@ -2135,6 +2216,12 @@ function registerChannelPackEndpoints(
           // 调用方是仓库外的脚本/手工 RPC。下面三处历史注释曾把它写成
           // 「账号卡片的刷新按钮」——那是失实的，会把排障的人引到不存在的 UI。
           switch (entry.provider) {
+            case COMATE.id:
+              await comate.refreshAccountCredential(entry.credentialRef, pool, entry.id)
+              break
+            case CODEARTS.id:
+              await codearts.refreshAccountCredential(entry.credentialRef, pool, entry.id)
+              break
             case LOBSTERAI.id:
               await lobsterai.refreshAccountCredential(entry.credentialRef, pool, entry.id)
               break
@@ -2744,6 +2831,28 @@ function registerChannelPackEndpoints(
             } satisfies RpcCreditsStatusResponse,
           }
         }
+        if (req.provider === COMATE.id) {
+          // Comate 没有每日签到接口（额度按小时/套餐配额，由服务端直接判定）：
+          // 如实返回 null，不臆造签到状态。
+          const accounts = await pool.listAccounts(req.provider)
+          return {
+            ok: true,
+            value: {
+              accounts: accounts.map((entry) => ({ accountId: entry.id, nickname: entry.nickname, status: null })),
+            } satisfies RpcCreditsStatusResponse,
+          }
+        }
+        if (req.provider === 'codearts') {
+          // CodeArts 没有可查询的「今日是否已签到」状态端点：如实返回 null，
+          // 不臆造状态对象（领取流程内部自带预检，见 claimAll 分支）。
+          const accounts = await pool.listAccounts(req.provider)
+          return {
+            ok: true,
+            value: {
+              accounts: accounts.map((entry) => ({ accountId: entry.id, nickname: entry.nickname, status: null })),
+            } satisfies RpcCreditsStatusResponse,
+          }
+        }
         if (req.provider === LOBSTERAI.id) {
 
           // CheckinStatus 不同构（无 streak/dailyCredit 等概念）。
@@ -2886,6 +2995,17 @@ function registerChannelPackEndpoints(
       case 'credits.claimAll': {
         const req = payload as RpcCreditsClaimAllRequest
         const accounts = await pool.listAccounts(req.provider)
+        if (req.provider === COMATE.id) {
+          // 显式拒绝而不是落到通用 `unsupported provider` —— 后者会让排查者
+          // 以为 provider 没注册。Comate 的额度是服务端配额，没有签到动作。
+          return {
+            ok: false,
+            error: {
+              code: 'bad-request',
+              message: '文心快码不支持每日签到（额度由服务端按套餐/小时配额发放，没有签到接口）',
+            },
+          }
+        }
         if (req.provider === CODEBUDDY.id) {
           // 每日签到只存在于中国版；`precheckStatus` 保持默认 true ——
           // 重复领取虽幂等，但会显示成「领取成功 +0 积分」。
@@ -2921,6 +3041,18 @@ function registerChannelPackEndpoints(
           const value = await collectClaimResults<QoderCredential, undefined>(accounts, undefined, {
             resolve: (ref) => ctx.credentials.resolve(ref),
             claim: (credential) => claimQoderDailyCheckin(credential, product),
+            precheckStatus: false,
+            warn: (msg) => ctx.logger?.warn?.(msg),
+          })
+          return { ok: true, value: value satisfies RpcCreditsClaimAllResponse }
+        }
+        if (req.provider === CODEARTS.id) {
+          // CodeArts 走华为签名协议，与腾讯系不同源：领取流程自带账户类型 +
+          // 活动列表预检（见 claimCodeArtsDailyCheckin），故跳过外部状态查询 ——
+          // 用 CodeBuddy 式的 fetchCheckinStatus 打华为端点必然失败。
+          const value = await collectClaimResults<CodeArtsCredential, undefined>(accounts, undefined, {
+            resolve: (ref) => ctx.credentials.resolve(ref),
+            claim: (credential) => claimCodeArtsDailyCheckin(credential),
             precheckStatus: false,
             warn: (msg) => ctx.logger?.warn?.(msg),
           })
@@ -3167,6 +3299,84 @@ function registerChannelPackEndpoints(
               windowDays: buddyExpiringWindowDays(),
             } satisfies RpcCreditsBalancesResponse,
           }
+        }
+        if (req.provider === COMATE.id) {
+          // Comate 没有“剩余积分”数字（`daily_cost` 对试用账号返回 null）。
+          // 但免费额度是可观测的：适配器把最近一次 Auto-Free 的真实结果记在
+          // `readComateFreeQuota()`（成功 / QUOTA_EXCEED），这里只读、不请求。
+          // 面板显示“可用 / 已用尽 / 待确认”，用户发一条消息即可刷新感知。
+          const rows: RpcCreditsBalancesResponse['accounts'] = []
+          for (const entry of accounts) {
+            const resolved = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
+            const credential = resolved === undefined ? undefined : parseComateCredential(resolved.value)
+            if (credential === undefined) {
+              rows.push({
+                accountId: entry.id,
+                nickname: entry.nickname,
+                enabled: entry.enabled,
+                balance: null,
+                status: 'unknown',
+                note: '凭据未配置',
+              })
+              continue
+            }
+            const free = readComateFreeQuota(credential.license)
+            rows.push({
+              accountId: entry.id,
+              nickname: entry.nickname,
+              enabled: entry.enabled,
+              balance: null,
+              status: free.status,
+              ...free.lastAt !== undefined ? { lastAt: free.lastAt } : {},
+              // available/unknown 的状态说明由界面按语言渲染；
+              // limited 保留上游原文（具体限额原因只有上游知道）。
+              ...free.status === 'limited' && free.note !== undefined ? { note: free.note } : {},
+            })
+          }
+          const status = rows.some(row => row.status === 'limited')
+            ? 'limited'
+            : rows.some(row => row.status === 'available')
+              ? 'available'
+              : 'unknown'
+          // 渠道级 note 只用于状态格 tooltip：优先带上上游限额文案。
+          const note = rows.find(row => row.status === 'limited' && row.note !== undefined)?.note
+          return {
+            ok: true,
+            value: {
+              accounts: rows,
+              status,
+              ...note !== undefined ? { note } : {},
+            } satisfies RpcCreditsBalancesResponse,
+          }
+        }
+        if (req.provider === 'codearts') {
+          // 余额来自 `statistics/plugin`（与账户类型检测同一个响应），
+          // 故用带原因的钩子：非积分账户要显示「Token 计费账户」而不是
+          // 误导性的「余额查询失败」。
+          const values = await collectCreditBalances<CodeArtsCredential, undefined>(accounts, undefined, {
+            resolve: (ref) => ctx.credentials.resolve(ref),
+            fetchBalanceDetailed: async (credential) => {
+              // 用带原因的版本：`fetchCodeArtsAccountInfo` 只回 null，会把
+              // 「AK 限流」「签名失败」「凭据过期」压成同一句笼统文案。
+              const result = await fetchCodeArtsAccountInfoDetailed(credential)
+              if (!result.ok) return { balance: null, error: `账户信息查询失败：${result.message}` }
+              const info = result.info
+              if (!info.isCreditPackage) {
+                return {
+                  balance: null,
+                  error: info.isTokenPackage
+                    ? 'Token 计费账户，无积分余额'
+                    : '非积分计费账户，无积分余额',
+                }
+              }
+              // 积分账户但没有 credit metric：如实报「无积分数据」，不显示 0 ——
+              // 0 会让用户以为自己把积分用光了。
+              if (info.credit === undefined) return { balance: null, error: '未返回积分数据' }
+              return { balance: info.credit }
+            },
+            warn: (msg) => ctx.logger?.warn?.(msg),
+          })
+          return { ok: true, value: { accounts: values } satisfies RpcCreditsBalancesResponse }
         }
         if (req.provider === LOBSTERAI.id) {
           // 查询前先做一次凭据对账：余额路径拿的是**存着的** access_token，不会像

@@ -511,6 +511,12 @@ export interface RpcCreditsBalanceAccount {
   enabled?: boolean
   /** 余额查询失败（网络/凭据/响应异常）时为 null —— 与「余额为 0」严格区分。 */
   balance: import('./credits.js').CreditBalance | null
+  /** 无数字余额时的额度状态（目前用于 Comate 免费额度）。 */
+  status?: 'limited' | 'available' | 'unknown'
+  /** 状态说明（上游文案 / 最近一次请求结果）。 */
+  note?: string
+  /** 最近一次能证明该状态的请求时刻（毫秒）。 */
+  lastAt?: number
   /** 查询失败的原因，供 UI 提示（成功时为 undefined）。 */
   error?: string
   /**
@@ -543,6 +549,10 @@ export interface RpcCreditsBalanceExtra {
 /** RPC: 查询积分余额响应 */
 export interface RpcCreditsBalancesResponse {
   accounts: RpcCreditsBalanceAccount[]
+  /** 无数字余额时的渠道级额度状态（目前用于 Comate 免费额度）。 */
+  status?: 'limited' | 'available' | 'unknown'
+  /** 渠道级状态说明（上游文案 / 最近一次请求结果）。 */
+  note?: string
   /**
    * 面板据此把每个资源包分成临时 / 长期两桶显示（`credit-expiry.js`），
    * 且必须在**渲染时**用当前时刻现算 —— 分类是时间的函数，把结果存下来就会
@@ -1696,4 +1706,68 @@ export interface RpcUsageAutoGrowthRequest {
 /** RPC: 自动领取开关响应（回显写入后的生效状态）。 */
 export interface RpcUsageAutoGrowthResponse {
   autoGrowth: RpcUsageAutoGrowthState
+}
+
+// ---------------------------------------------------------------------------
+// CodeArts（华为云码道）—— 2026-11-11 从上游 v2.5.1 移植
+// ---------------------------------------------------------------------------
+
+import type { DpopPrivateJwk } from './oauth.js'
+
+/** snap-manager ticket 端点响应的传输格式。 */
+export interface CodeArtsCredentialResponse {
+  credential?: {
+    access?: string
+    secret?: string
+    securitytoken?: string
+    securityToken?: string
+    expires_at?: string
+    expiresAt?: string
+  }
+  result?: {
+    accessKeyId?: string
+    secretAccessKey?: string
+    securityToken?: string
+    expiration?: string
+    expiresAt?: string
+  }
+  domain_id?: string
+  user_id?: string
+  user_name?: string
+  error_code?: string
+  error_msg?: string
+}
+
+/** 存储在 CODEARTS_ACCOUNT_* 下的归一化临时凭据。 */
+export interface CodeArtsCredential {
+  access_key_id: string
+  secret_access_key: string
+  security_token: string
+  expires_at: string
+  domain_id?: string
+  user_id?: string
+  user_name?: string
+  /** 刷新令牌（新式 IAM OAuth 流程签发；缺失表示旧 ticket 凭据，不可静默刷新）。 */
+  refresh_token?: string
+  /** PKCE 验证器，刷新换取时与 refresh_token 一起提交。 */
+  code_verifier?: string
+  /** DPoP ES256 私钥 JWK（随凭据持久化，刷新换取时签发 DPoP JWS）。 */
+  dpop_private_key_jwk?: DpopPrivateJwk
+  /** 模型速率限制/重置时间（框架层附加的运行时元数据，刷新凭据时需保留）。 */
+  model_rate_limits?: Record<string, unknown>
+}
+
+/** 一次登录流程的结果：已存储的凭据值及其过期时间。 */
+export interface LoginFlowResult {
+  access: string
+  expires: number
+  loginUrl: string
+}
+
+/** runLoginFlow 和 startCallbackServer 接受的选项。 */
+export interface LoginFlowOptions {
+  fetcher?: typeof fetch
+  openBrowser?: (url: string) => void | Promise<void>
+  maxAttempts?: number
+  flow?: 'oauth' | 'ticket'
 }

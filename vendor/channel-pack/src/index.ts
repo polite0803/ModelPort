@@ -7,6 +7,12 @@ import { registerQoderLlm } from './qoder-adapter.js'
 import { registerTraeLlm } from './trae-adapter.js'
 import { registerClineLlm } from './cline-adapter.js'
 import { registerLoomyLlm, parseLoomyRemoteModels } from './loomy-adapter.js'
+import { registerCodeArtsLlm, PROVIDER as CODEARTS_PROVIDER } from './llm-adapter.js'
+import { CodeArtsAuth, CODEARTS_CREDENTIAL_REF } from './service.js'
+import type { CodeArtsCredential } from './types.js'
+import { registerComateLlm, PROVIDER as COMATE_PROVIDER } from './comate-adapter.js'
+import { ComateAuth, COMATE_CREDENTIAL_REF } from './comate-auth.js'
+import type { ComateCredential } from './comate.js'
 import { registerRaccoonLlm } from './raccoon-adapter.js'
 import { LobsteraiAuth } from './lobsterai-auth.js'
 import { QoderAuth } from './qoder-auth.js'
@@ -787,6 +793,57 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
     // 「请求记录」的账号归属（见上面的 `activeClineAccountId`）。
     currentAccountId: () => activeClineAccountId.length > 0 ? activeClineAccountId : undefined,
     product: CLINE,
+  })
+
+  // ===== CodeArts（华为云码道）服务 =====
+  // 2026-11-11 从上游 v2.5.1 移植：登录走华为 IAM OAuth（DPoP ES256），
+  // 凭据是 AK/SK + security_token，chat 与模型列表都经 SDK-HMAC-SHA256 签名。
+  // 登录、状态与续期统一由 Channel Pack 面板触发，不注册斜杠命令。
+  const codeartsService = new CodeArtsAuth(ctx)
+  const codeartsAdapter = registerCodeArtsLlm(ctx, {
+    credentialRef: credentialRef(CODEARTS_CREDENTIAL_REF),
+    resolveCredential: async () => {
+      // 只认账号池：登录一律写入 CODEARTS_ACCOUNT_XXX，固定 ref 仅满足适配器契约。
+      const available = await pool.getAvailableAccount('codearts', '')
+      return available?.credential as CodeArtsCredential | undefined
+    },
+    refresh: async () => {
+      const available = await pool.getAvailableAccount('codearts', '')
+      if (available) {
+        await codeartsService.refreshAccountCredential(
+          available.entry.credentialRef,
+          pool,
+          available.entry.id,
+        )
+      }
+    },
+    fetchRemoteModels: () => codeartsService.refreshModels(pool),
+    accountPool: pool,
+  })
+
+  // ===== 文心快码（百度 Comate）服务 =====
+  // 2026-11-11 按官方 @comate/comatecli 2.0.0（MIT）的 SaaS 协议接入：
+  // 浏览器设备绑定换 License，模型目录与对话都走 comate.baidu.com 的
+  // autowork agent 接口（不是 OpenAI 兼容协议）。
+  const comateService = new ComateAuth(ctx)
+  const comateAdapter = registerComateLlm(ctx, {
+    credentialRef: credentialRef(COMATE_CREDENTIAL_REF),
+    resolveCredential: async () => {
+      const available = await pool.getAvailableAccount('comate', '')
+      return available?.credential as ComateCredential | undefined
+    },
+    refresh: async () => {
+      const available = await pool.getAvailableAccount('comate', '')
+      if (available) {
+        await comateService.refreshAccountCredential(
+          available.entry.credentialRef,
+          pool,
+          available.entry.id,
+        )
+      }
+    },
+    fetchRemoteModels: () => comateService.refreshModels(pool),
+    accountPool: pool,
   })
 
   // ===== Loomy（讯飞办公助手）服务 =====
@@ -1684,6 +1741,7 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
    * 「凭据一直刷不动」在日志里完全无痕（issue !IKIRTT 的可观测性条目）。
    */
   const refreshTargets: ReadonlyArray<readonly [string, (pool: AccountPool) => Promise<void>]> = [
+    ['codearts', (p) => codeartsService.refreshAll(p)],
     ['lobsterai', (p) => lobsterai.refreshAll(p)],
     ['qoder', (p) => qoder.refreshAll(p)],
     ['qodercn', (p) => qoderCn.refreshAll(p)],
@@ -1969,6 +2027,8 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
   }
   const modelAdapters: Record<string, { listAllModels(): readonly { id: string; name: string }[] }> = {
 
+    codearts: pruned(CODEARTS_PROVIDER, codeartsAdapter),
+    comate: pruned(COMATE_PROVIDER, comateAdapter),
     // 服务实例 `service` 不同名，故这里可以简写）。
     lobsterai: pruned(LOBSTERAI.id, lobsteraiAdapter),
     qoder: pruned(QODER.id, qoderAdapter),
@@ -1990,7 +2050,7 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
   // 丢的却是「下一轮工具调用能不能带上签名」。
   ctx.effect(() => () => { void geminiSigStore.flush().catch(() => {}) })
 
-  registerChannelPackRpc(ctx, pool, lobsterai, qoder, qoderCn, trae, cline, loomy, raccoon, minimax, zcode, gemini, workbuddy, buddy, modelAdapters, {
+  registerChannelPackRpc(ctx, pool, lobsterai, qoder, qoderCn, trae, cline, loomy, raccoon, minimax, zcode, gemini, workbuddy, buddy, codeartsService, comateService, modelAdapters, {
     ...config,
   })
   // 网关是旁路功能：这里传 `pool` 只为读设置页里的开关，其内部任何失败都已

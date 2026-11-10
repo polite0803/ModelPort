@@ -27,8 +27,8 @@ function packProviderIds(): string[] {
   return [...table.matchAll(/^\s*\['[A-Z]+', '([a-z]+)'\],/gm)].map(match => match[1])
 }
 
-test('the catalogue ships exactly thirteen channels with unique ids', () => {
-  assert.equal(ACCOUNT_CHANNELS.length, 13)
+test('the catalogue ships exactly fifteen channels with unique ids', () => {
+  assert.equal(ACCOUNT_CHANNELS.length, 15)
   const ids = new Set<string>()
   for (const channel of ACCOUNT_CHANNELS) {
     assert.equal(ids.has(channel.id), false, `duplicate channel id: ${channel.id}`)

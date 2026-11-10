@@ -125,6 +125,13 @@ function taskSearchTerm(row: TaskRow): string | null {
 interface LoginState {
   channel: ChannelView
   accountId?: string
+  /**
+   * 渠道包返回的登录页地址。
+   *
+   * 为什么由界面打开而不是主进程：headless daemon 的 `openExternal` 只能把
+   * URL 打到日志，没有浏览器可开；浏览器版 `/ui/` 必须用 `window.open`。
+   */
+  loginUrl?: string
   phase: 'starting' | 'waiting' | 'failed'
   error?: string
 }
@@ -244,6 +251,8 @@ export function Channels() {
   const creditsLastRunAt = useRef(0)
   const loginRef = useRef<LoginState | null>(null)
   loginRef.current = login
+  /** headless `/ui/` 里点击时预占的标签页；桌面/外壳为 null。 */
+  const loginPopup = useRef<Window | null>(null)
 
   const runCredits = useCallback(async (views: ChannelView[]) => {
     const connected = views.filter(view => view.accounts.total > 0)
@@ -411,6 +420,8 @@ export function Channels() {
       }
       if (value?.done === true) {
         if (value.success === true) {
+          loginPopup.current?.close()
+          loginPopup.current = null
           setLogin(null)
           toast({ title: t('channels.login.success') })
           void refresh()
@@ -434,22 +445,52 @@ export function Channels() {
   const startLogin = async (channel: ChannelView) => {
     stopPolling()
     setLogin({ channel, phase: 'starting' })
+    // 浏览器版 `/ui/`：在用户点击的手势内先占一个标签页，等 `account.create`
+    // 返回后再导航。RPC 往返（甚至 429 等待）会让手势窗口过期，直接
+    // `window.open(loginUrl)` 很容易被弹窗拦截。
+    const browserUi = window.electronAPI?.app?.platform === 'browser'
+    loginPopup.current = browserUi ? window.open('', '_blank') : null
     const result = await window.electronAPI.channels.rpc('account.create', { provider: channel.id })
     if (!result.ok) {
+      loginPopup.current?.close()
+      loginPopup.current = null
       setLogin({ channel, phase: 'failed', error: result.error?.message ?? t('channels.login.failed') })
       return
     }
-    const value = result.value as { accountId?: string } | undefined
+    const value = result.value as { accountId?: string; loginUrl?: string } | undefined
     if (typeof value?.accountId !== 'string') {
+      loginPopup.current?.close()
+      loginPopup.current = null
       setLogin({ channel, phase: 'failed', error: t('channels.login.failed') })
       return
     }
-    setLogin({ channel, accountId: value.accountId, phase: 'waiting' })
+    const loginUrl = typeof value.loginUrl === 'string' && /^https?:\/\//i.test(value.loginUrl)
+      ? value.loginUrl
+      : undefined
+    if (loginUrl === undefined) {
+      loginPopup.current?.close()
+      loginPopup.current = null
+    } else if (browserUi) {
+      // 预占的标签页可能被拦截（null）；退回到直接开新标签，仍失败则靠
+      // 对话框里的手动链接。
+      if (loginPopup.current !== null) {
+        try { loginPopup.current.opener = null } catch { /* 跨源后不可写 */ }
+        loginPopup.current.location.href = loginUrl
+      } else {
+        window.open(loginUrl, '_blank', 'noopener,noreferrer')
+      }
+    } else {
+      // 桌面/Windows 外壳：交给主进程用系统浏览器打开。
+      void window.electronAPI?.app?.openExternal?.(loginUrl)
+    }
+    setLogin({ channel, accountId: value.accountId, loginUrl, phase: 'waiting' })
     pollLogin(value.accountId, Date.now())
   }
 
   const cancelLogin = async () => {
     stopPolling()
+    loginPopup.current?.close()
+    loginPopup.current = null
     const current = loginRef.current
     setLogin(null)
     if (current?.accountId !== undefined) {
@@ -1225,48 +1266,98 @@ export function Channels() {
                   </div>
                   <div>
                     <div className="text-xs text-muted-foreground">{t('channels.statCredits')}</div>
-                    <div className="font-medium">
+                    <div
+                      className="font-medium"
+                      title={creditState !== undefined && creditState !== 'loading' ? creditState.note : undefined}
+                    >
                       {creditState === 'loading'
                         ? <Loader2 className="mx-auto h-4 w-4 animate-spin" />
-                        : remaining !== undefined ? remaining : '—'}
+                        : remaining !== undefined
+                          ? remaining
+                          : creditState !== undefined && creditState.status === 'available'
+                            ? t('channels.creditsAvailable')
+                            : creditState !== undefined && creditState.status === 'limited'
+                              ? t('channels.creditsLimited')
+                              : creditState !== undefined && creditState.status === 'unknown'
+                                ? t('channels.creditsUnknown')
+                                : creditState !== undefined && creditState.unsupported === true
+                                  ? t('channels.creditsUnsupported')
+                                  : '—'}
                     </div>
                   </div>
                 </div>
 
                 {creditState !== undefined && creditState !== 'loading'
                   && creditState.accounts.length > 0
-                  && (creditState.reported < creditState.accounts.length || creditState.accounts.length > 1) && (
+                  && (
+                    creditState.reported < creditState.accounts.length
+                    || creditState.accounts.length > 1
+                    || creditState.accounts.some(account => account.status !== undefined || account.note !== undefined)
+                  ) && (
                   <div className="rounded-md border p-2">
                     <div className="mb-1 flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                      <span>{t('channels.statCredits')}</span>
                       <span>
-                        {t('channels.creditsReported', {
-                          reported: creditState.reported,
-                          total: creditState.accounts.length,
-                        })}
+                        {creditState.reported === 0
+                          ? t('channels.creditsStatus')
+                          : t('channels.statCredits')}
                       </span>
+                      {creditState.reported > 0 && (
+                        <span>
+                          {t('channels.creditsReported', {
+                            reported: creditState.reported,
+                            total: creditState.accounts.length,
+                          })}
+                        </span>
+                      )}
                     </div>
                     {creditState.error !== undefined && (
                       <p className="mb-1 text-xs text-destructive">{creditState.error}</p>
                     )}
                     <ul className="space-y-1">
-                      {creditState.accounts.map(account => (
-                        <li key={account.accountId} className="flex items-center justify-between gap-2 text-xs">
-                          <span className="min-w-0 truncate">
-                            {account.nickname}
-                            {account.enabled === false && (
-                              <span className="ml-1 text-muted-foreground">{t('channels.creditsDisabled')}</span>
-                            )}
-                          </span>
-                          {account.error !== undefined
-                            ? (
-                              <span className="min-w-0 truncate text-destructive" title={account.error}>
-                                {account.error}
+                      {creditState.accounts.map(account => {
+                        const statusLabel = account.status === 'available'
+                          ? t('channels.creditsAvailable')
+                          : account.status === 'limited'
+                            ? t('channels.creditsLimited')
+                            : account.status === 'unknown'
+                              ? t('channels.creditsUnknown')
+                              : undefined
+                        const at = account.lastAt !== undefined
+                          ? new Date(account.lastAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                          : '—'
+                        const statusNote = account.status === 'available'
+                          ? t('channels.creditsLastSuccess', { time: at })
+                          : account.status === 'limited'
+                            ? t('channels.creditsLastLimited', { time: at })
+                            : account.status === 'unknown'
+                              ? t('channels.creditsNoRecord')
+                              : undefined
+                        const note = [statusNote, account.note].filter(Boolean).join('；')
+                        return (
+                          <li key={account.accountId} className="space-y-0.5 text-xs">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="min-w-0 truncate">
+                                {account.nickname}
+                                {account.enabled === false && (
+                                  <span className="ml-1 text-muted-foreground">{t('channels.creditsDisabled')}</span>
+                                )}
                               </span>
-                            )
-                            : <span className="font-medium">{account.remaining ?? '—'}</span>}
-                        </li>
-                      ))}
+                              {account.error !== undefined
+                                ? (
+                                  <span className="min-w-0 truncate text-destructive" title={account.error}>
+                                    {account.error}
+                                  </span>
+                                )
+                                : statusLabel !== undefined
+                                  ? <span className="font-medium">{statusLabel}</span>
+                                  : <span className="font-medium">{account.remaining ?? '—'}</span>}
+                            </div>
+                            {note.length > 0 && (
+                              <p className="truncate text-muted-foreground" title={note}>{note}</p>
+                            )}
+                          </li>
+                        )
+                      })}
                     </ul>
                   </div>
                 )}
@@ -1660,6 +1751,20 @@ export function Channels() {
                 </>
               )}
           </div>
+
+          {login?.loginUrl !== undefined && login.phase !== 'failed' && (
+            <p className="text-xs text-muted-foreground">
+              {t('channels.login.manualHint')}{' '}
+              <a
+                className="break-all underline"
+                href={login.loginUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {login.loginUrl}
+              </a>
+            </p>
+          )}
 
           <DialogFooter>
             <Button variant="outline" onClick={() => void cancelLogin()}>

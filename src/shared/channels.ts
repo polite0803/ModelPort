@@ -191,6 +191,18 @@ export interface ChannelCredits {  /**
   reported: number
   /** The channel does not expose a balance endpoint at all. */
   unsupported?: boolean
+  /**
+   * 渠道没有数字余额、但能给出额度状态时的读数（目前用于 Comate）。
+   *
+   * - `limited`：当前套餐额度受限，服务端会回退到 `note` 里的 Auto 模型；
+   * - `available`：额度可用，但上游不提供剩余数字；
+   * - `unknown`：状态不可判定（接口失败/账号未登录）。
+   *
+   * ⚠️ 与 `remaining` 互斥：有数字余额时不要设置 status。
+   */
+  status?: 'limited' | 'available' | 'unknown'
+  /** 额度状态的说明文本（上游文案优先），用于面板 tooltip。 */
+  note?: string
   /** Whole-call failure (network, credentials); per-account causes live on the rows. */
   error?: string
   accounts: Array<{
@@ -199,6 +211,12 @@ export interface ChannelCredits {  /**
     /** `false` when the account is parked; its reading is shown but not summed into `remaining`. */
     enabled?: boolean
     remaining?: number
+    /** 无数字余额时的额度状态（目前用于 Comate 的免费额度）。 */
+    status?: 'limited' | 'available' | 'unknown'
+    /** 状态说明（上游文案 / 最近一次请求结果），用于明细行与 tooltip。 */
+    note?: string
+    /** 最近一次能证明该状态的 Auto 请求时刻（毫秒）；`unknown` 时可能缺失。 */
+    lastAt?: number
     /** Why this account returned nothing (upstream wording first, e.g. "未登录"). */
     error?: string
   }>
@@ -321,7 +339,44 @@ export function channelModelDisplayName(
   model: Pick<ChannelModelInfo, 'id' | 'name'>,
 ): string {
   const baseName = model.name.trim().length > 0 ? model.name : `${channelId}/${model.id}`
-  return `${channelName} / ${baseName}`
+  const suffix = channelModelVariantSuffix(model.id, model.name)
+  return suffix === undefined ? `${channelName} / ${baseName}` : `${channelName} / ${baseName} · ${suffix}`
+}
+
+const slugOf = (value: string): string =>
+  value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+
+/**
+ * 同一个展示名在渠道里对应多个 id 时，用 id 与名字的差异给变体做后缀。
+ *
+ * 起因（2026-11-10 实测）：cline 的 `nvidia/nemotron-3.5-lightning:free` 与
+ * `nvidia/nemotron-3.5-lightning` 展示名同为 `Nemotron 3.5 Lightning`，而同步按
+ * **展示名**去重、同名只保留第一条 —— 免费那条连 `weight: 0` 一起被当别名吞掉，
+ * 于是它既不进 `/v1/models`，`auto` 的「免费优先」也看不见它。trae 的
+ * `kimi-k2.5`（x0.48）与 `multimodal_image_kimi-k2.5`（x0.75）同理，两个倍率还不同。
+ *
+ * 判据只有「id 比名字多了什么」，不猜、不看别的模型，所以主进程写目录与界面现算
+ * 得到同一个结果（见 `tests/renderer/model-annotation-entry.test.mjs` 的约束）。
+ * id 与名字没有前缀/后缀关系时返回 `undefined`（如 `qmodel_38max` ↔ `GLM-5.1`）：
+ * 那种情况多半是渠道内部 id，给它加后缀只会污染命名。
+ */
+export function channelModelVariantSuffix(id: string, name: string): string | undefined {
+  const displayName = name.trim()
+  if (displayName.length === 0) return undefined
+  const segments = id.split('/')
+  const tail = slugOf(segments[segments.length - 1] ?? '')
+  const base = slugOf(displayName)
+  if (tail.length === 0 || base.length === 0 || tail === base) return undefined
+
+  // **只认免费标记**。id 比名字多出来的其它片段大多是厂商标识（`Seed-Code-doubao`）
+  // 或渠道内部写法，给它们加后缀会把 `TRAE / Seed-Code` 改成 `· Doubao`，
+  // 属于凭空造名。换言之：同名的非免费变体继续按别名处理（第一条胜出），
+  // 这类要区分只能靠证据（如倍率不同）而不是从字符串猜。
+  if (tail === `${base}-free` || tail === `free-${base}`) return '免费'
+  return undefined
 }
 
 /**

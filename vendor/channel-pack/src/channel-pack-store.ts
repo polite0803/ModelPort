@@ -338,6 +338,12 @@ class MemoryStore implements ChannelPackStore {
  */
 const REF_PREFIX_TO_PROVIDER: ReadonlyArray<readonly [string, string]> = [
   ['LOBSTERAI', 'lobsterai'],
+  // 第 17 个 provider（codearts，2026-11-11 本地新增）—— 与前面四次同款坑：
+  // 漏加 = `CODEARTS_ACCOUNT_*` 的账号在 state.json 缺失时静默消失。
+  ['CODEARTS', 'codearts'],
+  // ⚠️ comate（2026-11-11 本地新增）—— 同款坑第五次：
+  // 漏加 = `COMATE_ACCOUNT_*` 的账号在 state.json 缺失时静默消失。
+  ['COMATE', 'comate'],
   ['QODER', 'qoder'],
   ['QODERCN', 'qodercn'],
   ['TRAE', 'trae'],

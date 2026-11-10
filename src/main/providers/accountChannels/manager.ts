@@ -16,7 +16,6 @@
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { PassThrough } from 'node:stream'
-import { getHost } from '../../runtime/host'
 import AccountManager from '../../store/accounts'
 import { storeManager } from '../../store/store'
 import type { Provider } from '../../store/types'
@@ -294,7 +293,20 @@ class AccountChannelManager {
       }
     }
     const value = result.value as
-      | { accounts?: Array<{ accountId?: string; nickname?: string; enabled?: boolean; balance?: { total?: number } | null; error?: string }> }
+      | {
+        accounts?: Array<{
+          accountId?: string
+          nickname?: string
+          enabled?: boolean
+          balance?: { total?: number } | null
+          status?: unknown
+          note?: unknown
+          lastAt?: unknown
+          error?: string
+        }>
+        status?: unknown
+        note?: unknown
+      }
       | undefined
     const rows = Array.isArray(value?.accounts) ? value.accounts : []
     let total = 0
@@ -310,6 +322,10 @@ class AccountChannelManager {
           total += remaining
         }
       }
+      const status: 'limited' | 'available' | 'unknown' | undefined =
+        row.status === 'limited' || row.status === 'available' || row.status === 'unknown'
+          ? row.status
+          : undefined
       return {
         accountId: String(row.accountId ?? ''),
         nickname: String(row.nickname ?? row.accountId ?? ''),
@@ -317,10 +333,23 @@ class AccountChannelManager {
         // 「总额凭空少了一截」，用户无法知道少了谁、为什么少（2026-11-01）。
         enabled: row.enabled !== false,
         remaining,
+        ...status !== undefined ? { status } : {},
+        ...typeof row.note === 'string' && row.note.length > 0 ? { note: row.note } : {},
+        ...typeof row.lastAt === 'number' && Number.isFinite(row.lastAt) ? { lastAt: row.lastAt } : {},
         error: typeof row.error === 'string' ? row.error : undefined,
       }
     })
-    return { reported, accounts, ...reported > 0 ? { remaining: Math.round(total * 100) / 100 } : {} }
+    const status: 'limited' | 'available' | 'unknown' | undefined =
+      value?.status === 'limited' || value?.status === 'available' || value?.status === 'unknown'
+        ? value.status
+        : undefined
+    return {
+      reported,
+      accounts,
+      ...reported > 0 ? { remaining: Math.round(total * 100) / 100 } : {},
+      ...status !== undefined ? { status } : {},
+      ...typeof value?.note === 'string' && value.note.length > 0 ? { note: value.note } : {},
+    }
   }
 
   /**
@@ -820,19 +849,13 @@ class AccountChannelManager {
   /**
    * Forwards one pack RPC.
    *
-   * `account.create` is special-cased: the pack returns a login URL and expects
-   * a browser window. Opening it here keeps the renderer free of shell access
-   * and guarantees the URL is opened exactly once.
+   * `account.create` returns the channel's login URL to the caller; **the
+   * renderer opens it**. A headless daemon has no browser (`getHost().openExternal`
+   * only logs the URL), so opening it here would leave the UI waiting forever.
    */
   async rpc(method: string, payload: unknown): Promise<ChannelRpcResult> {
     const bridge = await this.bridgeOrThrow()
     const result = await bridge.rpc(method, payload)
-    if (method === 'account.create' && result.ok) {
-      const value = result.value as { loginUrl?: unknown } | undefined
-      if (typeof value?.loginUrl === 'string' && /^https?:\/\//i.test(value.loginUrl)) {
-        getHost().openExternal(value.loginUrl)
-      }
-    }
     // 渠道包没有为所有改动账号池的方法广播 `changed`（opencode 的两个加账号方法就不发），
     // 这里补一次镜像：否则账号进了池子、provider 记录却没出现，卡永远停在「未配置」。
     if (result.ok && resyncsAfterChannelRpc(method)) this.notifyChanged()

@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { channelModelDisplayName } from '../../src/shared/channels.ts'
+import { channelModelDisplayName, channelModelVariantSuffix } from '../../src/shared/channels.ts'
 
 /**
  * 渠道模型的展示名是标注的两个键之一（`(providerId, displayName)`）：
@@ -35,5 +35,53 @@ describe('channelModelDisplayName', () => {
       channelModelDisplayName('TRAE', 'trae', model),
       channelModelDisplayName('Qoder', 'qoder', model),
     )
+  })
+
+  /**
+   * 2026-11-10 实测：cline 的免费变体与付费版展示名完全相同，同步按展示名去重时
+   * 免费那条连 `weight: 0` 一起被吞，既不进 `/v1/models`，`auto` 的「免费优先」
+   * 也看不见它。后缀只从「id 比名字多了什么」推出来，不看别的模型，保证主进程
+   * 与界面现算一致。
+   */
+  it('id 带免费变体标记时给展示名加「· 免费」，付费版保持原名', () => {
+    assert.equal(
+      channelModelDisplayName('Cline', 'cline', {
+        id: 'nvidia/nemotron-3.5-lightning:free',
+        name: 'Nemotron 3.5 Lightning',
+      }),
+      'Cline / Nemotron 3.5 Lightning · 免费',
+    )
+    assert.equal(
+      channelModelDisplayName('Cline', 'cline', {
+        id: 'nvidia/nemotron-3.5-lightning',
+        name: 'Nemotron 3.5 Lightning',
+      }),
+      'Cline / Nemotron 3.5 Lightning',
+      '付费版不带后缀，免得把老键全部改名',
+    )
+  })
+
+  it('非免费变体不加后缀：多出来的片段多半是厂商标识，猜不出语义就别造名', () => {
+    // `Seed-Code-doubao` 的 `doubao` 是厂商，不是变体；`DeepSeek-V4-Pro-Official`
+    // 与 `multimodal_image_kimi-k2.5` 确实可能是不同后端（后者倍率 0.75 vs 0.48），
+    // 但名字里没有语义可推，继续按别名处理，等有证据（倍率/探测）再说。
+    assert.equal(
+      channelModelDisplayName('TRAE', 'trae', { id: 'Seed-Code-doubao', name: 'Seed-Code' }),
+      'TRAE / Seed-Code',
+    )
+    assert.equal(
+      channelModelDisplayName('TRAE', 'trae', { id: 'DeepSeek-V4-Pro-Official', name: 'DeepSeek-V4-Pro' }),
+      'TRAE / DeepSeek-V4-Pro',
+    )
+    assert.equal(
+      channelModelDisplayName('TRAE', 'trae', { id: 'multimodal_image_kimi-k2.5', name: 'Kimi-K2.5' }),
+      'TRAE / Kimi-K2.5',
+    )
+  })
+
+  it('id 与名字没有前后缀关系时不加后缀：内部 id 不该污染命名', () => {
+    assert.equal(channelModelVariantSuffix('qmodel_38max', 'GLM-5.1'), undefined)
+    assert.equal(channelModelVariantSuffix('LoRA/Qwen/Qwen2.5-14B-Instruct', 'Qwen2.5-14B-Instruct'), undefined)
+    assert.equal(channelModelVariantSuffix('x1', ''), undefined, '没有展示名时回落 id，不叠两层后缀')
   })
 })

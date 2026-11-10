@@ -1,5 +1,5 @@
 /**
- * The thirteen account channels shipped by the vendored pack.
+ * The fifteen account channels shipped by the vendored pack.
  *
  * This is metadata only: login flows, account pools, credit claims and model
  * catalogues all come from `vendor/channel-pack` at runtime. The ids here must
@@ -149,6 +149,36 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
     growthTasks: false,
     description:
       'OpenCode 免费车道：匿名槽无需凭据即可用，按出口 IP 限流；粘贴 API key 可解锁收费模型。没有每日签到接口。',
+  },
+  {
+    id: 'codearts',
+    upstreamIdentity: {
+      declared: '华为 IAM OAuth（DPoP ES256）· SDK-HMAC-SHA256 签名 · 码道 IDE 的 AK/SK 临时凭据 · 不发送自定义 UA · 排队重投 10s→30s 退避 · Chat-Id 每请求唯一/Session-Id 按账号派生',
+      risk: 'high',
+    },
+    name: 'CodeArts 码道 (华为云)',
+    vendor: '华为云',
+    loginKind: 'oauth',
+    dailyCheckin: true,
+    growthTasks: false,
+    description: '华为云码道（CodeArts）OAuth 登录，用临时 AK/SK 签名调用；支持每日签到领积分。',
+  },
+  {
+    id: 'comate',
+    upstreamIdentity: {
+      declared: 'User-Agent: zulucli/2.0.0（官方 Comate CLI 协议复刻）· X-Source: COMATE · login-name 携带 License · autowork agent 协议',
+      risk: 'high',
+    },
+    name: '文心快码 (百度)',
+    vendor: '百度',
+    loginKind: 'browser',
+    // 额度由服务端按套餐/小时配额发放，没有签到端点。
+    dailyCheckin: false,
+    growthTasks: false,
+    description: '浏览器授权 Comate 账号，使用 Auto-Free 免费额度；对话走官方 agent 协议，不支持客户端工具调用。',
+    // 对话接口是 agent 协议（conversation → task → SSE execute），
+    // 客户端 tools 无法透传；带工具的请求由 auto 路由直接跳过本渠道。
+    capabilities: { tools: false },
   },
 ]
 

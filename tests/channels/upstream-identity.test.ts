@@ -30,9 +30,9 @@ async function loadChannels() {
 
 const RISK_LEVELS = new Set(['high', 'medium', 'low'])
 
-test('13 条账号渠道全部带身份标注，且字段有效', async () => {
+test('15 条账号渠道全部带身份标注，且字段有效', async () => {
   const ACCOUNT_CHANNELS = await loadChannels()
-  assert.equal(ACCOUNT_CHANNELS.length, 13)
+  assert.equal(ACCOUNT_CHANNELS.length, 15)
   for (const channel of ACCOUNT_CHANNELS) {
     const identity = channel.upstreamIdentity
     assert.ok(identity !== undefined, `${channel.id} 缺少 upstreamIdentity`)
@@ -46,7 +46,7 @@ test('风险等级与审计结论文致：被实际处置 / 冻结官方身份�
   const ACCOUNT_CHANNELS = await loadChannels()
   const risk = Object.fromEntries(ACCOUNT_CHANNELS.map(c => [c.id, c.upstreamIdentity.risk]))
   // 龙虾已被上游停服（2026-11-04）；其余是被冻结或内置的官方客户端身份。
-  for (const id of ['lobsterai', 'qoder', 'qodercn', 'trae', 'zcode', 'gemini', 'buddy', 'workbuddy']) {
+  for (const id of ['lobsterai', 'qoder', 'qodercn', 'trae', 'zcode', 'gemini', 'buddy', 'workbuddy', 'comate']) {
     assert.equal(risk[id], 'high', `${id} 必须是 high（不得被悄悄降级）`)
   }
   // 官方 SDK 形状 / 完全不发客户端身份的，才是 low。
@@ -81,6 +81,9 @@ test('声明必须与实际发出的身份一致（2026-11-05 审计）', async 
   // Trae 已改为现役客户端的动态字段，不再写死 0.1.52 / 20260811。
   assert.doesNotMatch(byId.trae, /0\.1\.52|20260811/)
   assert.match(byId.trae, /appVersion/)
+  // Comate 是官方 CLI 协议的复刻，声明必须写清它发的是 zulucli 身份与 agent 协议。
+  assert.match(byId.comate, /zulucli/)
+  assert.match(byId.comate, /agent/)
 })
 
 test('呈现层：卡片渲染风险徽标，提示文案带 declared 插值', () => {
