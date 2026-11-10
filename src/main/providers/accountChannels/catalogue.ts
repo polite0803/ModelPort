@@ -166,7 +166,7 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
   {
     id: 'comate',
     upstreamIdentity: {
-      declared: 'User-Agent: zulucli/2.0.0（官方 Comate CLI 协议复刻）· X-Source: COMATE · login-name 携带 License · autowork agent 协议',
+      declared: 'User-Agent: zulucli/2.0.0（官方 Comate CLI 协议复刻）· X-Source: COMATE · login-name 携带 License · autowork agent 协议 · agent 工具由桥接层翻译成客户端 tools（网关不执行 shell/文件）',
       risk: 'high',
     },
     name: '文心快码 (百度)',
@@ -175,10 +175,9 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
     // 额度由服务端按套餐/小时配额发放，没有签到端点。
     dailyCheckin: false,
     growthTasks: false,
-    description: '浏览器授权 Comate 账号，使用 Auto-Free 免费额度；对话走官方 agent 协议，不支持客户端工具调用。',
-    // 对话接口是 agent 协议（conversation → task → SSE execute），
-    // 客户端 tools 无法透传；带工具的请求由 auto 路由直接跳过本渠道。
-    capabilities: { tools: false },
+    description: '浏览器授权 Comate 账号，使用 Auto-Free 免费额度；agent 的工具调用会翻译成 Codex/Claude Code/Cline 类客户端的工具，在客户端工作区执行；网关不执行 shell/文件操作。',
+    // 工具由客户端执行：网关只做工具名/参数映射与结果回传。
+    capabilities: { tools: true },
   },
 ]
 

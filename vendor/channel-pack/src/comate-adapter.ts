@@ -1,4 +1,4 @@
-import { LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions,
   LlmModelInfo,
@@ -13,6 +13,14 @@ import type { AccountPool } from './account-pool.js'
 import { RemoteCatalogGate } from './remote-catalog-gate.js'
 import { registerAdapterIdempotent } from './llm-register-compat.js'
 import { normalizeHarnessMessages, type HarnessMessageLike } from './message-shape.js'
+import {
+  buildToolUseResults,
+  extractClientToolResults,
+  mapComateToolCall,
+  mergeToolInput,
+  type ClientToolDefinition,
+  type PendingToolCall,
+} from './comate-bridge.js'
 import { COMATE } from './comate-product.js'
 import {
   COMATE_FREE_MODEL,
@@ -58,6 +66,8 @@ const FREE_ONLY_TTL_MS = 30 * 60 * 1_000
 const EXECUTE_PATH = '/aidevops/autocomate/rest/autowork/v2/execute'
 const CONVERSATION_PATH = '/aidevops/autocomate/rest/autowork/v2/conversation'
 const TASK_PATH = '/aidevops/autocomate/rest/autowork/v2/task'
+/** 一次请求内“全部工具都无法映射”的连续轮次上限（正常不会触发）。 */
+const MAX_UNMAPPED_ROUNDS = 12
 
 interface ConversationState {
   conversationId: number
@@ -65,6 +75,23 @@ interface ConversationState {
   /** 已经成功下发过的消息指纹；下一轮据此只发增量。 */
   seen: string[]
   updatedAt: number
+  /** 已发给客户端、等待 tool result 的 agent 工具调用。 */
+  pending?: PendingToolCall[]
+}
+
+interface AgentToolCall {
+  id: string
+  name: string
+  input: Record<string, unknown>
+}
+
+interface StreamState {
+  nextIndex: number
+  textIndex?: number
+  reasoningIndex?: number
+  text: string
+  reasoning: string
+  usage?: { inputTokens: number; cachedInputTokens: number; outputTokens: number }
 }
 
 interface CreatedConversation {
@@ -392,7 +419,6 @@ export class ComateAdapter extends LlmAdapter {
   private lookupConversation(
     key: string,
     fingerprints: readonly string[],
-    lastUser: number,
   ): ConversationState | undefined {
     const states = this.conversations.get(key)
     if (states === undefined || states.length === 0) return undefined
@@ -405,7 +431,6 @@ export class ComateAdapter extends LlmAdapter {
     if (fresh.length !== states.length) this.conversations.set(key, fresh)
     const candidates = fresh.filter(state =>
       fingerprints.length > state.seen.length
-      && lastUser >= state.seen.length
       && isPrefix(state.seen, fingerprints),
     )
     if (candidates.length === 0) return undefined
@@ -475,29 +500,35 @@ export class ComateAdapter extends LlmAdapter {
       )
     }
 
-    // 本渠道不实现客户端工具调用：agent 会自己尝试服务端工具，客户端给的
-    // tools 无法执行。带工具的请求必须显式失败，不能假装已经调用。
-    if (options.tools !== undefined && options.tools.length > 0) {
-      throw new LlmError(
-        'comate: this channel does not support client tool calling; use a tools-capable channel',
-        'INVALID_REQUEST',
-      )
-    }
-
     const entry = (await this.loadModels()).find(model => model.id === options.model)
     const messages = normalizeHarnessMessages(options.messages as readonly HarnessMessageLike[])
     const fingerprints = messages.map(messageFingerprint)
     const key = conversationKey(options.system, messages)
     const lastUser = lastUserIndex(messages)
+    const clientTools = (options.tools ?? []) as readonly ClientToolDefinition[]
 
-    let state = this.lookupConversation(key, fingerprints, lastUser)
-    if (state !== undefined && lastUser < state.seen.length) {
-      // 没有新的用户轮次（客户端重试/回滚历史）——新建会话，避免把同一轮再喂一遍。
-      // 不删旧缓存：同键的其它会话可能仍在用。
+    let state = this.lookupConversation(key, fingerprints)
+    let isContinuation = false
+    let continuationResults: ReturnType<typeof buildToolUseResults> = []
+
+    if (state !== undefined && state.pending !== undefined) {
+      const results = extractClientToolResults(messages)
+      if (results.length > 0) {
+        isContinuation = true
+        continuationResults = buildToolUseResults(state.pending, results)
+      } else {
+        // 客户端没有带回 tool result（例如用户直接发了新问题）：旧会话仍停在
+        // 工具调用上，继续复用会污染上下文，直接重建。
+        this.forgetConversation(key, state.conversationId)
+        state = undefined
+      }
+    } else if (state !== undefined && lastUser < state.seen.length) {
+      // 没有新的用户轮次（重试/回滚历史）——新建会话，避免把同一轮再喂一遍。
       state = undefined
     }
+
     let isFirstQuery = false
-    let query: string
+    let query = ''
 
     if (state === undefined) {
       const title = lastUserText(messages) || firstUserText(messages) || 'Comate'
@@ -505,38 +536,158 @@ export class ComateAdapter extends LlmAdapter {
       state = { ...created, seen: [], updatedAt: Date.now() }
       isFirstQuery = true
       query = renderWithSystem(options.system, messages)
-    } else {
+    } else if (!isContinuation) {
       // 服务端会话已经记住了上一轮的 assistant 回复；这里只发最新的用户轮次，
       // 不要把客户端回显的 assistant 消息再喂回去。
       query = renderTranscript(messages.slice(lastUser))
     }
 
-    if (query.trim().length === 0) {
+    if (!isContinuation && query.trim().length === 0) {
       throw new LlmError('comate: nothing to send (empty transcript)', 'INVALID_REQUEST')
     }
 
-    const payload: Record<string, unknown> = {
+    const basePayload: Record<string, unknown> = {
       ...comateClientInfo(credential.license),
       conversationId: state.conversationId,
       taskId: state.taskId,
-      query,
       modelKey: options.model,
       thinkingEnabled: options.reasoningEffort !== 'off',
       ...entry?.contextWindow !== undefined
         ? { contextWindow: Math.round(entry.contextWindow / 1024) }
         : {},
-      isUserQuery: true,
-      isFirstQuery,
       contexts: [],
       subAgents: [],
       subAgentsChanged: false,
-      toolUseResults: [],
       agentInfo: AGENT_INFO,
       agentVersion: '',
       enableMemory: false,
       uploadBaseInfo: comateUploadBaseInfo(credential.license),
     }
 
+    let payload: Record<string, unknown> = isContinuation
+      ? {
+          ...basePayload,
+          query: '',
+          isUserQuery: false,
+          isFirstQuery: false,
+          toolUseResults: continuationResults,
+        }
+      : {
+          ...basePayload,
+          query,
+          isUserQuery: true,
+          isFirstQuery,
+          toolUseResults: [],
+        }
+
+    const streamState: StreamState = { nextIndex: 0, text: '', reasoning: '' }
+    let unmappedRounds = 0
+
+    try {
+      for (;;) {
+        const round = yield* this.consumeExecution(payload, credential, options, streamState)
+        if (round.toolCalls.length === 0) {
+          state.pending = undefined
+          break
+        }
+
+        const pendingCalls: PendingToolCall[] = round.toolCalls.map(call => {
+          const mapped = mapComateToolCall(call.name, call.input, clientTools)
+          return {
+            agentId: call.id,
+            agentName: call.name,
+            agentInput: call.input,
+            clientId: call.id,
+            clientName: mapped.name,
+            clientArgs: mapped.arguments,
+            mapped: mapped.mapped,
+            noop: mapped.noop,
+            ...mapped.failure !== undefined ? { failure: mapped.failure } : {},
+          }
+        })
+        const mappedCalls = pendingCalls.filter(call => call.mapped)
+
+        if (mappedCalls.length > 0) {
+          // 把 agent 的工具调用翻译成客户端 tools；工具由客户端执行，结果在
+          // 下一次请求里返回。网关只保存 pending 状态。
+          for (const call of mappedCalls) {
+            const index = streamState.nextIndex
+            streamState.nextIndex += 1
+            yield { type: 'block-start', index, blockType: 'tool-call' }
+            yield {
+              type: 'tool-call-delta',
+              index,
+              id: ToolCallId(call.clientId),
+              name: call.clientName,
+              argumentsDelta: call.clientArgs,
+            }
+            yield {
+              type: 'block-end',
+              index,
+              block: {
+                type: 'tool-call',
+                id: ToolCallId(call.clientId),
+                name: call.clientName,
+                arguments: call.clientArgs,
+              },
+            }
+          }
+          state.pending = pendingCalls
+          state.seen = fingerprints
+          state.updatedAt = Date.now()
+          this.rememberConversation(key, state, state)
+          yield* this.finishResponse(streamState, 'tool-calls')
+          return
+        }
+
+        // 所有工具都无法映射：把失败/no-op 结果直接回给 agent，继续同一轮。
+        // 这里不涉及任何客户端执行，纯粹是让 agent 换一种工具继续。
+        unmappedRounds += 1
+        if (unmappedRounds > MAX_UNMAPPED_ROUNDS) {
+          throw new LlmError(`comate: too many unmapped tool rounds (${MAX_UNMAPPED_ROUNDS})`, 'INVALID_REQUEST')
+        }
+        const results = buildToolUseResults(pendingCalls, [])
+        payload = {
+          ...basePayload,
+          query: '',
+          isUserQuery: false,
+          isFirstQuery: false,
+          toolUseResults: results,
+        }
+      }
+    } catch (error) {
+      this.forgetConversation(key, state.conversationId)
+      throw error
+    }
+
+    // 付费模型真的成功出流，说明套餐已升级或额度已恢复：清掉免费套餐窗口。
+    if (options.model !== COMATE.freeModelId) {
+      this.freeOnlyUntil.delete(credential.license)
+    } else {
+      // Auto-Free 成功出流 = 免费额度此刻可用（面板据此显示“可用”）。
+      recordComateFreeQuota(credential.license, 'available')
+    }
+    state.pending = undefined
+    state.seen = fingerprints
+    state.updatedAt = Date.now()
+    this.rememberConversation(key, state, state)
+    yield* this.finishResponse(streamState, 'stop')
+  }
+
+  /**
+   * 发一轮 execute 并消费 SSE；返回本轮 agent 请求的工具调用。
+   *
+   * 工具调用不会在这里执行：mapped 的工具以 StreamChunk 交给客户端；
+   * 无法映射的工具由 `stream` 直接回失败结果给 agent。`*_PARAMS_APPEND`
+   * 的 input 是**增量字符串分片**，由 `mergeToolInput` 拼接；
+   * `FUNCTION_CALL_END` 的 input 通常为空。
+   */
+  private async *consumeExecution(
+    payload: Record<string, unknown>,
+    credential: ComateCredential,
+    options: GenerateOptions,
+    state: StreamState,
+  ): AsyncGenerator<StreamChunk, { toolCalls: AgentToolCall[] }, void> {
     const response = await fetch(this.apiUrl(EXECUTE_PATH), {
       method: 'POST',
       headers: comateHeaders(credential.license),
@@ -568,76 +719,32 @@ export class ComateAdapter extends LlmAdapter {
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let buffer = ''
-    let nextIndex = 0
-    let textIndex: number | undefined
-    let reasoningIndex: number | undefined
-    let text = ''
-    let reasoning = ''
-    let usage: { inputTokens: number; cachedInputTokens: number; outputTokens: number } | undefined
+    const calls = new Map<string, AgentToolCall>()
 
-    const handleFrame = (frame: ComateFrame): StreamChunk[] => {
-      const chunks: StreamChunk[] = []
-      const content = frame.content
-      if (content === undefined) return chunks
-      const type = content.type
-      const detail = content.detail
-      if (type === 'ANSWER') {
-        const reasoningDelta = typeof detail?.reasoningDelta === 'string' ? detail.reasoningDelta : ''
-        if (reasoningDelta.length > 0) {
-          if (reasoningIndex === undefined) {
-            reasoningIndex = nextIndex
-            nextIndex += 1
-            chunks.push({ type: 'block-start', index: reasoningIndex, blockType: 'reasoning' })
-          }
-          reasoning += reasoningDelta
-          chunks.push({ type: 'reasoning-delta', index: reasoningIndex, text: reasoningDelta })
+    const applyToolUse = (detail: NonNullable<ComateFrame['content']>['detail']): void => {
+      const toolUses = Array.isArray(detail?.toolUse)
+        ? detail.toolUse as Array<{ id?: unknown; name?: unknown; input?: unknown }>
+        : []
+      for (const raw of toolUses) {
+        if (!isRecord(raw)) continue
+        const id = typeof raw.id === 'string' ? raw.id : ''
+        const name = typeof raw.name === 'string' ? raw.name : ''
+        if (id.length === 0) continue
+        let call = calls.get(id)
+        if (call === undefined) {
+          call = { id, name, input: {} }
+          calls.set(id, call)
         }
-        const delta = typeof detail?.delta === 'string' ? detail.delta : ''
-        if (delta.length > 0) {
-          if (textIndex === undefined) {
-            textIndex = nextIndex
-            nextIndex += 1
-            chunks.push({ type: 'block-start', index: textIndex, blockType: 'text' })
-          }
-          text += delta
-          chunks.push({ type: 'text-delta', index: textIndex, text: delta })
+        if (name.length > 0) call.name = name
+        if (typeof raw.input === 'string') {
+          // apply_patch 的 input 可能是字符串（整段补丁）；其他工具按增量拼接。
+          if (call.name === 'apply_patch') call.input.input = raw.input
+          else if (typeof call.input.input === 'string') call.input.input += raw.input
+          else call.input.input = raw.input
+          continue
         }
-        return chunks
+        if (isRecord(raw.input)) mergeToolInput(call.input, raw.input, call.name === 'apply_patch')
       }
-      if (type === 'TOKEN_USAGE' && detail?.usage !== undefined) {
-        const input = typeof detail.usage.inputTokens === 'number' ? detail.usage.inputTokens : 0
-        const cached = typeof detail.usage.cachedInputTokens === 'number' ? detail.usage.cachedInputTokens : 0
-        const output = typeof detail.usage.outputTokens === 'number' ? detail.usage.outputTokens : 0
-        usage = { inputTokens: input, cachedInputTokens: cached, outputTokens: output }
-        return chunks
-      }
-      if (type === 'QUOTA_EXCEED' || type === 'DOWNGRADE') {
-        const userType = typeof detail?.userType === 'string' ? detail.userType : ''
-        // TRIAL_INDIVIDUAL / FREE 等：本账号只能走免费模型。记一个窗口，
-        // 避免后续付费模型请求反复打上游。
-        if (/TRIAL|FREE/i.test(userType)) {
-          this.freeOnlyUntil.set(credential.license, Date.now() + FREE_ONLY_TTL_MS)
-        }
-        // Auto-Free 自己被限额，才是“免费额度已用尽”的证据；付费模型被拒
-        // 只说明套餐不含该模型，不代表免费额度不可用。
-        if (options.model === COMATE.freeModelId) {
-          recordComateFreeQuota(credential.license, 'limited', quotaMessage(detail))
-        }
-        throw new LlmError(quotaMessage(detail), 'QUOTA', { status: 429 })
-      }
-      if (type === 'EXCEPTION' || type === 'NEED_RETRY_EXCEPTION') {
-        const message = typeof detail?.exceptionMsg === 'string' && detail.exceptionMsg.length > 0
-          ? detail.exceptionMsg
-          : 'agent execution failed'
-        throw new LlmError(`comate: ${message}`, 'INVALID_REQUEST')
-      }
-      if (type === 'TOOL_CALL' || type === 'TOOL_CALL_END' || type === 'FUNCTION_CALL_END' || detail?.toolUse !== undefined) {
-        throw new LlmError(
-          'comate: the agent requested a tool call, but this channel cannot execute client tools',
-          'INVALID_REQUEST',
-        )
-      }
-      return chunks
     }
 
     try {
@@ -654,7 +761,61 @@ export class ComateAdapter extends LlmAdapter {
             if (raw.length > 0) {
               try {
                 const frame = JSON.parse(raw) as ComateFrame
-                for (const chunk of handleFrame(frame)) yield chunk
+                const content = frame.content
+                const type = content?.type
+                const detail = content?.detail
+                if (type === 'ANSWER') {
+                  const reasoningDelta = typeof detail?.reasoningDelta === 'string' ? detail.reasoningDelta : ''
+                  if (reasoningDelta.length > 0) {
+                    if (state.reasoningIndex === undefined) {
+                      state.reasoningIndex = state.nextIndex
+                      state.nextIndex += 1
+                      yield { type: 'block-start', index: state.reasoningIndex, blockType: 'reasoning' }
+                    }
+                    state.reasoning += reasoningDelta
+                    yield { type: 'reasoning-delta', index: state.reasoningIndex, text: reasoningDelta }
+                  }
+                  const delta = typeof detail?.delta === 'string' ? detail.delta : ''
+                  if (delta.length > 0) {
+                    if (state.textIndex === undefined) {
+                      state.textIndex = state.nextIndex
+                      state.nextIndex += 1
+                      yield { type: 'block-start', index: state.textIndex, blockType: 'text' }
+                    }
+                    state.text += delta
+                    yield { type: 'text-delta', index: state.textIndex, text: delta }
+                  }
+                } else if (type === 'TOKEN_USAGE' && detail?.usage !== undefined) {
+                  const input = typeof detail.usage.inputTokens === 'number' ? detail.usage.inputTokens : 0
+                  const cached = typeof detail.usage.cachedInputTokens === 'number' ? detail.usage.cachedInputTokens : 0
+                  const output = typeof detail.usage.outputTokens === 'number' ? detail.usage.outputTokens : 0
+                  const previous = state.usage ?? { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 }
+                  state.usage = {
+                    inputTokens: previous.inputTokens + input,
+                    cachedInputTokens: previous.cachedInputTokens + cached,
+                    outputTokens: previous.outputTokens + output,
+                  }
+                } else if (type === 'QUOTA_EXCEED' || type === 'DOWNGRADE') {
+                  const userType = typeof detail?.userType === 'string' ? detail.userType : ''
+                  // TRIAL_INDIVIDUAL / FREE 等：本账号只能走免费模型。记一个窗口，
+                  // 避免后续付费模型请求反复打上游。
+                  if (/TRIAL|FREE/i.test(userType)) {
+                    this.freeOnlyUntil.set(credential.license, Date.now() + FREE_ONLY_TTL_MS)
+                  }
+                  // Auto-Free 自己被限额，才是“免费额度已用尽”的证据；付费模型被拒
+                  // 只说明套餐不含该模型，不代表免费额度不可用。
+                  if (options.model === COMATE.freeModelId) {
+                    recordComateFreeQuota(credential.license, 'limited', quotaMessage(detail))
+                  }
+                  throw new LlmError(quotaMessage(detail), 'QUOTA', { status: 429 })
+                } else if (type === 'EXCEPTION' || type === 'NEED_RETRY_EXCEPTION') {
+                  const message = typeof detail?.exceptionMsg === 'string' && detail.exceptionMsg.length > 0
+                    ? detail.exceptionMsg
+                    : 'agent execution failed'
+                  throw new LlmError(`comate: ${message}`, 'INVALID_REQUEST')
+                } else if (type !== undefined && (type.startsWith('FUNCTION_CALL') || type.startsWith('TOOL_CALL'))) {
+                  applyToolUse(detail)
+                }
               } catch (error) {
                 if (error instanceof LlmError) throw error
                 // 畸形帧（心跳/增量 JSON）跳过，不终止整段流。
@@ -665,50 +826,49 @@ export class ComateAdapter extends LlmAdapter {
         }
       }
     } catch (error) {
-      this.forgetConversation(key, state.conversationId)
       await reader.cancel().catch(() => {})
       throw error
     } finally {
       reader.releaseLock()
     }
 
-    if (textIndex !== undefined) {
-      yield { type: 'block-end', index: textIndex, block: { type: 'text', text } }
+    const toolCalls = [...calls.values()]
+      .filter(call => call.name.length > 0)
+      .map(call => ({ id: call.id, name: call.name, input: call.input }))
+    return { toolCalls }
+  }
+
+  /** 收尾：关闭文本/推理块、发 usage，再发 finish。 */
+  private *finishResponse(state: StreamState, reason: 'stop' | 'tool-calls'): Iterable<StreamChunk> {
+    if (state.textIndex !== undefined) {
+      yield { type: 'block-end', index: state.textIndex, block: { type: 'text', text: state.text } }
     }
-    if (reasoningIndex !== undefined && reasoning.trim().length > 0) {
-      yield { type: 'block-end', index: reasoningIndex, block: { type: 'reasoning', text: reasoning } }
+    if (state.reasoningIndex !== undefined && state.reasoning.trim().length > 0) {
+      yield { type: 'block-end', index: state.reasoningIndex, block: { type: 'reasoning', text: state.reasoning } }
     }
-    if (textIndex === undefined && (reasoningIndex === undefined || reasoning.trim().length === 0)) {
+    if (
+      reason === 'stop'
+      && state.textIndex === undefined
+      && (state.reasoningIndex === undefined || state.reasoning.trim().length === 0)
+    ) {
       throw new LlmError('comate: agent returned no content', 'EMPTY_RESPONSE')
     }
-    if (usage !== undefined) {
-      const input = usage.cachedInputTokens > 0
-        ? Math.max(0, usage.inputTokens - usage.cachedInputTokens)
-        : usage.inputTokens
+    if (state.usage !== undefined) {
+      const input = state.usage.cachedInputTokens > 0
+        ? Math.max(0, state.usage.inputTokens - state.usage.cachedInputTokens)
+        : state.usage.inputTokens
       yield {
         type: 'usage',
         usage: {
           inputTokens: input,
-          outputTokens: usage.outputTokens,
-          ...usage.cachedInputTokens > 0 ? { cacheReadTokens: usage.cachedInputTokens } : {},
+          outputTokens: state.usage.outputTokens,
+          ...state.usage.cachedInputTokens > 0 ? { cacheReadTokens: state.usage.cachedInputTokens } : {},
         },
       }
     }
-    // 付费模型真的成功出流，说明套餐已升级或额度已恢复：清掉免费套餐窗口。
-    if (options.model !== COMATE.freeModelId) {
-      this.freeOnlyUntil.delete(credential.license)
-    } else {
-      // Auto-Free 成功出流 = 免费额度此刻可用（面板据此显示“可用”）。
-      recordComateFreeQuota(credential.license, 'available')
-    }
-    this.rememberConversation(key, {
-      conversationId: state.conversationId,
-      taskId: state.taskId,
-      seen: fingerprints,
-      updatedAt: Date.now(),
-    }, state)
-    yield { type: 'finish', reason: 'stop' }
+    yield { type: 'finish', reason }
   }
+
 }
 
 export function registerComateLlm(ctx: Context, options: ComateAdapterOptions): ComateAdapter {

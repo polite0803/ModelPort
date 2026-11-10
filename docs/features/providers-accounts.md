@@ -8,7 +8,7 @@ ModelPort 把上游分成三类，界面也对应三块：聚合目录、账号�
 
 聚合目录是数据表：`src/main/providers/aggregate/registry.ts` 里有 92 条渠道、580 个模型，覆盖带 Key 的 HTTP 端点、免密端点，以及标记为“本应用无法提供凭据”的 Google ADC 条目（`vertex` / `vertex-partner`）。用户在聚合页面选中一条、填 Key（若需要）后保存，才会生成 `type: 'aggregate'` 的供应商记录，因此供应商列表不会预先塞进几十条不可用行。
 
-账号渠道是登录型端点：15 个渠道（`lobsterai`、`qoder`、`qodercn`、`trae`、`cline`、`loomy`、`raccoon`、`minimax`、`zcode`、`gemini`、`workbuddy`、`buddy`、`opencode`、`codearts`、`comate`）由内置的“渠道包”托管登录、账号池、每日积分与模型目录。十四个走浏览器/设备码/OAuth，`opencode` 是唯一 `loginKind: 'api-key'` 的例外：不打开浏览器，加一条匿名槽或粘贴 `sk-` Key 即可。`comate` 的对话走官方 agent 协议，因此不支持客户端工具调用（`capabilities.tools: false`）。
+账号渠道是登录型端点：15 个渠道（`lobsterai`、`qoder`、`qodercn`、`trae`、`cline`、`loomy`、`raccoon`、`minimax`、`zcode`、`gemini`、`workbuddy`、`buddy`、`opencode`、`codearts`、`comate`）由内置的“渠道包”托管登录、账号池、每日积分与模型目录。十四个走浏览器/设备码/OAuth，`opencode` 是唯一 `loginKind: 'api-key'` 的例外：不打开浏览器，加一条匿名槽或粘贴 `sk-` Key 即可。`comate` 的 agent 工具调用由桥接层翻译成 Codex/Claude Code/Cline 类客户端自己的工具，在客户端工作区执行；网关不执行 shell/文件操作（`capabilities.tools: true`）。
 
 自定义供应商由用户自建：名称、端点、认证方式、请求头、模型与凭据字段都自己填，适配器走 OpenAI 兼容的默认转发路径。内置供应商（`builtinProviders`）目前为空；2026-11-01 退役的本机 `opencode` 运行时已不再是供应商。
 

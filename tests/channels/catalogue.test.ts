@@ -82,6 +82,12 @@ test('渠道 tools 硬上限：cline 必须声明 maxTools=128（用户报障 20
   assert.equal(getChannelDefinition('cline')?.maxTools, 128)
 })
 
+test('comate 声明 tools:true，工具由桥接层交给客户端执行', () => {
+  // auto 路由靠这个声明决定「带工具的请求能不能选 Comate」。桥接层会把
+  // agent 的工具翻译成客户端 tools，因此不能再标 false。
+  assert.equal(getChannelDefinition('comate')?.capabilities?.tools, true)
+})
+
 test('opencode 渠道：不跳浏览器，且没有签到接口', () => {
   // 这两条是它和其余 12 家的结构性差别，界面上的「登录」与「签到」入口都按它们决定。
   assert.equal(getChannelDefinition('opencode')?.loginKind, 'api-key')

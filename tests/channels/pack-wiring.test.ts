@@ -18,6 +18,7 @@ const INDEX_FILE = join(process.cwd(), 'vendor', 'channel-pack', 'src', 'index.t
 const RPC_FILE = join(process.cwd(), 'vendor', 'channel-pack', 'src', 'channel-pack-rpc.ts')
 const CODEARTS_ADAPTER_FILE = join(process.cwd(), 'vendor', 'channel-pack', 'src', 'llm-adapter.ts')
 const COMATE_ADAPTER_FILE = join(process.cwd(), 'vendor', 'channel-pack', 'src', 'comate-adapter.ts')
+const COMATE_BRIDGE_FILE = join(process.cwd(), 'vendor', 'channel-pack', 'src', 'comate-bridge.ts')
 
 function registrationArguments(source: string): string[] {
   const marker = 'registerChannelPackRpc(ctx, pool,'
@@ -92,4 +93,17 @@ test('Comate 免费额度用最近一次 Auto-Free 结果做状态，不再伪�
   assert.match(lib, /FREE_QUOTA_TTL_MS/)
   assert.match(lib, /export function recordComateFreeQuota/)
   assert.match(lib, /export function readComateFreeQuota/)
+})
+
+test('Comate 工具由客户端执行：桥接层不碰 shell/文件，适配器只发 tool_calls', () => {
+  const bridge = readFileSync(COMATE_BRIDGE_FILE, 'utf8')
+  // 桥接层是纯翻译：一旦引入 child_process/fs/spawn，工具就会偷偷在网关执行。
+  assert.doesNotMatch(bridge, /node:child_process|node:fs|execFile|spawn\s*\(/)
+  const adapter = readFileSync(COMATE_ADAPTER_FILE, 'utf8')
+  assert.match(adapter, /mapComateToolCall/)
+  assert.match(adapter, /extractClientToolResults/)
+  assert.match(adapter, /buildToolUseResults/)
+  assert.match(adapter, /tool-call-delta/)
+  assert.doesNotMatch(adapter, /does not support client tool calling/)
+  assert.doesNotMatch(adapter, /comate-tools\.js/)
 })
