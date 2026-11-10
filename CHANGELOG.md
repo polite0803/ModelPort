@@ -6,6 +6,54 @@
 条目按"为什么改、影响什么"描述；每条末尾括号里的短哈希指向产生该变更的提交，可在 `git show <哈希>` 中核对。
 版本边界与溯源说明见文末。
 
+## [1.7.15] - 2026-11-10
+
+版本边界：tag `v1.7.15`（相对 1.7.14）。两块内容：**Dashboard 顶部统计卡片可以按指定日期/区间查看**；
+上下文裁剪改为**按渠道点名**，缺省不裁，止住有前缀缓存渠道的命中率回归。配置形态新增一个可选字段
+（`contextManagement.channelIds`），升级后裁剪默认关闭，需要裁剪的渠道要显式填进去。
+
+### Added（新增）
+
+- **统计卡片能回答「那几天怎么样」**：总请求数、成功率、平均响应时间、Token 用量共用同一个时间段
+  ——今天 / 近 7 天 / 近 30 天 / 全部 / 自定义（两个 `<input type="date">`，起止倒置时给出提示而不是
+  悄悄互换）。聚合放在 `src/shared/statsWindow.ts` 的纯函数里，切换窗口只对已取回的日桶做本地重算，
+  不重新发 IPC；卡片与 Provider 状态卡共用一份 `StatsWindowPicker`，不再各写一套区间控件。
+- 趋势条比较**上一个等长区间**（今天对昨天、近 7 天对前 7 天、自定义对等长的前一段），不再固定拿
+  「昨日」当基准；`all` 没有前一段，按「无对比」呈现。(`e95dbd2`)
+
+### Changed（变更）
+
+- **「没有记录」仍然是「—」**：窗口内没有任何已存储的日桶时，请求数、成功率、延迟返回 `null` 并渲染
+  `—`/`-`，不写成 0；真正跑过但全部失败的窗口才显示 0% 成功率，延迟仍是无测量。活跃账户数描述的是
+  「现在」，不随时间窗变化，因此它没有趋势。(`e95dbd2`)
+- `scripts/deploy-wsl-daemon.sh`：从 `systemctl cat` 反解安装目录的 WSL 网关替换脚本（停服 → 覆盖
+  `modelport-daemon.cjs` / `resources` / `renderer` → 启动 → 轮询 `/health`）。默认**不**备份；
+  `MODELPORT_BACKUP=1` 才先复制整目录并在失败时回滚。`bin/modelport` 与它一并补上可执行位。
+
+### Fixed（修复）
+
+- **裁剪把有缓存渠道的命中率打到 59%**：`forwarder.ts` 里裁剪的门只有
+  `contextManagement.enabled`，而 slidingWindow 每轮把切点后移、历史前缀逐轮变异，DeepSeek 系的隐式
+  前缀缓存因此全灭——bailian / loomy / raccoon 实测命中率从 97–98% 掉到 59–60%，TRAE 这类本就没有
+  缓存的渠道反而不受影响。现在 `ContextManagementConfig` 增 `channelIds?: string[]`，只有被点名的
+  渠道会走裁剪；缺省或空表示**谁都不裁**，`enabled: true` 也不再全局生效。判据收敛在
+  `trimAppliesToProvider()`，控制台面板同步加作用域输入框。(`e95dbd2`)
+
+### Tests（判据）
+
+- `tests/shared/stats-window.test.ts`：日键跨月步进、闭区间长度与倒置、上期等长（`all` 无上期）、
+  空窗口返回 `null`、实测 0% 与「未测量」的区别、Token 合计不携带半份 per-provider/per-model 拆分。
+- `tests/proxy/context-trim-scope.test.ts`：缺省/空名单不裁、点名才裁、名单外的渠道不裁。(`e95dbd2`)
+
+### 未取读数
+
+- **统计窗口没有在 macOS / Windows 壳的实机上逐预设点过**：判据是纯函数单测与桌面端 dev 构建的人工查看；
+  自定义区间的 `input[type=date]` 在 Chromium 各平台的弹层差异未单独核对。
+- **本地安装以手动部署为准**：WSL 侧的 `/root/mpd` 由 `scripts/deploy-wsl-daemon.sh` 替换（需要 root，
+  脚本自带停服 → 覆盖 → 启动 → `/health` 探活）；桌面侧装本次 Release 的安装包。程序内更新走
+  `electron-updater` → GitHub Releases，本机若开着系统代理却没有代理进程监听，会以
+  `net::ERR_CONNECTION_REFUSED` 失败——这是网络环境问题，不是包本身的问题。
+
 ## [1.7.14] - 2026-11-09
 
 版本边界：tag `v1.7.14`（相对 1.7.13）。一块内容：**网关管理从独立窗口搬进控制台**，成为
