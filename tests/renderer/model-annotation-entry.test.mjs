@@ -21,6 +21,9 @@ const batchButton = read('src/renderer/src/components/models/CatalogScopeBatchBu
 const channelManager = read('src/main/providers/accountChannels/manager.ts')
 const runner = read('src/main/providers/modelCatalogBatchRunner.ts')
 const metadataService = read('src/main/providers/modelMetadataService.ts')
+const api = read('src/shared/api.ts')
+const handlers = read('src/main/ipc/handlers.ts')
+const ipcChannels = read('src/main/ipc/channels.ts')
 
 const locales = ['zh-CN', 'en-US'].map((name) => ({
   name,
@@ -122,10 +125,19 @@ test('新文案两种语言各写全，插值槽不多不少', () => {
 
     const metadata = json.models.metadata
     for (const key of ['batchScopeButton', 'batchScopeTitle', 'batchScopeDesc', 'batchScopeNone',
-      'batchScopeProgressTitle', 'batchScopeDone', 'batchScopeCancelled', 'batchScopeFailedStart']) {
+      'batchScopeProgressTitle', 'batchScopeDone', 'batchScopeCancelled', 'batchScopeFailedStart',
+      'batchScopeEstimateFailed', 'batchScopeNoChangeTitle', 'batchScopeSummary',
+      'batchScopeNothingAdoptable', 'batchScopeNothingAtAll', 'batchOtherJobTitle',
+      'batchOtherJobCancel']) {
       assert.equal(typeof metadata[key], 'string', `${name} 缺 models.metadata.${key}`)
     }
     assert.equal(slots(metadata.batchScopeTitle), '{{scope}}', `${name} 的范围标题只该带 scope 一个槽`)
+    assert.equal(slots(metadata.batchScopeSummary), '{{failed}},{{fields}},{{skipped}},{{success}}',
+      `${name} 的补全汇总必须带上已采用字段数`)
+    assert.equal(slots(metadata.batchScopeNothingAdoptable), '{{count}}',
+      `${name} 的「可探测」提示只该带 count 一个槽`)
+    assert.equal(slots(metadata.batchOtherJobTitle), '{{scope}}',
+      `${name} 的其它任务提示只该带 scope 一个槽`)
 
     // 范围说法必须中性：同一个按钮既挂在账号渠道上也挂在聚合条目上。
     for (const key of ['batchScopeButton', 'batchScopeProgressTitle', 'batchScopeDone']) {
@@ -134,11 +146,90 @@ test('新文案两种语言各写全，插值槽不多不少', () => {
 
     assert.equal(typeof json.aggregate.manage.models.annotate, 'string', `${name} 缺聚合侧入口标题`)
     assert.equal(typeof json.aggregate.manage.models.annotateHint, 'string', `${name} 缺聚合侧入口说明`)
+    assert.equal(typeof json.aggregate.manage.models.adoptedBadge, 'string',
+      `${name} 缺聚合侧的「已采用」徽标文案`)
+    assert.equal(slots(json.aggregate.manage.models.adoptedBadge), '{{count}}',
+      `${name} 的「已采用」徽标只该带 count 一个槽`)
     for (const key of ['annotate', 'annotateHint', 'annotateBlocked']) {
       assert.equal(typeof json.channels.models[key], 'string', `${name} 缺 channels.models.${key}`)
     }
     // 禁用说明只该出现在渠道侧：聚合目录里没有「失效但仍列出」的模型。
     assert.equal(json.aggregate.manage.models.annotateBlocked, undefined,
       `${name} 不该给聚合侧一条它用不上的禁用说明`)
+
+    assert.equal(typeof json.proxy.routePoolMarkContextTooLarge, 'string',
+      `${name} 缺上下文窗口超界提示`)
+    assert.equal(slots(json.proxy.routePoolMarkContextTooLarge), '{{max}}',
+      `${name} 的上下文窗口超界提示只该带 max 一个槽`)
   }
+})
+
+test('保存后回填库里的归一结果，不再等下次打开才「跳回」', () => {
+  // result.marks 是 setUserModelMark 的返回值，已过 normalizeModelMark；
+  // 界面继续显示被丢弃的字段就是「保存成功，下次打开却回退」的来源。
+  assert.match(dialog, /const saved = result\.marks\[providerId\]\?\.\[displayName\]/,
+    '保存成功必须取回归一后的那条标注')
+  assert.match(dialog, /setDraft\(saved \?/, '草稿要用归一值回填')
+  assert.match(dialog, /setContextDraft\(saved\?\.contextTokens/, '上下文窗口也要回填')
+  assert.match(dialog, /setOutputDraft\(saved\?\.maxOutputTokens/, '输出上限也要回填')
+  assert.match(dialog, /onSaved\(result\.marks\)/, '宿主仍要拿到全量标注表')
+})
+
+test('两个数值字段共用判据，且上界与主进程归一函数同值', () => {
+  assert.match(dialog, /function parseMarkTokens\(raw: string, max: number\)/,
+    '两个数值字段必须走同一条解析判据')
+  assert.match(dialog, /changeTokens\('context'/, '上下文窗口不许再用 number 输入框绕开校验')
+  assert.match(dialog, /contextError !== null \|\| outputError !== null/,
+    '任一字段非法都必须拦住保存')
+  assert.doesNotMatch(dialog, /type="number"/, '数值字段一律用文本草稿，非法输入才不会被吞掉')
+
+  const storeMarks = read('src/main/store/modelMarks.ts')
+  const capOf = (source, name) => {
+    const match = source.match(new RegExp(`const ${name} = ([\\d_]+)`))
+    assert.ok(match, `${name} 必须是显式常量`)
+    return Number(match[1].replace(/_/g, ''))
+  }
+  assert.equal(capOf(dialog, 'MAX_MARK_CONTEXT_TOKENS'), capOf(storeMarks, 'MAX_CONTEXT_TOKENS'),
+    '上下文窗口上界必须与主进程归一判据一致')
+  assert.equal(capOf(dialog, 'MAX_MARK_OUTPUT_TOKENS'), capOf(storeMarks, 'MAX_OUTPUT_TOKENS'),
+    '输出上限上界必须与主进程归一判据一致')
+})
+
+test('聚合详情页把手工标注显示出来，并在刷新后重读', () => {
+  assert.match(aggregate, /getModelMarks\(\)/, '详情页必须读标注表')
+  assert.match(aggregate, /\}, \[entry\.id, models\]\)/,
+    '标注表要跟着 detail 刷新重读，否则保存后徽标不出现')
+  assert.match(aggregate, /Object\.keys\(marks\[entry\.id\]\?\.\[model\.displayName\] \?\? \{\}\)\.length > 0/,
+    '徽标判据与路由池编辑器一致：有任意手工字段才算已标注')
+  assert.match(aggregate, /t\('proxy\.routePoolManualMark'\)/, '徽标复用既有文案，不新增第二套叫法')
+})
+
+test('聚合详情页也回显批量采用结果，而不只是手工标注', () => {
+  assert.match(aggregate, /getCatalogAdoptions\(\)/, '详情页必须读标准库采用台账')
+  assert.match(aggregate, /adoptedByModel\.get\(model\.displayName\)/,
+    '采用数必须按 (provider, displayName) 计，不能用模型 id 猜')
+  assert.match(aggregate, /aggregate\.manage\.models\.adoptedBadge/,
+    '采用结果要有自己的徽标，不能借手工标注的文案')
+  assert.match(api, /getCatalogAdoptions: \(\): Promise<CatalogAdoption\[\]>/,
+    '渲染层 API 要暴露只读采用台账')
+  assert.match(ipcChannels, /PROVIDERS_GET_CATALOG_ADOPTIONS: 'providers:getCatalogAdoptions'/,
+    'IPC 通道必须显式声明')
+  assert.match(handlers, /PROVIDERS_GET_CATALOG_ADOPTIONS[\s\S]{0,160}getCatalogAdoptions\(\)/,
+    '主进程 handler 必须真的回读采用台账')
+})
+
+test('批量入口拦住空跑，并把挡住它的其它任务摆出来可取消', () => {
+  assert.match(batchButton, /estimate\.fields === 0/, '没有可自动采用的字段要拦住启动')
+  assert.match(batchButton, /disabled=\{starting \|\| nothingToDo\}/,
+    '空跑必须禁用开始按钮，而不是跑完再报成功')
+  assert.match(batchButton, /batchScopeNothingAdoptable/,
+    '还有可探测模型时要说明「勾选探测可继续」')
+  assert.match(batchButton, /batchScopeNothingAtAll/,
+    '既无可采用字段也无可探测缺口时要单独说明')
+  assert.match(batchButton, /batchScopeEstimateFailed/, '估算异常要有可见的失败提示')
+  assert.match(batchButton, /batchScopeSummary/, '收尾汇总必须带上已采用字段数')
+  assert.match(batchButton, /batchOtherJobTitle/, '被其它 active job 挡住时要展示该任务本身')
+  assert.match(batchButton, /cancelCatalogBatch\?\.\(jobId\)/,
+    '被挡住时必须能在当前页面取消那个任务')
+  assert.match(batchButton, /probeRequests/, '确认框要显示探测请求条数')
 })

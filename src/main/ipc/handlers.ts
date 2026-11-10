@@ -758,6 +758,11 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
     return storeManager.getUserModelMarks()
   })
 
+  // 只读台账，和 getModelMarks 同一形态：界面用它回显「这一行已被批量采用了几项」。
+  registerMainHandler(IpcChannels.PROVIDERS_GET_CATALOG_ADOPTIONS, async () => {
+    return storeManager.getCatalogAdoptions()
+  })
+
   registerMainHandler(
     IpcChannels.PROVIDERS_SET_MODEL_MARK,
     async (_, providerId: string, displayName: string, mark: ModelCapabilityHint | null) => {

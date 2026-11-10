@@ -236,6 +236,8 @@ interface ProvidersAPI {
   }>
   /** 全部手动标注，`providerId -> displayName -> hint`。 */
   getModelMarks: () => Promise<Record<string, Record<string, ModelCapabilityHint>>>
+  /** 标准库逐字段采用台账（只读），行内回显批量补全结果用。 */
+  getCatalogAdoptions: () => Promise<CatalogAdoption[]>
   /** `mark: null` 清除该模型的手动标注（回到自动解析结果）。 */
   setModelMark: (providerId: string, displayName: string, mark: ModelCapabilityHint | null) => Promise<{
     success: boolean

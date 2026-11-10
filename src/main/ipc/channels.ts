@@ -75,6 +75,8 @@ export const IpcChannels = {
   // 手工能力标注（vision/tools/reasoning/context/...），优先级高于所有自动标注
   PROVIDERS_GET_MODEL_MARKS: 'providers:getModelMarks',
   PROVIDERS_SET_MODEL_MARK: 'providers:setModelMark',
+  // 标准库逐字段采用台账：聚合页/渠道页回显批量补全结果（写入方是 modelCatalogService）
+  PROVIDERS_GET_CATALOG_ADOPTIONS: 'providers:getCatalogAdoptions',
   // 元数据解析报表（覆盖率 + 待标注队列）与手动探测（打开页面不发起请求）
   PROVIDERS_GET_MODEL_METADATA: 'providers:getModelMetadata',
   /** 单个模型的解析结果：逐模型标注入口用它，避免为一次点击重算整张报表。 */

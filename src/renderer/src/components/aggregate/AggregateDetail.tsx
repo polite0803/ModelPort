@@ -41,6 +41,8 @@ import type {
 import { aggregateCostCounts, aggregateCostOf } from '../../../../shared/aggregateCost'
 import { getTermsWarning } from '../../../../shared/aggregateTerms'
 import { quotaRows, quotaViewOf, WINDOW_OF_METRIC } from '../../../../shared/aggregateQuotaView'
+import type { ModelCapabilityHint } from '../../../../shared/types'
+import type { CatalogAdoption } from '../../../../shared/modelCatalog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -1018,6 +1020,45 @@ function ModelsCard(props: {
   const [adding, setAdding] = useState(false)
   /** 消耗筛选：`all` = 不筛；其余按分类精确匹配。 */
   const [costFilter, setCostFilter] = useState<'all' | AggregateCostClass>('all')
+  /**
+   * 手工标注表：`detail()` 只回目录行，不含标注，所以保存后光看模型行会像「什么都没发生」。
+   * 标注写入经 onRefresh 换出新的 models 引用，这里随之重读一次，把「已标注」显示出来。
+   * 判据与路由池编辑器一致：该行有任意手工字段就算已标注。
+   */
+  const [marks, setMarks] = useState<Record<string, Record<string, ModelCapabilityHint>>>({})
+  useEffect(() => {
+    const api = window.electronAPI?.providers
+    if (!api?.getModelMarks) return
+    let cancelled = false
+    void api.getModelMarks()
+      .then((next) => { if (!cancelled) setMarks(next) })
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [entry.id, models])
+
+  /**
+   * 标准库采用台账：批量补全写的是 catalogAdoptions，不是 userModelMarks。
+   * 行上只显示手工标注会让一次成功的批量补全看起来毫无变化，所以同样随 refresh 重读。
+   */
+  const [adoptions, setAdoptions] = useState<CatalogAdoption[]>([])
+  useEffect(() => {
+    const api = window.electronAPI?.providers
+    if (!api?.getCatalogAdoptions) return
+    let cancelled = false
+    void api.getCatalogAdoptions()
+      .then((next) => { if (!cancelled) setAdoptions(next) })
+      .catch(() => undefined)
+    return () => { cancelled = true }
+  }, [entry.id, models])
+
+  const adoptedByModel = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const item of adoptions) {
+      if (item.providerId !== entry.id) continue
+      counts.set(item.displayName, (counts.get(item.displayName) ?? 0) + 1)
+    }
+    return counts
+  }, [adoptions, entry.id])
 
   const servedCount = models.filter(model => model.served).length
 
@@ -1340,6 +1381,7 @@ function ModelsCard(props: {
                     const result = testResults[model.id]
                     const summary = paramSummary(model.params)
                     const cost = costBadgeOf(row.cost, t)
+                    const adoptedCount = adoptedByModel.get(model.displayName) ?? 0
                     return (
                       <div key={model.displayName} className="flex flex-wrap items-center gap-2 px-2 py-1.5 hover:bg-muted/20">
                         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -1362,6 +1404,16 @@ function ModelsCard(props: {
                             >
                               {cost.label}
                             </Badge>
+                            {Object.keys(marks[entry.id]?.[model.displayName] ?? {}).length > 0 && (
+                              <Badge variant="outline" className="px-1 py-0 text-[10px] text-primary">
+                                {t('proxy.routePoolManualMark')}
+                              </Badge>
+                            )}
+                            {adoptedCount > 0 && (
+                              <Badge variant="outline" className="px-1 py-0 text-[10px] text-info">
+                                {t('aggregate.manage.models.adoptedBadge', { count: adoptedCount })}
+                              </Badge>
+                            )}
                           </div>
                           {summary && (
                             <span className="truncate font-mono text-[11px] text-muted-foreground" title={summary}>

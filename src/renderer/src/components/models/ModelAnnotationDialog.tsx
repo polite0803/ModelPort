@@ -205,10 +205,12 @@ type TriStateField = (typeof TRI_STATE_FIELDS)[number][0]
 const MODALITIES: InputModality[] = ['text', 'image', 'audio', 'video', 'pdf']
 
 /**
- * 输出上限的合理上界，与主进程 `store/modelMarks.ts::MAX_OUTPUT_TOKENS` 同值。
- * 这里先做一次人读校验：超出范围的输入必须当场拒绝并说明，不能等到保存时被
- * `normalizeModelMark` 静默丢掉。
+ * 两个数值字段的合理上界，与主进程 `store/modelMarks.ts` 的
+ * `MAX_CONTEXT_TOKENS` / `MAX_OUTPUT_TOKENS` 同值。这里先做一次人读校验：
+ * 超出范围的输入必须当场拒绝并说明，不能等到保存时被 `normalizeModelMark`
+ * 静默丢掉 —— 那会让界面显示「已保存」，库里却没有这一格，下次打开又回退。
  */
+const MAX_MARK_CONTEXT_TOKENS = 100_000_000
 const MAX_MARK_OUTPUT_TOKENS = 1_000_000
 
 /** 手动标注的原始草稿：只保留用户显式设置的字段。 */
@@ -260,12 +262,15 @@ export function ModelMarkEditor({
   const [draft, setDraft] = useState<MarkDraft>({})
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // 输出上限用文本草稿：非法输入要留在框里并给出提示，不能一按保存就被归一函数静默丢掉。
+  // 两个数值字段用文本草稿：非法输入要留在框里并给出提示，不能一按保存就被归一函数静默丢掉。
+  const [contextDraft, setContextDraft] = useState('')
   const [outputDraft, setOutputDraft] = useState('')
 
   // 只在换模型时重置草稿：保存失败时用户输入不会被清掉。
+  // 保存成功则由 handleSave 用主进程返回的归一结果回填（见下），两处口径一致。
   useEffect(() => {
     setDraft(mark ? { ...mark, modalities: mark.modalities ? [...mark.modalities] : undefined } : {})
+    setContextDraft(mark?.contextTokens !== undefined ? String(mark.contextTokens) : '')
     setOutputDraft(mark?.maxOutputTokens !== undefined ? String(mark.maxOutputTokens) : '')
     setError(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -296,24 +301,22 @@ export function ModelMarkEditor({
     patch({ modalities: next.length === 0 ? undefined : next })
   }
 
-  const outputError = validateMaxOutput(outputDraft, t)
+  const contextError = validateMarkTokens(contextDraft, MAX_MARK_CONTEXT_TOKENS, t, 'context')
+  const outputError = validateMarkTokens(outputDraft, MAX_MARK_OUTPUT_TOKENS, t, 'output')
 
-  /**
-   * 输出上限只接受正整数：留空 = 未标注（不写 0），非数字 / 0 / 小数 / 超上界都
-   * 即时拒绝。非法输入保留在输入框里并显示原因，同时清掉草稿里的旧值，避免用户
-   * 改了非法内容却把上一次的合法值悄悄存进去。
-   */
-  const changeMaxOutput = (raw: string) => {
-    setOutputDraft(raw)
-    const parsed = parseMaxOutput(raw)
-    // 非法值：草稿里的旧值必须清掉（否则用户改了非法内容却把上一次的合法值悄悄存进去），
-    // 同时把原因显示在输入框下面。
-    patch({ maxOutputTokens: parsed === null ? undefined : parsed.value })
+  /** 两个数值字段共用一条判据：留空 = 未标注，非法值留在框里并清掉草稿里的旧值。 */
+  const changeTokens = (field: 'context' | 'output', raw: string) => {
+    if (field === 'context') setContextDraft(raw)
+    else setOutputDraft(raw)
+    const max = field === 'context' ? MAX_MARK_CONTEXT_TOKENS : MAX_MARK_OUTPUT_TOKENS
+    const parsed = parseMarkTokens(raw, max)
+    const value = parsed === null ? undefined : parsed.value
+    patch(field === 'context' ? { contextTokens: value } : { maxOutputTokens: value })
   }
 
   const handleSave = async () => {
-    if (outputError !== null) {
-      setError(outputError)
+    if (contextError !== null || outputError !== null) {
+      setError(contextError ?? outputError)
       return
     }
     const api = window.electronAPI?.providers
@@ -326,6 +329,12 @@ export function ModelMarkEditor({
     try {
       const result = await api.setModelMark(providerId, displayName, cleanHint(draft))
       if (result.success) {
+        // 主进程会归一（丢弃越界 / 空值），界面必须立刻显示库里真正存下的那一版：
+        // 否则显示「已保存」却留着被丢弃的字段，下次打开就跳回「继承」＝用户看到的回退。
+        const saved = result.marks[providerId]?.[displayName]
+        setDraft(saved ? { ...saved, modalities: saved.modalities ? [...saved.modalities] : undefined } : {})
+        setContextDraft(saved?.contextTokens !== undefined ? String(saved.contextTokens) : '')
+        setOutputDraft(saved?.maxOutputTokens !== undefined ? String(saved.maxOutputTokens) : '')
         onSaved(result.marks)
       } else {
         setError(result.error ?? t('proxy.routePoolMarkSaveFailed'))
@@ -378,16 +387,22 @@ export function ModelMarkEditor({
       <div className="space-y-1">
         <Label className="text-xs">{t('proxy.routePoolMarkContext')}</Label>
         <Input
-          type="number"
-          min={1}
+          type="text"
+          inputMode="numeric"
           className="h-8 text-xs"
-          value={draft.contextTokens ?? ''}
-          onChange={(event) => {
-            const raw = event.target.value
-            patch({ contextTokens: raw === '' ? undefined : Math.max(1, Number(raw) || 0) })
-          }}
-          placeholder={t('proxy.routePoolMarkInherit')}
+          value={contextDraft}
+          onChange={(event) => changeTokens('context', event.target.value)}
+          placeholder={t('proxy.routePoolMarkMaxOutputPlaceholder')}
+          aria-invalid={contextError !== null}
         />
+        <p className="text-[10px] text-muted-foreground">
+          {t('proxy.routePoolMarkMaxOutputHelp', {
+            max: MAX_MARK_CONTEXT_TOKENS.toLocaleString('en-US'),
+          })}
+        </p>
+        {contextError !== null && (
+          <p className="text-[10px] text-destructive break-words">{contextError}</p>
+        )}
       </div>
 
       <div className="space-y-1">
@@ -397,7 +412,7 @@ export function ModelMarkEditor({
           inputMode="numeric"
           className="h-8 text-xs"
           value={outputDraft}
-          onChange={(event) => changeMaxOutput(event.target.value)}
+          onChange={(event) => changeTokens('output', event.target.value)}
           placeholder={t('proxy.routePoolMarkMaxOutputPlaceholder')}
           aria-invalid={outputError !== null}
         />
@@ -456,22 +471,29 @@ export function ModelMarkEditor({
 }
 
 /** 留空 = 未标注；合法正整数 = 值；其余 = `null`（调用方必须拒绝而不是截断/取整）。 */
-function parseMaxOutput(raw: string): { value?: number } | null {
+function parseMarkTokens(raw: string, max: number): { value?: number } | null {
   const trimmed = raw.trim()
   if (trimmed === '') return { value: undefined }
   if (!/^\d+$/.test(trimmed)) return null
   const value = Number(trimmed)
-  if (value <= 0 || value > MAX_MARK_OUTPUT_TOKENS) return null
+  if (value <= 0 || value > max) return null
   return { value }
 }
 
-function validateMaxOutput(raw: string, t: Translator): string | null {
+/** 两个字段共用判据，只有「上界过大」的文案各自说清是哪个字段。 */
+function validateMarkTokens(
+  raw: string,
+  max: number,
+  t: Translator,
+  field: 'context' | 'output',
+): string | null {
   const trimmed = raw.trim()
-  if (parseMaxOutput(trimmed) !== null) return null
-  if (Number(trimmed) > MAX_MARK_OUTPUT_TOKENS) {
-    return t('proxy.routePoolMarkMaxOutputTooLarge', {
-      max: MAX_MARK_OUTPUT_TOKENS.toLocaleString('en-US'),
-    })
+  if (parseMarkTokens(trimmed, max) !== null) return null
+  if (Number(trimmed) > max) {
+    const key = field === 'context'
+      ? 'proxy.routePoolMarkContextTooLarge'
+      : 'proxy.routePoolMarkMaxOutputTooLarge'
+    return t(key, { max: max.toLocaleString('en-US') })
   }
   return t('proxy.routePoolMarkMaxOutputInvalid')
 }
@@ -677,7 +699,7 @@ function AnnotationBody({
         {metadata && (
           <div className="divide-y rounded-md border">
             {METADATA_ATTRIBUTES.filter((attribute) =>
-              isAttributeApplicable(attribute, metadata.providerType),
+              isAttributeApplicable(attribute, metadata.providerType, metadata),
             ).map((attribute) => (
               <div key={attribute} className="flex items-start justify-between gap-3 px-3 py-1.5">
                 <span className="shrink-0 text-xs text-muted-foreground">

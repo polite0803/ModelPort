@@ -282,6 +282,10 @@ const providersAPI = {
   getModelMarks: (): Promise<Record<string, Record<string, ModelCapabilityHint>>> =>
     wire.invoke(IpcChannels.PROVIDERS_GET_MODEL_MARKS),
 
+  /** 标准库逐字段采用台账（只读）：行内回显批量补全结果用。 */
+  getCatalogAdoptions: (): Promise<CatalogAdoption[]> =>
+    wire.invoke(IpcChannels.PROVIDERS_GET_CATALOG_ADOPTIONS),
+
   setModelMark: (providerId: string, displayName: string, mark: ModelCapabilityHint | null): Promise<{
     success: boolean
     marks: Record<string, Record<string, ModelCapabilityHint>>
