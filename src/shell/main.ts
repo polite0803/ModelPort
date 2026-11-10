@@ -39,6 +39,7 @@ import {
   type GatewayEntry,
   type GatewayKind,
 } from './addressBook'
+import { decideWindowOpen } from './openTarget'
 import { dropSecret, getSecret, putSecret, type SecretSealer } from './secretStore'
 import { changeGatewayTrust, describeCertificate, gatewayTrustStatus, type TrustTarget } from './gatewayTrust'
 import { checkForUpdates, runUpgrade } from './updater'
@@ -538,10 +539,19 @@ function createWindow(): void {
     console.error(`[Shell] renderer gone: ${details.reason} exitCode=${details.exitCode}`)
   })
 
-  // External links stay in the real browser: the shell window is a remote document and
-  // must not grow a navigation surface the page itself did not ask for.
+  // A link the page opens in a new window is usually a *route*, not a second document: the
+  // window routes in place when the target is the gateway's own UI, and only a different
+  // origin goes to the real browser. Sending both to `shell.openExternal` is what made an
+  // in-app link ("打开渠道") leave the app.
   window.webContents.setWindowOpenHandler(({ url }) => {
-    if (normalizeOrigin(url)) void shell.openExternal(url)
+    const decision = decideWindowOpen(window?.webContents.getURL() ?? '', url)
+    if (decision.kind === 'navigate') {
+      window?.webContents.send('shell:navigate', decision.path)
+    } else if (decision.kind === 'load') {
+      void window?.loadURL(decision.url)
+    } else if (decision.kind === 'external') {
+      void shell.openExternal(decision.url)
+    }
     return { action: 'deny' }
   })
 
