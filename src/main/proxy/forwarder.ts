@@ -88,7 +88,7 @@ import { dispatchLedger } from './dispatchLedger.ts'
 import { planAttemptDeadline, planForwardRetries } from './retryPolicy'
 import { stripUnsupportedForBuiltin } from './parameterPolicy'
 import { ensureAnthropicOutputCap, outputCapFallbackOf } from './utils/outputCap.ts'
-import { createContextManagementService } from './services/contextManagementService'
+import { createContextManagementService, trimAppliesToProvider } from './services/contextManagementService'
 import { accountChannelManager } from '../providers/accountChannels/manager'
 import { sanitizeChatToolDefinitions } from '../channelPack/toolCallValidation'
 import { getAggregateEntry } from '../providers/aggregate/registry'
@@ -353,7 +353,14 @@ export class RequestForwarder {
       let modifiedRequest = request
 
       // 探测请求的提示词长度就是被测的档位；上下文管理会把它裁短，必须跳过。
-      if (!isProbe && config.contextManagement?.enabled && modifiedRequest.messages && modifiedRequest.messages.length > 0) {
+      // 裁剪只在 `channelIds` 点名的渠道上运行：头切会把历史前缀逐轮变异，
+      // 对有前缀缓存的渠道是每轮全价重读（2026-11-10 回归，PLAN §9.12）。
+      if (
+        !isProbe &&
+        trimAppliesToProvider(config.contextManagement ?? {}, provider.id) &&
+        modifiedRequest.messages &&
+        modifiedRequest.messages.length > 0
+      ) {
         try {
           // 摘要压缩那条策略已于 2026-11-03 退役（它会另起一次模型调用、再把产物
           // 包成 `[Conversation Summary]` 塞进历史 —— 那是网关替用户写内容）。

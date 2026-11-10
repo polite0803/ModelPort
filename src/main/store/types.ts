@@ -456,6 +456,17 @@ export interface ContextManagementConfig {
   }
   /** Execution order of strategies */
   executionOrder: ('slidingWindow' | 'tokenLimit')[]
+  /**
+   * Providers whose traffic may be trimmed. Absent or empty = trim nothing.
+   *
+   * A head cut rewrites the oldest context bytes, which invalidates the upstream
+   * prefix cache for every later turn — cheap for a channel that does not cache
+   * (trae), expensive for one that does (measured 60–98% hits on
+   * bailian/loomy/raccoon before the 2026-11-10 regression, PLAN-prompt-cache
+   * §9.12). Naming the channel is the honest gate: a capability table cannot
+   * see account channels, only aggregate entries.
+   */
+  channelIds?: string[]
 }
 
 /**

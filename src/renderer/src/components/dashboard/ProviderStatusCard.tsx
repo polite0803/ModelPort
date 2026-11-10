@@ -3,9 +3,9 @@ import { Card } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
 import { Server } from 'lucide-react'
 import type { ProviderStatus } from '@/types/electron'
-import { recentLocalDays } from '@shared/localDay'
 import type { ProviderStatsWindow, ProviderWindowTokenUsage } from '@shared/providerUsage'
 import { formatTokens } from './TokenUsageCard'
+import { StatsWindowPresets, StatsWindowRangeInputs } from './StatsWindowPicker'
 
 export interface ProviderStats {
   id: string
@@ -39,13 +39,6 @@ export interface ProviderStatusCardProps {
   onWindowChange: (window: ProviderStatsWindow) => void
   className?: string
 }
-
-const PRESETS: readonly { key: string; window: ProviderStatsWindow; labelKey: string; count?: number }[] = [
-  { key: 'today', window: { kind: 'today' }, labelKey: 'dashboard.providerWindow.today' },
-  { key: 'days7', window: { kind: 'days', days: 7 }, labelKey: 'dashboard.providerWindow.days', count: 7 },
-  { key: 'days30', window: { kind: 'days', days: 30 }, labelKey: 'dashboard.providerWindow.days', count: 30 },
-  { key: 'all', window: { kind: 'all' }, labelKey: 'dashboard.providerWindow.all' },
-]
 
 /**
  * Money keeps its own formatting because a day of cheap requests genuinely costs
@@ -112,35 +105,6 @@ export function ProviderStatusCard({
     ].filter(Boolean).join(' · ')
   }
 
-  const isCustom = statsWindow.kind === 'range'
-
-  /**
-   * The preset is highlighted only for the window it produces: two `days`
-   * presets differ by their count, and a hand-edited range is never a preset.
-   */
-  const isActivePreset = (preset: ProviderStatsWindow): boolean => {
-    if (isCustom || preset.kind !== statsWindow.kind) return false
-    return preset.kind !== 'days' ||
-      (statsWindow.kind === 'days' && statsWindow.days === preset.days)
-  }
-
-  // Opening the custom editor on the last week keeps it a change of shape, not
-  // an accident: an empty range would read as "no traffic" rather than "not yet
-  // filled in".
-  const openCustomRange = () => {
-    const days = recentLocalDays(7)
-    onWindowChange({ kind: 'range', start: days[0].key, end: days[days.length - 1].key })
-  }
-
-  const setRangeEdge = (edge: 'start' | 'end', value: string) => {
-    if (statsWindow.kind !== 'range') return
-    onWindowChange({ ...statsWindow, [edge]: value })
-  }
-
-  const rangeEdges = statsWindow.kind === 'range' ? statsWindow : null
-  const invalidRange =
-    rangeEdges !== null && rangeEdges.start > rangeEdges.end
-
   return (
     <Card className={cn('flex h-full flex-col p-5', className)}>
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -151,69 +115,14 @@ export function ProviderStatusCard({
           </h3>
         </div>
 
-        <div className="flex items-center gap-1">
-          {PRESETS.map((preset) => {
-            const active = isActivePreset(preset.window)
-
-            return (
-              <button
-                key={preset.key}
-                type="button"
-                onClick={() => onWindowChange(preset.window)}
-                className={cn(
-                  'rounded-md px-2 py-1 text-caption transition-colors',
-                  active
-                    ? 'bg-[var(--accent-soft)] text-[var(--accent-primary)]'
-                    : 'text-[var(--text-muted)] hover:bg-[var(--surface-hover)]'
-                )}
-              >
-                {preset.count === undefined
-                  ? t(preset.labelKey)
-                  : t(preset.labelKey, { count: preset.count })
-                }
-              </button>
-            )
-          })}
-          <button
-            type="button"
-            onClick={openCustomRange}
-            className={cn(
-              'rounded-md px-2 py-1 text-caption transition-colors',
-              isCustom
-                ? 'bg-[var(--accent-soft)] text-[var(--accent-primary)]'
-                : 'text-[var(--text-muted)] hover:bg-[var(--surface-hover)]'
-            )}
-          >
-            {t('dashboard.providerWindow.custom')}
-          </button>
-        </div>
+        <StatsWindowPresets value={statsWindow} onChange={onWindowChange} />
       </div>
 
-      {rangeEdges && (
-        <div className="mt-2 flex flex-wrap items-center gap-2 pl-4 text-caption text-[var(--text-muted)]">
-          <label className="flex items-center gap-1.5">
-            <span>{t('dashboard.providerWindow.from')}</span>
-            <input
-              type="date"
-              value={rangeEdges.start}
-              onChange={(event) => setRangeEdge('start', event.target.value)}
-              className="rounded-md border border-[var(--border)] bg-[var(--surface-inset)] px-1.5 py-0.5 text-caption"
-            />
-          </label>
-          <label className="flex items-center gap-1.5">
-            <span>{t('dashboard.providerWindow.to')}</span>
-            <input
-              type="date"
-              value={rangeEdges.end}
-              onChange={(event) => setRangeEdge('end', event.target.value)}
-              className="rounded-md border border-[var(--border)] bg-[var(--surface-inset)] px-1.5 py-0.5 text-caption"
-            />
-          </label>
-          {invalidRange && (
-            <span className="text-[var(--warning)]">{t('dashboard.providerWindow.invalidRange')}</span>
-          )}
-        </div>
-      )}
+      <StatsWindowRangeInputs
+        value={statsWindow}
+        onChange={onWindowChange}
+        className="mt-2 pl-4"
+      />
 
       {providers.length === 0 ? (
         <div className="empty-state flex-1">

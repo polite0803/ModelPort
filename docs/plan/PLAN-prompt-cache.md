@@ -662,3 +662,30 @@ prompt_tokens 区间 59,722–175,435（均价 105,133，合计 231 万）
 **部署**：WSL 覆盖（备份 `/root/mpd.bak-trim-2020`），`modelport-daemon.cjs` 含新符号 ×4，`/health` ok。配置经管理 RPC `config:update` 落盘并重启：`enabled=true`、`slidingWindow{40}`、`tokenLimit{65536}`、顺序 `[slidingWindow, tokenLimit]`。
 
 **预期与风险**：长会话 prompt 预计从 ~107K 压到 ≤64K（估算口径 `ceil(chars/3)`；中文密集内容实际 tokens 会高于估算值）。风险是模型丢掉早期工具结果后可能重读文件，轮数上升抵消部分收益。观察指标：每日 TRAE `requests`、`upstreamPrompt/requests` 均值、积分日耗。验证点：下一轮 TRAE 会话日志出现 `[Forwarder] Context management applied: X -> Y messages`。
+
+## 9.12 全局裁剪打碎了有缓存渠道的前缀缓存（2026-11-10 止血）
+
+**用户报「命中率急剧下降、消耗显著增大」——真回归，不是口径。** 两层归因：
+
+- 口径①只影响 TRAE 一行（0% 进分母，aggregate 从 97.97% 到 74.68% 那档是**显示**变化，token 不变）。
+- 真回归来自 §9.11 的全局裁剪：`forwarder.ts:356` 的门只有 `config.contextManagement?.enabled`，**无渠道豁免、无 cache-first 门**（压缩有 `cacheFirst`，裁剪没有）。slidingWindow 每轮把切点后移，历史前缀逐轮变异 ⇒ DeepSeek 系隐式前缀缓存全灭。
+
+**分渠道前后对比**（`tokenUsage.byModel`，分母=口径①）：
+
+| 模型 | 11-08 | 11-09（20:44 起裁） | 11-10（全天裁） |
+|---|---|---|---|
+| loomy/GLM-5.3-Flash | 88.0% | 85.6% | **59.3%** |
+| bailian/deepseek-v4.1-flash-1017 | 97.2% | 97.8% | **60.3%** |
+| raccoon/sn-deepseek-v4-1-flash-1017 | 87.0% | 90.5% | **59.9%** |
+| bailian/qwen3.8-flash | 97.7% | 98.6% | 86.1% |
+| trae/deepseek-v4.1-flash | 0%（无缓存，不受裁剪影响；prompt 均值 107K→67K，**裁剪对它反而是纯赚**） | | |
+
+裁剪事件 2842 次（11-09 20:44 起，每小时 250–340 条，`757→42 messages`），远超「偶发长会话」的形状——被裁的是大量有缓存渠道的正常流量。
+
+**止血（2026-11-10 08:0x）**：`contextManagement.enabled=false`（先走 `contextManagement:updateConfig` RPC + 重启——**未生效**，conf 异步落盘没赶上重启读盘，老配置多活了半分钟；再直接改 `data.json` + 重启，验证：`getConfig` 回 `enabled:false`、日志零新增裁剪事件、`/health` ok）。代价：TRAE 暂时回到全量重发（~107K/轮），等代码修复。
+
+**正解（待做）**：把压缩已有的 `cacheFirst`/`providerOverrides` 门移植到裁剪——有文档化前缀缓存（或 cacheRead>0 实证）的渠道跳过 slidingWindow/tokenLimit，无缓存渠道（TRAE 类）照裁。配置类型有 5 处副本（store/types.ts、shared/api.ts、renderer electron.d.ts、ContextManagement.tsx、i18n×2），按既有流程同步。
+
+**正解落地（2026-11-10 08:31，拍板通过）**：`ContextManagementConfig` 增 `channelIds?: string[]`——点名谁可以被裁，**缺省/空 = 不裁任何人**（`enabled:true` 也不再全局生效）。没有照搬压缩的能力表判据：能力表只覆盖聚合渠道，罩不住这次被误伤的账号渠道（loomy/raccoon 无 AggregateEntry 条目）；点名是能盖住全部渠道形状的诚实门。`trimAppliesToProvider()` 进 forwarder 裁剪门；UI 面板加作用域输入框（i18n×2）。测试：相关 21/21 绿 + 新增 `context-trim-scope` 5 条（变异：门恒真 → 红 3）。**部署走并行会话新落的 `scripts/deploy-wsl-daemon.sh`**（单命令停-拷-起-探活-回滚，备份 `/root/mpd.bak-20261110-083115`），现网 `enabled=true, channelIds=["trae"]`。**验证**：重启后 4 分钟窗口 4 条非 TRAE 请求（bailian/raccoon）零裁剪事件；TRAE 侧由单测覆盖。钉子提醒：并行会话在途的仪表盘统计窗口功能（dashboardStore 等 4 文件）未进本部署，其 2 条钉子测试在完整工作树上仍红，落地时随他们的功能一起修。
+
+**操作教训（已入记忆）**：RPC 写配置后必须等落盘再重启（本例等 2s 不够）；或写后用 `getConfig` 读回 + 观察日志再重启。

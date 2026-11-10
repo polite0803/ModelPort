@@ -23,6 +23,12 @@ interface ContextManagementConfigType {
   enabled: boolean
   strategies: StrategyConfig
   executionOrder: ('slidingWindow' | 'tokenLimit')[]
+  channelIds?: string[]
+}
+
+/** 逗号/空白分隔的渠道 ID 列表；空串归一为不裁剪任何渠道。 */
+function parseChannelIds(text: string): string[] {
+  return [...new Set(text.split(/[,\s，、]+/).map(id => id.trim()).filter(Boolean))]
 }
 
 export function ContextManagement() {
@@ -39,6 +45,7 @@ export function ContextManagement() {
   })
 
   const [hasChanges, setHasChanges] = useState(false)
+  const [channelIdsText, setChannelIdsText] = useState('')
 
   useEffect(() => {
     loadConfig()
@@ -48,6 +55,7 @@ export function ContextManagement() {
     try {
       const contextConfig = await window.electronAPI.contextManagement.getConfig()
       setConfig(contextConfig)
+      setChannelIdsText((contextConfig.channelIds ?? []).join(', '))
     } catch (error) {
       console.error('Failed to load context management config:', error)
     }
@@ -77,7 +85,10 @@ export function ContextManagement() {
 
   const saveConfig = async () => {
     try {
-      await window.electronAPI.contextManagement.updateConfig(config)
+      await window.electronAPI.contextManagement.updateConfig({
+        ...config,
+        channelIds: parseChannelIds(channelIdsText),
+      })
       setHasChanges(false)
       toast({
         title: t('common.success'),
@@ -118,6 +129,23 @@ export function ContextManagement() {
 
           {config.enabled && (
             <div className="space-y-4 pt-4 border-t">
+              <div className="space-y-2">
+                <Label htmlFor="context-channel-ids">{t('contextManagement.channelIds')}</Label>
+                <Input
+                  id="context-channel-ids"
+                  value={channelIdsText}
+                  onChange={(e) => {
+                    setChannelIdsText(e.target.value)
+                    handleConfigChange({ channelIds: parseChannelIds(e.target.value) })
+                  }}
+                  placeholder="trae"
+                  className="font-mono"
+                />
+                <p className="text-xs text-muted-foreground">
+                  {t('contextManagement.channelIdsHint')}
+                </p>
+              </div>
+
               <div className="flex items-center gap-2">
                 <div className="h-2 w-2 rounded-full bg-primary"></div>
                 <span className="text-sm font-medium text-muted-foreground">

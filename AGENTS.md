@@ -331,3 +331,14 @@ interface - each `chatCompletion()` returns its own shape, and the forwarder onl
 
 
 
+
+
+## Global user rules (bootstrap, added 2026-11-10, updated 2026-11-10)
+
+This file carries the project-level constraints for `/home/polit/projects/ModelPort`.
+User-level rules live in `/home/polit/.codebuddy/rules/*.mdc` and are injected at session
+start, but are not re-injected after context compaction. At the start of every conversation,
+and again after any compaction or noticeable memory loss, read those `.mdc` files plus
+`/home/polit/.codebuddy/CODEBUDDY.md` and `/home/polit/.codebuddy/memory/MEMORY.md`, and
+treat them as mandatory global rules. Keep task state in `/home/polit/.codebuddy/memory/`;
+never claim to remember a previous turn without reading those files.

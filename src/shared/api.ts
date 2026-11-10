@@ -871,6 +871,8 @@ interface ContextManagementConfig {
     }
   }
   executionOrder: ('slidingWindow' | 'tokenLimit')[]
+  /** 仅这些渠道的流量会被裁剪；缺省/空 = 不裁剪任何渠道（头切会打碎上游前缀缓存）。 */
+  channelIds?: string[]
 }
 
 const managementApiAPI = {

@@ -94,6 +94,8 @@
     "proxyStopped": "代理服务已停止",
     "runtime": "运行时间",
     "vsYesterday": "较昨日",
+    "vsPreviousPeriod": "较上期",
+    "statsWindow": "统计时间段",
     "hours": "小时",
     "minutes": "分钟",
     "justNow": "刚刚",
@@ -1434,6 +1436,8 @@
     "enableContextManagement": "启用上下文管理",
     "enableContextManagementHint": "自动管理对话上下文，防止超出模型限制",
     "strategyConfig": "策略配置",
+    "channelIds": "裁剪作用渠道",
+    "channelIdsHint": "仅这些渠道 ID 的流量会被裁剪（逗号分隔，如 trae）。留空 = 不裁剪任何渠道——头切会打碎上游前缀缓存，有缓存收益的渠道不要加进来",
     "configSaved": "上下文管理配置已保存",
     "configSaveFailed": "保存上下文管理配置失败",
     "slidingWindow": {

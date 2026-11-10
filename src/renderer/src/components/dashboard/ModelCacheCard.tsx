@@ -20,6 +20,7 @@ import { Card } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
 import type { ModelWindowCoverage, ModelWindowTokenUsage, ProviderStatsWindow } from '@shared/providerUsage'
 import { formatTokens } from './TokenUsageCard'
+import { StatsWindowPresets } from './StatsWindowPicker'
 
 export interface ModelCacheCardProps {
   stats: Record<string, ModelWindowTokenUsage>
@@ -29,19 +30,7 @@ export interface ModelCacheCardProps {
   className?: string
 }
 
-const PRESETS: readonly { key: string; window: ProviderStatsWindow; labelKey: string; count?: number }[] = [
-  { key: 'today', window: { kind: 'today' }, labelKey: 'dashboard.providerWindow.today' },
-  { key: 'days7', window: { kind: 'days', days: 7 }, labelKey: 'dashboard.providerWindow.days', count: 7 },
-  { key: 'days30', window: { kind: 'days', days: 30 }, labelKey: 'dashboard.providerWindow.days', count: 30 },
-  { key: 'all', window: { kind: 'all' }, labelKey: 'dashboard.providerWindow.all' },
-]
-
 const DEFAULT_VISIBLE_ROWS = 8
-
-function isActiveWindow(preset: ProviderStatsWindow, current: ProviderStatsWindow): boolean {
-  if (preset.kind !== current.kind) return false
-  return preset.kind !== 'days' || (current.kind === 'days' && preset.days === current.days)
-}
 
 function percentOf(numerator: number, denominator: number): string | null {
   if (!(denominator > 0)) return null
@@ -86,29 +75,7 @@ export function ModelCacheCard({
           <h3 className="card-heading">{t('dashboard.modelCache.title')}</h3>
         </div>
 
-        <div className="flex items-center gap-1">
-          {PRESETS.map((preset) => {
-            const active = isActiveWindow(preset.window, statsWindow)
-
-            return (
-              <button
-                key={preset.key}
-                type="button"
-                onClick={() => onWindowChange(preset.window)}
-                className={cn(
-                  'rounded-md px-2 py-1 text-caption transition-colors',
-                  active
-                    ? 'bg-[var(--accent-soft)] text-[var(--accent-primary)]'
-                    : 'text-[var(--text-muted)] hover:bg-[var(--surface-hover)]'
-                )}
-              >
-                {preset.count === undefined
-                  ? t(preset.labelKey)
-                  : t(preset.labelKey, { count: preset.count })}
-              </button>
-            )
-          })}
-        </div>
+        <StatsWindowPresets value={statsWindow} onChange={onWindowChange} />
       </div>
 
       {rows.length === 0 ? (

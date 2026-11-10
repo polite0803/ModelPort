@@ -38,6 +38,15 @@ export interface ContextManagementConfig {
     tokenLimit: TokenLimitConfig
   }
   executionOrder: ('slidingWindow' | 'tokenLimit')[]
+  /**
+   * Providers whose traffic may be trimmed; absent or empty = trim nothing.
+   *
+   * A head cut rewrites the oldest context bytes, which invalidates the upstream
+   * prefix cache for every later turn. The 2026-11-10 regression (PLAN-prompt-cache
+   * §9.12) proved this costs 60–98% measured hit rates on channels that cache —
+   * so trimming is opt-in per provider, never "whoever happens to be enabled".
+   */
+  channelIds?: string[]
 }
 
 /**
@@ -104,7 +113,30 @@ export function normalizeContextManagementConfig(
   delete (merged.strategies as unknown as Record<string, unknown>).summary
   merged.executionOrder = (config.executionOrder ?? DEFAULT_CONTEXT_MANAGEMENT_CONFIG.executionOrder)
     .filter((name: string) => name === 'slidingWindow' || name === 'tokenLimit') as ('slidingWindow' | 'tokenLimit')[]
+  // Trim scope is opt-in per provider: absent/malformed collapses to "trim
+  // nothing", never to "trim everyone" — the 2026-11-10 regression showed what
+  // the default-everyone shape costs (PLAN-prompt-cache §9.12).
+  merged.channelIds = Array.isArray(config.channelIds)
+    ? [...new Set(config.channelIds.map(id => String(id).trim()).filter(id => id.length > 0))]
+    : []
   return merged
+}
+
+/**
+ * Whether trimming may run for this provider.
+ *
+ * `channelIds` names the providers whose traffic may pay the head-cut cost:
+ * trimming rewrites the oldest context bytes, which invalidates the upstream
+ * prefix cache for every later turn — measured 60–98% hits on the channels we
+ * accidentally trimmed on 2026-11-10 (PLAN-prompt-cache §9.12). Absent or empty
+ * = trim nothing, whatever `enabled` says.
+ */
+export function trimAppliesToProvider(
+  config: Pick<ContextManagementConfig, 'enabled' | 'channelIds'>,
+  providerId: string
+): boolean {
+  if (!config.enabled) return false
+  return (config.channelIds ?? []).some(id => id.trim() === providerId)
 }
 
 /**

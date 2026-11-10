@@ -1,10 +1,12 @@
 import { create } from 'zustand'
 import type { ProxyStatus, ProxyStatistics, Provider, Account, ProviderCheckResult, LogEntry, DayTokenSummary } from '@/types/electron'
 import type { DailyTrendPoint } from '@shared/types'
-import { localDayKey, recentLocalDays } from '@shared/localDay'
-import { dailyTrendPoints, dayCountsOf, differenceInPoints, percentChange, successRateOf } from '@shared/trendMath'
+import { dailyTrendPoints, differenceInPoints, percentChange } from '@shared/trendMath'
+import type { DailyBucket } from '@shared/trendMath'
 import { aggregateModelCoverage, aggregateModelTokenUsage, aggregateProviderUsage, aggregateProviderTokenUsage, DEFAULT_PROVIDER_WINDOW } from '@shared/providerUsage'
 import type { DailyProviderUsage, ModelWindowCoverage, ModelWindowTokenUsage, ProviderStatsWindow } from '@shared/providerUsage'
+import { previousWindow, windowDayTotals, windowTokenSummary } from '@shared/statsWindow'
+import type { WindowDayTotals } from '@shared/statsWindow'
 import type { DayTokenBucket } from '@shared/tokenAccounting'
 import type { ProviderStats, ActivityItem, ChartDataPoint } from '@/components/dashboard'
 
@@ -26,6 +28,22 @@ interface DashboardState {
   proxyStatus: ProxyStatus | null
   statistics: ProxyStatistics | null
   stats: DashboardStats
+  /**
+   * The window the headline cards are summed over. Every one of them reads the
+   * same day buckets, so switching this changes all of them together - and it is
+   * a local re-bucket, not a refetch.
+   */
+  statsWindow: ProviderStatsWindow
+  /** The selected window's totals, `null`-aware so "no record" is not "0". */
+  windowTotals: WindowDayTotals
+  /** The day buckets behind `statsWindow`, kept for local re-bucketing. */
+  dayBuckets: Record<string, DailyBucket>
+  /** Token counters by day, kept whole for the same reason. */
+  tokenDays: Record<string, DayTokenBucket>
+  /** Today's summary as the main process built it (carries the compression switch). */
+  todayTokenUsage: DayTokenSummary | null
+  /** Current active accounts; a property of now, not of the selected window. */
+  activeAccountCount: number
   providers: ProviderStats[]
   /** Per-(provider, model) cache counters over `providerWindow`. */
   modelCacheStats: Record<string, ModelWindowTokenUsage>
@@ -52,6 +70,7 @@ interface DashboardState {
   setStats: (stats: Partial<DashboardStats>) => void
   setProviders: (providers: ProviderStats[]) => void
   setProviderWindow: (window: ProviderStatsWindow) => void
+  setStatsWindow: (window: ProviderStatsWindow) => void
   setActivities: (activities: ActivityItem[]) => void
   addActivity: (activity: ActivityItem) => void
   setChartData: (data: ChartDataPoint[]) => void
@@ -98,6 +117,62 @@ const providerStatsOf = (inputs: ProviderCardInputs, window: ProviderStatsWindow
       tokens: tokenUsage[meta.id],
     }
   })
+}
+
+/** The headline cards' scope until the user picks one. */
+export const DEFAULT_STATS_WINDOW: ProviderStatsWindow = { kind: 'today' }
+
+const EMPTY_WINDOW_TOTALS: WindowDayTotals = {
+  requests: null,
+  successRate: null,
+  avgLatencyMs: null,
+  days: 0,
+}
+
+interface HeadlineCards {
+  stats: DashboardStats
+  windowTotals: WindowDayTotals
+  tokenUsage: DayTokenSummary | null
+}
+
+/**
+ * Every headline figure from one window of the same day buckets.
+ *
+ * The comparison side is the window's own predecessor (yesterday for today, the
+ * prior N days for N days), never "yesterday" unconditionally - a 30-day total
+ * compared against one day would be a change in window length, not in traffic.
+ * `all` has no predecessor, so its trends stay `null`.
+ */
+const headlineCards = (
+  dayBuckets: Record<string, DailyBucket>,
+  tokenDays: Record<string, DayTokenBucket>,
+  window: ProviderStatsWindow,
+  activeAccounts: number,
+  todayTokenUsage: DayTokenSummary | null,
+): HeadlineCards => {
+  const now = Date.now()
+  const totals = windowDayTotals(dayBuckets, window, now)
+  const baseWindow = previousWindow(window, now)
+  const base = baseWindow === null ? null : windowDayTotals(dayBuckets, baseWindow, now)
+
+  return {
+    windowTotals: totals,
+    stats: {
+      totalRequests: totals.requests ?? 0,
+      successRate: totals.successRate ?? 0,
+      avgLatency: totals.avgLatencyMs ?? 0,
+      activeAccounts,
+      requestsTrend: percentChange(totals.requests, base?.requests ?? null),
+      successRateTrend: differenceInPoints(totals.successRate, base?.successRate ?? null),
+      latencyTrend: percentChange(totals.avgLatencyMs, base?.avgLatencyMs ?? null),
+      // Accounts are a property of now; a historical count is not recorded.
+      accountsTrend: null,
+    },
+    // Today's own summary carries the compression switch; a window does not.
+    tokenUsage: window.kind === 'today' && todayTokenUsage !== null
+      ? todayTokenUsage
+      : windowTokenSummary(tokenDays, window, now),
+  }
 }
 
 const convertLogsToActivities = (logs: LogEntry[], providers: Provider[]): ActivityItem[] => {
@@ -176,6 +251,12 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
     latencyTrend: null,
     accountsTrend: null,
   },
+  statsWindow: DEFAULT_STATS_WINDOW,
+  windowTotals: EMPTY_WINDOW_TOTALS,
+  dayBuckets: {},
+  tokenDays: {},
+  todayTokenUsage: null,
+  activeAccountCount: 0,
   providers: [],
   modelCacheStats: {},
   modelCacheCoverage: { totalRequests: 0, detailedRequests: 0 },
@@ -199,6 +280,24 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
     modelCacheStats: aggregateModelTokenUsage(state.providerCard.tokenDays, window),
     modelCacheCoverage: aggregateModelCoverage(state.providerCard.tokenDays, window),
   })),
+  // A window change is a local re-bucket over the stored day maps: no IPC, so
+  // the cards cannot lag behind the selector, and no refetch that could make
+  // the total and the comparison come from different moments.
+  setStatsWindow: (window) => set((state) => {
+    const cards = headlineCards(
+      state.dayBuckets,
+      state.tokenDays,
+      window,
+      state.activeAccountCount,
+      state.todayTokenUsage,
+    )
+    return {
+      statsWindow: window,
+      stats: cards.stats,
+      windowTotals: cards.windowTotals,
+      tokenUsage: cards.tokenUsage,
+    }
+  }),
   setActivities: (activities) => set({ activities }),
   addActivity: (activity) => set((state) => ({
     activities: [activity, ...state.activities].slice(0, 50),
@@ -208,7 +307,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   setError: (error) => set({ error }),
 
   refreshData: async () => {
-    const { setLoading, setError, setProxyStatus, setStatistics, setTokenUsage, setStats, setProviders, setActivities, setChartData } = get()
+    const { setLoading, setError, setProxyStatus, setStatistics, setStats, setProviders, setActivities, setChartData } = get()
     
     setLoading(true)
     setError(null)
@@ -249,46 +348,31 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
 
       setProxyStatus(proxyStatus)
       setStatistics(statistics)
-      setTokenUsage(tokenUsage)
+      set({ todayTokenUsage: tokenUsage })
 
-      const totalRequests = persistentStats?.totalRequests ?? statistics?.totalRequests ?? 0
-      const successRequests = persistentStats?.successRequests ?? statistics?.successRequests ?? 0
-      const successRate = totalRequests > 0
-        ? Math.round((successRequests / totalRequests) * 100)
-        : 0
-      
-      const today = localDayKey(Date.now())
-      const todayStats = persistentStats?.dailyStats?.[today]
-      const avgLatency = todayStats && todayStats.successRequests > 0
-        ? Math.round(todayStats.totalLatency / todayStats.successRequests)
-        : (successRequests > 0
-          ? Math.round((persistentStats?.totalLatency ?? 0) / successRequests)
-          : Math.round(statistics?.avgLatency ?? 0))
-      
       const activeAccounts = accounts?.filter((a: Account) => a.status === 'active').length ?? 0
 
-      const yesterday = recentLocalDays(2)[0].key
+      // One fetch, two windows: the headline cards and the provider card both
+      // sum these day buckets, so neither has to trust a second source that
+      // could disagree with itself.
+      const dayBuckets = (persistentStats?.dailyStats ?? {}) as Record<string, DailyBucket>
+      const tokenDayBuckets = (tokenDays ?? {}) as Record<string, DayTokenBucket>
 
-      const todayTrend = dailyTrends.find((point) => point.date === today)
-      const yesterdayTrend = dailyTrends.find((point) => point.date === yesterday)
-
-      const todayCounts = dayCountsOf(todayTrend)
-      const yesterdayCounts = dayCountsOf(yesterdayTrend)
-      
-      const requestsTrend = percentChange(todayCounts.requests, yesterdayCounts.requests)
-      const successRateTrend = differenceInPoints(successRateOf(todayCounts), successRateOf(yesterdayCounts))
-      // A day with no successful request reports an average latency of 0, which means
-      // "not measured", not "instant".
-      const latencyTrend = percentChange(todayCounts.avgLatency || null, yesterdayCounts.avgLatency || null)
-
-      setStats({
-        totalRequests,
-        successRate,
-        avgLatency,
+      const cards = headlineCards(
+        dayBuckets,
+        tokenDayBuckets,
+        get().statsWindow,
         activeAccounts,
-        requestsTrend,
-        successRateTrend,
-        latencyTrend,
+        tokenUsage,
+      )
+
+      setStats(cards.stats)
+      set({
+        windowTotals: cards.windowTotals,
+        tokenUsage: cards.tokenUsage,
+        dayBuckets,
+        tokenDays: tokenDayBuckets,
+        activeAccountCount: activeAccounts,
       })
 
       const requestLogsPromise = window.electronAPI?.requestLogs?.get?.({ limit: 100 }) ?? Promise.resolve([])
@@ -308,8 +392,8 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
             latency: check?.latency,
           }
         }),
-        days: (persistentStats?.dailyStats ?? {}) as Record<string, DailyProviderUsage>,
-        tokenDays: tokenDays ?? {},
+        days: dayBuckets as Record<string, DailyProviderUsage>,
+        tokenDays: tokenDayBuckets,
       }
 
       set({ providerCard })
@@ -344,6 +428,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
         latencyTrend: null,
         accountsTrend: null,
       })
+      set({ windowTotals: EMPTY_WINDOW_TOTALS, tokenUsage: null })
       setActivities([])
       setChartData([])
     } finally {

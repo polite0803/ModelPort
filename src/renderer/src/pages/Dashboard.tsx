@@ -12,6 +12,7 @@ import {
   TokenUsageCard,
   ModelCacheCard,
 } from '@/components/dashboard'
+import { StatsWindowPresets, StatsWindowRangeInputs } from '@/components/dashboard/StatsWindowPicker'
 import { PageHeader } from '@/components/layout/PageHeader'
 import { useDashboardStore } from '@/stores/dashboardStore'
 import { useSettingsStore } from '@/stores/settingsStore'
@@ -25,6 +26,8 @@ export function Dashboard() {
     stats,
     providers,
     providerWindow,
+    statsWindow,
+    windowTotals,
     activities,
     chartData,
     tokenUsage,
@@ -35,9 +38,19 @@ export function Dashboard() {
     lastUpdated,
     refreshData,
     setProviderWindow,
+    setStatsWindow,
   } = useDashboardStore()
   const { setProxyEnabled } = useSettingsStore()
   const hasLoadedRef = useRef(false)
+
+  /**
+   * "vs yesterday" only holds for the today window; every other window compares
+   * against the preceding period of the same length.
+   */
+  const trendLabel =
+    statsWindow.kind === 'today'
+      ? t('dashboard.vsYesterday')
+      : t('dashboard.vsPreviousPeriod')
 
   useEffect(() => {
     if (!hasLoadedRef.current) {
@@ -123,33 +136,46 @@ export function Dashboard() {
         </div>
       )}
 
+      {/*
+        The period is chosen once, above the numbers it applies to: the trend on
+        each card compares against the period before this one, so "vs yesterday"
+        would be wrong the moment another window is picked.
+      */}
+      <div className="mb-4 flex flex-col gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-caption text-[var(--text-muted)]">{t('dashboard.statsWindow')}</span>
+          <StatsWindowPresets value={statsWindow} onChange={setStatsWindow} />
+        </div>
+        <StatsWindowRangeInputs value={statsWindow} onChange={setStatsWindow} />
+      </div>
+
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
         <StatsCard
           title={t('dashboard.totalRequests')}
-          value={stats.totalRequests.toLocaleString()}
+          value={windowTotals.requests === null ? '—' : windowTotals.requests.toLocaleString()}
           icon={Activity}
           trend={{
             value: stats.requestsTrend,
-            label: t('dashboard.vsYesterday'),
+            label: trendLabel,
           }}
         />
         <StatsCard
           title={t('dashboard.successRate')}
-          value={`${stats.successRate}%`}
+          value={windowTotals.successRate === null ? '—' : `${windowTotals.successRate}%`}
           icon={CheckCircle}
           trend={{
             value: stats.successRateTrend,
-            label: t('dashboard.vsYesterday'),
+            label: trendLabel,
           }}
         />
         <StatsCard
           title={t('dashboard.avgResponseTime')}
-          value={`${stats.avgLatency}ms`}
+          value={windowTotals.avgLatencyMs === null ? '—' : `${windowTotals.avgLatencyMs}ms`}
           icon={Clock}
           trendPolarity="negative"
           trend={{
             value: stats.latencyTrend,
-            label: t('dashboard.vsYesterday'),
+            label: trendLabel,
           }}
         />
       </div>

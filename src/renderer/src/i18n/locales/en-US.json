@@ -94,6 +94,8 @@
     "proxyStopped": "Proxy service is stopped",
     "runtime": "Runtime",
     "vsYesterday": "vs yesterday",
+    "vsPreviousPeriod": "vs previous period",
+    "statsWindow": "Statistics period",
     "hours": "hours",
     "minutes": "minutes",
     "justNow": "Just now",
@@ -1434,6 +1436,8 @@
     "enableContextManagement": "Enable Context Management",
     "enableContextManagementHint": "Automatically manage conversation context to prevent exceeding model limits",
     "strategyConfig": "Strategy Configuration",
+    "channelIds": "Trim scope (channels)",
+    "channelIdsHint": "Only traffic from these channel IDs is trimmed (comma-separated, e.g. trae). Leave empty to trim nothing — a head cut invalidates the upstream prefix cache, so keep caching channels out",
     "configSaved": "Context management configuration saved",
     "configSaveFailed": "Failed to save context management configuration",
     "slidingWindow": {
