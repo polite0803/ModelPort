@@ -3,5 +3,14 @@
 #   --print-paths    what this host actually resolved
 #   --init-host      bind beyond loopback + API key + management API, in one step
 #   --import-backup  restore a desktop backup (password via stdin or the env var)
+#
+# Runs the build output, not a copy committed to the repo: `npm run build:daemon`
+# produces out/daemon/ with the bundle, its resources and the served UI next to each
+# other, which is the layout the daemon resolves at startup.
 DIR=$(cd "$(dirname "$0")/.." && pwd)
-exec node "$DIR/modelport-daemon.cjs" "$@"
+BUNDLE="$DIR/out/daemon/modelport-daemon.cjs"
+if [ ! -f "$BUNDLE" ]; then
+  echo "modelport: $BUNDLE is missing - run 'npm run build:daemon' first" >&2
+  exit 1
+fi
+exec node "$BUNDLE" "$@"

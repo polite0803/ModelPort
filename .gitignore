@@ -10,6 +10,11 @@ dist/
 dist-shell*/
 dist-nsis-try/
 output/
+
+# Unpacked daemon layout at the repo root - produced by `npm run build:daemon`
+# into out/daemon; `bin/modelport` runs that copy, never a committed one.
+/modelport-daemon.cjs
+/renderer/
 build/entitlements.mac.plist
 
 # Channel pack worker bundle (built by scripts/build-channel-pack.mjs;
