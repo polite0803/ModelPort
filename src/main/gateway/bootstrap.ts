@@ -18,7 +18,7 @@ import { configureModelListRefresh } from '../scheduler/modelListRefresh'
 import { aggregateProviderManager } from '../providers/aggregate'
 import { primeModelProbeCache } from '../providers/modelProbeStore'
 import { shutdownCatalogBatchJobs } from '../providers/modelCatalogBatchRunner'
-import { installConsoleBridge, setMainConsoleSink } from '../logging/consoleBridge'
+import { installConsoleBridge, setMainConsoleSink } from '../../shared/logging/consoleBridge'
 
 export interface GatewayListening {
   host: string

@@ -60,6 +60,10 @@ test('the shell imports no gateway module tree', () => {
     // in the built file; this list makes the failure name the source file).
     'src/shell/updatePlan.ts',
     'src/shell/updater.ts',
+    // The console's own error log: it installs the shared console bridge, which is why the
+    // bridge lives under `shared/` (same reason as `shared/certificateTrust`) rather than
+    // under `src/main/logging/`, where importing it would make the shell a gateway module.
+    'src/shell/consoleLogSink.ts',
   ]
   for (const file of shellSources) {
     const source = readFileSync(file, 'utf8')
@@ -190,4 +194,22 @@ test('certificate trust is the console machine\'s action, gated and argument-fre
   assert.doesNotMatch(shellMain, /callback\(true\)/, 'the console must not accept an invalid certificate')
   assert.match(trust, /\/v1\/management\/tls\/ca/, 'the PEM comes from the gateway, over the sealed secret')
   assert.match(trust, /mode: 0o600/, 'the cached certificate still lands in the console profile')
+})
+
+test('the console installs its own error log before anything can fail', () => {
+  // A packaged console has no terminal, so its `console.error` output is a stream nobody
+  // reads unless something persists it. The install has to precede the single-instance lock:
+  // the failures that matter most (an unwritable profile, a second instance quitting) happen
+  // in exactly that window.
+  const install = shellMain.indexOf("installShellConsoleLog(app.getPath('userData'))")
+  const lock = shellMain.indexOf('app.requestSingleInstanceLock()')
+  assert.ok(install > 0, 'the console must install a console log sink')
+  assert.ok(lock > 0 && install < lock, 'the sink must be installed before the instance lock')
+
+  const sink = readFileSync('src/shell/consoleLogSink.ts', 'utf8')
+  assert.match(sink, /'logs'/, 'it writes under the console profile, not the gateway one')
+  // The bridge feeds console.error back into this sink, so the sink must report its own
+  // failures somewhere else.
+  assert.doesNotMatch(sink, /console\.(error|warn)\(/, 'sink failures must not recurse')
+  assert.match(sink, /process\.stderr\.write/, 'they go to stderr instead')
 })

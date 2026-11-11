@@ -1202,6 +1202,25 @@ server-side session table: the `sessionManager.ts` store-backed table, its 60s s
 populated the table for years, so the switch never had an effect - `data.json` no longer carries a
 `sessions` key and `config.sessionConfig` is stripped on read. `/v1/management/sessions` still
 answers 501, now for the same reason the code does: the concept does not exist.
+A `sessions` key left behind in a pre-1.8.3 `data.json` is dropped on the next start
+(`store.ts::dropRetiredTopLevelKeys` over `keyMigration.ts::retiredTopLevelKeys`).
+
+### Main-Process Console Output
+Neither packaged host has a terminal, so a bare `console.error` is a stream nobody reads. Both
+install one bridge - `shared/logging/consoleBridge.ts`, which keeps the original console call and
+hands a redacted, truncated copy to the sink its host injects:
+
+- the gateway (`gateway/bootstrap.ts`) sends it to `storeManager.addLog`, so it lands in the app
+  log the UI shows and a diagnostic bundle exports;
+- the console app (`src/shell/consoleLogSink.ts`) appends NDJSON to `<userData>/logs/console.ndjson`,
+  capped at 2 MB with one rotated sibling, because the console owns no gateway store and
+  `tests/build/shell-entries.test.ts` fences it out of `src/main` imports.
+
+The bridge lives under `shared/` for exactly that reason, as `shared/certificateTrust.ts` does. Two
+rules follow from it: a sink reports its own failures on `process.stderr` and never through
+`console.*` (that is a self-sustaining loop - `appLogs/manager.ts` and the shell sink both do this),
+and only `error`/`warn` are captured, because `info`-level console output is startup narration and
+would flush the log list.
 
 ## Public API Contract
 
@@ -1478,7 +1497,7 @@ Application data lives in `~/.modelport/`. The Electron profile directory is pin
 `package.json`'s `name` (which is what Electron does by default) makes an existing install unreadable
 the moment the package is renamed.
 
-- `data.json` - one electron-store file holding config, providers, accounts, sessions, statistics and
+- `data.json` - one electron-store file holding config, providers, accounts, statistics and
   app logs (there is no separate `providers.json` / `accounts.json`). Its `userModelMarks` key is the
   manual capability annotation table (`providerId -> displayName -> hint`), kept out of
   `userModelOverrides` so a model sync cannot erase a user's correction.

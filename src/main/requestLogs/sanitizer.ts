@@ -1,6 +1,6 @@
 import type { RequestAttemptTrace, RequestLogEntry, RequestStreamTrace } from '../../shared/types.ts'
 import { DEFAULT_MAX_BODY_CHARS, type RequestLogConfig } from './types.ts'
-import { redactAndTruncate, redactSensitiveText, truncateText } from '../logging/redaction.ts'
+import { redactAndTruncate, redactSensitiveText, truncateText } from '../../shared/logging/redaction.ts'
 
 /** 栈只对错误行有用；16KB 足够看清调用链，又不至于让一行日志变成整份 bundle。 */
 const MAX_ERROR_STACK_CHARS = 16_000

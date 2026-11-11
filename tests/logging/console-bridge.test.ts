@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 const { loadModule } = await import('../routes/harness.mjs')
 
 test('error/warn 双写：原 console 仍执行，进 sink 的文本已脱敏', async () => {
-  const bridge = await loadModule('main/logging/consoleBridge.ts')
+  const bridge = await loadModule('shared/logging/consoleBridge.ts')
   bridge.resetConsoleBridgeForTests()
 
   const seen: Array<[string, string]> = []
@@ -35,7 +35,7 @@ test('error/warn 双写：原 console 仍执行，进 sink 的文本已脱敏', 
 })
 
 test('sink 内部再 console.error 不递归', async () => {
-  const bridge = await loadModule('main/logging/consoleBridge.ts')
+  const bridge = await loadModule('shared/logging/consoleBridge.ts')
   bridge.resetConsoleBridgeForTests()
 
   let calls = 0
@@ -60,7 +60,7 @@ test('sink 内部再 console.error 不递归', async () => {
 })
 
 test('重复 install 只包裹一次', async () => {
-  const bridge = await loadModule('main/logging/consoleBridge.ts')
+  const bridge = await loadModule('shared/logging/consoleBridge.ts')
   bridge.resetConsoleBridgeForTests()
 
   const seen: string[] = []
@@ -80,7 +80,7 @@ test('重复 install 只包裹一次', async () => {
 })
 
 test('未注入 sink 时只走原 console，不抛错', async () => {
-  const bridge = await loadModule('main/logging/consoleBridge.ts')
+  const bridge = await loadModule('shared/logging/consoleBridge.ts')
   bridge.resetConsoleBridgeForTests()
 
   const printed: string[] = []

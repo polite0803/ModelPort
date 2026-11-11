@@ -65,10 +65,15 @@ import { buildSnapshot, GATEWAY_ACTION_LABELS, type GatewayListEntry, type Gatew
 import { gatewayListPageUrl } from './gatewayListPage'
 import { gatewayPromptPageUrl } from './gatewayPromptPage'
 import { escapeHtml } from './htmlEscape'
+import { installShellConsoleLog } from './consoleLogSink'
 import type { ShellUpdateProgress } from '../shared/shellBridge'
 
 app.setPath('userData', join(app.getPath('appData'), 'modelport-shell'))
 app.setAppUserModelId('com.modelport.shell')
+// Before anything that can fail: a packaged console has no terminal, so without this its own
+// `console.error` / `console.warn` - refused certificate, unreadable address book, a gateway
+// child that never came up - goes to a stream nobody reads. See `consoleLogSink.ts`.
+installShellConsoleLog(app.getPath('userData'))
 
 if (!app.requestSingleInstanceLock()) {
   app.quit()

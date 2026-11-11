@@ -241,6 +241,12 @@ Logging / diagnostics:
   app log and to `~/.modelport/logs/crash-fallback.ndjson` before the store is ready.
 * Timed log persistence is async and atomic (unique temp + rename); `flushSync()` remains the quit path
   and invalidates stale in-flight snapshots. Worker logs carry `providerId`/`requestId` when available.
+* `console.error`/`console.warn` are mirrored to a durable surface by `src/shared/logging/consoleBridge.ts`,
+  installed once per host: the gateway sends them to the app log (`gateway/bootstrap.ts`), the console
+  appends to `<userData>/logs/console.ndjson` (`src/shell/consoleLogSink.ts`). It lives under `shared/`
+  because `src/shell` may not import `src/main` (same reason as `shared/certificateTrust`). **A sink must
+  never report its own failure through `console.*`** - the bridge would feed it back into the same sink;
+  both sinks write to `process.stderr` instead.
 * Settings forms must not render editable controls before `appConfig` loads. `ProxyConfigForm` waits for
   the persisted config and then syncs unless the user has unsaved edits; otherwise its default
   127.0.0.1 / HTTPS-off state gets saved back over `proxyHost`/`httpsEnabled`/`httpsSanHosts`.

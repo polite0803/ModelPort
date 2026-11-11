@@ -66,7 +66,10 @@ ModelPort 有两套日志：请求日志记录每个 `/v1/*` 请求的结果，�
 - `src/main/appLogs/types.ts` — 应用日志条目形状
 - `src/main/logging/crashReporter.ts` — 进程崩溃捕获与 ndjson 兜底
 - `src/main/logging/diagnosticBundle.ts` — 诊断包组装
-- `src/main/logging/redaction.ts` — 先脱敏再截断的公共实现
+- `src/shared/logging/redaction.ts` — 先脱敏再截断的公共实现（放 `shared/` 是因为控制台的日志链路也要用它，而 `src/shell` 不许导入 `src/main`）
+- `src/shared/logging/consoleBridge.ts` — `console.error/warn` 双写拦截，sink 由宿主注入；只收 error/warn
+- `src/main/gateway/bootstrap.ts` — 网关侧 sink：送 `storeManager.addLog`，进 UI 可见的应用日志
+- `src/shell/consoleLogSink.ts` — 控制台侧 sink：落自己 profile 的 `logs/console.ndjson`（2MB 上限 + 一份 `.1` 轮转）
 - `src/main/proxy/attemptTrace.ts` — 单次尝试行分类
 - `src/main/proxy/rejectionLog.ts` — 被拒请求的统一行格式
 - `src/main/proxy/routes/chat.ts` — `X-Request-Id`、trace 头、客户端识别

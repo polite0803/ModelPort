@@ -15,7 +15,7 @@ import { appendFileSync, mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { LogEntry } from '../store/types.ts'
-import { redactAndTruncate } from './redaction.ts'
+import { redactAndTruncate } from '../../shared/logging/redaction.ts'
 
 const MAX_PENDING = 100
 const MAX_STACK_CHARS = 16_000
