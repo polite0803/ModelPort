@@ -81,12 +81,23 @@ interface ModelFlowState {
 
 const FLOW_WINDOW_MS = 60 * 1000
 const DEFAULT_MODEL_CONCURRENCY = 4
-const MIN_MODEL_CONCURRENCY = 1
+/**
+ * 下限 2 而不是 1：乘性降速把 4 打到 1 后，一条卡首字的慢流就占死唯一名额，
+ * 同模型的其余请求全部本地 429（2026-11-11 codearts 429 风暴实测：10:59:45
+ * 起 23s 内四连 502 把 4→2→1，此后 57–102s 的假死流轮流独占，恢复条件
+ * ——5 连净成功且距上次降速 30s——要数分钟才够得到）。保底 2 让收缩态始终
+ * 留一条并行活路，代价只是上游真限流时多打一路。
+ */
+const MIN_MODEL_CONCURRENCY = 2
 const MAX_MODEL_CONCURRENCY = 16
 /** 最多保留多少个 (账号, 模型) 流控档；自定义模型名不能把表撑大。 */
 const MAX_MODEL_FLOWS = 512
-/** 两次乘性下降至少隔这么久，避免一个尖峰把并发打到 1 后长期起不来。 */
-const DECREASE_COOLDOWN_MS = 5 * 1000
+/**
+ * 两次乘性下降至少隔这么久。5s 太密：一波渠道故障（同上实测 23s 内四连
+ * 502）就够把 4→2→1 一路打穿，而恢复要数分钟。30s 与 INCREASE_COOLDOWN_MS
+ * 对齐 —— 一波故障只降一次，冷却窗过后仍拥塞才继续降。
+ */
+const DECREASE_COOLDOWN_MS = 30 * 1000
 /** 连续成功达到这个数、且距上次降速足够久，才加一档。 */
 const INCREASE_STREAK = 5
 const INCREASE_COOLDOWN_MS = 30 * 1000

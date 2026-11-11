@@ -57,7 +57,19 @@ test('身份判据一律是服务端稳定标识，不得使用 access_token', (
     assert.notEqual(match[2], 'access_token', `${match[1]} 不能用每次登录都会变的 access_token 判重`)
   }
   assert.match(table, /zcode:\s*'user_id'/, 'zcode 的判据必须是 user_id（device_mid 每次登录都会变）')
+  // codearts 的 access_key_id 是带 security_token 的**临时** STS 凭据，每次登录
+  // 都换发；拿它判重永远不命中，重新登录就会多出一条无法辨认的 `codearts-xxxxxxxx`。
+  assert.match(table, /codearts:\s*'account_id'/, 'codearts 必须用 refresh_token 里的 account_id 判重')
   assert.doesNotMatch(table, /minimax:/, 'MiniMax 没有稳定身份字段，不应把会漂移的值塞进表里')
+})
+
+test('codearts 身份对账先于存量去重', () => {
+  // 判重按「凭据里的 account_id」匹配，而升级前登录的凭据还没有该字段；
+  // 顺序反了会让存量账号整批漏判（见 reconcileIdentities 的注释）。
+  const reconcileAt = RPC.indexOf('codearts.reconcileIdentities(pool)')
+  const dedupeAt = RPC.indexOf('pool.disableDuplicateAccounts(LOGIN_IDENTITY_FIELDS)')
+  assert.ok(reconcileAt > 0, '启动时必须对 codearts 存量账号做一次身份对账')
+  assert.ok(dedupeAt > reconcileAt, '身份对账必须排在存量去重之前')
 })
 
 test('存量重复账号只停用、不删除', () => {

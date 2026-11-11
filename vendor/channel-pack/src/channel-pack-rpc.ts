@@ -40,6 +40,7 @@ import type { CodeArtsAuth } from './service.js'
 import { CODEARTS } from './codearts-product.js'
 import type { CodeArtsCredential } from './types.js'
 import { claimCodeArtsDailyCheckin, fetchCodeArtsAccountInfoDetailed } from './codearts-credits.js'
+import { codeartsDisplayName, codeartsIdentity } from './codearts-identity.js'
 import type { ComateAuth } from './comate-auth.js'
 import { COMATE } from './comate-product.js'
 import { parseComateCredential, readComateFreeQuota } from './comate.js'
@@ -63,7 +64,7 @@ import { isMinimaxRefreshable, minimaxCredentialExpiresAtMs } from './minimax.js
 import type { MinimaxCredential } from './minimax.js'
 import {
   claimMinimaxDailyCheckin,
-  fetchMinimaxCreditBalance,
+  fetchMinimaxCreditBalanceDetailed,
   fetchMinimaxSigninStatus,
 } from './minimax-credits.js'
 import { GEMINI, geminiAccountLabel, geminiCredentialExpiresAtMs, isGeminiRefreshable } from './gemini.js'
@@ -988,7 +989,15 @@ function providerIdsOf(
 /** RPC 的可选配置；追加字段以兼容现有 provider / modelAdapters 的位置参数调用。 */
 export interface ChannelPackRpcConfig {
   disableOpencode?: boolean
-
+  /**
+   * 渠道网络出口（`index.ts` 里 `createChannelFetch(...).fetch`）。
+   *
+   * ⚠️ 余额/配额查询**必须**走它：直接调全局 `fetch` 会绕过代理/出口选择，
+   * 同一台机器上「续期」报 `渠道网络请求失败（直连；ETIMEDOUT）`、面板却只显示
+   * 裸 `fetch failed` —— 两条路径的失败口径对不上，用户无法判断该改代理还是重登。
+   * 省略时退回全局 `fetch`（既有单测无需改造）。
+   */
+  fetchImpl?: typeof fetch
 }
 
 /**
@@ -1037,7 +1046,10 @@ function rememberDuplicateLogin(id: string, existingId: string): void {
  * 也不拿会漂移的值去删账号。
  */
 const LOGIN_IDENTITY_FIELDS: Readonly<Record<string, string>> = {
-  codearts: 'access_key_id',
+  // codearts 的 access_key_id 是**临时** STS 凭据（带 security_token、小时级过期），
+  // 每次登录都换发 —— 用它会永远判不出重复。稳定身份在 refresh_token 的
+  // `user_profile.account_id` 里，登录时由 `codearts-identity.ts` 解出并固化。
+  codearts: 'account_id',
   comate: 'license',
   gemini: 'sub',
   trae: 'uid',
@@ -1324,16 +1336,25 @@ function registerChannelPackEndpoints(
   // 存量重复账号（同一身份在池里有多条启用记录）只**停用**、不删除：
   // 自动删除用户账号与凭据不可逆，而停用已经能让它们退出选号与计数。
   // 失败只记日志：这是展示层对账，不该挡住 RPC 注册。
-  void pool.disableDuplicateAccounts(LOGIN_IDENTITY_FIELDS).then((groups) => {
-    for (const group of groups) {
-      ctx.logger.warn(
-        `[channel-pack] ${group.provider} 存在重复账号：保留 ${group.keptId}，`
-        + `已停用 ${group.disabledIds.join(', ')}`,
-      )
-    }
-  }).catch((error: unknown) => {
-    ctx.logger.warn(`[channel-pack] 存量账号去重失败（不影响使用）：${String(error)}`)
-  })
+  //
+  // ⚠️ 顺序：先让 codearts 把身份字段补进存量凭据，再跑通用判重 —— 判重按
+  // 「凭据里的 `account_id`」匹配，而升级前登录的凭据还没有这个字段，
+  // 反过来的顺序会让它们整批漏判（详见 `reconcileIdentities`）。
+  void codearts.reconcileIdentities(pool)
+    .catch((error: unknown) => {
+      ctx.logger.warn(`[channel-pack] codearts 身份对账失败（不影响使用）：${String(error)}`)
+    })
+    .then(() => pool.disableDuplicateAccounts(LOGIN_IDENTITY_FIELDS))
+    .then((groups) => {
+      for (const group of groups) {
+        ctx.logger.warn(
+          `[channel-pack] ${group.provider} 存在重复账号：保留 ${group.keptId}，`
+          + `已停用 ${group.disabledIds.join(', ')}`,
+        )
+      }
+    }).catch((error: unknown) => {
+      ctx.logger.warn(`[channel-pack] 存量账号去重失败（不影响使用）：${String(error)}`)
+    })
 
   /**
    * Qoder **同协议族**成员：国际版与中国版共用同一组 RPC 实现，只换 `product`
@@ -1592,10 +1613,11 @@ function registerChannelPackEndpoints(
    * 且 `sanitizeAccounts`（`src/channel-pack-store.ts:173-191`）只保留三个字段，
    * 写回池也会被丢掉。故每次列表时从**各账号自己的 ref** 现读。
    *
-   * ## ⚠ 只对 zcode 做，且逐条独立失败
+   * ## ⚠ 只对 zcode / codearts 做，且逐条独立失败
    *
-   * - 只认 `zcode`：其余 11 个 provider 的凭证形状不同，通读一遍纯属浪费
-   *   （`account.list` 是进面板就发的热路径）。
+   * - 只认 `zcode` 与 `codearts`：其余 provider 的凭证形状不同，通读一遍纯属浪费
+   *   （`account.list` 是进面板就发的热路径）。码道只是**解码本地 refresh_token**，
+   *   不发任何网络请求。
    * - 单条解析失败**不影响整行**：拿不到就不补字段，绝不让账号列表整体失败
    *   （列表可用性远比这两个展示字段重要）。
    *
@@ -1609,6 +1631,7 @@ function registerChannelPackEndpoints(
     accounts: readonly ProviderAccountStatus[],
     provider: string,
   ): Promise<ProviderAccountStatus[]> {
+    if (provider === CODEARTS.id) return await enrichCodeArtsIdentity(accounts)
     if (provider !== ZCODE.id) return [...accounts]
     const out: ProviderAccountStatus[] = []
     for (const account of accounts) {
@@ -1637,6 +1660,33 @@ function registerChannelPackEndpoints(
         })
       } catch {
         // 凭据损坏/未配置：保留原条目（这些账号在卡片上会由额度那一栏报错说明）。
+        out.push(account)
+      }
+    }
+    return out
+  }
+
+  /**
+   * 码道账号的展示身份：从凭据里解出华为云账号名。
+   *
+   * 与 zcode 同一条思路（`accountName` 是**派生**字段，不写回账号池），但
+   * 取值只能来自凭据：码道登录成功后，别处拿不到任何身份信息。新凭据里已固化
+   * `account_name`；旧凭据回退解码 `refresh_token`，因此**不需要重新登录**。
+   *
+   * ⚠️ 纯本地解码，不发网络请求（`account.list` 是进面板就发的热路径）。
+   * 解不出时原样返回，由调用方回退既有昵称。
+   */
+  async function enrichCodeArtsIdentity(
+    accounts: readonly ProviderAccountStatus[],
+  ): Promise<ProviderAccountStatus[]> {
+    const out: ProviderAccountStatus[] = []
+    for (const account of accounts) {
+      try {
+        const resolved = await ctx.credentials.resolve(credentialRef(account.credentialRef))
+        if (!resolved) { out.push(account); continue }
+        const identity = codeartsIdentity(JSON.parse(resolved.value))
+        out.push(identity === undefined ? account : { ...account, accountName: identity.accountName })
+      } catch {
         out.push(account)
       }
     }
@@ -1853,9 +1903,9 @@ function registerChannelPackEndpoints(
           started.result.then(async (loginResult) => {
             const credential = parseCodeArtsCredential(loginResult.access)
             const patch = {
-              nickname: credential?.user_name !== undefined && credential.user_name.length > 0
-                ? credential.user_name
-                : id,
+              // 账号名：refresh_token 里的华为云账号名（新式 OAuth 流程唯一下发的
+              // 身份值），旧 ticket 凭据回退 `user_name`，都没有才用 id 占位。
+              nickname: codeartsDisplayName(credential, id),
               expiresAt: credential?.expires_at !== undefined
                 ? (Number.isNaN(Date.parse(credential.expires_at)) ? undefined : Date.parse(credential.expires_at))
                 : undefined,
@@ -3722,14 +3772,20 @@ function registerChannelPackEndpoints(
           // 余额来自 `GET /minimax-cloud/api/v1/credit/details`。
           //
           // ⚠️ **该端点是平铺响应**（`total_count` 与 `base_resp` 同级、**没有
-          // `data` 键**）—— 与签到端点不同。`fetchMinimaxCreditBalance` 内部已
-          // 用 `unwrapEnvelopeData` 兼容两种形状。
-          // ⚠️ 查不到时（null）由 helper 统一补「余额查询失败」文案，卡片显示
-          // 原因而非 0 —— 这与「余额为 0」是**两回事**，不能混为一谈
+          // `data` 键**）—— 与签到端点不同。`fetchMinimaxCreditBalanceDetailed`
+          // 内部已用 `unwrapEnvelopeData` 兼容两种形状。
+          // ⚠️ 失败时带原因（凭据失效 / 网络 / 形状），卡片显示原因而非 0 ——
+          // 「查不到」与「余额为 0」是**两回事**，不能混为一谈
           //（本机实测 `total_count: 0` 且 `details` 缺失正是「真的为 0」）。
           const values = await collectCreditBalances<MinimaxCredential, undefined>(accounts, undefined, {
             resolve: (ref) => ctx.credentials.resolve(ref),
-            fetchBalance: (credential) => fetchMinimaxCreditBalance(credential),
+            // ⚠️ 用带原因版本 + 渠道出口 fetch：
+            // 1) 401 要显示「凭据已失效，请重新登录」，不能退化成笼统的
+            //    「余额查询失败」（用户报障时两个账号都只看到后一句）；
+            // 2) config.fetchImpl 是 `createChannelFetch` 的出口，与续期同一条
+            //    路径 —— 否则应用内代理/环境代理对余额查询不生效。
+            fetchBalanceDetailed: (credential) =>
+              fetchMinimaxCreditBalanceDetailed(credential, config.fetchImpl),
             warn: (msg) => ctx.logger?.warn?.(msg),
           })
           return { ok: true, value: { accounts: values } satisfies RpcCreditsBalancesResponse }
@@ -3758,7 +3814,12 @@ function registerChannelPackEndpoints(
           const values = await collectCreditBalances<GeminiCredential, typeof GEMINI>(accounts, GEMINI, {
             resolve: (ref) => ctx.credentials.resolve(ref),
             fetchBalanceDetailed: async (credential) => {
-              const { balance, error, tier } = await fetchGeminiCreditBalance(credential, GEMINI, { force: req.force === true })
+              const { balance, error, tier } = await fetchGeminiCreditBalance(credential, GEMINI, {
+                force: req.force === true,
+                // 与续期共用渠道出口：全局 fetch 下这里只会报裸 `fetch failed`，
+                // 而同一时刻的续期日志写的是 `渠道网络请求失败（直连；ETIMEDOUT）`。
+                fetcher: config.fetchImpl,
+              })
               const extra: RpcCreditsBalanceExtra | undefined = tier === undefined
                 ? undefined
                 : { accountTier: { label: tier.label, title: `${tier.name}（${tier.id}）` } }

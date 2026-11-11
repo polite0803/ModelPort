@@ -266,3 +266,37 @@ test('短窗口记录首字 EWMA、429/超时/degraded 比例', () => {
   assert.equal(snapshot.timeoutRate, 0)
 })
 
+/**
+ * 2026-11-11 codearts 429 风暴的复盘：10:59:45 起 23s 内四连 502（拥塞类）
+ * 在 5s 降速冷却下把并发 4→2→1 一路打穿，此后 57–102s 的假死流轮流独占
+ * 唯一名额，恢复条件（5 连净成功 + 30s）要数分钟才够得到。
+ */
+test('一波渠道故障只降一次：冷却窗内的连击 502 不把并发打穿到 1', () => {
+  const runtime = new AccountRuntime()
+  const model = 'm1'
+
+  for (let i = 0; i < 4; i++) {
+    runtime.recordAttemptOutcome('a', model, { success: false, status: 502 }, NOW + i * 6000)
+  }
+  assert.equal(runtime.snapshot('a', NOW + 25_000, model).modelLimit, 2, '一波只降一次：4→2')
+})
+
+test('乘性降速的 floor=2：收缩态永远留一条并行活路，恢复路径不受影响', () => {
+  const runtime = new AccountRuntime()
+  const model = 'm1'
+
+  // 第一波 502 → 4→2；冷却窗（30s）过后第二波 502 → floor(2*0.7)=1 → max(2,1)=2
+  runtime.recordAttemptOutcome('a', model, { success: false, status: 502 }, NOW)
+  assert.equal(runtime.snapshot('a', NOW + 1, model).modelLimit, 2)
+  runtime.recordAttemptOutcome('a', model, { success: false, status: 502 }, NOW + 31_000)
+  assert.equal(runtime.snapshot('a', NOW + 31_001, model).modelLimit, 2, '不得降到 1')
+
+  // 恢复照旧：5 连净成功且距上次降速 ≥30s → 2→3
+  for (let i = 0; i < 5; i++) {
+    runtime.tryBeginAttempt('a', model, NOW + 62_000 + i)
+    runtime.endAttempt('a', model)
+    runtime.recordAttemptOutcome('a', model, { success: true, totalMs: 1000 }, NOW + 62_000 + i)
+  }
+  assert.equal(runtime.snapshot('a', NOW + 63_000, model).modelLimit, 3)
+})
+

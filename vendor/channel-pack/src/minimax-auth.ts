@@ -4,8 +4,9 @@
  * 登录走 **OAuth 设备码 + PKCE**（见 `minimax-oauth.ts`），
  * 续期走 `refresh_token` grant。
  *
- * ⚠️ **`refreshAll` 只按 `refreshable` 过滤，不看 `enabled`**
- * （AGENTS.md「续期不得按 enabled 过滤」的真实缺陷教训）。
+ * ⚠️ **`refreshAll` 的判据读凭据里的 `refresh_token`，不读池里的 `refreshable`**
+ * （AGENTS.md「续期不得按 enabled 过滤」+ 池布尔单向门的真实缺陷教训，
+ * 见 `refreshAll` 的注释）。
  */
 
 import { Service } from '@deepseek-ai/cordis'
@@ -14,6 +15,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { AccountPool } from './account-pool.js'
 import {
   refreshAccountWithReconcile,
+  syncAccountExpiry,
   type ExpiryAccessors,
 } from './expiry-sync.js'
 import {
@@ -264,26 +266,40 @@ export class MinimaxAuth extends Service {
   }
 
   /**
-   * 批量续期：**只按 `refreshable` 过滤，不看 `enabled`**。
+   * 批量续期：**判据读凭据，不读池里的 `refreshable`**。仍然不看 `enabled`。
    *
-   * 照 `src/cline-auth.ts` 的 `refreshAll` 形态（它是最规范的一份）。
+   * ## 为什么不能只看池里的布尔（真实缺陷，2026-11-11 现网）
+   *
+   * 池里的 `refreshable` 只应影响展示与「能不能再试」，不能当作「永远别试」：
+   * 一旦某次续期被拒（例如并发重放导致旧 refresh_token 被服务端作废），
+   * 它就被写成 `false`，而这里的 `continue` 又在 `try` 之外 —— 于是邮箱里
+   * 明明还躺着可用的 `refresh_token`，定时器却**每 30 分钟静默跳过、一行日志都没有**。
+   * 现网两个 MiniMax 账号就是这样过期 5 天无人续期，面板只能显示「余额查询失败」。
+   *
+   * 修法与 `gemini-auth.ts` 一致：先读凭据，看得见 `refresh_token` 就尝试；
+   * 池值与凭据不符时**只记日志**（随后的有效期对账会把它改回来，不额外写盘）。
    */
   async refreshAll(pool: AccountPool): Promise<void> {
     const accounts = await pool.listAccounts(this.product.id)
     for (const entry of accounts) {
-      // ⚠️ 判据只看 refreshable，不看 enabled
-      if (!entry.refreshable) continue
+      let credential: MinimaxCredential | undefined
       try {
         const ref = credentialRef(entry.credentialRef)
         const resolved = await this.ctx.credentials.resolve(ref)
         if (!resolved) {
-          await pool.updateAccount(entry.id, { refreshable: false })
+          // 凭据确实不存在：这才是「不可续期」的真实含义（写盘前先判，避免每轮重复写）。
+          if (entry.refreshable) await pool.updateAccount(entry.id, { refreshable: false })
           continue
         }
-        const credential = parseMinimaxCredential(resolved.value)
-        if (!credential || !isMinimaxRefreshable(credential)) {
-          await pool.updateAccount(entry.id, { refreshable: false })
+        credential = parseMinimaxCredential(resolved.value)
+        if (credential === undefined || !isMinimaxRefreshable(credential)) {
+          if (entry.refreshable) await pool.updateAccount(entry.id, { refreshable: false })
           continue
+        }
+        if (!entry.refreshable) {
+          this.ctx.logger?.info?.(
+            `[minimax] 账号 ${entry.id} 的凭据具备续期材料，本轮恢复自动续期（此前的标记与凭据不符）`,
+          )
         }
         await refreshAccountWithReconcile({
           pool,
@@ -296,16 +312,45 @@ export class MinimaxAuth extends Service {
           refresh: (c) => this.refreshCredentialFor(c),
           save: (c) => this.ctx.credentials.set(ref, JSON.stringify(c)),
           warn: (message) => this.ctx.logger?.warn?.(message),
+          info: (message) => this.ctx.logger?.info?.(message),
         })
       } catch (error) {
         if (error instanceof MinimaxRefreshTokenExpiredError) {
-          try {
-            await pool.updateAccount(entry.id, { refreshable: false })
-          } catch {
-            // 忽略 updateAccount 本身的错误
+          // ⚠️ **判终态前先确认「我刚才用的那一份 refresh_token 还是不是当前那一份」**。
+          // refresh_token 会轮换：并发下服务端拒的是**旧的**那一份（已被别的成功请求
+          // 作废），而磁盘上此刻可能躺着一份**可用**的新凭据。不加这层判据，
+          // 一次交错就会把好账号永久标死（gemini-auth.ts 实测同型）。
+          const latest = await this.readCredential(entry.credentialRef).catch(() => undefined)
+          if (latest !== undefined
+            && isMinimaxRefreshable(latest)
+            && credential !== undefined
+            && latest.refresh_token !== credential.refresh_token) {
+            this.ctx.logger?.info?.(
+              `[minimax] 账号 ${entry.id} 续期被拒但凭据已被他处更新（并发重放），`
+              + `按最新凭据对账，不标记为不可续期`,
+            )
+            await syncAccountExpiry({
+              pool,
+              provider: this.product.id,
+              credential: latest,
+              accessors: MINIMAX_EXPIRY_ACCESSORS,
+              accountId: entry.id,
+              current: entry,
+              tag: `[${this.product.id}]`,
+              warn: (message) => this.ctx.logger?.warn?.(message),
+            })
+            continue
+          }
+          if (entry.refreshable) {
+            try {
+              await pool.updateAccount(entry.id, { refreshable: false })
+            } catch {
+              // 忽略 updateAccount 本身的错误
+            }
           }
           this.ctx.logger?.warn?.(
-            `[minimax] 账号 ${entry.id} 的 refresh_token 已失效，已标记为不可续期（需重新登录）`,
+            `[minimax] 账号 ${entry.id} 的 refresh_token 已失效，已标记为不可续期（需重新登录）`
+            + `；服务端原文：${error.message}`,
           )
         } else {
           // 非终态失败（网络抖动、5xx…）**必须留下日志** ——
@@ -317,6 +362,13 @@ export class MinimaxAuth extends Service {
         }
       }
     }
+  }
+
+  /** 读指定 ref 的最新凭据（并发重放判据用）；不存在/损坏返回 undefined。 */
+  private async readCredential(refName: string): Promise<MinimaxCredential | undefined> {
+    const resolved = await this.ctx.credentials.resolve(credentialRef(refName))
+    if (!resolved) return undefined
+    return parseMinimaxCredential(resolved.value)
   }
 
   /**

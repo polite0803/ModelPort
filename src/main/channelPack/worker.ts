@@ -45,6 +45,15 @@ type CompleteRequest = {
 const dataDir = String(workerData.dataDir)
 const attachmentDir = join(dataDir, 'attachments')
 
+/**
+ * 宿主机代理配置文件（`scripts/wsl-host-proxy.mjs` 写的那个）跟着数据目录走：
+ * daemon 是 `/root/.modelport/host-proxy.json`，Electron 是 `<userData>/host-proxy.json`。
+ * 环境变量显式给了就按给出的（`off` 表示关闭；脚本也可以直接写这个路径）。
+ */
+if (!process.env.MODELPORT_HOST_PROXY_FILE) {
+  process.env.MODELPORT_HOST_PROXY_FILE = join(dataDir, 'host-proxy.json')
+}
+
 const send = (message: Record<string, unknown>): void => {
   parentPort?.postMessage(message)
 }

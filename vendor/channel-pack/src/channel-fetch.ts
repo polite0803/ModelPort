@@ -5,6 +5,7 @@ import path from 'node:path'
 import { Dispatcher1Wrapper, type Dispatcher } from 'undici'
 import { normalizeProxy } from './opencode.js'
 import { createProxyDispatcher } from './opencode-proxy.js'
+import { resolveHostProxy } from './host-proxy.js'
 
 export interface ChannelOutlet {
   active: () => boolean
@@ -100,9 +101,17 @@ export interface ChannelFetchOptions {
   readSystemProxy?: () => Promise<string>
   fetchImpl?: typeof fetch
   dispatcherFor?: typeof createProxyDispatcher
+  /**
+   * 宿主机代理来源（脚本写的配置文件，见 `host-proxy.ts`）。
+   *
+   * 默认读 `~/.modelport/host-proxy.json` 并做端口存活探测；省略/探测失败都表示
+   * 「没有宿主机代理」，请求走直连。宿主代理**不由** `HTTPS_PROXY` 表达，因为
+   * 那个开关需要重启服务，而宿主机的代理会随手启停。
+   */
+  hostProxy?: (environment: NodeJS.ProcessEnv) => Promise<string | undefined>
 }
 
-/** 一次挂载一个实例：插件出口 > 环境代理 > Windows 手动代理 > 直连。 */
+/** 一次挂载一个实例：插件出口 > 环境代理 > 宿主机代理（脚本） > Windows 手动代理 > 直连。 */
 export function createChannelFetch(options: ChannelFetchOptions = {}): { fetch: typeof fetch; close: () => Promise<void> } {
   const dispatchers = new Map<string, Dispatcher>()
   let system: Promise<WindowsProxy | undefined> | undefined
@@ -136,15 +145,25 @@ export function createChannelFetch(options: ChannelFetchOptions = {}): { fetch: 
       if (proxy) {
         route = '环境代理'
         if (!channelProxyBypassed(target, envValue('NO_PROXY') ?? '')) address = proxy
-      } else if ((options.platform ?? process.platform) === 'win32') {
-        if (!system || Date.now() - systemAt >= 30_000) {
-          systemAt = Date.now()
-          system = (options.readSystemProxy ?? readWindowsProxy)().then(parseWindowsProxy)
-        }
-        const config = await system
+      } else {
+        // 宿主机代理由脚本维护（`scripts/wsl-host-proxy.mjs`）：代理关掉时文件为空、
+        // 或这里探测不到端口，都退回下一级 —— 不让「本机代理没开」卡死全部渠道。
+        const hostProxy = await (options.hostProxy ?? resolveHostProxy)(env)
         signal?.throwIfAborted()
         if (closed) throw new Error('渠道出网服务已停止')
-        if (config) { address = windowsProxyFor(target, config); route = 'Windows 系统代理' }
+        if (hostProxy !== undefined && !channelProxyBypassed(target, envValue('NO_PROXY') ?? '')) {
+          address = hostProxy
+          route = '宿主机代理'
+        } else if ((options.platform ?? process.platform) === 'win32') {
+          if (!system || Date.now() - systemAt >= 30_000) {
+            systemAt = Date.now()
+            system = (options.readSystemProxy ?? readWindowsProxy)().then(parseWindowsProxy)
+          }
+          const config = await system
+          signal?.throwIfAborted()
+          if (closed) throw new Error('渠道出网服务已停止')
+          if (config) { address = windowsProxyFor(target, config); route = 'Windows 系统代理' }
+        }
       }
       if (!address) {
         if (route !== '直连') route = '直连，代理例外或当前协议无代理'

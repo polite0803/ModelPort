@@ -1751,6 +1751,14 @@ export interface CodeArtsCredential {
   domain_id?: string
   user_id?: string
   user_name?: string
+  /**
+   * 华为云账号 ID / 账号名 —— 从 `refresh_token` 的 `user_profile` 解出后固化。
+   *
+   * 临时凭据的 `access_key_id` 每次登录都会换发，不能当身份（判重与展示都会把
+   * 同一账号当成新的）；这两个字段才跨登录稳定。
+   */
+  account_id?: string
+  account_name?: string
   /** 刷新令牌（新式 IAM OAuth 流程签发；缺失表示旧 ticket 凭据，不可静默刷新）。 */
   refresh_token?: string
   /** PKCE 验证器，刷新换取时与 refresh_token 一起提交。 */

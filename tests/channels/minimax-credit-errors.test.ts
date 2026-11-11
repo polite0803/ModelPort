@@ -30,6 +30,8 @@ async function loadMinimaxCredits(t: { after(fn: () => void): void }) {
     stdin: {
       contents: `export {
         claimMinimaxDailyCheckin,
+        fetchMinimaxCreditBalance,
+        fetchMinimaxCreditBalanceDetailed,
         fetchMinimaxSigninStatus,
         parseMinimaxSigninPanel,
       } from ${JSON.stringify(join(VENDOR_SRC, 'minimax-credits.ts'))}`,
@@ -125,4 +127,52 @@ test('状态预检遇到 401 返回 null（由 claim 给出可读原因）', asy
     (async () => response(401, { error: 'invalid access token' })) as unknown as typeof fetch,
   )
   assert.equal(status, null)
+})
+
+test('余额查询 401 显示「凭据已失效」，而不是笼统的「余额查询失败」', async (t) => {
+  const { fetchMinimaxCreditBalanceDetailed } = await loadMinimaxCredits(t)
+  const result = await fetchMinimaxCreditBalanceDetailed(
+    CREDENTIAL,
+    (async () => response(401, { error: 'invalid access token' })) as unknown as typeof fetch,
+  )
+  assert.equal(result.balance, null)
+  assert.match(result.error, /凭据已失效/)
+  assert.match(result.error, /重新登录/)
+})
+
+test('余额查询网络异常单独成句（与凭据失效区分）', async (t) => {
+  const { fetchMinimaxCreditBalanceDetailed } = await loadMinimaxCredits(t)
+  const result = await fetchMinimaxCreditBalanceDetailed(
+    CREDENTIAL,
+    (async () => {
+      throw new Error('ETIMEDOUT')
+    }) as unknown as typeof fetch,
+  )
+  assert.equal(result.balance, null)
+  assert.match(result.error, /余额查询网络失败/)
+  assert.match(result.error, /ETIMEDOUT/)
+})
+
+test('余额响应缺 details/total_count 时报形状错误，不编造 0', async (t) => {
+  const { fetchMinimaxCreditBalanceDetailed } = await loadMinimaxCredits(t)
+  const result = await fetchMinimaxCreditBalanceDetailed(
+    CREDENTIAL,
+    (async () => response(200, { base_resp: { status_code: 0 } })) as unknown as typeof fetch,
+  )
+  assert.equal(result.balance, null)
+  assert.match(result.error, /details\/total_count/)
+})
+
+test('平铺余额响应按 remaining_amount 求和（不把字符串算成 0）', async (t) => {
+  const { fetchMinimaxCreditBalanceDetailed, fetchMinimaxCreditBalance } = await loadMinimaxCredits(t)
+  const fetcher = (async () => response(200, {
+    base_resp: { status_code: 0 },
+    total_count: 2,
+    details: [{ remaining_amount: '800.00' }, { remaining_amount: '0' }],
+  })) as unknown as typeof fetch
+  const detailed = await fetchMinimaxCreditBalanceDetailed(CREDENTIAL, fetcher)
+  assert.equal(detailed.error, undefined)
+  assert.equal(detailed.balance?.total, 800)
+  // 门控用的薄包装必须给出同一个读数（它只关心「是不是 0」）。
+  assert.equal((await fetchMinimaxCreditBalance(CREDENTIAL, fetcher))?.total, 800)
 })

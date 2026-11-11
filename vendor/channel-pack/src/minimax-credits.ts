@@ -245,7 +245,13 @@ export function minimaxPanelToCheckinStatus(panel: MinimaxSigninPanel): CheckinS
 /** 一次请求的结果。 */
 type EnvelopeResult =
   | { ok: true; payload: Record<string, unknown> }
-  | { ok: false; code: number; message: string }
+  | {
+    ok: false
+    /** 失败层级：余额面板要据此区分「要重新登录」「网络不通」与「响应形状变了」。 */
+    kind: 'http' | 'business' | 'network' | 'shape'
+    code: number
+    message: string
+  }
 
 /**
  * 取出业务载荷。
@@ -301,6 +307,7 @@ async function requestEnvelope(
     if (!response.ok) {
       return {
         ok: false,
+        kind: 'http',
         code: response.status,
         message: response.status === 401 || response.status === 403
           ? `凭据已失效（HTTP ${response.status}），请重新登录该账号`
@@ -313,12 +320,13 @@ async function requestEnvelope(
     } catch {
       return {
         ok: false,
+        kind: 'shape',
         code: response.status,
         message: `服务端返回了非 JSON 响应（HTTP ${response.status}）`,
       }
     }
     if (typeof payload !== 'object' || payload === null) {
-      return { ok: false, code: -1, message: '响应无法解析' }
+      return { ok: false, kind: 'shape', code: -1, message: '响应无法解析' }
     }
     const record = payload as Record<string, unknown>
     const baseResp = typeof record.base_resp === 'object' && record.base_resp !== null
@@ -327,12 +335,18 @@ async function requestEnvelope(
     const statusCode = finiteNumber(baseResp.status_code)
     const statusMsg = typeof baseResp.status_msg === 'string' ? baseResp.status_msg : ''
     if (statusCode !== undefined && statusCode !== 0) {
-      return { ok: false, code: statusCode, message: statusMsg || `业务错误 ${statusCode}` }
+      return {
+        ok: false,
+        kind: 'business',
+        code: statusCode,
+        message: statusMsg || `业务错误 ${statusCode}`,
+      }
     }
     return { ok: true, payload: record }
   } catch (error) {
     return {
       ok: false,
+      kind: 'network',
       code: -1,
       message: error instanceof Error ? error.message : String(error),
     }
@@ -454,21 +468,58 @@ export async function claimMinimaxDailyCheckin(
  *（`credit_type` 的语义未实测），故**不凭猜测分类**。`packages` 同理留空 ——
  * 需要时再按实测补充，**不得**用 locale 文案反推字段名。
  */
+/** 余额查询结果：`balance === null` 时 `error` 给出可读原因。 */
+export interface MinimaxBalanceResult {
+  balance: CreditBalance | null
+  error?: string
+}
+
+/**
+ * 查询余额（不抛错，失败一律 `null`）。
+ *
+ * 供**余额门控**使用：门控只关心「是不是 0」，不需要原因。
+ * 要把原因展示给用户时用 {@link fetchMinimaxCreditBalanceDetailed}。
+ */
 export async function fetchMinimaxCreditBalance(
   credential: MinimaxCredential,
   fetcher: typeof fetch = fetch,
   product: MinimaxProduct = MINIMAX,
 ): Promise<CreditBalance | null> {
+  return (await fetchMinimaxCreditBalanceDetailed(credential, fetcher, product)).balance
+}
+
+/**
+ * 查询余额并**保留失败原因**。
+ *
+ * ⚠️ 面板把 `balance: null` 渲染成「余额查询失败」—— 不带上游原因时，
+ * 「access_token 已失效，需要重新登录」与「网络不通」在 UI 上长得一模一样
+ * （2026-11-11 用户报障：两个账号只显示「余额查询失败」，无从判断该不该重登）。
+ * 与 Gemini 的 `fetchBalanceDetailed`、CLINE 的逐条 error 是同一惯例。
+ */
+export async function fetchMinimaxCreditBalanceDetailed(
+  credential: MinimaxCredential,
+  fetcher: typeof fetch = fetch,
+  product: MinimaxProduct = MINIMAX,
+): Promise<MinimaxBalanceResult> {
   const url = `${product.apiHost}${MINIMAX_CREDIT_DETAILS_PATH}`
   const result = await requestEnvelope(url, credential, { method: 'GET' }, fetcher)
-  if (!result.ok) return null
+  if (!result.ok) {
+    // 401/403 是终态且文案本身就可执行（「请重新登录该账号」），不再加前缀。
+    if (result.kind === 'http' && (result.code === 401 || result.code === 403)) {
+      return { balance: null, error: result.message }
+    }
+    const prefix = result.kind === 'network' ? '余额查询网络失败' : '余额查询失败'
+    return { balance: null, error: `${prefix}：${result.message}` }
+  }
   // ⚠️ 余额响应是**平铺**的（`details` / `total_count` 与 `base_resp` 同级，
   // 无 `data`）；`unwrapEnvelopeData` 对这种形状会原样返回顶层。
   const data = unwrapEnvelopeData(result.payload)
   // ⚠️ `base_resp.status_code` 由 `requestEnvelope` 判过，这里只需确认形状：
   // 若连 `details` 与 `total_count` 都没有，说明响应形状不对，不编造 0。
   const details = Array.isArray(data.details) ? data.details : undefined
-  if (details === undefined && finiteNumber(data.total_count) === undefined) return null
+  if (details === undefined && finiteNumber(data.total_count) === undefined) {
+    return { balance: null, error: '余额查询失败：响应缺少 details/total_count' }
+  }
   // ⚠️ 余额 = 各包 `remaining_amount` 之和；缺失 `details` ⇒ 0（真的为 0）。
   let total = 0
   for (const entry of details ?? []) {
@@ -476,5 +527,5 @@ export async function fetchMinimaxCreditBalance(
     const remaining = looseAmount((entry as Record<string, unknown>).remaining_amount)
     if (remaining !== undefined) total += remaining
   }
-  return { total: roundCredits(total), packages: [], expiredTotal: 0 }
+  return { balance: { total: roundCredits(total), packages: [], expiredTotal: 0 } }
 }

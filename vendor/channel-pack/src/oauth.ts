@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { exportJWK, generateKeyPair, importJWK, SignJWT } from './jose-compat.js'
+import { readCodeArtsIdentityFromRefreshToken } from './codearts-identity.js'
 import type { CodeArtsCredential } from './types.js'
 
 /** CodeArts Agent 的 OAuth client_id（即其 URI scheme，来自 product.json）。 */
@@ -182,6 +183,9 @@ export function credentialFromTokenResponse(
   keyPair: DpopKeyPair,
 ): CodeArtsCredential {
   const credentials = token.credentials ?? {}
+  // 身份只存在于 refresh_token 的 JWT 载荷里（token 端点不回传 user_name），
+  // 解出后固化，供展示名与登录判重使用；解不出就不写字段。
+  const identity = readCodeArtsIdentityFromRefreshToken(token.refresh_token)
   return {
     access_key_id: credentials.access_key_id ?? '',
     secret_access_key: credentials.secret_access_key ?? '',
@@ -190,6 +194,9 @@ export function credentialFromTokenResponse(
     refresh_token: token.refresh_token,
     code_verifier: pkce.codeVerifier,
     dpop_private_key_jwk: keyPair.privateKeyJwk,
+    ...identity === undefined
+      ? {}
+      : { account_id: identity.accountId, account_name: identity.accountName },
   }
 }
 

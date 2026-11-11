@@ -79,6 +79,8 @@ src/renderer/next-app/
 # Local reference material dropped in by tooling (not part of the app)
 .uploads/
 .tmp_img/
+# Scratch files from local probe runs (never part of the product)
+.tmp-*
 # XGIMI TV debloat backup/rollback notes (another project, kept out of this repo)
 /tv-debloat/
 

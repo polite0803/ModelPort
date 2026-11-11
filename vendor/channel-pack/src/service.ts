@@ -10,6 +10,7 @@ import {
 import type { CodeArtsCredential, LoginFlowOptions, LoginFlowResult, ProviderAccountEntry } from './types.js'
 import { AccountPool } from './account-pool.js'
 import { SerialQueue } from './serial-queue.js'
+import { codeartsIdentity } from './codearts-identity.js'
 import {
   refreshAccountWithReconcile,
   shouldRefreshNow,
@@ -376,8 +377,69 @@ export class CodeArtsAuth extends Service {
     refreshed.domain_id = credential.domain_id
     refreshed.user_id = credential.user_id
     refreshed.user_name = credential.user_name
+    // 身份字段：新 refresh_token 的载荷里本来就带着（`credentialFromTokenResponse`
+    // 会解出来），只有在解不出时才回退旧值 —— 反过来（直接用旧值覆盖）会在账号
+    // 被换绑后继续显示旧名字。
+    refreshed.account_id = refreshed.account_id || credential.account_id
+    refreshed.account_name = refreshed.account_name || credential.account_name
     if (credential.model_rate_limits) refreshed.model_rate_limits = credential.model_rate_limits
     return refreshed
+  }
+
+  /**
+   * 存量账号的身份对账：把 `account_id` / `account_name` 补进凭据，并把占位昵称
+   * 换成华为云账号名。
+   *
+   * ## 为什么必须补（真实报障）
+   *
+   * 新式 IAM OAuth 流程最初**一个身份字段都不落库**，账号池里的昵称因此一直是
+   * 登录时随手写的 `codearts-xxxxxxxx`。用户看到两行 `codearts-xxxx` 时无法判断
+   * 「是重复登录，还是真的有两个账号」，而其中一行又恰好是「无积分余额」——
+   * 这正是本次报障的原文。
+   *
+   * 同时，判重字段 `LOGIN_IDENTITY_FIELDS.codearts` 从临时 `access_key_id` 改成
+   * `account_id` 后，**升级前登录的账号**凭据里还没有这个字段，判重会跳过它们
+   * （见 `findAccountIdsByIdentityField` 的「缺失即跳过」约定）。这里从
+   * `refresh_token` 解出身份写回，让存量账号也能被新登录去重。
+   *
+   * ## 只修「显然是自己写的」昵称
+   *
+   * 仅当 `nickname === id`（登录时 `addAccount` 的占位值）才覆盖 —— 用户手动改过
+   * 的名字一律不动。凭据写回同样幂等：字段已一致时不发写请求。
+   *
+   * 单条失败只记日志、继续下一条：这是展示层对账，不该挡住登录/续期。
+   */
+  async reconcileIdentities(pool: AccountPool): Promise<void> {
+    for (const entry of pool.listAccountsByProvider('codearts')) {
+      try {
+        const resolved = await this.ctx.credentials.resolve(credentialRef(entry.credentialRef))
+        if (!resolved) continue
+        let raw: Record<string, unknown>
+        try {
+          const parsed = JSON.parse(resolved.value) as unknown
+          if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) continue
+          raw = parsed as Record<string, unknown>
+        } catch {
+          // 凭据损坏：留给续期/登录路径处理，这里不猜。
+          continue
+        }
+        const identity = codeartsIdentity(raw)
+        if (identity === undefined) continue
+        if (raw.account_id !== identity.accountId || raw.account_name !== identity.accountName) {
+          await this.ctx.credentials.set(
+            credentialRef(entry.credentialRef),
+            JSON.stringify({ ...raw, account_id: identity.accountId, account_name: identity.accountName }),
+          )
+        }
+        if (entry.nickname === entry.id) {
+          await pool.updateAccount(entry.id, { nickname: identity.accountName })
+        }
+      } catch (error) {
+        this.ctx.logger?.warn?.(
+          `[codearts] 账号 ${entry.id} 身份对账失败（不影响使用）：${String(error)}`,
+        )
+      }
+    }
   }
 
   /**

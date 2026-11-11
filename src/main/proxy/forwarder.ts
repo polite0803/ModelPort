@@ -171,6 +171,44 @@ function upstreamRequestIdOf(headers: unknown): string | undefined {
   return undefined
 }
 
+/**
+ * 本地准入拒绝的连击降采样 warn。每次拒绝本来就有请求行与 chat 路由的
+ * 「Request failed」错误行，缺的是 AIMD 状态本身 —— 「卡在几、首字 EWMA
+ * 多少」只能靠请求行时间差反推（2026-11-11 codearts 429 风暴复盘里这半
+ * 天的反推本可省掉）。按 (账号, 模型) 每 10s 补一条快照 warn。
+ */
+const LOCAL_ADMISSION_WARN_INTERVAL_MS = 10_000
+const LOCAL_ADMISSION_WARN_MAX_KEYS = 256
+const localAdmissionWarnAt = new Map<string, number>()
+
+function warnLocalAdmissionRejected(
+  providerId: string,
+  account: Account,
+  model: string,
+  requestId: string | undefined,
+): void {
+  const key = `${account.id}\u0000${model}`
+  const now = Date.now()
+  const last = localAdmissionWarnAt.get(key)
+  if (last !== undefined && now - last < LOCAL_ADMISSION_WARN_INTERVAL_MS) return
+  localAdmissionWarnAt.set(key, now)
+  // 键域 = (账号, 模型)，量级有界；超限摘最旧，防自定义模型名把表撑大。
+  if (localAdmissionWarnAt.size > LOCAL_ADMISSION_WARN_MAX_KEYS) {
+    const oldest = localAdmissionWarnAt.keys().next()
+    if (!oldest.done) localAdmissionWarnAt.delete(oldest.value)
+  }
+  const snapshot = accountRuntime.snapshot(account.id, now, model)
+  const inFlight = snapshot.modelInFlight ?? snapshot.inFlight
+  const ewma = snapshot.ewmaFirstTokenMs
+  storeManager.addLog(
+    'warn',
+    `Local per-model admission saturated: inFlight=${inFlight}/${snapshot.modelLimit ?? '?'}` +
+      ` ewmaFirstTokenMs=${ewma === undefined ? 'n/a' : Math.round(ewma)}` +
+      ` rateLimitedRate=${snapshot.rateLimitedRate ?? 'n/a'}`,
+    { requestId, providerId, accountId: account.id, model },
+  )
+}
+
 interface ExtractedUpstreamError {
   message: string
   details: UpstreamErrorDetails
@@ -405,6 +443,7 @@ export class RequestForwarder {
       if (!admission.ok) {
         const message = 'Local per-model concurrency limit reached'
         const retryAfter = String(Math.max(1, Math.ceil(admission.retryAfterMs / 1000)))
+        warnLocalAdmissionRejected(provider.id, account, actualModel, request.requestId)
         const result: ForwardResult = {
           success: false,
           status: 429,

@@ -344,7 +344,9 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
     return result.balance === null ? null : result.balance.total
   }))
   pool.setBalanceGate(GEMINI.id, balanceGate(async credential => {
-    const result = await fetchGeminiCreditBalance(credential as GeminiCredential, GEMINI)
+    const result = await fetchGeminiCreditBalance(credential as GeminiCredential, GEMINI, {
+      fetcher: network.fetch,
+    })
     return result.balance === null ? null : result.balance.total
   }))
   pool.setBalanceGate(LOBSTERAI.id, balanceGate(async credential =>
@@ -352,7 +354,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   pool.setBalanceGate(RACCOON.id, balanceGate(async credential =>
     creditTotal(await fetchRaccoonCreditBalance(RACCOON, credential as RaccoonCredential))))
   pool.setBalanceGate(MINIMAX.id, balanceGate(async credential =>
-    creditTotal(await fetchMinimaxCreditBalance(credential as MinimaxCredential))))
+    creditTotal(await fetchMinimaxCreditBalance(credential as MinimaxCredential, network.fetch))))
   const accountForRefresh = async (provider: string, accountId?: string) => {
     if (accountId === undefined) return pool.getAvailableAccount(provider, '')
     const entry = pool.listAccountsByProvider(provider).find(account => account.id === accountId)
@@ -1093,7 +1095,9 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   //
   // 服务名由 MinimaxAuth 依 product.id 派生，注册为 ctx.minimaxAuth。
   // 不注册斜杠命令：入口在 Channel Pack 的 MiniMax 面板。
-  const minimax = new MinimaxAuth(ctx)
+  // ⚠️ 必须注入渠道出口 `network.fetch`：默认全局 fetch 会绕过代理/出口选择，
+  // 于是「登录/续期」与「余额/签到」可能走不同网络路径，失败口径也各不相同。
+  const minimax = new MinimaxAuth(ctx, { fetchImpl: network.fetch })
   const minimaxAdapter = registerMinimaxLlm(ctx, {
     credentialRef: credentialRef(MINIMAX.defaultCredentialRef),
     resolveCredential: async (modelId?: string) => {
@@ -2052,6 +2056,8 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
 
   registerChannelPackRpc(ctx, pool, lobsterai, qoder, qoderCn, trae, cline, loomy, raccoon, minimax, zcode, gemini, workbuddy, buddy, codeartsService, comateService, modelAdapters, {
     ...config,
+    // 余额/配额查询与续期共用同一条渠道出口（见 `ChannelPackRpcConfig.fetchImpl`）。
+    fetchImpl: network.fetch,
   })
   // 网关是旁路功能：这里传 `pool` 只为读设置页里的开关，其内部任何失败都已
   // 自行降级为日志，绝不会让插件 apply() 失败。
