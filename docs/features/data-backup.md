@@ -18,7 +18,7 @@
 | 请求日志、应用日志（可选，默认关闭） | `request-logs/`、`logs/` ndjson |
 | 渠道账号、渠道凭据、模型黑名单、永久积分锁定 | 渠道包 `backup.export` RPC |
 
-不搬的东西：`store.key`（本机密钥库封装，换机无意义）、会话（`sessions`，导入时清空）、额度账本（`quota-ledger.json`，本机计量窗口）、`derived/` 下的探测与目录快照（可重建）。
+不搬的东西：`store.key`（本机密钥库封装，换机无意义）、额度账本（`quota-ledger.json`，本机计量窗口）、`derived/` 下的探测与目录快照（可重建）。
 
 ## 为什么不能直接拷 `~/.modelport`
 

@@ -69,7 +69,7 @@ src/
 │   ├── ipc/         # main <-> renderer handlers
 │   ├── proxy/       # Koa proxy: server, forwarder, loadbalancer, modelMapper,
 │   │                #   adapters/, routes/ (chat, completions, models, messages, responses, management/),
-│   │                #   compression/, quota/, services/, sessionManager.ts
+│   │                #   compression/, quota/, services/
 │   ├── oauth/       # manager, inAppLogin, adapters/
 │   ├── channelPack/ # vendored pack host: worker.ts + compat shims + bridge.ts
 │   ├── providers/   # builtin/ (one file per provider), aggregate/ (registry+manager),
@@ -165,7 +165,7 @@ Data / store:
 
 * Data lives in `\~/.modelport/`; the Electron profile is **pinned** to `<appData>/modelport` by
 `app.setPath('userData', …)`. Do not unpin it - `safeStorage` seals `store.key` against that path.
-* `data.json` is a single conf file (config, providers, accounts, sessions, statistics,
+* `data.json` is a single conf file (config, providers, accounts, statistics,
 logs). `userModelMarks` (manual capability hints) stays out of `userModelOverrides` so a model sync
 cannot erase a user correction.
 * Startup `initializeDefaultProviders()` force-overwrites a builtin's `apiEndpoint`, `chatPath`,

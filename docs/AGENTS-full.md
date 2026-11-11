@@ -105,8 +105,7 @@ src/
 │   │   ├── routes/         # chat.ts, completions.ts, models.ts
 │   │   │   └── management/ # /v1/management/* HTTP API
 │   │   ├── middleware/     # managementAuth
-│   │   ├── services/       # contextManagementService (history trimming)
-│   │   └── sessionManager.ts # Session table + delete-after-chat flag
+│   │   └── services/       # contextManagementService (history trimming)
 │   ├── oauth/              # OAuth authentication
 │   │   ├── manager.ts      # OAuth flow orchestration
 │   │   ├── inAppLogin.ts   # In-app browser login with token auto-extraction
@@ -1166,12 +1165,6 @@ re-anchoring the conversation to it.
 ### IPC Communication
 All main-renderer communication uses IPC channels defined in `src/main/ipc/channels.ts`. The naming convention is `domain:action` (e.g., `proxy:start`, `accounts:add`).
 
-### Session Management
-`sessionManager.ts` keeps a store-backed session table (with a 60s sweeper). The only thing the
-request path consults is `shouldDeleteAfterChat()`, which returns `SessionConfig.deleteAfterTimeout`
-- "drop the session after this reply" versus keep it for reuse. There is no `single`/`multi` mode
-field and no `parentMessageId` handling in `SessionConfig`.
-
 ### Tool Calling (native passthrough only)
 
 `tools` / `tool_choice` / `parallel_tool_calls` travel as the client sent them: `buildRequestBody`
@@ -1203,10 +1196,12 @@ document no longer exist.
 
 ### Session Management Flow
 Context continuity travels in the request itself: the forwarder hands the client's message history
-to the provider adapter, which maps it onto that provider's conversation primitives.
-`sessionManager.ts` keeps the store-backed session table, its 60s sweeper and
-`shouldDeleteAfterChat()`; `getOrCreateSession()` and `createSession()` have no callers on
-that path.
+to the provider adapter, which maps it onto that provider's conversation primitives. There is no
+server-side session table: the `sessionManager.ts` store-backed table, its 60s sweeper, the
+`session:*` IPC channels and the delete-after-chat switch were removed on 2026-11-11. Nothing had
+populated the table for years, so the switch never had an effect - `data.json` no longer carries a
+`sessions` key and `config.sessionConfig` is stripped on read. `/v1/management/sessions` still
+answers 501, now for the same reason the code does: the concept does not exist.
 
 ## Public API Contract
 
