@@ -374,10 +374,17 @@ class AggregateProviderManager {
   }
 
   /**
-   * 在线同步模型清单：带 Key 轮换探测上游清单，把上游报告的模型**并入**当前暴露清单。
-   * 只增不减 —— 用户裁剪过的清单、每模型参数、账号与 Key 都不会被一次同步抹掉。
-   * 新模型（包括静态目录之外的新 id）拿到 `<entryId>/<id>` 显示名并进入路由映射，
-   * 这就是"在有效 Key 支持下同步获取有效模型"。
+   * 同步模型清单：带 Key 轮换探测上游清单，把当前暴露清单**对齐**成上游此刻
+   * 真正提供的那一份 —— 上游新报的模型加进来，上游不再报的模型删掉。
+   *
+   * 三条边界：
+   * - **只有上游自己答了清单才删**（`plan.source === 'upstream'`）。走 models.dev
+   *   兜底时只增不减：第三方目录缺一行不能证明上游下架。
+   * - **不删到空**：上游答空清单是 `empty` 失败，清空的聚合记录会被当成通配供应商，
+   *   把所有模型名都吞掉（同 `removeModel` 的 `last_model` 理由）。
+   * - **只动模型账本**：存活模型的每模型参数原样保留（`save` 按新清单裁剪，已删模型的
+   *   参数随之消失，不留孤儿）；账号与 Key 一概不碰。被删模型的停用标记一并清掉，
+   *   免得它将来重新上架时一进来就是停用态（同 `removeModel`）。
    */
   async syncModels(id: string): Promise<AggregateOperationResult> {
     const entry = getAggregateEntry(id)
@@ -404,23 +411,44 @@ class AggregateProviderManager {
     if (fetchedIds.length === 0) return { success: false, reason: 'empty' }
 
     const currentIds = Object.values(provider.modelMappings ?? {})
-    const merged = mergeAggregateModelIds(currentIds, fetchedIds)
+    // 删除只在"上游亲自答了"时发生：models.dev 是别人的滞后快照，缺一条不等于下架。
+    const next = mergeAggregateModelIds(currentIds, fetchedIds, {
+      removeMissing: plan.source === 'upstream',
+    })
     const currentSet = new Set(currentIds)
-    const addedCount = merged.filter(modelId => !currentSet.has(modelId)).length
+    const nextSet = new Set(next)
+    const addedCount = next.filter(modelId => !currentSet.has(modelId)).length
+    const removedIds = currentIds.filter(modelId => !nextSet.has(modelId))
 
-    if (addedCount > 0) {
+    // 只给「真被停用过」的删除项清标记：没被停用的模型删掉时不该在停用账本里留下
+    // 一条空记录（同步对账的默认行为仍是"不写排除账本"）。
+    const removedNames = new Set(removedIds.map(modelId => aggregateModelName(id, modelId)))
+    const stoppedRemoved = removedIds.length === 0
+      ? []
+      : storeManager
+          .getModelCatalogue(id)
+          .filter(model => removedNames.has(model.displayName) && !model.served)
+          .map(model => model.displayName)
+
+    if (addedCount > 0 || removedIds.length > 0) {
       try {
-        this.save({ id, baseUrl: provider.apiEndpoint, models: merged, enabled: provider.enabled })
+        this.save({ id, baseUrl: provider.apiEndpoint, models: next, enabled: provider.enabled })
       } catch (error) {
         return { success: false, reason: 'save_failed', detail: error instanceof Error ? error.message : String(error) }
       }
+    }
+
+    if (stoppedRemoved.length > 0) {
+      // 与 removeModel 同一条理由：删掉的模型不该把停用标记留给未来重新上架的同名模型。
+      storeManager.setModelsServed(id, stoppedRemoved, true)
     }
 
     return {
       success: true,
       fetchedCount: fetchedIds.length,
       addedCount,
-      modelCount: merged.length,
+      removedCount: removedIds.length,
+      modelCount: next.length,
       // 面板要能说出"这份清单是上游答的，还是第三方目录补的"。
       ...(plan.source === 'upstream' ? { modelSource: 'upstream' as const } : { modelSource: 'models.dev' as const }),
     }

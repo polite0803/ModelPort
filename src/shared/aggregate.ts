@@ -289,18 +289,41 @@ export interface AggregateSaveInput {
 }
 
 /**
- * 在线同步的模型并集：保留当前清单（顺序不变），把上游新报告的 id 追加在后面，
- * 去空白、去重。同步只增不减 —— 用户裁剪过的清单、每模型参数都不会被一次拉取抹掉。
+ * 在线同步的模型清单对账：当前清单保持自己的顺序，上游新报告的 id 追加在后面，
+ * 全程去空白、去重。
+ *
+ * `removeMissing: true` 是**上游自己答了清单**时的真同步：当前清单里上游没再报告的
+ * id 被移除（下架/改名留下的作废项），上游新报的照常追加。顺序仍以现有清单为准，
+ * 一次同步不打乱用户看到的排列。
+ *
+ * 默认只增不减是给第三方目录（models.dev）用的：它只能证明"上游还有哪些"，
+ * 证明不了"哪些已下架"，拿它删模型等于按别人的滞后快照猜上游。
  */
 export function mergeAggregateModelIds(
   currentIds: readonly string[],
-  fetchedIds: readonly string[]
+  fetchedIds: readonly string[],
+  options: { removeMissing?: boolean } = {}
 ): string[] {
-  const seen = new Set<string>()
+  const fetched: string[] = []
+  const fetchedSet = new Set<string>()
+  for (const value of fetchedIds) {
+    const id = (value ?? '').trim()
+    if (!id || fetchedSet.has(id)) continue
+    fetchedSet.add(id)
+    fetched.push(id)
+  }
+
   const merged: string[] = []
-  for (const value of [...currentIds, ...fetchedIds]) {
+  const seen = new Set<string>()
+  for (const value of currentIds) {
     const id = (value ?? '').trim()
     if (!id || seen.has(id)) continue
+    if (options.removeMissing === true && !fetchedSet.has(id)) continue
+    seen.add(id)
+    merged.push(id)
+  }
+  for (const id of fetched) {
+    if (seen.has(id)) continue
     seen.add(id)
     merged.push(id)
   }
@@ -317,6 +340,12 @@ export interface AggregateOperationResult {
   fetchedCount?: number
   /** Models newly added by this sync (sync only). */
   addedCount?: number
+  /**
+   * Models removed by this sync because the **upstream's own** list no longer
+   * reports them (sync only). The models.dev fallback never removes: a missing
+   * row in a third-party catalogue is not evidence that the upstream dropped it.
+   */
+  removedCount?: number
   /**
    * Where the synced list came from (sync only): the vendor's own list endpoint,
    * or the models.dev catalogue used as a fallback. The panel says which one,

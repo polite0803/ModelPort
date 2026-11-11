@@ -38,6 +38,7 @@ import type {
   RoutePreviewSample,
   TlsStatus,
   TlsTrustResult,
+  ProviderModelTestResult,
 } from './types'
 import type {
   BackupApplyResult,
@@ -309,6 +310,13 @@ const providersAPI = {
     displayName: string,
   ): Promise<{ success: true; metadata: ModelMetadata } | { success: false; error: string }> =>
     wire.invoke(IpcChannels.PROVIDERS_GET_MODEL_METADATA_ONE, providerId, displayName),
+
+  /**
+   * 模型管理页的「测试」：发一次最小真实请求，返回成败与延迟。
+   * `alias` 给出时 `displayName` 是别名行的名字（按全局映射表解析落点）。
+   */
+  testModel: (providerId: string, displayName: string, alias?: string): Promise<ProviderModelTestResult> =>
+    wire.invoke(IpcChannels.PROVIDERS_TEST_MODEL, providerId, displayName, alias),
 
   probeModel: (
     providerId: string,

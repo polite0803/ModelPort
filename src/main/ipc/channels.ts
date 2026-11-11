@@ -81,6 +81,9 @@ export const IpcChannels = {
   PROVIDERS_GET_MODEL_METADATA: 'providers:getModelMetadata',
   /** 单个模型的解析结果：逐模型标注入口用它，避免为一次点击重算整张报表。 */
   PROVIDERS_GET_MODEL_METADATA_ONE: 'providers:getModelMetadataOne',
+  // 模型管理页的「测试」：发一次最小真实请求，只回答「这个模型此刻能不能用」。
+  // 与聚合详情页的 `aggregate:testModel` 同一类动作，但覆盖渠道/自定义供应商。
+  PROVIDERS_TEST_MODEL: 'providers:testModel',
   PROVIDERS_PROBE_MODEL: 'providers:probeModel',
   PROVIDERS_CANCEL_PROBE: 'providers:cancelProbe',
   PROVIDERS_GET_PROBE_JOBS: 'providers:getProbeJobs',

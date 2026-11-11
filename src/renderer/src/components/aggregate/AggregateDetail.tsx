@@ -1160,24 +1160,26 @@ function ModelsCard(props: {
       return
     }
 
-    // 清单来源必须说清：由 models.dev 补的清单比上游略滞后，
+    // 清单来源必须说清：由 models.dev 补的清单比上游略滞后，且这一支只增不减，
     // 用户据此判断"这家漏了模型"时该怪目录还是怪自己的 Key。
     if (result.modelSource === 'models.dev') {
       toast({
         title: t('aggregate.manage.toast.synced', {
           fetched: result.fetchedCount ?? 0,
           added: result.addedCount ?? 0,
+          removed: result.removedCount ?? 0,
           total: result.modelCount ?? 0,
         }),
         description: t('aggregate.manage.toast.syncedFromModelsDev'),
       })
-    } else if ((result.addedCount ?? 0) === 0) {
+    } else if ((result.addedCount ?? 0) === 0 && (result.removedCount ?? 0) === 0) {
       toast({ title: t('aggregate.manage.toast.syncedNoChange') })
     } else {
       toast({
         title: t('aggregate.manage.toast.synced', {
           fetched: result.fetchedCount ?? 0,
           added: result.addedCount ?? 0,
+          removed: result.removedCount ?? 0,
           total: result.modelCount ?? 0,
         }),
       })

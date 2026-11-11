@@ -333,25 +333,27 @@ test('R1-聚合同步：上游新报的模型直接进目录并在服，同步�
       '全局表没有这一行时，归属仍从聚合前缀推导出来',
     )
 
-    // 第二次同步带来第三个名字：仍然默认在服，仍然不写排除项。
+    // 第二次同步：上游不再报 new-a —— 真同步把它删掉，同时把 new-c 加进来。
     server.setModels([{ id: 'new-b' }, { id: 'new-c' }])
     const again = await aggregateProviderManager.syncModels('ollama')
     assert.equal(again.success, true)
+    assert.equal(again.addedCount, 1)
+    assert.equal(again.removedCount, 1)
     assert.deepEqual(
       sm.getEffectiveModels('ollama').map((m: any) => m.displayName),
-      ['ollama/new-a', 'ollama/new-b', 'ollama/new-c'],
-      '同步只增不减，新名字一样默认启用',
+      ['ollama/new-b', 'ollama/new-c'],
+      '上游不再报的模型被删掉，新报的照常默认在服',
     )
     assert.deepEqual(overrides(), {})
 
-    // 反面：用户显式停用的那一条，扛得住后续同步，且同步不额外加别的排除项。
+    // 反面：用户显式停用的名字重回上游清单时仍是停用；已下架的 new-c 这一轮被删。
     sm.setModelsServed('ollama', ['ollama/new-a'], false)
     server.setModels([{ id: 'new-a' }, { id: 'new-b' }, { id: 'new-d' }])
     await aggregateProviderManager.syncModels('ollama')
     assert.deepEqual(overrides().ollama.excludedModels, ['ollama/new-a'], '唯一写入者是上面那次显式停用')
     assert.deepEqual(
       sm.getEffectiveModels('ollama').map((m: any) => m.displayName),
-      ['ollama/new-b', 'ollama/new-c', 'ollama/new-d'],
+      ['ollama/new-b', 'ollama/new-d'],
     )
 
     // 「在服」= 真的进了**负载均衡的候选池**（`providerSupportsModel` → `isModelRoutable`，
@@ -391,6 +393,76 @@ test('R1-聚合同步不再吞用户钉定：全局表里的同名条目同步�
     assert.equal('ollama/new-b' in sm.getConfig().modelMappings, false)
   } finally {
     await server.close()
+  }
+})
+
+test('R1-聚合同步：被删模型的停用标记一并清掉，重新上架时回到在服', async () => {
+  sm.clearAll()
+  const server = await startModelServer()
+  try {
+    server.setModels([{ id: 'keep' }, { id: 'gone' }])
+    aggregateProviderManager.save({ id: 'ollama', baseUrl: server.baseUrl, models: [] })
+    await aggregateProviderManager.syncModels('ollama')
+
+    sm.setModelsServed('ollama', ['ollama/gone'], false)
+    assert.deepEqual(overrides().ollama.excludedModels, ['ollama/gone'])
+
+    // 上游下架 gone：真同步删掉它，同时清掉挂在它名上的停用标记。
+    server.setModels([{ id: 'keep' }])
+    const dropped = await aggregateProviderManager.syncModels('ollama')
+    assert.equal(dropped.removedCount, 1)
+    assert.deepEqual(
+      sm.getModelCatalogue('ollama').map((m: any) => m.displayName),
+      ['ollama/keep'],
+    )
+    assert.deepEqual(overrides().ollama?.excludedModels ?? [], [], '删掉的模型不留停用标记')
+
+    // 上游把它报回来：一进来就在服，不需要用户再点一次启用。
+    server.setModels([{ id: 'keep' }, { id: 'gone' }])
+    await aggregateProviderManager.syncModels('ollama')
+    assert.deepEqual(
+      sm.getEffectiveModels('ollama').map((m: any) => m.displayName),
+      ['ollama/keep', 'ollama/gone'],
+    )
+  } finally {
+    await server.close()
+  }
+})
+
+test('R1-聚合同步：上游没答时退到 models.dev 只增不减，不删既有模型', async () => {
+  sm.clearAll()
+  const failing = createServer((_req, res) => {
+    res.writeHead(503)
+    res.end('down')
+  })
+  failing.listen(0, '127.0.0.1')
+  await once(failing, 'listening')
+  const port = (failing.address() as { port: number }).port
+  const manager = aggregateProviderManager as unknown as {
+    fetchModelsDevModels: (Id: string) => Promise<unknown>
+  }
+  const realFetch = manager.fetchModelsDevModels
+  try {
+    aggregateProviderManager.save({
+      id: 'ollama',
+      baseUrl: `http://127.0.0.1:${port}/v1`,
+      models: ['keep-me'],
+    })
+    manager.fetchModelsDevModels = async () => [
+      { displayName: 'ollama/third-party', actualModelId: 'third-party' },
+    ]
+
+    const synced = await aggregateProviderManager.syncModels('ollama')
+    assert.equal(synced.success, true, `sync failed: ${JSON.stringify(synced)}`)
+    assert.equal(synced.modelSource, 'models.dev')
+    assert.equal(synced.removedCount, 0, '第三方目录缺一条不能当成上游下架')
+    assert.deepEqual(
+      sm.getModelCatalogue('ollama').map((m: any) => m.displayName),
+      ['ollama/keep-me', 'ollama/third-party'],
+    )
+  } finally {
+    manager.fetchModelsDevModels = realFetch
+    await new Promise<void>((resolve) => failing.close(() => resolve()))
   }
 })
 

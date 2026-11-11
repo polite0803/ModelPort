@@ -22,11 +22,12 @@ import {
 import { useProvidersStore } from '@/stores/providersStore'
 import { useProxyStore } from '@/stores/proxyStore'
 import { useToast } from '@/hooks/use-toast'
-import { Search, Copy, CheckCircle2, XCircle, Cpu, Check, Square, Database, ChevronLeft, ChevronRight, Loader2, Ban } from 'lucide-react'
+import { Search, Copy, CheckCircle2, XCircle, Cpu, Check, Square, Database, ChevronLeft, ChevronRight, Loader2, Ban, Wifi } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { weightTone } from '@/lib/costTone'
 import { Switch } from '@/components/ui/switch'
 import type { Account, CatalogueModel } from '@/types/electron'
+import type { ProviderModelTestResult } from '@shared/types'
 import type { ChannelCredits, CostBucket } from '@shared/channels'
 import { costBucketOf } from '@shared/channels'
 import { aggregateCostOf } from '@shared/aggregateCost'
@@ -83,14 +84,59 @@ interface ModelRowProps {
   /** 供应商维度的当前余额/积分；缺省表示上游没有这份数据 */
   credits: Record<string, ChannelCredits | 'loading'>
   onToggleServed: (model: ModelInfo, served: boolean) => void
+  /** 这一行正在测试 */
+  testing: boolean
+  /** 任何一行在测试：同一时刻只放一条真实请求出去 */
+  testBusy: boolean
+  /** 最近一次测试结果；缺省 = 还没测过 */
+  testResult?: ProviderModelTestResult
+  onTestModel: (model: ModelInfo) => void
+}
+
+/** 测试失败的机读原因 → 文案 key。未登记的原因不硬猜，只显示 detail。 */
+const TEST_REASON_KEYS: Record<string, string> = {
+  unknown_provider: 'models.testReasonUnknownProvider',
+  unknown_entry: 'models.testReasonUnknownProvider',
+  not_configured: 'models.testReasonNotConfigured',
+  unknown_model: 'models.testReasonUnknownModel',
+  no_active_account: 'models.testReasonNoAccount',
+  missing_api_key: 'models.testReasonMissingKey',
+  invalid_api_key: 'models.testReasonInvalidKey',
+  http_status: 'models.testReasonUpstream',
+  channel_runtime_stopped: 'models.testReasonChannelStopped',
+  upstream_error: 'models.testReasonUpstream',
+  network_error: 'models.testReasonNetwork',
+  timeout: 'models.testReasonTimeout',
+  invalid_request: 'models.testReasonInvalid',
+  unsupported: 'models.testReasonUnsupported',
 }
 
 const PAGE_SIZE = 50
 
-const ModelRow = memo(({ model, isSelected, onSelect, t, credits, onToggleServed }: ModelRowProps) => {
+const ModelRow = memo(({
+  model,
+  isSelected,
+  onSelect,
+  t,
+  credits,
+  onToggleServed,
+  testing,
+  testBusy,
+  testResult,
+  onTestModel,
+}: ModelRowProps) => {
   const providerIcon = providerIcons[model.providerId]
   const credit = credits[model.providerId]
-  
+  // 别名行没有固定供应商时（映射表未指定 preferredProviderId）没有可测的落点。
+  const testable = model.source !== undefined || model.providerId !== 'mapping'
+  const testReasonKey = testResult?.reason === undefined ? undefined : TEST_REASON_KEYS[testResult.reason]
+  const testTitle = testResult === undefined
+    ? t('models.testHint')
+    : [
+        testReasonKey === undefined ? undefined : t(testReasonKey),
+        testResult.detail,
+      ].filter((part): part is string => typeof part === 'string' && part !== '').join(' · ')
+
   return (
     <TableRow 
       className={cn(
@@ -206,6 +252,43 @@ const ModelRow = memo(({ model, isSelected, onSelect, t, credits, onToggleServed
           )}
         </div>
       </TableCell>
+      <TableCell>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 px-2"
+            disabled={testBusy || !testable}
+            title={testable ? t('models.testHint') : t('models.testUnavailableHint')}
+            onClick={(event) => {
+              event.stopPropagation()
+              onTestModel(model)
+            }}
+          >
+            {testing ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Wifi className="h-3.5 w-3.5" />
+            )}
+            {testing ? t('models.testing') : t('models.testModel')}
+          </Button>
+          {testResult !== undefined && (
+            <span
+              className={cn(
+                'text-xs',
+                testResult.success
+                  ? 'text-success'
+                  : 'max-w-[9rem] truncate text-error',
+              )}
+              title={testTitle}
+            >
+              {testResult.success
+                ? `${testResult.latencyMs ?? 0} ms`
+                : t('models.testFailed')}
+            </span>
+          )}
+        </div>
+      </TableCell>
     </TableRow>
   )
 })
@@ -225,6 +308,10 @@ export function ModelList() {
   const [currentPage, setCurrentPage] = useState(1)
   const [catalogueMap, setCatalogueMap] = useState<Record<string, CatalogueModel[]>>({})
   const [serving, setServing] = useState(false)
+  /** 正在测的那一行；同一时刻只发一条真实测试请求 */
+  const [testingModelId, setTestingModelId] = useState<string | null>(null)
+  /** 行 id -> 最近一次测试结果（不落盘：这是现场读数，不是配置） */
+  const [testResults, setTestResults] = useState<Record<string, ProviderModelTestResult>>({})
   const [modalityFilter, setModalityFilter] = useState<'all' | Modality>('all')
   const [costFilter, setCostFilter] = useState<'all' | CostBucket>('all')
   /** 启用状态筛选：served = 对外广告且参与路由，stopped = 已停用 */
@@ -611,6 +698,41 @@ export function ModelList() {
     changeServed([model], served)
   }, [changeServed])
 
+  /**
+   * 一次「测试」= 一条最小真实请求。别名行把名字交给主进程按映射表解析落点，
+   * 目录行则按 `<providerId>/<displayName>` 定位目录行。
+   */
+  const handleTestModel = useCallback(async (model: ModelInfo) => {
+    if (testingModelId !== null) return
+    if (!window.electronAPI?.providers?.testModel) {
+      setTestResults(current => ({
+        ...current,
+        [model.id]: { success: false, reason: 'unsupported' },
+      }))
+      return
+    }
+    setTestingModelId(model.id)
+    try {
+      const result = await window.electronAPI.providers.testModel(
+        model.providerId,
+        model.name,
+        model.alias,
+      )
+      setTestResults(current => ({ ...current, [model.id]: result }))
+    } catch (error) {
+      setTestResults(current => ({
+        ...current,
+        [model.id]: {
+          success: false,
+          reason: 'network_error',
+          ...(error instanceof Error ? { detail: error.message } : {}),
+        },
+      }))
+    } finally {
+      setTestingModelId(null)
+    }
+  }, [testingModelId])
+
   /** 「仅启用选中」：选中的启用、其余目录行停用，跨全部供应商 */
   const handleServeOnlySelected = useCallback(async () => {
     const selected = new Set(selectedModels)
@@ -880,6 +1002,7 @@ export function ModelList() {
                     <TableHead>{t('models.provider')}</TableHead>
                     <TableHead>{t('models.account')}</TableHead>
                     <TableHead>{t('models.status')}</TableHead>
+                    <TableHead>{t('models.testModel')}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -892,6 +1015,10 @@ export function ModelList() {
                       t={t}
                       credits={credits}
                       onToggleServed={handleToggleServed}
+                      testing={testingModelId === model.id}
+                      testBusy={testingModelId !== null}
+                      {...(testResults[model.id] === undefined ? {} : { testResult: testResults[model.id] })}
+                      onTestModel={handleTestModel}
                     />
                   ))}
                 </TableBody>

@@ -38,6 +38,7 @@ import type {
   RoutePreviewSample,
   TlsStatus,
   TlsTrustResult,
+  ProviderModelTestResult,
 } from '../../../shared/types'
 import type {
   AggregateDetail,
@@ -251,6 +252,12 @@ interface ProvidersAPI {
     providerId: string,
     displayName: string,
   ) => Promise<{ success: true; metadata: ModelMetadata } | { success: false; error: string }>
+  /** 模型管理页「测试」：一次最小真实请求，只回答此刻能不能用。 */
+  testModel: (
+    providerId: string,
+    displayName: string,
+    alias?: string,
+  ) => Promise<ProviderModelTestResult>
   /** 手动探测一个模型（一次点击一条阶梯；打开页面不会自动触发）。 */
   probeModel: (
     providerId: string,

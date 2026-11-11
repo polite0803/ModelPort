@@ -90,8 +90,26 @@ test('online sync merges: current list keeps its order, new upstream ids are app
   )
 })
 
-test('online sync never removes: an empty upstream answer keeps the current list', () => {
+test('add-only sync (models.dev fallback) keeps every current id when upstream answers nothing', () => {
   assert.deepEqual(mergeAggregateModelIds(['kept'], []), ['kept'])
+})
+
+test('true sync drops ids the upstream no longer reports, keeping survivors in order', () => {
+  assert.deepEqual(
+    mergeAggregateModelIds(['glm-4.6', 'glm-4.5'], ['glm-4.5', 'glm-5'], { removeMissing: true }),
+    ['glm-4.5', 'glm-5'],
+  )
+})
+
+test('true sync appends new ids after the survivors instead of taking upstream order', () => {
+  assert.deepEqual(
+    mergeAggregateModelIds(['a', 'b', 'c'], ['c', 'a', 'd'], { removeMissing: true }),
+    ['a', 'c', 'd'],
+  )
+})
+
+test('true sync with an empty upstream answer removes everything it cannot confirm', () => {
+  assert.deepEqual(mergeAggregateModelIds(['a', 'b'], [], { removeMissing: true }), [])
 })
 
 test('online sync trims, dedupes and drops blank ids from both sides', () => {

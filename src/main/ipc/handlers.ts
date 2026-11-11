@@ -24,6 +24,7 @@ import { oauthManager } from '../oauth/manager'
 import { fetchProviderModels } from '../providers/modelCatalog'
 import { getModelMetadataReport, getResolvedModelMetadata } from '../providers/modelMetadataService'
 import { runModelCapabilityProbe } from '../providers/modelProbeRunner'
+import { testProviderModel } from '../providers/modelTest'
 import {
   adoptCatalogField,
   getCatalogCandidates,
@@ -807,6 +808,31 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
         return { success: false, error: error instanceof Error ? error.message : 'metadata failed' }
       }
     }
+  )
+
+  // 模型管理页的一行「测试」：发一次最小真实请求，只回答「此刻能不能用」。
+  // 与元数据探测（`providers:probeModel`）是两件事：这里不落探测台账，也不改标注。
+  registerMainHandler(
+    IpcChannels.PROVIDERS_TEST_MODEL,
+    async (_, providerId: string, displayName: string, alias?: string) => {
+      if (typeof providerId !== 'string' || typeof displayName !== 'string') {
+        return { success: false, reason: 'invalid_request' }
+      }
+      try {
+        return await testProviderModel({
+          providerId,
+          displayName,
+          ...(typeof alias === 'string' && alias !== '' ? { alias } : {}),
+        })
+      } catch (error) {
+        console.error('[IPC] Model test failed:', error)
+        return {
+          success: false,
+          reason: 'network_error',
+          detail: error instanceof Error ? error.message : String(error),
+        }
+      }
+    },
   )
 
   registerMainHandler(

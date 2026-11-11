@@ -1084,6 +1084,19 @@ export interface ProviderCheckResult {
   reason?: string
 }
 
+/**
+ * 模型管理页「测试」按钮的结果：一次最小真实请求的成败与延迟。
+ *
+ * `reason` 是机读原因（界面自己出文案）；`detail` 只在有可读的上游/网络报文时出现，
+ * 缺失不是「成功」，也不补 0。
+ */
+export interface ProviderModelTestResult {
+  success: boolean
+  latencyMs?: number
+  reason?: string
+  detail?: string
+}
+
 export interface OAuthResult {
   success: boolean
   providerId?: string
