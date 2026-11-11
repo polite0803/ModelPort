@@ -6,6 +6,120 @@
 条目按"为什么改、影响什么"描述；每条末尾括号里的短哈希指向产生该变更的提交，可在 `git show <哈希>` 中核对。
 版本边界与溯源说明见文末。
 
+## [1.8.6] - 2026-11-12
+
+版本边界：tag `v1.8.6`（相对 1.8.5）。主题是**Codex 接 `codex` 路由的两类假象**——渠道上游的
+404 被折成 502 吃掉换家上限、一整发什么都没交付的流被记成成功；另含启动时误删用户凭据的退役名
+判据、候选耗尽的 503 收口补齐、工具调用配对修复、余额门控降级、OpenCode 会话亲和头与模型管理页
+的同步/标注能力。本批改动由并行会话在同一工作树完成，hunk 交错，合为单个提交 `6bbde15`。
+
+### Fixed（修复）
+
+- **渠道上游的 404 被折成 502，换家上限被注定失败的候选吃满**：cline 的 `:batch` 变体在 chat
+  端点逐发 404 `model not supported`。建流阶段的失败只能以 HTTP 200 的 SSE 错误帧浮现，而那一发
+  帧里没写状态码，宿主嗅探分支又只按文案判 400/502 —— 于是「这一家供不了这个模型」被记成账号
+  故障，三条 `:batch` 撞满路由的 `maxAttempts: 3`，1152 个候选的链在第 7 家收手，客户端读到
+  `503 no_available_model（last: cline: model not supported）`。现在错误帧带上上游真实状态码，
+  宿主两个嗅探分支同口径读它（此前只有姊妹分支读），404 换家且不罚账号、不进冷却。现网证据
+  `chatcmpl-mwcbjari-izjtek`：同渠道同模型，流式记 502、非流式记 404，全仓 110 笔渠道包失败
+  无一例外折成 502。(`6bbde15`)
+- **只承诺不执行：一整发零交付的流被记成成功**：Codex 工具结果回填后的那一轮由
+  `openrouter/free` 服务，200 + `[DONE]` + 176 KB 出站，但正文与工具调用都是空（客户端 usage 里
+  1108 个 output token 全是思考），回合以 `last_agent_message: null` 结束，界面停在上一句「先确认
+  当前 shell 位置」上。去重率判据对这一发结构性失明——思考走 `reasoning_details` 对象数组，零行
+  只得到 `notJudged: too_short`，看着像健康——所以它既算胜又留着粘性锚点，下一轮继续派给同一台
+  空转机。现在补第三类退化读数 `streamTrace.emptyTurn`：只在客户端带了工具、流正常收尾、且正文与
+  `tool_calls` 皆空时判，命中即按 degraded 进 AIMD/Bandit 并撤锚点。现网证据
+  `chatcmpl-mwcghqtq-td1xm6`。(`6bbde15`)
+- **更新后 DeepSeek 的 Key 丢了**：`deepseek`/`glm`/`kimi`/`minimax`/`zai` 五个名字既是 1.5 网页
+  集成的退役名、又是随包聚合目录的现役条目 id（`minimax` 还兼账号渠道 id），而凭据按同
+  `providerId` 落同一张 `accounts` 表，于是每次网关启动（自更新必带一次重启）都把用户配好的 Key
+  与每模型开关当孤儿删掉。判据改为「在名单里 **且** 随包代码无任何现役定义」。(`6bbde15`)
+- **候选耗尽被透传成 429，Codex 读成「你已达到使用上限」并终止**：收口判据从「只收 404」扩为
+  「试过多家且失败在候选侧（404/401/403/429/5xx、渠道包池空文案）」一律收成 503 + `Retry-After`
+  ——缺省 60 秒取自余额门控的缓存 TTL，上游给了解禁时刻就用它（秒数与 HTTP 日期都读）；400/422
+  永不收口，第一家就失败仍原样透传。`/v1/completions` 补上此前只有 chat 路由才有的这套收口。
+  现网证据 11-11 那笔：链在第 3 家收手、末笔池空门控被透传成 429，而当时池里 75 个候选大多活着。
+  (`6bbde15`)
+- **Codex 的 agent 回合被严格上游整段拒收**：同一份历史在 `buddy/deepseek-v4-pro`、
+  `buddy/kimi-k3.1-pro` 中 502「tool calls and tool results do not match」，换到宽松候选才 200，
+  代价是整轮粘在弱模型上、用户读到无故停下。渠道 Worker 出站前把「调用↔结果」配平：无结果的调用、
+  孤儿结果、重复声明、重复回填各删多余一条，**只删不造**，调用清空后连键撤掉。(`6bbde15`)
+- **`opencode_go` 每轮白撞一次 400**（上游要求 `x-opencode-session`）：对解析后主机名为
+  `opencode.ai` 及其子域的上游补发四个同值亲和头，取值优先客户端自己的会话标识
+  （`prompt_cache_key` → `user` → `metadata.user_id`），否则账号级纯哈希派生，无跨请求缓存。
+  补头不产生订阅资格——403 仍是账号事实，界面照实说。(`6bbde15`)
+- **余额为 0 的账号被直接剔除，把候选池踢空**：0 分不清「烧光」与「本计划根本不发积分」，剔除会
+  抛出「账号池中的账号当前均不可用」。改为**降级排最后**——只有池里再无「有余额/未知」账号时才取
+  手动顺序第一个并 warn；「这个计划发放过积分吗」的判据收进 `credits.ts::planGrantsCredits` 成唯一
+  权威并接到 TRAE 与 Gemini（Gemini 两个配额窗口都没下发时按未知放行，不再当 0 拦号）。
+  cline/raccoon/lobsterai/minimax 只有汇总数字、拿不出发放量，不套用该判据。(`6bbde15`)
+
+### Added（新增）
+
+- **模型管理页「同步模型」按钮**（IPC `providers:syncModels`）：作用域随供应商筛选，缺省同步所有
+  已启用的可同步供应商；账号渠道整包只 `resync` 一轮、聚合逐条目 `syncModels`、内置走
+  `modelsFetch`，逐家回报增删并提示；自定义供应商明确回 `unsupported`，不假装同步成功。(`6bbde15`)
+- **每模型「消耗倍率」与「免费」标注**：标注对话框两栏越界当场拒绝；列表按
+  `manual > 渠道目录` 合并并提示「来自手工标注、同步不覆盖」；聚合行显示成本分类，别名/自定义显示
+  「不适用」而非「未标注」；消耗筛选与路由侧同口径。(`6bbde15`)
+- **请求行携带空转读数** `streamTrace.emptyTurn`（`contentChars` / `toolCallDeltas` /
+  `toolsOffered` / `empty`），与 `streamTrace.repetition` 并列、同源于一份累计 SSE 文本，只读不
+  写；非流式仍明确不判。(`6bbde15`)
+
+### Changed（变更）
+
+- **目录变体标签解析修正**：`名 · x0.03 SG` 这类带同名变体的标签现在能拆出倍率且名字原样保留；
+  此前解析失败会让去重吞掉模型。(`6bbde15`)
+- **日志的失败分类与实际换家分支对齐**：缺会话亲和头那类 400、以及普通 404，在
+  `attempts[].outcome` 与 `auto.failures[].kind` 两处统一记 `capability`（此前同一笔尝试两处结论
+  相反）。(`6bbde15`)
+
+### Tests（判据）
+
+- `tests/channels/openai-gateway-error-frame-status.test.ts`：建流阶段的错误帧带上游状态码
+  （顶层与 `failure.status` 两种形状都取）、读不到时仍按 502 兜底不发明数字、一条流只有一个
+  `[DONE]`。(`6bbde15`)
+- `tests/routes/account-channel-stream-error-status.test.ts`：三条 `:batch` 的 404 不吃掉
+  `maxAttempts`、第四家正常服务；单发一笔 `:batch` 得 404 且账号不进冷却。(`6bbde15`)
+- `tests/routes/empty-turn-stream-trace.test.ts`：带工具、零正文、零工具调用的完成流在请求行留下
+  `emptyTurn`，并真的进这一家的 `degradedRate`；交付了工具调用的那一发不判空转。(`6bbde15`)
+- `tests/shared/stream-repetition.test.ts` / `tests/proxy/sticky-revoke-policy.test.ts`：
+  `reasoning_details` 数组形状下去重率失明而空转判据命中、有正文或有工具调用都不算空转、没带工具
+  不判、`[DONE]`/PING/坏帧不贡献计数；撤锚点只在 `done` 上生效，`client_gone`/`timeout` 各按既有
+  口径。(`6bbde15`)
+- `tests/store/retired-name-collision.test.ts`：撞名判活、`mimo`/`qwen`/`qwen-ai` 照删、Key 值逐
+  字节存活、每模型开关分治、退役名单不许悄悄变、二次启动幂等。(`6bbde15`)
+- `tests/channels/tool-call-validation.test.ts`：四类配对缺陷各自删对、不改写入参、明细只带坐标且
+  12 条截断、怪异输入不抛错。(`6bbde15`)
+- `tests/proxy/failover.test.ts` / `tests/proxy/attempt-trace.test.ts`：收口矩阵（5xx/401/403/429
+  命中、400/422/200/无状态码不收口）、上游 `Retry-After` 覆盖默认值、`parseRetryAfterSeconds` 七种
+  输入、亲和头 400 记 capability 而普通 400 仍 fatal。(`6bbde15`)
+- `tests/ipc/model-sync-console.test.ts` / `tests/renderer/model-weight-annotation.test.mjs`：同步
+  通道/类型镜像/三分支/按钮与中英插值一致、整包只 resync 一轮；标注表单判据、合并顺序、筛选同口径、
+  变体倍率。(`6bbde15`)
+- `tests/channels/account-pool-balance-demote.test.ts` / `credit-balance-plan-gate.test.ts`：未知
+  账号优先于 0 余额账号、全 0 才降级并 warn、健康路径只读 TTL 缓存不多探；发放判据算术、免费档放行、
+  Gemini 无配额窗口不等于 0。(`6bbde15`)
+- `tests/proxy/opencode-affinity.test.ts`：域判定的假阳性、四头同值且只发四个、禁用身份头、可重复
+  派生、字段优先级、两个 `buildHeaders` 调用点必须传 `request`。(`6bbde15`)
+- 两处吃源码文本的接线断言按新实现更新（`tests/renderer/repetition-guard-wiring.test.mjs` 的变异
+  锚点），变异仍会红——牙齿没被摘掉。(`6bbde15`)
+
+### 未取读数
+
+- **只在 WSL 宿主上跑过门禁**：`npm run gate` 全绿（2249 个测试、0 失败、两套 tsc 零错误），没有在
+  Windows / macOS 安装包上各起一次验证。
+- **空转判据只覆盖 `/v1/chat/completions` 一条道**：`/v1/completions` 与 `/v1/responses` 今天根本不
+  产 `streamTrace`（去重率读数也不在那两条道上），所以同一发零交付在另两条道上仍会被记成成功。
+- **客户端可见的错误帧多了一个非 OpenAI 标准的 `status` 键**（`error.status`，此前该帧只有
+  `message`/`type`/`code`）；未逐个客户端验过容忍度。
+- **一个行为变化未取实测**：流式渠道失败里真 400 的那几笔（现网 3 笔 `INVALID_REQUEST`）现在按既有
+  裁定「400 终止」，不再伪装成 502 去换家。
+- **现网 WSL 网关仍是 1.8.5 的产物**：上面两条 Codex 相关的修复要部署并重启后才生效。
+
+---
+
 ## [1.8.5] - 2026-11-11
 
 版本边界：tag `v1.8.5`（相对 1.8.4）。主题是**每个渠道一个「走系统代理」开关**；另含码道 token
