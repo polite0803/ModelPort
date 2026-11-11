@@ -364,8 +364,6 @@ function applyReplace(data: BackupData): void {
   store.set('userModelMarks', normalizeMarksTable(sanitizeRecord(data.userModelMarks)))
   store.set('catalogAdoptions', sanitizeObjectArray(data.catalogAdoptions))
   store.set('aggregateCreditSnapshots', sanitizeRecord(data.aggregateCreditSnapshots))
-  // 会话是按账号绑定的运行时状态：账号表已经被整份换掉，留着旧会话只会索引到不存在的账号。
-  store.set('sessions', [])
 
   // 统计块是逐字段直读的（`getStatistics()` 原样返回盘上对象），缺字段会让仪表盘
   // 出现 `undefined`。补齐出厂值而不是整份丢弃：备份里的真实计数仍然有效。

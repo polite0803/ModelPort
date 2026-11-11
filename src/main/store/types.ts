@@ -349,8 +349,6 @@ export interface AppConfig {
   enableApiKey: boolean
   /** OAuth proxy mode: 'system' uses system proxy, 'none' disables proxy */
   oauthProxyMode: 'system' | 'none'
-  /** Session management configuration */
-  sessionConfig: SessionConfig
   /** Management API configuration */
   managementApi: ManagementApiConfig
   /** Context management configuration */
@@ -411,11 +409,6 @@ export interface AppConfig {
  * Log Level Enum
  */
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
-
-/**
- * Session Status Enum
- */
-export type SessionStatus = 'active' | 'expired' | 'deleted'
 
 /**
  * Sliding Window Configuration Interface
@@ -484,51 +477,6 @@ export interface ChatMessage {
   providerMessageId?: string
   /** Tool call ID (for tool messages) */
   toolCallId?: string
-}
-
-/**
- * Session Record Interface
- * Represents a conversation session
- */
-export interface SessionRecord {
-  /** Session unique identifier */
-  id: string
-  /** Provider ID */
-  providerId: string
-  /** Account ID */
-  accountId: string
-  /** Session type */
-  sessionType: 'chat' | 'agent'
-  /** Message history */
-  messages: ChatMessage[]
-  /** Creation time (timestamp) */
-  createdAt: number
-  /** Last active time (timestamp) */
-  lastActiveAt: number
-  /** Session status */
-  status: SessionStatus
-  /** Model used */
-  model?: string
-  /** Session metadata */
-  metadata?: {
-    title?: string
-    tokenCount?: number
-  }
-}
-
-/**
- * Session Configuration Interface
- * Global session management settings
- */
-export interface SessionConfig {
-  /** Session timeout (minutes), default 30 */
-  sessionTimeout: number
-  /** Max messages per session, default 50 */
-  maxMessagesPerSession: number
-  /** Delete session after timeout */
-  deleteAfterTimeout: boolean
-  /** Max active sessions per account, default 3 */
-  maxSessionsPerAccount: number
 }
 
 /**
@@ -753,8 +701,6 @@ export interface StoreSchema {
   logs: LogEntry[]
   /** Request log entries */
   requestLogs: RequestLogEntry[]
-  /** Session records */
-  sessions: SessionRecord[]
   /** Persistent statistics */
   statistics: PersistentStatistics
   /**
@@ -785,16 +731,6 @@ export interface StoreSchema {
    * 混进任何一边都会把两个计数域折成一个数。
    */
   aggregateCreditSnapshots: AggregateCreditSnapshots
-}
-
-/**
- * Default Session Configuration
- */
-export const DEFAULT_SESSION_CONFIG: SessionConfig = {
-  sessionTimeout: 30,
-  maxMessagesPerSession: 50,
-  deleteAfterTimeout: false,
-  maxSessionsPerAccount: 3,
 }
 
 /**
@@ -921,7 +857,6 @@ export const DEFAULT_CONFIG: AppConfig = {
   apiKeys: [],
   enableApiKey: false,
   oauthProxyMode: 'system',
-  sessionConfig: DEFAULT_SESSION_CONFIG,
   managementApi: DEFAULT_MANAGEMENT_API_CONFIG,
   contextManagement: DEFAULT_CONTEXT_MANAGEMENT_CONFIG,
   autoRouting: DEFAULT_AUTO_ROUTING_CONFIG,

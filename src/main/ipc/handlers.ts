@@ -57,18 +57,16 @@ import {
 import { autoRouter } from '../proxy/autoRouter'
 import type { RoutePreviewResult, RoutePreviewSample } from '../proxy/autoRouter'
 import { proxyStatusManager } from '../proxy/status'
-import { sessionManager } from '../proxy/sessionManager'
 import { ConfigManager } from '../store/config'
 import { generateManagementSecret } from '../proxy/middleware/managementAuth'
 import { buildRequestDiagnosticBundle } from '../logging/diagnosticBundle'
 import type { Provider, Account, ProxyStatus, ProviderCheckResult, OAuthResult, AuthType, CredentialField, LogLevel, LogEntry, ProviderVendor, ModelRoute, ModelCapabilityHint } from '../../shared/types'
 import type { RouteListResult, RouteMutationResult, RouteRemovalResult, RoutePoolSizesResult } from '../../shared/modelRouteName'
-import type { SessionConfig, SessionRecord, ManagementApiConfig, AppConfig } from '../store/types'
+import type { ManagementApiConfig, AppConfig } from '../store/types'
 import { DEFAULT_CONTEXT_MANAGEMENT_CONFIG } from '../store/types'
 import type { TlsStatus, TlsTrustResult } from '../../shared/types'
 import type { ProviderType } from '../oauth/types'
 import type { ModelsFetchFailure } from '../store/types'
-
 
 /**
  * 聚合同步的失败原因 → 供应商卡片那套 ModelsFetchFailure。
@@ -1642,48 +1640,6 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
       console.error('[APP_OPEN_EXTERNAL] Error:', error)
       throw error
     }
-  })
-
-  // ==================== Session Management Handlers ====================
-
-  registerMainHandler(IpcChannels.SESSION_GET_CONFIG, async (): Promise<SessionConfig> => {
-    return sessionManager.getSessionConfig()
-  })
-
-  registerMainHandler(IpcChannels.SESSION_UPDATE_CONFIG, async (_, updates: Partial<SessionConfig>): Promise<SessionConfig> => {
-    return sessionManager.updateSessionConfig(updates)
-  })
-
-  registerMainHandler(IpcChannels.SESSION_GET_ALL, async (): Promise<SessionRecord[]> => {
-    return sessionManager.getAllSessions()
-  })
-
-  registerMainHandler(IpcChannels.SESSION_GET_ACTIVE, async (): Promise<SessionRecord[]> => {
-    return sessionManager.getAllActiveSessions()
-  })
-
-  registerMainHandler(IpcChannels.SESSION_GET_BY_ID, async (_, id: string): Promise<SessionRecord | undefined> => {
-    return sessionManager.getSession(id)
-  })
-
-  registerMainHandler(IpcChannels.SESSION_GET_BY_ACCOUNT, async (_, accountId: string): Promise<SessionRecord[]> => {
-    return sessionManager.getSessionsByAccount(accountId)
-  })
-
-  registerMainHandler(IpcChannels.SESSION_GET_BY_PROVIDER, async (_, providerId: string): Promise<SessionRecord[]> => {
-    return sessionManager.getSessionsByProvider(providerId)
-  })
-
-  registerMainHandler(IpcChannels.SESSION_DELETE, async (_, id: string): Promise<boolean> => {
-    return sessionManager.deleteSession(id)
-  })
-
-  registerMainHandler(IpcChannels.SESSION_CLEAR_ALL, async (): Promise<void> => {
-    return sessionManager.clearAllSessions()
-  })
-
-  registerMainHandler(IpcChannels.SESSION_CLEAN_EXPIRED, async (): Promise<number> => {
-    return sessionManager.cleanExpiredSessions()
   })
 
   // ==================== Management API Handlers ====================

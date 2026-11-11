@@ -1350,13 +1350,6 @@
     "credits": "Made with ❤️ by the Open Source Community",
     "builtWith": "Built with Electron, React, TypeScript, Tailwind CSS, Zustand, Koa and other amazing open source projects."
   },
-  "session": {
-    "sessionSettings": "Session Settings",
-    "deleteAfterChat": "Chat History Cleanup",
-    "deleteAfterChatHint": "Automatically delete web-side chat history after each conversation",
-    "configSaved": "Session configuration saved",
-    "configSaveFailed": "Failed to save session configuration"
-  },
   "compression": {
     "title": "Context compression",
     "loading": "Reading the current settings… (no switch until the stored value arrives, so a default can never be saved as if it were the user's choice)",

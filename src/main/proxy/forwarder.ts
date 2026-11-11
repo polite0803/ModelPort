@@ -21,7 +21,6 @@ import {
   type RequestAttemptTrace,
 } from '../../shared/types'
 import { AnthropicAdapter } from './adapters/anthropic'
-import { sessionManager } from './sessionManager'
 import { loadBalancer } from './loadbalancer'
 import { autoRouter, type AutoCandidate } from './autoRouter'
 import {
@@ -138,10 +137,6 @@ import {
   reasoningEchoApplies,
   recordReasoningEchoCompletion,
 } from './reasoningEcho.ts'
-
-function shouldDeleteSession(): boolean {
-  return sessionManager.shouldDeleteAfterChat()
-}
 
 /** 上游 `Retry-After` 的原始值；数组按 HTTP 语义拼成单值，空白值视为没给。 */
 function retryAfterOf(headers: unknown): string | undefined {
@@ -1113,7 +1108,7 @@ export class RequestForwarder {
         provider.type === 'aggregate' && provider.aggregateId
           ? getAggregateEntry(provider.aggregateId)?.dropParams
           : undefined
-      const sanitizedBody = applyAggregateDropParams(body, dropRules) as typeof body
+      const sanitizedBody = applyAggregateDropParams(body, dropRules)
 
       const axiosConfig: AxiosRequestConfig = {
         method: 'POST',
@@ -1465,8 +1460,8 @@ export class RequestForwarder {
     request: ChatCompletionRequest,
     actualModel: string,
     account: Account
-  ): any {
-    const body: any = {
+  ): Record<string, unknown> {
+    const body: Record<string, unknown> = {
       model: actualModel,
       messages: request.messages,
       stream: request.stream || false,
@@ -1559,10 +1554,11 @@ export class RequestForwarder {
   /**
    * Extract Response Headers
    */
-  private extractHeaders(headers: any): Record<string, string> {
+  private extractHeaders(headers: unknown): Record<string, string> {
     const result: Record<string, string> = {}
+    if (headers === null || typeof headers !== 'object') return result
 
-    for (const [key, value] of Object.entries(headers)) {
+    for (const [key, value] of Object.entries(headers as Record<string, unknown>)) {
       if (typeof value === 'string') {
         result[key] = value
       } else if (Array.isArray(value)) {
@@ -1608,7 +1604,7 @@ export class RequestForwarder {
     url: string,
     method: string,
     headers: Record<string, string>,
-    body: any,
+    body: unknown,
     isStream: boolean = false
   ): Promise<ForwardResult> {
     const startTime = Date.now()

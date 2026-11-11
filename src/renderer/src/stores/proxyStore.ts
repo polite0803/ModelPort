@@ -216,7 +216,7 @@ export const useProxyStore = create<ProxyState>((set, get) => ({
     try {
       set({ isLoading: true, error: null })
       // 按字段提交：主进程的 `storeManager.updateConfig` 是唯一的合并与归一权威（它对
-      // sessionConfig / requestLogConfig / autoRouting 做深合并）。
+      // requestLogConfig / autoRouting 做深合并）。
       // 之前这条路是「取渲染层缓存的整份镜像 → 整对象覆盖 → 经通用 `store:set` raw 写盘」，
       // 它绕过归一，还会把主进程运行期更新的字段顶回这份镜像的旧值。
       await window.electronAPI.config.update(config)

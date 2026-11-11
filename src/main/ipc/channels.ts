@@ -194,17 +194,6 @@ export const IpcChannels = {
   APP_SET_TITLE_BAR_THEME: 'app:setTitleBarTheme',
   APP_OPEN_EXTERNAL: 'app:openExternal',
 
-  SESSION_GET_CONFIG: 'session:getConfig',
-  SESSION_UPDATE_CONFIG: 'session:updateConfig',
-  SESSION_GET_ALL: 'session:getAll',
-  SESSION_GET_ACTIVE: 'session:getActive',
-  SESSION_GET_BY_ID: 'session:getById',
-  SESSION_GET_BY_ACCOUNT: 'session:getByAccount',
-  SESSION_GET_BY_PROVIDER: 'session:getByProvider',
-  SESSION_DELETE: 'session:delete',
-  SESSION_CLEAR_ALL: 'session:clearAll',
-  SESSION_CLEAN_EXPIRED: 'session:cleanExpired',
-
   MANAGEMENT_API_GET_CONFIG: 'managementApi:getConfig',
   MANAGEMENT_API_UPDATE_CONFIG: 'managementApi:updateConfig',
   MANAGEMENT_API_GENERATE_SECRET: 'managementApi:generateSecret',

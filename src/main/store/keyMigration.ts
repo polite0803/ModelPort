@@ -30,7 +30,7 @@ export function planKeySetup(input: KeyPlanInput): KeyPlan {
   return input.dataFileExists ? 'migrate' : 'create'
 }
 
-const COUNTED_KEYS = ['providers', 'accounts', 'sessions'] as const
+const COUNTED_KEYS = ['providers', 'accounts'] as const
 
 /**
  * Checks a rewrite carried the whole payload over: every top-level key survives

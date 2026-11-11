@@ -1350,13 +1350,6 @@
     "credits": "由开源社区 ❤️ 制作",
     "builtWith": "基于 Electron、React、TypeScript、Tailwind CSS、Zustand、Koa 等优秀的开源项目构建。"
   },
-  "session": {
-    "sessionSettings": "会话设置",
-    "deleteAfterChat": "对话记录清理",
-    "deleteAfterChatHint": "每次对话结束后自动删除Web端对话记录",
-    "configSaved": "会话配置已保存",
-    "configSaveFailed": "保存会话配置失败"
-  },
   "compression": {
     "title": "上下文压缩",
     "loading": "正在读取当前设置…（读到之前不显示开关，避免把默认值当成现状保存）",

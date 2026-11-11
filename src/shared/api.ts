@@ -101,7 +101,13 @@ import type { DayTokenBucket, DayTokenSummary } from './tokenAccounting'
 
 /** How this object reaches the main process: IPC in the shell, HTTP against a daemon. */
 export interface ApiWire {
-  invoke(channel: string, ...args: unknown[]): Promise<any>
+  /**
+   * `T` is inferred from the caller's annotated return type, so a method that declares
+   * `Promise<ProxyStatus>` gets that shape instead of `any`. Call sites that pass the
+   * result straight through to an untyped consumer still get `unknown` - that is the
+   * point: an unchecked wire result has to be narrowed somewhere.
+   */
+  invoke<T = unknown>(channel: string, ...args: unknown[]): Promise<T>
   /** Returns nothing; `off` is the unsubscribe half, mirroring `ipcRenderer`. */
   on(channel: string, handler: (event: unknown, payload: any) => void): void
   off(channel: string, handler: (event: unknown, payload: any) => void): void
@@ -804,60 +810,6 @@ const routesAPI = {
     wire.invoke(IpcChannels.ROUTES_POOL_SIZES),
 }
 
-interface SessionConfig {
-  mode: 'single'
-  sessionTimeout: number
-  maxMessagesPerSession: number
-  deleteAfterTimeout: boolean
-  maxSessionsPerAccount: number
-}
-
-interface SessionRecord {
-  id: string
-  providerId: string
-  accountId: string
-  providerSessionId: string
-  parentMessageId?: string
-  sessionType: 'chat' | 'agent'
-  messages: any[]
-  createdAt: number
-  lastActiveAt: number
-  status: 'active' | 'expired' | 'deleted'
-  model?: string
-}
-
-const sessionAPI = {
-  getConfig: (): Promise<SessionConfig> => 
-    wire.invoke(IpcChannels.SESSION_GET_CONFIG),
-  
-  updateConfig: (config: Partial<SessionConfig>): Promise<void> => 
-    wire.invoke(IpcChannels.SESSION_UPDATE_CONFIG, config),
-  
-  getAll: (): Promise<SessionRecord[]> => 
-    wire.invoke(IpcChannels.SESSION_GET_ALL),
-  
-  getActive: (): Promise<SessionRecord[]> => 
-    wire.invoke(IpcChannels.SESSION_GET_ACTIVE),
-  
-  getById: (id: string): Promise<SessionRecord | undefined> => 
-    wire.invoke(IpcChannels.SESSION_GET_BY_ID, id),
-  
-  getByAccount: (accountId: string): Promise<SessionRecord[]> => 
-    wire.invoke(IpcChannels.SESSION_GET_BY_ACCOUNT, accountId),
-  
-  getByProvider: (providerId: string): Promise<SessionRecord[]> => 
-    wire.invoke(IpcChannels.SESSION_GET_BY_PROVIDER, providerId),
-  
-  delete: (id: string): Promise<boolean> => 
-    wire.invoke(IpcChannels.SESSION_DELETE, id),
-  
-  clearAll: (): Promise<void> => 
-    wire.invoke(IpcChannels.SESSION_CLEAR_ALL),
-  
-  cleanExpired: (): Promise<number> => 
-    wire.invoke(IpcChannels.SESSION_CLEAN_EXPIRED),
-}
-
 interface ManagementApiConfig {
   enableManagementApi: boolean
   managementApiSecret: string
@@ -1047,7 +999,6 @@ const electronAPI = {
   config: configAPI,
   anthropicDiscovery: anthropicDiscoveryAPI,
   routes: routesAPI,
-  session: sessionAPI,
   managementApi: managementApiAPI,
   contextManagement: contextManagementAPI,
   tray: trayAPI,

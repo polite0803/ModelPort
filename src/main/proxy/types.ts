@@ -293,7 +293,8 @@ export interface ForwardResult {
   success: boolean
   status?: number
   headers?: Record<string, string>
-  body?: any
+  /** Decoded upstream JSON. `unknown` on purpose: each reader narrows the fields it uses. */
+  body?: unknown
   stream?: NodeJS.ReadableStream
   skipTransform?: boolean
   error?: string

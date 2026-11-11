@@ -20,10 +20,6 @@ import {
   DEFAULT_CONFIG,
   BUILTIN_PROVIDERS,
   LogLevel,
-  SessionRecord,
-  SessionConfig,
-  DEFAULT_SESSION_CONFIG,
-  ChatMessage,
   RequestLogEntry,
   RequestLogConfig,
   PersistentStatistics,
@@ -494,7 +490,6 @@ class StoreManager {
       config: DEFAULT_CONFIG,
       logs: [],
       requestLogs: [],
-      sessions: [],
       statistics: DEFAULT_STATISTICS,
       // Per-day token counters start empty; an upgrade simply has no history.
       tokenUsage: {},
@@ -586,7 +581,15 @@ class StoreManager {
     // 退役掉的注入层在老 `data.json` 里留下的键。上面是 spread，死键会原样活到
     // `getConfig()`，而 `GET/PUT /v1/management/config/:key` 的门槛是 `key in config` ——
     // 于是 API 会报「这一格存在」，改它却没有任何代码读。读侧摘掉。
-    for (const retiredKey of ['toolCallingConfig', 'toolPromptConfig', 'trailingUserGuard', 'outputSteering']) {
+    for (const retiredKey of [
+      'toolCallingConfig',
+      'toolPromptConfig',
+      'trailingUserGuard',
+      'outputSteering',
+      // The session table (and the delete-after-chat switch that configured it) was
+      // retired with it: nothing populated the table, so the switch never had an effect.
+      'sessionConfig',
+    ]) {
       delete (normalized as unknown as Record<string, unknown>)[retiredKey]
     }
 
@@ -1438,13 +1441,6 @@ class StoreManager {
       ...updates,
     }
 
-    if (updates.sessionConfig && currentConfig.sessionConfig) {
-      newConfig.sessionConfig = {
-        ...currentConfig.sessionConfig,
-        ...updates.sessionConfig,
-      }
-    }
-
     if (updates.requestLogConfig) {
       newConfig.requestLogConfig = normalizeRequestLogConfig({
         ...currentConfig.requestLogConfig,
@@ -2233,229 +2229,6 @@ class StoreManager {
       stats.dailyStats = filteredDailyStats
       this.store!.set('statistics', stats)
     }
-  }
-
-  // ==================== System Prompts Operations ====================
-
-  // ==================== Session Operations ====================
-
-  /**
-   * Get Session Configuration
-   */
-  getSessionConfig(): SessionConfig {
-    this.ensureInitialized()
-    const config = this.store!.get('config') || DEFAULT_CONFIG
-    return config.sessionConfig || DEFAULT_SESSION_CONFIG
-  }
-
-  /**
-   * Update Session Configuration
-   */
-  updateSessionConfig(updates: Partial<SessionConfig>): SessionConfig {
-    this.ensureInitialized()
-    const currentConfig = this.store!.get('config') || DEFAULT_CONFIG
-    const newSessionConfig = {
-      ...(currentConfig.sessionConfig || DEFAULT_SESSION_CONFIG),
-      ...updates,
-    }
-    const newConfig = {
-      ...currentConfig,
-      sessionConfig: newSessionConfig,
-    }
-    this.store!.set('config', newConfig)
-    return newSessionConfig
-  }
-
-  /**
-   * Get All Sessions
-   */
-  getSessions(): SessionRecord[] {
-    this.ensureInitialized()
-    return this.store!.get('sessions') || []
-  }
-
-  /**
-   * Get Session By ID
-   */
-  getSessionById(id: string): SessionRecord | undefined {
-    this.ensureInitialized()
-    const sessions = this.store!.get('sessions') || []
-    return sessions.find((s: SessionRecord) => s.id === id)
-  }
-
-  /**
-   * Get Active Sessions
-   */
-  getActiveSessions(): SessionRecord[] {
-    this.ensureInitialized()
-    const sessions = this.store!.get('sessions') || []
-    const config = this.getSessionConfig()
-    const timeoutMs = config.sessionTimeout * 60 * 1000
-    const now = Date.now()
-    
-    return sessions.filter((s: SessionRecord) => 
-      s.status === 'active' && 
-      (now - s.lastActiveAt) < timeoutMs
-    )
-  }
-
-  /**
-   * Add Session
-   */
-  addSession(session: SessionRecord): void {
-    this.ensureInitialized()
-    const sessions = this.store!.get('sessions') || []
-    sessions.push(session)
-    this.store!.set('sessions', sessions)
-  }
-
-  /**
-   * Update Session
-   */
-  updateSession(id: string, updates: Partial<SessionRecord>): SessionRecord | null {
-    this.ensureInitialized()
-    const sessions = this.store!.get('sessions') || []
-    const index = sessions.findIndex((s: SessionRecord) => s.id === id)
-    
-    if (index === -1) {
-      return null
-    }
-    
-    sessions[index] = {
-      ...sessions[index],
-      ...updates,
-    }
-    
-    this.store!.set('sessions', sessions)
-    return sessions[index]
-  }
-
-  /**
-   * Add Message to Session
-   */
-  addMessageToSession(sessionId: string, message: ChatMessage): SessionRecord | null {
-    this.ensureInitialized()
-    const sessions = this.store!.get('sessions') || []
-    const index = sessions.findIndex((s: SessionRecord) => s.id === sessionId)
-    
-    if (index === -1) {
-      return null
-    }
-    
-    const config = this.getSessionConfig()
-    const session = sessions[index]
-    
-    if (session.messages.length >= config.maxMessagesPerSession) {
-      session.messages = session.messages.slice(-config.maxMessagesPerSession + 1)
-    }
-    
-    session.messages.push(message)
-    session.lastActiveAt = Date.now()
-    
-    sessions[index] = session
-    this.store!.set('sessions', sessions)
-    return session
-  }
-
-  /**
-   * Delete Session
-   */
-  deleteSession(id: string): boolean {
-    this.ensureInitialized()
-    const sessions = this.store!.get('sessions') || []
-    const index = sessions.findIndex((s: SessionRecord) => s.id === id)
-    
-    if (index === -1) {
-      return false
-    }
-    
-    sessions.splice(index, 1)
-    this.store!.set('sessions', sessions)
-    return true
-  }
-
-  /**
-   * Mark Session as Expired
-   */
-  expireSession(id: string): SessionRecord | null {
-    return this.updateSession(id, { status: 'expired' })
-  }
-
-  /**
-   * Clean Expired Sessions
-   * Always delete sessions with 'expired' status
-   * For timed-out active sessions, behavior depends on deleteAfterTimeout config:
-   * - If true: Delete them from storage
-   * - If false: Mark them as 'expired' (will be deleted on next clean)
-   */
-  cleanExpiredSessions(): number {
-    this.ensureInitialized()
-    const sessions = this.store!.get('sessions') || []
-    const config = this.getSessionConfig()
-    const timeoutMs = config.sessionTimeout * 60 * 1000
-    const now = Date.now()
-    
-    let removedCount = 0
-    
-    // Always delete sessions that are already expired
-    let remainingSessions = sessions.filter((s: SessionRecord) => {
-      if (s.status === 'expired') {
-        removedCount++
-        return false
-      }
-      return true
-    })
-    
-    // Handle timed-out active sessions based on config
-    if (config.deleteAfterTimeout) {
-      // Delete timed-out sessions from storage
-      remainingSessions = remainingSessions.filter((s: SessionRecord) => {
-        if (s.status === 'active' && (now - s.lastActiveAt) >= timeoutMs) {
-          removedCount++
-          return false
-        }
-        return true
-      })
-    } else {
-      // Mark timed-out sessions as expired (will be deleted on next clean)
-      remainingSessions = remainingSessions.map((s: SessionRecord) => {
-        if (s.status === 'active' && (now - s.lastActiveAt) >= timeoutMs) {
-          removedCount++
-          return { ...s, status: 'expired' as const }
-        }
-        return s
-      })
-    }
-    
-    this.store!.set('sessions', remainingSessions)
-    
-    return removedCount
-  }
-
-  /**
-   * Get Sessions By Account ID
-   */
-  getSessionsByAccountId(accountId: string): SessionRecord[] {
-    this.ensureInitialized()
-    const sessions = this.store!.get('sessions') || []
-    return sessions.filter((s: SessionRecord) => s.accountId === accountId)
-  }
-
-  /**
-   * Get Sessions By Provider ID
-   */
-  getSessionsByProviderId(providerId: string): SessionRecord[] {
-    this.ensureInitialized()
-    const sessions = this.store!.get('sessions') || []
-    return sessions.filter((s: SessionRecord) => s.providerId === providerId)
-  }
-
-  /**
-   * Clear All Sessions
-   */
-  clearAllSessions(): void {
-    this.ensureInitialized()
-    this.store!.set('sessions', [])
   }
 
   // ==================== Model Management Operations ====================

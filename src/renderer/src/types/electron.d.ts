@@ -507,41 +507,6 @@ interface RoutesAPI {
   poolSizes: () => Promise<RoutePoolSizesResult>
 }
 
-interface SessionConfig {
-  mode: 'single'
-  sessionTimeout: number
-  maxMessagesPerSession: number
-  deleteAfterTimeout: boolean
-  maxSessionsPerAccount: number
-}
-
-interface SessionRecord {
-  id: string
-  providerId: string
-  accountId: string
-  providerSessionId: string
-  parentMessageId?: string
-  sessionType: 'chat' | 'agent'
-  messages: any[]
-  createdAt: number
-  lastActiveAt: number
-  status: 'active' | 'expired' | 'deleted'
-  model?: string
-}
-
-interface SessionAPI {
-  getConfig: () => Promise<SessionConfig>
-  updateConfig: (config: Partial<SessionConfig>) => Promise<void>
-  getAll: () => Promise<SessionRecord[]>
-  getActive: () => Promise<SessionRecord[]>
-  getById: (id: string) => Promise<SessionRecord | undefined>
-  getByAccount: (accountId: string) => Promise<SessionRecord[]>
-  getByProvider: (providerId: string) => Promise<SessionRecord[]>
-  delete: (id: string) => Promise<boolean>
-  clearAll: () => Promise<void>
-  cleanExpired: () => Promise<number>
-}
-
 interface RequestLogEntry {
   id: string
   timestamp: number
@@ -776,7 +741,6 @@ interface ElectronAPI {
   config: ConfigAPI
   anthropicDiscovery: AnthropicDiscoveryAPI
   routes: RoutesAPI
-  session: SessionAPI
   managementApi: ManagementApiAPI
   contextManagement: ContextManagementAPI
   tray: TrayAPI

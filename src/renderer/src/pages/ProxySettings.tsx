@@ -6,7 +6,6 @@ import {
   LoadBalanceConfig,
   ProxyStatus,
   AdvancedConfig,
-  SessionManagement,
 } from '@/components/proxy'
 import { ContextManagement } from '@/components/proxy/ContextManagement'
 import { CompressionSettings } from '@/components/proxy/CompressionSettings'
@@ -72,7 +71,6 @@ export function ProxySettings() {
         <TabsContent value="advanced">
           <div className="space-y-6">
             <AdvancedConfig />
-            <SessionManagement />
             <ContextManagement />
             <CompressionSettings />
             <PromptCacheSettings />

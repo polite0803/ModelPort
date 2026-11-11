@@ -765,7 +765,6 @@ export interface AppConfig {
   apiKeys: ApiKey[]
   enableApiKey: boolean
   oauthProxyMode: 'system' | 'none'
-  sessionConfig: SessionConfig
   managementApi: ManagementApiConfig
   contextManagement?: unknown
   /**
@@ -1110,13 +1109,6 @@ export interface ValidationResult {
     used?: number
     expiresAt?: number
   }
-}
-
-export interface SessionConfig {
-  sessionTimeout: number
-  maxMessagesPerSession: number
-  deleteAfterTimeout: boolean
-  maxSessionsPerAccount: number
 }
 
 /**
@@ -1609,7 +1601,6 @@ export interface ConfigUpdateRequest {
   retryCount?: number
   enableApiKey?: boolean
   oauthProxyMode?: 'system' | 'none'
-  sessionConfig?: SessionConfig
   managementApi?: ManagementApiConfig
   autoRouting?: Partial<AutoRoutingConfig>
   /** Route table written as a whole through `PUT /v1/management/config/routes`. */

@@ -15,7 +15,6 @@ import routes from './routes'
 import managementRoutes from './routes/management'
 import { proxyStatusManager } from './status'
 import { storeManager } from '../store/store'
-import { sessionManager } from './sessionManager'
 import {
   createHandshakeRejectionTracker,
   loadTlsMaterial,
@@ -701,7 +700,6 @@ export class ProxyServer {
       return false
     }
 
-    sessionManager.destroy()
     autoRouter.reset()
 
     const servers = [this.server, this.httpsServer].filter(

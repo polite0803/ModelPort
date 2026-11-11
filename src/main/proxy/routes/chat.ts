@@ -1123,7 +1123,10 @@ router.post('/completions', async (ctx: Context) => {
     // Read usage once: the log row and the quota ledger must show the same
     // numbers, and a second read of the same body is exactly how the two drift.
     const outputText = !request.stream
-      ? String((result.body as Record<string, any> | undefined)?.choices?.[0]?.message?.content ?? '')
+      ? String(
+          (result.body as { choices?: Array<{ message?: { content?: unknown } }> } | undefined)
+            ?.choices?.[0]?.message?.content ?? '',
+        )
       : ''
     const nonStreamReading = !request.stream
       ? readOrEstimateUsage(usageInputText(request), outputText, result.body)
@@ -1644,7 +1647,9 @@ router.post('/completions', async (ctx: Context) => {
       const requiresToolCall =
         request.tool_choice === 'required' ||
         (typeof request.tool_choice === 'object' && request.tool_choice?.type === 'function')
-      const bodyToolCalls = (result.body as any)?.choices?.[0]?.message?.tool_calls
+      const bodyToolCalls = (
+        result.body as { choices?: Array<{ message?: { tool_calls?: unknown } }> } | undefined
+      )?.choices?.[0]?.message?.tool_calls
       if (requiresToolCall && (!Array.isArray(bodyToolCalls) || bodyToolCalls.length === 0)) {
         ctx.set('X-ModelPort-Tool-Violation', 'required')
       }
