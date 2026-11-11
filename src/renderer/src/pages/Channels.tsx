@@ -467,7 +467,13 @@ export function Channels() {
     pollTimer.current = setTimeout(async () => {
       const result = await window.electronAPI.channels.rpc('login.poll', { accountId })
       const value = result.ok
-        ? result.value as { done?: boolean; success?: boolean; error?: string } | undefined
+        ? result.value as {
+          done?: boolean
+          success?: boolean
+          error?: string
+          duplicate?: boolean
+          existingAccountId?: string
+        } | undefined
         : undefined
       if (!result.ok) {
         setLogin(current => current === null ? null : { ...current, phase: 'failed', error: result.error?.message })
@@ -478,7 +484,8 @@ export function Channels() {
           loginPopup.current?.close()
           loginPopup.current = null
           setLogin(null)
-          toast({ title: t('channels.login.success') })
+          // 判为重复：新条目已被移除、原有账号仍在，如实提示而不是笼统「已添加」。
+          toast({ title: t(value.duplicate === true ? 'channels.login.duplicate' : 'channels.login.success') })
           void refresh()
           return
         }

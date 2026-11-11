@@ -1210,7 +1210,7 @@ export class CodeArtsAdapter extends LlmAdapter {
         // TPM 超限），而非 4xx——consumeSse 检测到可重试排队错误时抛
         // SseQueueRetryError，落入下方排队重试逻辑，与 TM.00001041 一致。
         try {
-          yield* this.consumeSse(response, options)
+          yield* this.consumeSse(response, options, isBenefitModel && !benefitHeaderDropped)
           break
         } catch (error) {
           if (error instanceof SseQuotaExhaustedError) {
@@ -1406,10 +1406,15 @@ export class CodeArtsAdapter extends LlmAdapter {
    * 本方法解析每个 SSE 事件的 `error_code`/`error_msg`：可重试的排队/限流
    * 错误抛 {@link SseQueueRetryError} 让外层重试循环按 TM.00001041 同等
    * 处理（10s 间隔重试整个 chat 请求）；不可重试错误抛普通 LlmError。
+   *
+   * @param sentBenefitHeader - 本次请求是否带了 `maas_type: benefit`。流内出现
+   *   未被额度/排队分支接住的错误时，它是「按 benefit 通道寻址失败」的唯一
+   *   结构化证据（见下方 benefit 判据），据此让外层去掉该头重试一次。
    */
   private async *consumeSse(
     response: Response,
     options: GenerateOptions,
+    sentBenefitHeader: boolean,
   ): AsyncIterable<StreamChunk> {
     if (!response.body) throw new LlmError('codearts: empty model response body', 'EMPTY_RESPONSE')
     // 块组装状态：文本 / 推理 / 工具调用各自拥有唯一
@@ -1682,6 +1687,12 @@ export class CodeArtsAdapter extends LlmAdapter {
             const message = typeof data.error_msg === 'string' && data.error_msg.length > 0
               ? data.error_msg
               : data.error_code
+            // 抛出给宿主/客户端的那一份**必须带上游 `error_code`**：只留 `error_msg`
+            // 会把 APIG 层（路径/环境未发布）与 InferHub 层（模型/权益）压成同一句
+            // 英文散文，2026-11-11 排查华为云 benefit 通路时正是这里断了取证。
+            const located = typeof data.error_msg === 'string' && data.error_msg.length > 0
+              ? `${data.error_code}: ${message}`
+              : message
             // ⚠️ 顺序不可颠倒：额度耗尽（InferHub.4291.200）必须**先**于排队判据
             // 检查。历史上它们混淆过一次 —— `4291` 被 `429` 的裸子串匹配吃掉，
             // 额度错误因此被当成「可重试的排队」，进入 30 分钟静默重试循环，
@@ -1694,11 +1705,25 @@ export class CodeArtsAdapter extends LlmAdapter {
             if (isSseQueueErrorCode(data.error_code)) {
               throw new SseQueueRetryError(data.error_code, message)
             }
-            if (data.error_code === CODEARTS_BENEFIT_NOT_FOUND_ERROR_CODE) {
-              // 账号没有 benefit 包（积分制账户）：交给 stream() 去掉该头重试
-              throw new LlmError(`codearts: ${message}`, BENEFIT_NOT_FOUND_CODE, { status: 200 })
+            if (data.error_code === CODEARTS_BENEFIT_NOT_FOUND_ERROR_CODE || sentBenefitHeader) {
+              // 账号没有 benefit 包（积分制账户）：交给 stream() 去掉该头重试一次。
+              //
+              // 判据扩展（2026-11-11 现网）：同一件事华为侧不一定回
+              // `InferHub.4004.200`，也会回 `The API does not exist or has not been
+              // published in the environment`（benefit 通道对该账号不存在，实测
+              // glm-5.3-flash 与 deepseek-v4.1-flash 同文案，同账号不带该头的
+              // openpangu-2.0-flash 正常出流）。按英文文案匹配换个措辞即失效，
+              // 故用**结构判据**：这一次确实带了 `maas_type: benefit`，而流内错误
+              // 没被上面的额度/排队分支接住 —— 先按「benefit 通道不可用」去头重试。
+              // 重试仍失败时抛出的是第二次的原文，本条不会被掩盖。
+              throw new LlmError(`codearts: ${located}`, BENEFIT_NOT_FOUND_CODE, { status: 200 })
             }
-            throw new LlmError(`codearts: ${message}`, 'INVALID_REQUEST', { status: 200 })
+            // 不带该头时的流内错误 = 该账号供不上这个模型，是确定性终态。原来的
+            // `status: 200` 到宿主只剩 502 `api_error`，网关于是按「可切换故障」把
+            // 同账号同模型再投一次（现网 attempts 两条完全相同），还可能给账号记
+            // 惩罚。404 是既有词汇里唯一表达「该渠道不提供该模型」的码（同
+            // gemini-adapter 的先例），且客户端侧 404 不惩罚账号。
+            throw new LlmError(`codearts: ${located}`, 'INVALID_REQUEST', { status: 404 })
           }
           const choice = data.choices?.[0]
           const delta = choice?.delta

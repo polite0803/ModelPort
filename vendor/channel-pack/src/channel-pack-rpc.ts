@@ -21,7 +21,7 @@ import { clientIdentitySnapshot, forceIdentityRefresh, type ClientIdentitySnapsh
 import { isSupportedProvider } from './channel-pack-store.js'
 import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { AccountPool } from './account-pool.js'
-import { allAccountsRateLimitedForModel } from './account-pool.js'
+import { DUPLICATE_NICKNAME_MARK, allAccountsRateLimitedForModel } from './account-pool.js'
 import { isGatewayEnabled } from './openai-gateway/config.js'
 import { collectGatewayModelDetails, collectGatewayModels, toGatewayModelIds, type GatewayModelSource } from './openai-gateway/models.js'
 import type { GatewayEffortView } from './openai-gateway/effort-view.js'
@@ -992,6 +992,165 @@ export interface ChannelPackRpcConfig {
 }
 
 /**
+ * 登录成功但判为重复的终态：`新账号 id → 既有账号 id`。
+ *
+ * 重复条目会被 {@link absorbDuplicateLogin} **删除**，所以 `login.poll` 不能再靠
+ * 「条目还在」判断成功 —— 那会退化成「done:false」并把前端拖到超时。
+ * 这张表让 poll 立刻返回「成功，但账号已存在」，前端据此提示而不是当成失败。
+ *
+ * 模块级而非请求级：它的生命周期与「一次登录」绑定，而 `login.poll` 是另一个
+ * 请求；表项由 poll 消费后立即删除，且账号 id 是随机生成的，不会跨实例误命中。
+ */
+const duplicateLogins = new Map<string, string>()
+
+/**
+ * 记一条「登录成功但判为重复」的终态。
+ *
+ * 前端可能直接关掉弹窗、不再 poll —— 给表一个上限，避免长期运行后无限增长。
+ */
+function rememberDuplicateLogin(id: string, existingId: string): void {
+  if (duplicateLogins.size >= 100) {
+    const oldest = duplicateLogins.keys().next()
+    if (oldest.done !== true) duplicateLogins.delete(oldest.value)
+  }
+  duplicateLogins.set(id, existingId)
+}
+
+/**
+ * 登录后去重的身份判据：`provider → 凭据里的**服务端下发**稳定标识字段`。
+ *
+ * ## 为什么不能用 `access_token`
+ *
+ * 每次重新登录都会换发新令牌 ⇒ 拿它判重会把同一账号判成不同账号，
+ * **永远去重不掉**。这与 zcode 的 `device_mid`（本插件随机生成、重登必变）
+ * 是同一个坑，那里的注释已写明教训。
+ *
+ * ## 缺字段 ⇒ 放弃去重，不报错
+ *
+ * 老凭据可能没有该字段（例如 zcode 的 `user_id` 是后补的）。此时**跳过**，
+ * 让账号照常添加 —— 宁可漏一次判重，也不能让用户添加不了账号。
+ *
+ * ## 为什么没有 minimax
+ *
+ * 它的 `access_token` 不是 JWT、`account_id` 恒 `undefined`（见
+ * `MinimaxCredential` 的注释），池里没有任何**稳定**身份值可用。宁可不做，
+ * 也不拿会漂移的值去删账号。
+ */
+const LOGIN_IDENTITY_FIELDS: Readonly<Record<string, string>> = {
+  codearts: 'access_key_id',
+  comate: 'license',
+  gemini: 'sub',
+  trae: 'uid',
+  cline: 'account_id',
+  qoder: 'uid',
+  qodercn: 'uid',
+  buddy: 'user_id',
+  workbuddy: 'user_id',
+  loomy: 'userid',
+  raccoon: 'user_id',
+  lobsterai: 'uid',
+  zcode: 'user_id',
+}
+
+/**
+ * 登录成功后的去重：同一身份已有**启用的**账号时，把本次新建的重复条目清掉。
+ *
+ * ## 为什么不沿用 zcode 原来的「停用 + 改名」
+ *
+ * 那只是让重复账号不参与选号，列表里仍然多一行、计数仍然偏大 —— 用户报障
+ * 的原话就是「多账户竟然没有去重」。本次新建条目是本轮登录**自己刚造出来的**，
+ * 删它不损失用户任何既有数据；原账号与它的排序/昵称/限流记录一概不动。
+ *
+ * ## 凭据先合并，再删新条目
+ *
+ * 新登录的凭据通常更新（zcode 的静态 JWT 尤其如此）。直接把新条目删掉会让
+ * 留下的账号继续用旧令牌，所以先把新凭据**合并进原账号的 ref**（同名字段新值
+ * 覆盖、既有额外字段保留），再删新条目。合并失败则退化为「停用新条目」——
+ * 两条同时参与选号才是必须避免的缺陷。
+ *
+ * ## 并发两次登录
+ *
+ * 判据是「匹配列表的**第一条**」：池内靠后的那条删自己，靠前的那条留下。
+ * 双方无论谁先执行，结论一致，不会出现两条互删。
+ *
+ * @returns 判为重复时返回原账号 id；不是重复返回 `undefined`。
+ */
+async function absorbDuplicateLogin(
+  ctx: Context,
+  pool: AccountPool,
+  params: {
+    provider: string
+    id: string
+    refName: string
+    /** 本次登录算出的展示补丁；判重成功时应用到**原账号**上。 */
+    patch?: Partial<Pick<ProviderAccountEntry, 'nickname' | 'expiresAt' | 'refreshable'>>
+  },
+): Promise<{ existingId: string } | undefined> {
+  const field = LOGIN_IDENTITY_FIELDS[params.provider]
+  if (field === undefined) return undefined
+  const resolved = await ctx.credentials.resolve(credentialRef(params.refName))
+  if (resolved === null || resolved === undefined) return undefined
+  let fresh: Record<string, unknown>
+  try {
+    const parsed = JSON.parse(resolved.value) as unknown
+    if (typeof parsed !== 'object' || parsed === null) return undefined
+    fresh = parsed as Record<string, unknown>
+  } catch {
+    return undefined
+  }
+  const identity = fresh[field]
+  if (typeof identity !== 'string' || identity.length === 0) return undefined
+  const matches = await pool.findAccountIdsByIdentityField(
+    params.provider, field, identity, { onlyEnabled: true },
+  )
+  const existingId = matches[0]
+  if (existingId === undefined || existingId === params.id) return undefined
+  const existing = pool.findAccount(existingId)
+  if (existing === undefined) return undefined
+
+  try {
+    const current = await ctx.credentials.resolve(credentialRef(existing.credentialRef))
+    let merged = JSON.stringify(fresh)
+    if (current !== null && current !== undefined) {
+      try {
+        const parsed = JSON.parse(current.value) as unknown
+        if (typeof parsed === 'object' && parsed !== null) {
+          // 既有凭据里可能有新凭据不带的字段（续期 token、运行时元数据等），必须保留。
+          merged = JSON.stringify({ ...parsed as Record<string, unknown>, ...fresh })
+        }
+      } catch {
+        // 既有凭据已损坏：用新登录结果整体覆盖是唯一可用的修法。
+      }
+    }
+    await ctx.credentials.set(credentialRef(existing.credentialRef), merged)
+  } catch (error) {
+    ctx.logger.warn(
+      `[channel-pack] ${params.provider} 账号 ${identity} 已存在于 ${existingId}，`
+      + `但凭据合并失败，改为停用新条目 ${params.id}：${String(error)}`,
+    )
+    await pool.updateAccount(params.id, {
+      nickname: `${params.patch?.nickname ?? params.id}${DUPLICATE_NICKNAME_MARK}`,
+      enabled: false,
+    }).catch(() => {})
+    rememberDuplicateLogin(params.id, existingId)
+    return { existingId }
+  }
+
+  // ⚠ 先记终态再删条目：poll 是另一个请求，若在两者之间到达，会看到
+  // 「条目不存在」而判成 done:false，把前端拖到超时。
+  rememberDuplicateLogin(params.id, existingId)
+  await pool.removeAccount(params.id)
+  if (params.patch !== undefined) {
+    await pool.updateAccount(existingId, params.patch).catch(() => {})
+  }
+  ctx.logger.warn(
+    `[channel-pack] ${params.provider} 账号 ${identity} 已存在于 ${existingId}，`
+    + `本次新建条目 ${params.id} 已自动移除（未重复添加）`,
+  )
+  return { existingId }
+}
+
+/**
  * 注册 Channel Pack 管理 API 端点。
  *
  * `connection` 服务只存在于 Web bundle；这里用**惰性注入**而非插件级静态
@@ -1161,6 +1320,20 @@ function registerChannelPackEndpoints(
     ctx.logger.warn('[channel-pack] connection.fetch not available, RPC endpoints not registered')
     return
   }
+
+  // 存量重复账号（同一身份在池里有多条启用记录）只**停用**、不删除：
+  // 自动删除用户账号与凭据不可逆，而停用已经能让它们退出选号与计数。
+  // 失败只记日志：这是展示层对账，不该挡住 RPC 注册。
+  void pool.disableDuplicateAccounts(LOGIN_IDENTITY_FIELDS).then((groups) => {
+    for (const group of groups) {
+      ctx.logger.warn(
+        `[channel-pack] ${group.provider} 存在重复账号：保留 ${group.keptId}，`
+        + `已停用 ${group.disabledIds.join(', ')}`,
+      )
+    }
+  }).catch((error: unknown) => {
+    ctx.logger.warn(`[channel-pack] 存量账号去重失败（不影响使用）：${String(error)}`)
+  })
 
   /**
    * Qoder **同协议族**成员：国际版与中国版共用同一组 RPC 实现，只换 `product`
@@ -1616,13 +1789,18 @@ function registerChannelPackEndpoints(
             await ctx.credentials.set(ref, flow.access)
             buddyAuth.scheduleRefresh()
             const credential = parseBuddyCredential(flow.access)
-            await pool.updateAccount(id, {
+            const patch = {
               nickname: credential?.nickname ?? id,
               // Buddy 的 expires_at 是字符串形式的毫秒时间戳，必须用
               // credentialExpiresAtMs 解析（Date.parse 对纯数字串会得到 NaN）。
               expiresAt: credential ? credentialExpiresAtMs(credential) : undefined,
               refreshable: Boolean(credential?.refresh_token),
-            })
+            }
+            if (await absorbDuplicateLogin(ctx, pool, {
+              provider: buddyProduct.id, id, refName, patch,
+            }) === undefined) {
+              await pool.updateAccount(id, patch)
+            }
           }).catch((error: unknown) => {
             ctx.logger.warn(`[channel-pack] background ${buddyProduct.id} login failed for ${id}: ${String(error)}`)
             // 登录失败：移除占位条目，避免留下无凭据的幽灵账号。
@@ -1644,13 +1822,16 @@ function registerChannelPackEndpoints(
           })
           started.result.then(async (loginResult) => {
             const credential = parseComateCredential(loginResult.access)
-            await pool.updateAccount(id, {
+            const patch = {
               nickname: credential?.displayName !== undefined && credential.displayName.length > 0
                 ? credential.displayName
                 : id,
               // License 不过期，也没有续期材料。
               refreshable: false,
-            })
+            }
+            if (await absorbDuplicateLogin(ctx, pool, { provider: COMATE.id, id, refName, patch }) === undefined) {
+              await pool.updateAccount(id, patch)
+            }
           }).catch((error: unknown) => {
             ctx.logger.warn(`[channel-pack] background comate login failed for ${id}: ${String(error)}`)
             void pool.removeAccount(id).catch(() => {})
@@ -1671,7 +1852,7 @@ function registerChannelPackEndpoints(
           })
           started.result.then(async (loginResult) => {
             const credential = parseCodeArtsCredential(loginResult.access)
-            await pool.updateAccount(id, {
+            const patch = {
               nickname: credential?.user_name !== undefined && credential.user_name.length > 0
                 ? credential.user_name
                 : id,
@@ -1679,7 +1860,10 @@ function registerChannelPackEndpoints(
                 ? (Number.isNaN(Date.parse(credential.expires_at)) ? undefined : Date.parse(credential.expires_at))
                 : undefined,
               refreshable: Boolean(credential?.refresh_token),
-            })
+            }
+            if (await absorbDuplicateLogin(ctx, pool, { provider: 'codearts', id, refName, patch }) === undefined) {
+              await pool.updateAccount(id, patch)
+            }
           }).catch((error: unknown) => {
             ctx.logger.warn(`[channel-pack] background codearts login failed for ${id}: ${String(error)}`)
             void pool.removeAccount(id).catch(() => {})
@@ -1699,13 +1883,16 @@ function registerChannelPackEndpoints(
           })
           started.result.then(async (loginResult) => {
             const credential = parseLobsteraiCredential(loginResult.access)
-            await pool.updateAccount(id, {
+            const patch = {
               // ⚠️ 用 `lobsteraiDisplayNickname`：服务端把**手机号本身**当昵称
               // 下发且只脱敏到「露末 4 位」，需归一化为末 2 位（用户要求）。
               nickname: lobsteraiDisplayNickname(credential, id),
               expiresAt: credential !== undefined ? lobsteraiCredentialExpiresAtMs(credential) : undefined,
               refreshable: credential !== undefined && isLobsteraiRefreshable(credential),
-            })
+            }
+            if (await absorbDuplicateLogin(ctx, pool, { provider: LOBSTERAI.id, id, refName, patch }) === undefined) {
+              await pool.updateAccount(id, patch)
+            }
           }).catch((error: unknown) => {
             ctx.logger.warn(`[channel-pack] background ${LOBSTERAI.id} login failed for ${id}: ${String(error)}`)
             void pool.removeAccount(id).catch(() => {})
@@ -1749,11 +1936,14 @@ function registerChannelPackEndpoints(
                 await ctx.credentials.set(credentialRef(refName), JSON.stringify(updated))
               }
             }
-            await pool.updateAccount(id, {
+            const patch = {
               nickname: nickname !== undefined && nickname.length > 0 ? nickname : id,
               expiresAt: credential !== undefined ? qoderCredentialExpiresAtMs(credential) : undefined,
               refreshable: credential !== undefined && isQoderRefreshable(credential),
-            })
+            }
+            if (await absorbDuplicateLogin(ctx, pool, { provider: product.id, id, refName, patch }) === undefined) {
+              await pool.updateAccount(id, patch)
+            }
           }).catch((error: unknown) => {
             ctx.logger.warn(`[channel-pack] background ${product.id} login failed for ${id}: ${String(error)}`)
             // 登录失败：移除占位条目，避免留下无凭据的幽灵账号
@@ -1776,14 +1966,17 @@ function registerChannelPackEndpoints(
           })
           started.result.then(async (loginResult) => {
             const credential = parseTraeCredential(loginResult.access)
-            await pool.updateAccount(id, {
+            const patch = {
               // ⚠️ 用 `traeDisplayNickname`（手机号优先）而非直接取 `nickname`：
               // 服务端 ScreenName 是**按 uid 自动生成的默认名**，多账号无法区分
               // （用户报障 2026-09-27）。见该函数的说明。
               nickname: traeDisplayNickname(credential, id),
               expiresAt: credential !== undefined ? traeCredentialExpiresAtMs(credential) : undefined,
               refreshable: credential !== undefined && isTraeRefreshable(credential),
-            })
+            }
+            if (await absorbDuplicateLogin(ctx, pool, { provider: TRAE.id, id, refName, patch }) === undefined) {
+              await pool.updateAccount(id, patch)
+            }
           }).catch((error: unknown) => {
             ctx.logger.warn(`[channel-pack] background ${TRAE.id} login failed for ${id}: ${String(error)}`)
             // 登录失败：移除占位条目，避免留下无凭据的幽灵账号
@@ -1813,13 +2006,16 @@ function registerChannelPackEndpoints(
           })
           started.result.then(async (loginResult) => {
             const credential = parseClineCredential(loginResult.access)
-            await pool.updateAccount(id, {
+            const patch = {
               nickname: credential?.nickname !== undefined && credential.nickname.length > 0
                 ? credential.nickname
                 : id,
               expiresAt: credential !== undefined ? clineCredentialExpiresAtMs(credential) : undefined,
               refreshable: credential !== undefined && isClineRefreshable(credential),
-            })
+            }
+            if (await absorbDuplicateLogin(ctx, pool, { provider: CLINE.id, id, refName, patch }) === undefined) {
+              await pool.updateAccount(id, patch)
+            }
           }).catch((error: unknown) => {
             ctx.logger.warn(`[channel-pack] background ${CLINE.id} login failed for ${id}: ${String(error)}`)
             // 登录失败：移除占位条目，避免留下无凭据的幽灵账号
@@ -1862,7 +2058,7 @@ function registerChannelPackEndpoints(
           started.result.then(async (login) => {
             const result = await loomy.persistWechatLogin(login, { refName })
             const credential = JSON.parse(result.access) as LoomyCredential
-            await pool.updateAccount(id, {
+            const patch = {
               // 用手机号尾号让多账号可区分（Loomy 无独立昵称接口；
               // 微信昵称可能有，优先用它）。
               nickname: login.nickname !== undefined && login.nickname.length > 0
@@ -1873,7 +2069,10 @@ function registerChannelPackEndpoints(
               expiresAt: result.expires > 0 ? result.expires : undefined,
               // ⚠️ 恒 false：Loomy 无续期端点。
               refreshable: false,
-            })
+            }
+            if (await absorbDuplicateLogin(ctx, pool, { provider: LOOMY.id, id, refName, patch }) === undefined) {
+              await pool.updateAccount(id, patch)
+            }
           }).catch((error: unknown) => {
             ctx.logger.warn(`[channel-pack] background ${LOOMY.id} wechat login failed for ${id}: ${String(error)}`)
             // 登录失败：移除占位条目，避免留下无凭据的幽灵账号
@@ -1913,7 +2112,7 @@ function registerChannelPackEndpoints(
           raccoonStarted.result.then(async (credential) => {
             const result = await raccoon.persistLogin(credential, { refName })
             const saved = JSON.parse(result.access) as RaccoonCredential
-            await pool.updateAccount(id, {
+            const patch = {
               // ⚠️ 服务端的 `name` 是**自动生成的默认名**（本机账号是
               // `RaccoonAva`，即「Raccoon」+ 随机串），微信扫码**不回传微信昵称**
               //（`wechat_bindings` 只有绑定 id 与时间，无昵称/头像）。
@@ -1928,7 +2127,10 @@ function registerChannelPackEndpoints(
               expiresAt: result.expires > 0 ? result.expires : undefined,
               // ⚠️ raccoon **有** refresh 端点，与 Loomy（恒 false）不同。
               refreshable: result.refreshable,
-            })
+            }
+            if (await absorbDuplicateLogin(ctx, pool, { provider: RACCOON.id, id, refName, patch }) === undefined) {
+              await pool.updateAccount(id, patch)
+            }
           }).catch((error: unknown) => {
             ctx.logger.warn(`[channel-pack] background ${RACCOON.id} login failed for ${id}: ${String(error)}`)
             // 登录失败：移除占位条目，避免留下无凭据的幽灵账号
@@ -2027,63 +2229,31 @@ function registerChannelPackEndpoints(
           })
           started.result.then(async (saved) => {
             /**
-             * ★★ **重复账号去重**（真实缺陷，2026-10-02）。
+             * ★★ **重复账号去重**（真实缺陷，2026-10-02 首次修，2026-11-11 收敛到共享实现）。
              *
-             * ## 为什么必须做
+             * 同一账号点两次「添加账号」曾得到**两条独立条目** —— 各自参与选号、
+             * 各自消耗额度，UI 上看起来像两个账号。
              *
-             * 同一账号点两次「添加账号」会得到**两条独立条目** ——
-             * 它们各自参与选号、各自消耗额度，而 UI 上看起来像两个账号
-             * （昵称也一样，无从分辨）。此前 `user_id` 甚至**没有被存进
-             * 凭据**，连判据都没有。
+             * ⚠ 判据必须是 `user_id`（服务端下发），**不能**用 `device_mid`
+             * （本插件随机生成，同一账号每次重登都会变 ⇒ 永远去重不掉）。
+             * 时机也必须在**登录成功之后**：登录前只有占位条目（无凭据、无
+             * `user_id`），无从判断。
              *
-             * ## 判据必须是 `user_id`，不能用 `device_mid`
-             *
-             * `device_mid` 在插件登录路径下由我们**随机生成**
-             * （`generateDeviceMid()`，实测其值不被服务端绑定校验）——
-             * **同一账号每次重新登录都会变**。拿它判重会把同一账号
-             * 判成不同账号，反而**永远去重不掉**。
-             * `user_id` 是**服务端下发**的稳定标识，才正确。
-             *
-             * ## 时机：必须在**登录成功之后**
-             *
-             * 登录前只有占位条目（无凭据、无 `user_id`），无从判断 ——
-             * 故去重放在这个回调里，不在 `addAccount` 之前。
-             *
-             * ## ⚠ 处置：**不删条目**，而是把它标成**停用**并改名
-             *
-             * 为什么不直接 `removeAccount(id)`：前端 `login.poll` 是靠
-             * 「条目还在 + 凭据已写入」判断登录成功的。
-             * **删掉条目会让它显示成「登录失败」**，而事实恰恰相反
-             * （登录成功了，只是这个账号已存在）—— 那会误导用户去反复重试。
-             *
-             * 停止则该条目：① 仍在列表里（`login.poll` 如实报告成功）；
-             * ② `enabled: false` ⇒ **不参与自动选号**（这是去重的实际效果）；
-             * ③ 昵称写明「重复」⇒ 用户一眼能看出发生了什么、可自行删除。
-             *
-             * ⚠ 保留**原来那条**（`existingId`）继续可用，不动它：它可能
-             * 已被排序、改名或承载限流记录，删它损失更大。
+             * 处置已从「停用新条目」改为共享的 `absorbDuplicateLogin`：
+             * 新条目是本轮登录自己刚造出来的，删它不损失既有数据；原账号的
+             * 排序/昵称/限流记录一概不动，且新凭据会先合并进原账号。
              */
-            const userId = saved.credential.user_id
             const label = saved.credential.account_label ?? id
-            if (typeof userId === 'string' && userId.length > 0) {
-              const existingId = await pool.findAccountIdByIdentityField(
-                ZCODE.id,
-                'user_id',
-                userId,
-              )
-              if (existingId.length > 0 && existingId !== id) {
-                ctx.logger.warn(
-                  `[channel-pack] zcode 该账号（user_id=${userId}）已存在于 ${existingId}，`
-                  + `新条目 ${id} 已自动停用（不参与选号）`,
-                )
-                await pool.updateAccount(id, {
-                  nickname: `ZCode ${label}（重复，已停用）`,
-                  enabled: false,
-                })
-                return
-              }
+            // 判据必须是 `user_id`（服务端下发）；`device_mid` 每次登录都会变，
+            // 不能当账号标识 —— 见 `LOGIN_IDENTITY_FIELDS` 与 `absorbDuplicateLogin`。
+            if (await absorbDuplicateLogin(ctx, pool, {
+              provider: ZCODE.id,
+              id,
+              refName,
+              patch: { nickname: `ZCode ${label}` },
+            }) === undefined) {
+              await pool.updateAccount(id, { nickname: `ZCode ${label}` })
             }
-            await pool.updateAccount(id, { nickname: `ZCode ${label}` })
           }).catch((error: unknown) => {
             ctx.logger.warn(`[channel-pack] background ${ZCODE.id} login failed for ${id}: ${String(error)}`)
             // 登录失败：移除占位条目，避免留下无凭据的幽灵账号
@@ -2124,7 +2294,7 @@ function registerChannelPackEndpoints(
             // ⚠️ 不接收 `persistLogin` 的返回值：它给的是 OIDC `sub`，只适合当稳定
             // 标识。展示名一律走 `geminiAccountLabel`（见下）。
             await gemini.persistLogin(credential, { refName })
-            await pool.updateAccount(id, {
+            const patch = {
               // ⚠️ 用 `geminiAccountLabel`（邮箱优先）而非 `accountId.slice(0, 8)`：
               // `sub` 是 21 位数字，截前 8 位得到 `Gemini 10500520` 这种**不可辨认**
               // 的展示名（用户报障 2026-10-03）。`sub` 的价值是「稳定标识」，不是
@@ -2138,7 +2308,10 @@ function registerChannelPackEndpoints(
               // ⚠️ Google OAuth 默认 `access_type=offline`，故 refresh_token
               // 必定下发；这里仍按凭据本体如实判定，不写死 true。
               refreshable: isGeminiRefreshable(credential),
-            })
+            }
+            if (await absorbDuplicateLogin(ctx, pool, { provider: GEMINI.id, id, refName, patch }) === undefined) {
+              await pool.updateAccount(id, patch)
+            }
             pendingLoginFailures.delete(id)
           }).catch((error: unknown) => {
             const reason = error instanceof Error ? error.message : String(error)
@@ -2342,6 +2515,15 @@ function registerChannelPackEndpoints(
 
       case 'login.poll': {
         const req = payload as RpcPollLoginRequest
+        // 判为重复时新条目已删除，只能靠这张表如实回答「成功，但账号已存在」。
+        const existingAccountId = duplicateLogins.get(req.accountId)
+        if (existingAccountId !== undefined) {
+          duplicateLogins.delete(req.accountId)
+          return {
+            ok: true,
+            value: { done: true, success: true, duplicate: true, existingAccountId } satisfies RpcPollLoginResponse,
+          }
+        }
         const failure = pendingLoginFailures.get(req.accountId)
         if (failure !== undefined) {
           pendingLoginFailures.delete(req.accountId)

@@ -177,6 +177,10 @@ export interface RpcPollLoginResponse {
   done: boolean
   success?: boolean
   error?: string
+  /** 登录成功、但该账号已在池中：本次新建条目已被移除，未重复添加。 */
+  duplicate?: boolean
+  /** `duplicate` 为真时，保留的那个既有账号 id。 */
+  existingAccountId?: string
 }
 
 export interface RpcUpdateAccountRequest {

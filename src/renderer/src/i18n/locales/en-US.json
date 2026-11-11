@@ -1869,6 +1869,7 @@
       "waiting": "Waiting for you to finish signing in…",
       "manualHint": "If the browser did not open, open the sign-in page manually:",
       "success": "Account added",
+      "duplicate": "This account already exists — it was not added again",
       "failed": "Sign-in failed",
       "timeout": "Sign-in timed out, please retry",
       "hint": {

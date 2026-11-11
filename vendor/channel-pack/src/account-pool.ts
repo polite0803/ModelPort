@@ -31,6 +31,14 @@ declare module '@deepseek-ai/cordis' {
 const EMPTY_MODEL_SET: ReadonlySet<string> = new Set<string>()
 
 /**
+ * 存量重复账号的昵称标记。
+ *
+ * 只用于「已经躺在池里的重复条目」：停用而不删除（凭据不丢，可逆），
+ * 但昵称必须写清楚，否则列表里看起来仍是两个独立账号。
+ */
+export const DUPLICATE_NICKNAME_MARK = '（重复，已停用）'
+
+/**
  * 判定「某 provider 的启用账号是否**全部**因目标模型处于限流期」。
  *
  * ## 为什么需要它
@@ -799,17 +807,87 @@ export class AccountPool {
     field: string,
     identity: string,
   ): Promise<string> {
-    if (identity.length === 0) return ''
+    const ids = await this.findAccountIdsByIdentityField(provider, field, identity)
+    return ids[0] ?? ''
+  }
+
+  /**
+   * 按身份字段列出**全部**匹配账号 id（保持池内顺序）。
+   *
+   * 去重必须拿到全部匹配项而不能只看第一条：并发两次登录时，两条新条目
+   * 都还没被判重，只有让**池内靠后**的那条删自己，双方才会得出同一个结论
+   *（见 `channel-pack-rpc.ts::absorbDuplicateLogin`）。
+   *
+   * @param options.onlyEnabled - 只看启用账号。登录去重必须传 `true`：
+   *   用户停用一个账号后重新登录，意图是「重新启用它」，不该被那条停用记录
+   *   挡住（`findAccountIdByIdentityField` 默认含停用账号，是给选号归因用的）。
+   */
+  async findAccountIdsByIdentityField(
+    provider: string,
+    field: string,
+    identity: string,
+    options: { onlyEnabled?: boolean } = {},
+  ): Promise<string[]> {
+    if (identity.length === 0) return []
+    const ids: string[] = []
     for (const entry of this.readAccounts()) {
       if (entry.provider !== provider) continue
+      if (options.onlyEnabled === true && !entry.enabled) continue
       const resolved = await this.resolveCredentialByRef(entry.credentialRef)
       if (resolved === undefined) continue
       const value = resolved[field]
       // ⚠ 缺失该字段 ⇒ 无法判断，**跳过**（不是「不匹配」）。
       if (typeof value !== 'string' || value.length === 0) continue
-      if (value === identity) return entry.id
+      if (value === identity) ids.push(entry.id)
     }
-    return ''
+    return ids
+  }
+
+  /**
+   * 存量账号的身份去重（启动时执行一次）。
+   *
+   * 同一 provider 下身份字段相同、且都处于**启用**态的多条账号，保留池内
+   * 顺序第一条（= 选号优先级最高），其余**停用并标注**。不删除条目、不碰凭据：
+   * 自动删除用户账号与其凭据不可逆，停用已经足以让它们退出选号与计数。
+   *
+   * ⚠ 已带 {@link DUPLICATE_NICKNAME_MARK} 的条目跳过 —— 用户手动重新启用
+   * 过的账号，每次启动都被悄悄停用会变成「开关失灵」。
+   *
+   * @param identities - `provider → 凭据里的稳定身份字段`。缺表的 provider 不参与。
+   * @returns 实际停用了几条（供调用方记一条日志）。
+   */
+  async disableDuplicateAccounts(
+    identities: Readonly<Record<string, string>>,
+  ): Promise<Array<{ provider: string; keptId: string; disabledIds: string[] }>> {
+    const kept = new Map<string, { provider: string; keptId: string; disabledIds: string[] }>()
+    const patch = new Map<string, string>()
+    for (const entry of this.readAccounts()) {
+      if (!entry.enabled) continue
+      const field = identities[entry.provider]
+      if (field === undefined) continue
+      const resolved = await this.resolveCredentialByRef(entry.credentialRef)
+      const identity = resolved?.[field]
+      if (typeof identity !== 'string' || identity.length === 0) continue
+      const key = `${entry.provider}\u0000${identity}`
+      const group = kept.get(key)
+      if (group === undefined) {
+        kept.set(key, { provider: entry.provider, keptId: entry.id, disabledIds: [] })
+        continue
+      }
+      if (entry.nickname.includes(DUPLICATE_NICKNAME_MARK)) continue
+      group.disabledIds.push(entry.id)
+      patch.set(entry.id, `${entry.nickname}${DUPLICATE_NICKNAME_MARK}`)
+    }
+    const groups = [...kept.values()].filter(group => group.disabledIds.length > 0)
+    if (groups.length === 0) return []
+    // 扫描期间可能有并发写：把补丁合并到**当前**副本上再整体写回（与
+    // `queueStoreSave` 的「取一次快照」约定一致）。
+    const next = this.readAccounts().map(entry => {
+      const nickname = patch.get(entry.id)
+      return nickname === undefined ? entry : { ...entry, nickname, enabled: false }
+    })
+    await this.writeAccounts(next)
+    return groups
   }
 
   /** 按 id 查找账号条目（含已停用账号）。 */
