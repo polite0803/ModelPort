@@ -351,6 +351,13 @@ WSL-remote session the shell is already on the Linux host - never wrap commands 
 BYOK / third-party models are only available in the two local-workspace rows; the Qoder SSH
 workspace mode is deliberately not used.
 
+Local-environment rules shared by all three rows: never copy or clone this checkout to
+`C:` or `D:` for a local build (changes would not flow back, and `sdk.dir`, `gradlew` and
+native modules are Linux-only); never run builds, tests, adb or a repo-wide search on
+`Z:` / SMB. The cross-project entry point is
+`/home/polit/projects/scripts/wsl-project.sh` (`list` / `env` / `init` / `check`), and
+ModelPort's Qoder SSH templates live in `.qoder/rules/00-execution-ssh.md`.
+
 ### CodeBuddy WSL remote only
 
 This file carries the project-level constraints for `/home/polit/projects/ModelPort`.
