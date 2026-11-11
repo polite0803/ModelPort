@@ -399,6 +399,13 @@ export interface AppConfig {
    */
   modelListRefresh?: ModelListRefreshConfig
   /**
+   * 按渠道的「走系统代理」开关（`shared/types.ts` 同一字段，两处都要写）。
+   *
+   * 开 = 沿用应用已探到的系统代理链；关 = 该渠道直连。缺省条目按「开」读 ——
+   * 升级前所有渠道都走自动出口，缺省读成「关」等于静默改掉出网路径。
+   */
+  channelSystemProxy?: Record<string, boolean>
+  /**
    * 免验证（keyless）聚合条目的自动开通黑名单：用户显式删除过的条目 id 记在这里，
    * 启动期自动开通不再复活它们。
    */

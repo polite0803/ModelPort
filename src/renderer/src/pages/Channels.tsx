@@ -28,6 +28,7 @@ import type {
   ChannelView,
 } from '../../../shared/channels'
 import { channelAddFlowOf, channelModelDisplayName } from '../../../shared/channels'
+import { channelUsesSystemProxy } from '../../../shared/channelProxy'
 import type { CatalogAdoption } from '../../../shared/modelCatalog'
 import type { ModelMetadata } from '../../../shared/modelMetadata'
 import { CatalogScopeBatchButton } from '@/components/models/CatalogScopeBatchButton'
@@ -233,6 +234,11 @@ export function Channels() {
   const [autoCheckinBusy, setAutoCheckinBusy] = useState(false)
   const [autoGrowth, setAutoGrowth] = useState<RpcAutoGrowthState | null>(null)
   const [autoGrowthBusy, setAutoGrowthBusy] = useState(false)
+  /**
+   * 按渠道「走系统代理」开关。`null` = 配置还没读回来：此时开关禁用，
+   * 不拿默认值冒充用户的真实设置（配置表单不得在配置加载前渲染可编辑控件）。
+   */
+  const [systemProxy, setSystemProxy] = useState<Record<string, boolean> | null>(null)
   const [login, setLogin] = useState<LoginState | null>(null)
   const [credentialAdd, setCredentialAdd] = useState<CredentialAddState | null>(null)
   const [traeDevice, setTraeDevice] = useState<TraeDeviceState | null>(null)
@@ -447,6 +453,26 @@ export function Channels() {
     return unsubscribe
   }, [refresh, scheduleRefresh])
 
+  // 「走系统代理」是整份配置里的一格；写入走 `config.update`，其它窗口/管理 API
+  // 改了同一格时靠 `CONFIG_CHANGED` 同步，不在这里维护第二份状态。
+  useEffect(() => {
+    let cancelled = false
+    void window.electronAPI.config.get()
+      .then(config => {
+        if (!cancelled) setSystemProxy(config.channelSystemProxy ?? {})
+      })
+      .catch(() => {
+        // 读不到时保持 `null`（开关禁用）：如实显示「还不知道」，而不是画成全开。
+      })
+    const unsubscribe = window.electronAPI.config.onConfigChanged(config => {
+      setSystemProxy(config.channelSystemProxy ?? {})
+    })
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [])
+
   useEffect(() => () => {
     if (pollTimer.current !== null) clearTimeout(pollTimer.current)
     if (autoCheckinTimer.current !== null) clearTimeout(autoCheckinTimer.current)
@@ -657,6 +683,30 @@ export function Channels() {
       return
     }
     await refresh()
+  }
+
+  /**
+   * 切换某渠道的「走系统代理」。缺省条目读作「开」，所以打开时删掉键、
+   * 关闭时写 `false` —— 配置里只留用户显式关掉的例外，升级带来的老配置不用迁移。
+   * 写入失败（校验拒绝）整体回滚并报错，绝不留下「界面关了、实际还在走代理」。
+   */
+  const toggleSystemProxy = async (channel: ChannelView, enabled: boolean) => {
+    const previous = systemProxy
+    if (previous === null) return
+    const next = { ...previous }
+    if (enabled) delete next[channel.id]
+    else next[channel.id] = false
+    setSystemProxy(next)
+    try {
+      await window.electronAPI.config.update({ channelSystemProxy: next })
+    } catch (error) {
+      setSystemProxy(previous)
+      toast({
+        title: t('common.error'),
+        description: error instanceof Error ? error.message : t('channels.systemProxy.saveFailed'),
+        variant: 'destructive',
+      })
+    }
   }
 
   const toggleAccount = async (channel: ChannelView, accountId: string, enabled: boolean) => {
@@ -1220,6 +1270,10 @@ export function Channels() {
           const remaining = creditState !== undefined && creditState !== 'loading'
             ? creditState.remaining
             : undefined
+          // 整个渠道只有 token 计量的账号时，表头与数字都得改口径 —— 顶着
+          // 「剩余积分」显示一个 token 数，等于把两个不可比的计数域并成一句话。
+          const tokenHeader = creditState !== undefined && creditState !== 'loading'
+            && creditState.remainingUnit === 'token'
           const modelState = models[channel.id]
           const modelList = Array.isArray(modelState) ? modelState : []
           const modelsOpen = openModels[channel.id] === true
@@ -1308,6 +1362,19 @@ export function Channels() {
               <CardContent className="flex flex-1 flex-col gap-4">
                 <p className="text-sm text-muted-foreground">{channel.description}</p>
 
+                {/* 出口开关与渠道启停无关：停用的渠道也允许先设好出网方式。 */}
+                <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="text-sm">{t('channels.systemProxy.label')}</div>
+                    <div className="text-xs text-muted-foreground">{t('channels.systemProxy.hint')}</div>
+                  </div>
+                  <Switch
+                    checked={channelUsesSystemProxy(systemProxy ?? undefined, channel.id)}
+                    disabled={systemProxy === null}
+                    onCheckedChange={checked => void toggleSystemProxy(channel, checked)}
+                  />
+                </div>
+
                 <div className="grid grid-cols-3 gap-2 rounded-md border p-3 text-center">
                   <div>
                     <div className="text-xs text-muted-foreground">{t('channels.statAccounts')}</div>
@@ -1329,7 +1396,9 @@ export function Channels() {
                     )}
                   </div>
                   <div>
-                    <div className="text-xs text-muted-foreground">{t('channels.statCredits')}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {tokenHeader ? t('channels.statCreditsToken') : t('channels.statCredits')}
+                    </div>
                     <div
                       className="font-medium"
                       title={creditState !== undefined && creditState !== 'loading' ? creditState.note : undefined}
@@ -1337,7 +1406,9 @@ export function Channels() {
                       {creditState === 'loading'
                         ? <Loader2 className="mx-auto h-4 w-4 animate-spin" />
                         : remaining !== undefined
-                          ? remaining
+                          ? tokenHeader
+                            ? <>{remaining} <span className="text-muted-foreground">token</span></>
+                            : remaining
                           : creditState !== undefined && creditState.status === 'available'
                             ? t('channels.creditsAvailable')
                             : creditState !== undefined && creditState.status === 'limited'
@@ -1363,7 +1434,11 @@ export function Channels() {
                       <span>
                         {creditState.reported === 0
                           ? t('channels.creditsStatus')
-                          : t('channels.statCredits')}
+                          : creditState.mixedUnits === true
+                            ? t('channels.creditsQuota')
+                            : creditState.remainingUnit === 'token'
+                              ? t('channels.statCreditsToken')
+                              : t('channels.statCredits')}
                       </span>
                       {creditState.reported > 0 && (
                         <span>
@@ -1374,6 +1449,9 @@ export function Channels() {
                         </span>
                       )}
                     </div>
+                    {creditState.mixedUnits === true && (
+                      <p className="mb-1 text-xs text-muted-foreground">{t('channels.creditsMixedNote')}</p>
+                    )}
                     {creditState.error !== undefined && (
                       <p className="mb-1 text-xs text-destructive">{creditState.error}</p>
                     )}
@@ -1414,7 +1492,14 @@ export function Channels() {
                                 )
                                 : statusLabel !== undefined
                                   ? <span className="font-medium">{statusLabel}</span>
-                                  : <span className="font-medium">{account.remaining ?? '—'}</span>}
+                                  : (
+                                    <span className="font-medium">
+                                      {account.remaining ?? '—'}
+                                      {account.remaining !== undefined && account.unit === 'token' && (
+                                        <span className="text-muted-foreground"> token</span>
+                                      )}
+                                    </span>
+                                  )}
                             </div>
                             {note.length > 0 && (
                               <p className="truncate text-muted-foreground" title={note}>{note}</p>

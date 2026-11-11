@@ -197,6 +197,21 @@ export interface CreditBalance {
    * UI 可以据此提示「另有 N 已失效」，既不误导也不丢信息。
    */
   expiredTotal: number
+  /**
+   * 这份余额的**计量口径**（`'token'` / `'credit'`，缺省按积分）。
+   *
+   * ## 为什么要在汇总层带单位（2026-11-11 华为云码道真实缺陷）
+   *
+   * 同一个渠道下两个账号可以是两种计费口径：`individual.trial` 回积分
+   * （`usageTotalPackageCredit`，实测剩 4428.19），`agent.trial`(Free) 只回
+   * **token 配额**（`usageTokenChatMessages`，实测 500 万里已用 45.4 万）。
+   * 宿主算渠道总额时把各账号的 `total` 直接相加 —— 不带上单位就会算出
+   * 「4428.19 + 4545965」这种既不可比也无意义的数，界面还顶着「剩余积分」的标签。
+   *
+   * ⇒ 消费方规则：**只有同口径的余额才能相加**；不同口径必须分行显示并各自带单位
+   * （与 {@link normalizeCreditUnit} 的「token 与积分不互相折算」同一条裁定）。
+   */
+  unit?: 'token' | 'credit'
 }
 
 /**

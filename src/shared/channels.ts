@@ -185,8 +185,13 @@ export interface ChannelCredits {  /**
    *
    * 停用账号的余额不出现在这里（它们的读数仍在 `accounts` 明细行里）——
    * 否则启停一个账号渠道总额不会变化，用户看不出积分的加或减。
+   *
+   * ⚠️ 口径：**只累计积分账号**。token 计量的账号（`unit: 'token'`）单列在明细行，
+   * 与积分相加会得到无意义的数，见 `mixedUnits`。
    */
   remaining?: number
+  /** `remaining` 的口径；缺省 `'credit'`（表头写「剩余积分」）。只在整渠道都是 token 计量时给出。 */
+  remainingUnit?: 'token' | 'credit'
   /** Accounts that answered with a usable balance. */
   reported: number
   /** The channel does not expose a balance endpoint at all. */
@@ -205,12 +210,22 @@ export interface ChannelCredits {  /**
   note?: string
   /** Whole-call failure (network, credentials); per-account causes live on the rows. */
   error?: string
+  /**
+   * 本渠道同时存在**积分与 token 两种计量口径**（2026-11-11 华为云码道）。
+   *
+   * 为 `true` 时 `remaining` 只含积分账号，token 账号的读数在 `accounts` 明细行里
+   * 各自带单位显示 —— 两个口径的数量级差三个数量级，相加得到的数没有任何含义，
+   * 但把它们收敛成同一个数又正是用户最容易误读的地方，故界面必须显式说明。
+   */
+  mixedUnits?: boolean
   accounts: Array<{
     accountId: string
     nickname: string
     /** `false` when the account is parked; its reading is shown but not summed into `remaining`. */
     enabled?: boolean
     remaining?: number
+    /** `remaining` 的口径；缺省 `'credit'`。`'token'` 的行不参与渠道总额相加。 */
+    unit?: 'token' | 'credit'
     /** 无数字余额时的额度状态（目前用于 Comate 的免费额度）。 */
     status?: 'limited' | 'available' | 'unknown'
     /** 状态说明（上游文案 / 最近一次请求结果），用于明细行与 tooltip。 */
@@ -220,6 +235,91 @@ export interface ChannelCredits {  /**
     /** Why this account returned nothing (upstream wording first, e.g. "未登录"). */
     error?: string
   }>
+}
+
+/** `credits.balances` 返回的账号行（worker 版本不同，字段都可能缺，故全部可选）。 */
+export interface CreditsBalanceRow {
+  accountId?: string
+  nickname?: string
+  enabled?: boolean
+  balance?: { total?: number; unit?: string } | null
+  status?: unknown
+  note?: unknown
+  lastAt?: unknown
+  error?: unknown
+}
+
+/** 渠道级附带读数（Comate 这类没有数字余额、只有额度状态的渠道）。 */
+export interface CreditsChannelState {
+  status?: unknown
+  note?: unknown
+}
+
+const quotaStatusOf = (value: unknown): 'limited' | 'available' | 'unknown' | undefined =>
+  value === 'limited' || value === 'available' || value === 'unknown' ? value : undefined
+
+/**
+ * 把 `credits.balances` 的账号行折成面板用的 {@link ChannelCredits}。
+ *
+ * 三条判据各自对应一次真实缺陷，改动时必须保持：
+ * 1. **只有启用账号进总额**（2026-10-30：启停一个号渠道总额纹丝不动）；
+ * 2. **积分与 token 分桶**（2026-11-11 华为云码道：老计费账号只回 token 配额，
+ *    与积分相加会得到「4428.19 + 4545965」这种没有含义的数，而表头写着「剩余积分」）；
+ * 3. **逐账号读数与失败原因并存**（2026-11-01：只给渠道总额时，一个号查询失败
+ *    表现为「总额凭空少一截」，用户不知道少了谁、为什么少）。
+ */
+export function summarizeChannelCredits(
+  rows: readonly CreditsBalanceRow[],
+  channel?: CreditsChannelState,
+): ChannelCredits {
+  let creditTotal = 0
+  let tokenTotal = 0
+  let creditCount = 0
+  let tokenCount = 0
+  let reported = 0
+  const accounts = rows.map(row => {
+    const remaining = typeof row.balance?.total === 'number' ? row.balance.total : undefined
+    const unit: 'token' | 'credit' = row.balance?.unit === 'token' ? 'token' : 'credit'
+    if (remaining !== undefined) {
+      reported += 1
+      if (row.enabled !== false) {
+        if (unit === 'token') {
+          tokenTotal += remaining
+          tokenCount += 1
+        } else {
+          creditTotal += remaining
+          creditCount += 1
+        }
+      }
+    }
+    const status = quotaStatusOf(row.status)
+    return {
+      accountId: String(row.accountId ?? ''),
+      nickname: String(row.nickname ?? row.accountId ?? ''),
+      enabled: row.enabled !== false,
+      remaining,
+      ...remaining !== undefined ? { unit } : {},
+      ...status !== undefined ? { status } : {},
+      ...typeof row.note === 'string' && row.note.length > 0 ? { note: row.note } : {},
+      ...typeof row.lastAt === 'number' && Number.isFinite(row.lastAt) ? { lastAt: row.lastAt } : {},
+      error: typeof row.error === 'string' ? row.error : undefined,
+    }
+  })
+  const status = quotaStatusOf(channel?.status)
+  // 表头写的是「剩余积分」，故积分桶优先；整渠道只有 token 时改报 token 并带单位，
+  // 两桶都有时另一桶只出现在明细行里（`mixedUnits` 让界面把这件事说明白）。
+  const tokenOnly = creditCount === 0 && tokenCount > 0
+  return {
+    reported,
+    accounts,
+    ...(creditCount > 0 || tokenCount > 0
+      ? { remaining: Math.round((creditCount > 0 ? creditTotal : tokenTotal) * 100) / 100 }
+      : {}),
+    ...tokenOnly ? { remainingUnit: 'token' as const } : {},
+    ...creditCount > 0 && tokenCount > 0 ? { mixedUnits: true } : {},
+    ...status !== undefined ? { status } : {},
+    ...typeof channel?.note === 'string' && channel.note.length > 0 ? { note: channel.note } : {},
+  }
 }
 
 /** RPC envelope returned by the pack. `ok:false` carries a human-readable cause. */

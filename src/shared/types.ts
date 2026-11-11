@@ -806,6 +806,16 @@ export interface AppConfig {
    * 所以老配置无需迁移——和 `routes` / `seededPresetRoutes` 同款的"缺席即默认"门禁。
    */
   modelListRefresh?: ModelListRefreshConfig
+  /**
+   * 按渠道的「走系统代理」开关：`渠道 id → 是否走系统代理`。
+   *
+   * 开 = 沿用应用已探到的系统代理链（环境代理 / 宿主机代理文件 / Windows 系统代理）；
+   * 关 = 该渠道直连。**缺省条目按「开」读**（见 `shared/channelProxy.ts`），
+   * 升级前所有渠道都走自动出口，缺省读成「关」会静默改掉正在工作的出网路径。
+   *
+   * 声明两次（此处与 `main/store/types.ts`），两处都要写。
+   */
+  channelSystemProxy?: Record<string, boolean>
 }
 
 /**

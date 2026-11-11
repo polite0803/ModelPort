@@ -120,6 +120,8 @@ export class ChannelBridge {
   private readonly jobs = new Map<string, Job>()
   private sequence = 0
   private shuttingDown = false
+  /** 「按渠道走系统代理」开关；spawn 时随 workerData 带上，运行期靠消息更新。 */
+  private channelSystemProxy: Record<string, boolean> = {}
 
   constructor(options: ChannelBridgeOptions) {
     this.options = options
@@ -131,6 +133,18 @@ export class ChannelBridge {
   /** Worker process is alive and finished its first start. */
   get running(): boolean {
     return this.worker !== null && this.readyPromise !== null
+  }
+
+  /**
+   * 把「按渠道走系统代理」开关推给 Worker。
+   *
+   * Worker 读不到宿主的 store，而保存后要即时生效（不等重启），所以走消息；未启动时
+   * 先记下来，下一次 spawn 随 `workerData` 带过去 —— 两条路都用同一份内存副本，
+   * 不会出现「重启前是新的、重启后是旧的」。
+   */
+  setChannelSystemProxy(map: Record<string, boolean>): void {
+    this.channelSystemProxy = { ...map }
+    this.worker?.postMessage({ type: 'channel-system-proxy', map: this.channelSystemProxy })
   }
 
   async start(): Promise<void> {
@@ -155,7 +169,7 @@ export class ChannelBridge {
     }
 
     const worker = new Worker(workerPath, {
-      workerData: { dataDir: this.options.dataDir },
+      workerData: { dataDir: this.options.dataDir, channelSystemProxy: this.channelSystemProxy },
       // 渠道包靠这个变量定位状态目录（`resolveChannelPackHome`）；不注入就会写进
       // 用户真实的 `~/.dsh`，与本应用的账号池分裂成两套。
       // 本机 OpenAI 兼容网关关掉：本应用自己就是 `/v1` 服务，再监听 8326 只会

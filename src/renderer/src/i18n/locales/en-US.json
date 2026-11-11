@@ -1717,6 +1717,14 @@
     "statAccounts": "Accounts",
     "statModels": "Models",
     "statCredits": "Credits",
+    "statCreditsToken": "Tokens left",
+    "systemProxy": {
+      "label": "Use system proxy",
+      "hint": "Turn off to connect this channel directly, ignoring the system or host proxy the app already uses",
+      "saveFailed": "Save failed"
+    },
+    "creditsQuota": "Quota readings",
+    "creditsMixedNote": "Credits and tokens are two metering domains: never converted, never summed - listed per account",
     "creditsReported": "{{reported}}/{{total}} accounts answered",
     "creditsUnsupported": "N/A",
     "creditsStatus": "Quota status",

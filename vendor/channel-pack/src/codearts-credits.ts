@@ -149,6 +149,88 @@ const CREDIT_METRIC_LABELS: Readonly<Record<string, string>> = {
 /** 总额 metric 的名字（其余分类明细不参与总额计算，避免重复累加）。 */
 const TOTAL_CREDIT_METRIC = 'usageTotalPackageCredit'
 
+/** 会话 token 计量项（与积分并列的另一种免费策略）。 */
+const TOKEN_QUOTA_METRIC = 'usageTokenChatMessages'
+
+/** 账号的 token 计量读数。 */
+export interface CodeArtsTokenMeter {
+  /** 本周期已消耗的 token 数（上游 `usage_token_num`）。 */
+  used: number
+  /**
+   * 本周期 token 配额（上游 `package_token_amount`）；`undefined` = **该账号不按 token 限额**。
+   *
+   * ⚠️ 实测积分版账号这一项是占位值 `1`，而 `usage_token_num` 是真实累计 4,774,418 ——
+   * 当成配额会凭空造出「总额 1、已用 477 万」的负剩余，故只报用量、不报剩余。
+   */
+  quota?: number
+}
+
+/**
+ * 读 token 计量项 —— 判据是**上游自己的 `show` 标记**，不是账户类型。
+ *
+ * ## 为什么不是「积分账号 or token 账号」二选一（2026-11-11 现网全字段取证）
+ *
+ * `statistics/plugin` 的每个 metric 都带 `show`，两个真实账号的分布是：
+ *
+ * | 账号 | 套餐 | 积分项 | token 项 |
+ * |---|---|---|---|
+ * | hw086287662933786 | `codearts.agent.individual.trial` | `show: true`，剩 4428.19 | **同样 `show: true`**，已用 4,774,418（配额位占位 `1`） |
+ * | GT-weixin_51024015 | `codearts.agent.trial`(Free) | 整个响应里没有 | `show: true`，配额 5,000,000 / 已用 454,035 |
+ *
+ * ⇒ 码道**同时存在积分与 token 两种免费计量**，同一账号可以两项都有。面板主数字只能放
+ * 一个口径，另一项必须以说明行呈现 —— 否则「这个号这个月烧了多少 token」完全看不见；
+ * 而把两项折成一个数字就是跨口径相加（见 `credits.ts` 的 `CreditBalance.unit`）。
+ *
+ * ⚠️ `usageDataChatMessages` 两个账号都是 `show: false`（上游自己不展示），故不读它。
+ */
+function parseTokenMeter(metrics: unknown): CodeArtsTokenMeter | undefined {
+  if (!Array.isArray(metrics)) return undefined
+  for (const item of metrics) {
+    if (item === null || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    if (readString(record, 'name') !== TOKEN_QUOTA_METRIC) continue
+    // `show` 缺失按展示处理：这是显示判据而非能力判据，缺料时宁可多给一条读数。
+    if (record.show === false) return undefined
+    const quota = readNumber(record, 'package_token_amount')
+    return {
+      used: readNumber(record, 'usage_token_num'),
+      ...(quota > 1 ? { quota } : {}),
+    }
+  }
+  return undefined
+}
+
+/**
+ * 把 token 计量折成余额 —— 只在**真有配额**时成立。
+ *
+ * 老 token 版账号没有任何积分项，若不在这里给出读数，面板就把它显示成「无读数」；
+ * 但它给的是 token 口径，必须带 `unit: 'token'`，消费方不得与积分余额相加
+ * （与 {@link normalizeCreditUnit} 的「token 与积分不互相折算」同一条裁定）。
+ */
+function tokenBalanceOf(meter: CodeArtsTokenMeter | undefined, packageStatus: string): CreditBalance | undefined {
+  const quota = meter?.quota
+  if (quota === undefined || meter === undefined) return undefined
+  const remaining = quota - meter.used
+  return {
+    total: roundCredits(remaining),
+    packages: [{
+      name: 'Token 配额',
+      unit: 'token',
+      remaining,
+      total: quota,
+      used: meter.used,
+      // 与积分分支同理：`statistics/plugin` 不下发逐包的有效期，只有套餐状态。
+      // 套餐非 `normal` 时如实标成失效，而不是继续当可用额度显示。
+      active: packageStatus.length === 0 || packageStatus === 'normal',
+      cycleStartTime: '',
+      cycleEndTime: '',
+      expiredTime: '',
+    }],
+    expiredTotal: 0,
+    unit: 'token',
+  }
+}
+
 /** 账户/套餐信息（`statistics/plugin` 解析结果）。 */
 export interface CodeArtsAccountInfo {
   /**
@@ -167,12 +249,21 @@ export interface CodeArtsAccountInfo {
   /** 套餐状态（`package.status`）。 */
   packageStatus: string
   /**
-   * 积分余额；非积分账户或无 credit metric 时为 `undefined`。
+   * 该账号的**主读数**；两种口径都拿不到时是 `undefined`。
    *
-   * 与 `total` 为 0 严格区分：`undefined` 表示「这个账户没有积分口径」，
-   * 而 `{ total: 0 }` 表示「有积分口径但当前为 0」。
+   * - 有积分项 → 积分口径（`unit` 缺省）；
+   * - 没有积分项但有 token 配额 → token 口径（`unit: 'token'`），与积分不可比、不可相加。
+   *
+   * 与「有口径但当前为 0」严格区分：`undefined` 表示这个账号没有可报的额度读数。
    */
   credit?: CreditBalance
+  /**
+   * token 计量读数（**与 `credit` 并列**，不是二选一）。
+   *
+   * 实测积分版账号同时带两项：积分剩 4428.19 + token 已用 477 万（配额位是占值 `1`，
+   * 所以这里 `quota === undefined`）。主数字放不下两项，另一项由调用方作为说明行给出。
+   */
+  tokenMeter?: CodeArtsTokenMeter
 }
 
 /** 活动列表中的一项（只保留签到所需字段）。 */
@@ -470,6 +561,9 @@ export async function fetchCodeArtsAccountInfoDetailed(
   const pkg = readRecord(data, 'package')
   const packageNameCn = readString(pkg, 'package_name_cn')
   const packageNameEn = readString(pkg, 'package_name_en')
+  const packageStatus = readString(pkg, 'status')
+  const tokenMeter = parseTokenMeter(data.metrics)
+  const credit = parseCreditBalance(data.metrics) ?? tokenBalanceOf(tokenMeter, packageStatus)
   return {
     ok: true,
     info: {
@@ -477,8 +571,9 @@ export async function fetchCodeArtsAccountInfoDetailed(
       isTokenPackage: readBool(pkg, 'is_token_package'),
       specCode: readString(pkg, 'spec_code'),
       packageName: packageNameCn.length > 0 ? packageNameCn : packageNameEn,
-      packageStatus: readString(pkg, 'status'),
-      credit: parseCreditBalance(data.metrics),
+      packageStatus,
+      credit,
+      ...tokenMeter === undefined ? {} : { tokenMeter },
     },
   }
 }

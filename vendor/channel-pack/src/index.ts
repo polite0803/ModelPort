@@ -268,8 +268,21 @@ export function makeReadImageRequest(ctx: Context) {
   }
 }
 
-export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?: ChannelOutlet } = {}): void {
-  const network = createChannelFetch({ outlet: config.outlet })
+export function apply(ctx: Context, config: {
+  disableOpencode?: boolean
+  outlet?: ChannelOutlet
+  /** 按渠道决定是否走系统代理（宿主 `AppConfig.channelSystemProxy`）。 */
+  systemProxy?: (channel: string) => boolean
+} = {}): void {
+  const network = createChannelFetch({ outlet: config.outlet, systemProxy: config.systemProxy })
+  /**
+   * 每个渠道一条**绑定身份**的 fetcher。
+   *
+   * 开关判据要的是「哪个渠道在请求」，未绑定的 `network.fetch` 拿不到这个身份。
+   * 构造适配器时渠道是静态已知的，所以这里按 id 绑一次、往下全部用绑定版 ——
+   * 否则开关只对「碰巧拿到网络对象」的那几条路径生效，推理仍走全局出口。
+   */
+  const fetchFor = (channel: string): typeof fetch => network.fetchFor(channel)
   ctx.effect(() => () => { void network.close() })
   // 本插件自带 Channel Pack 设置页，关闭 0.1.7 起由 Config schema 反渲染的自动表单
   // （老契约没有 configure()，静默跳过）。
@@ -345,7 +358,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   }))
   pool.setBalanceGate(GEMINI.id, balanceGate(async credential => {
     const result = await fetchGeminiCreditBalance(credential as GeminiCredential, GEMINI, {
-      fetcher: network.fetch,
+      fetcher: fetchFor(GEMINI.id),
     })
     return result.balance === null ? null : result.balance.total
   }))
@@ -354,7 +367,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   pool.setBalanceGate(RACCOON.id, balanceGate(async credential =>
     creditTotal(await fetchRaccoonCreditBalance(RACCOON, credential as RaccoonCredential))))
   pool.setBalanceGate(MINIMAX.id, balanceGate(async credential =>
-    creditTotal(await fetchMinimaxCreditBalance(credential as MinimaxCredential, network.fetch))))
+    creditTotal(await fetchMinimaxCreditBalance(credential as MinimaxCredential, fetchFor(MINIMAX.id)))))
   const accountForRefresh = async (provider: string, accountId?: string) => {
     if (accountId === undefined) return pool.getAvailableAccount(provider, '')
     const entry = pool.listAccountsByProvider(provider).find(account => account.id === accountId)
@@ -463,8 +476,9 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   // 而是本地回调 + authCode 换 token（见 src/lobsterai-oauth.ts）。
   // 服务名由 LobsteraiAuth 依 product.id 派生，注册为 ctx.lobsteraiAuth。
   // 与其他 provider 一样不注册斜杠命令：入口在 Channel Pack 的 LobsterAI 面板。
-  const lobsterai = new LobsteraiAuth(ctx)
+  const lobsterai = new LobsteraiAuth(ctx, { fetcher: fetchFor(LOBSTERAI.id) })
   const lobsteraiAdapter = registerLobsteraiLlm(ctx, {
+    fetchImpl: fetchFor(LOBSTERAI.id),
     credentialRef: credentialRef(LOBSTERAI.defaultCredentialRef),
     resolveCredential: async (modelId?: string) => {
       // 只从 LobsterAI 自己的账号池取账号，回退到自己的单凭据 ref，
@@ -518,7 +532,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   // （不起本地回调服务器，见 src/qoder-oauth.ts）。
   // 服务名由产品 id 派生，注册为 ctx.qoderAuth。
   // 与其它 provider 一样不注册斜杠命令：入口在 Channel Pack 的 Qoder 面板。
-  const qoder = new QoderAuth(ctx)
+  const qoder = new QoderAuth(ctx, { fetcher: fetchFor(QODER.id) })
   /**
    * 「本次实际使用的账号 id」跟踪表（provider id → 账号 id）。
    *
@@ -536,6 +550,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
    */
   const activeQoderAccountId = new Map<string, string | undefined>()
   const qoderAdapter = registerQoderLlm(ctx, {
+    fetchImpl: fetchFor(QODER.id),
     credentialRef: credentialRef(QODER.defaultCredentialRef),
     resolveCredential: async (modelId?: string) => {
       // 只从 Qoder 自己的账号池取账号，回退到自己的单凭据 ref，
@@ -617,8 +632,9 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   // tool_calls、错误帧不抛错）修两遍。
   // 服务名由 `${product.id}Auth` 派生，注册为 ctx.qoderCnAuth。
   // 不注册斜杠命令：入口在 Channel Pack 的「Qoder (中国版)」面板。
-  const qoderCn = new QoderAuth(ctx, { product: QODER_CN })
+  const qoderCn = new QoderAuth(ctx, { product: QODER_CN, fetcher: fetchFor(QODER_CN.id) })
   const qoderCnAdapter = registerQoderLlm(ctx, {
+    fetchImpl: fetchFor(QODER_CN.id),
     credentialRef: credentialRef(QODER_CN.defaultCredentialRef),
     resolveCredential: async (modelId?: string) => {
       // 只取中国版自己账号池的账号，回退到 QODERCN_ACCESS_TOKEN。
@@ -685,8 +701,9 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   // SSE 为自定义格式（非 OpenAI 标准），需独立解析。
   // 服务名由 TraeAuth 依 product.id 派生，注册为 ctx.traeAuth。
   // 不注册斜杠命令：入口在 Channel Pack 的 TRAE 面板。
-  const trae = new TraeAuth(ctx)
+  const trae = new TraeAuth(ctx, { fetcher: fetchFor(TRAE.id) })
   const traeAdapter = registerTraeLlm(ctx, {
+    fetchImpl: fetchFor(TRAE.id),
     credentialRef: credentialRef(TRAE.defaultCredentialRef),
     resolveCredential: async (modelId?: string) => {
       // ⚠️ `modelId` 必须透传：限流是**按模型**记的（`modelRateLimits[model]`），
@@ -729,7 +746,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   // （前缀**不可剥**），推理是**标准 OpenAI 兼容**端点。
   // 服务名由 ClineAuth 依 product.id 派生，注册为 ctx.clineAuth。
   // 不注册斜杠命令：入口在 Channel Pack 的 Cline 面板。
-  const cline = new ClineAuth(ctx, { fetcher: network.fetch })
+  const cline = new ClineAuth(ctx, { fetcher: fetchFor(CLINE.id) })
   /**
    * 「本次实际使用的是哪个 Cline **池账号**」——「订阅额度 → 请求记录」的
    * 「账号」列按它归属，面板也是用这个 id 过滤的。
@@ -744,7 +761,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
    */
   let activeClineAccountId = ''
   const clineAdapter = registerClineLlm(ctx, {
-    fetchImpl: network.fetch,
+    fetchImpl: fetchFor(CLINE.id),
     credentialRef: credentialRef(CLINE.defaultCredentialRef),
     resolveCredential: async (modelId?: string) => {
       // 只从 Cline 自己的账号池取账号，回退到自己的单凭据 ref，
@@ -801,8 +818,9 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   // 2026-11-11 从上游 v2.5.1 移植：登录走华为 IAM OAuth（DPoP ES256），
   // 凭据是 AK/SK + security_token，chat 与模型列表都经 SDK-HMAC-SHA256 签名。
   // 登录、状态与续期统一由 Channel Pack 面板触发，不注册斜杠命令。
-  const codeartsService = new CodeArtsAuth(ctx)
+  const codeartsService = new CodeArtsAuth(ctx, { fetcher: fetchFor(CODEARTS_PROVIDER) })
   const codeartsAdapter = registerCodeArtsLlm(ctx, {
+    fetchImpl: fetchFor(CODEARTS_PROVIDER),
     credentialRef: credentialRef(CODEARTS_CREDENTIAL_REF),
     resolveCredential: async () => {
       // 只认账号池：登录一律写入 CODEARTS_ACCOUNT_XXX，固定 ref 仅满足适配器契约。
@@ -827,8 +845,9 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   // 2026-11-11 按官方 @comate/comatecli 2.0.0（MIT）的 SaaS 协议接入：
   // 浏览器设备绑定换 License，模型目录与对话都走 comate.baidu.com 的
   // autowork agent 接口（不是 OpenAI 兼容协议）。
-  const comateService = new ComateAuth(ctx)
+  const comateService = new ComateAuth(ctx, { fetcher: fetchFor(COMATE_PROVIDER) })
   const comateAdapter = registerComateLlm(ctx, {
+    fetchImpl: fetchFor(COMATE_PROVIDER),
     credentialRef: credentialRef(COMATE_CREDENTIAL_REF),
     resolveCredential: async () => {
       const available = await pool.getAvailableAccount('comate', '')
@@ -854,7 +873,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   // 推理是标准 OpenAI 兼容（复用 openai-compat.ts）。
   // 服务名由 LoomyAuth 依 product.id 派生，注册为 ctx.loomyAuth。
   // 不注册斜杠命令：入口在 Channel Pack 的 Loomy 面板。
-  const loomy = new LoomyAuth(ctx)
+  const loomy = new LoomyAuth(ctx, { fetcher: fetchFor(LOOMY.id) })
 
   /**
    * 按凭据 ref 解析 Loomy 凭据（供选号器与兜底路径共用）。
@@ -889,6 +908,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   })
 
   const loomyAdapter = registerLoomyLlm(ctx, {
+    fetchImpl: fetchFor(LOOMY.id),
     credentialRef: credentialRef(LOOMY.defaultCredentialRef),
     /**
      * 解析本轮该用哪个账号的凭据。
@@ -1027,8 +1047,9 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   //
   // 服务名由 RaccoonAuth 依 product.id 派生，注册为 ctx.raccoonAuth。
   // 不注册斜杠命令：入口在 Channel Pack 的 Raccoon 面板。
-  const raccoon = new RaccoonAuth(ctx)
+  const raccoon = new RaccoonAuth(ctx, { fetcher: fetchFor(RACCOON.id) })
   const raccoonAdapter = registerRaccoonLlm(ctx, {
+    fetchImpl: fetchFor(RACCOON.id),
     credentialRef: credentialRef(RACCOON.defaultCredentialRef),
     resolveCredential: async (modelId?: string) => {
       // 只从 raccoon 自己的账号池取账号，回退到自己的单凭据 ref，
@@ -1095,9 +1116,10 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   //
   // 服务名由 MinimaxAuth 依 product.id 派生，注册为 ctx.minimaxAuth。
   // 不注册斜杠命令：入口在 Channel Pack 的 MiniMax 面板。
-  // ⚠️ 必须注入渠道出口 `network.fetch`：默认全局 fetch 会绕过代理/出口选择，
-  // 于是「登录/续期」与「余额/签到」可能走不同网络路径，失败口径也各不相同。
-  const minimax = new MinimaxAuth(ctx, { fetchImpl: network.fetch })
+  // ⚠️ 必须注入**绑定渠道身份**的出口：默认全局 fetch 会绕过代理/出口选择，
+  // 于是「登录/续期」与「余额/签到」可能走不同网络路径，失败口径也各不相同；
+  // 未绑定身份的 `network.fetch` 又读不到本渠道的系统代理开关。
+  const minimax = new MinimaxAuth(ctx, { fetchImpl: fetchFor(MINIMAX.id) })
   const minimaxAdapter = registerMinimaxLlm(ctx, {
     credentialRef: credentialRef(MINIMAX.defaultCredentialRef),
     resolveCredential: async (modelId?: string) => {
@@ -1187,7 +1209,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   //
   // 服务名由 GeminiAuth 依 product.id 派生，注册为 ctx.geminiAuth。
   // 不注册斜杠命令：入口在 Channel Pack 的 Gemini 面板。
-  const gemini = new GeminiAuth(ctx, { fetchImpl: network.fetch })
+  const gemini = new GeminiAuth(ctx, { fetchImpl: fetchFor(GEMINI.id) })
   /**
    * 身份头的版本/changelist **从自动更新站现取**（6 小时缓存）。
    *
@@ -1204,7 +1226,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
     const release = await fetchAntigravityHubRelease({
       platform: process.platform,
       arch: process.arch,
-      fetchImpl: network.fetch,
+      fetchImpl: fetchFor(GEMINI.id),
     })
     publishAntigravityHubRelease(release)
     ctx.logger.info(`[channel-pack] gemini 身份版本：${describeGeminiIdentity()}`)
@@ -1216,8 +1238,8 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   // 等于没有跨请求缓存，每轮推理都会多打一次 `loadCodeAssist`。
   const geminiProjectCache = new Map<string, string>()
   const geminiAdapter = registerGeminiLlm(ctx, {
-    fetchImpl: network.fetch,
-    projectFetcher: network.fetch,
+    fetchImpl: fetchFor(GEMINI.id),
+    projectFetcher: fetchFor(GEMINI.id),
     // 身份版本号的现取接线（见上面 `refreshGeminiHubRelease` 的注释）。
     refreshHubRelease: refreshGeminiHubRelease,
     credentialRef: credentialRef(GEMINI.defaultCredentialRef),
@@ -1288,8 +1310,8 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   // 国际版没有签到接口（product.ts 的 WORKBUDDY 注释），每日积分只能在
   // 中国版（CodeBuddy）领取 —— 只注册国际版等于拿不到每日免费积分。
   // 服务名由 BuddyAuth 依 product.id 派生：buddyAuth / workbuddyAuth。
-  const buddy = new BuddyAuth(ctx, { product: CODEBUDDY, fetcher: network.fetch })
-  const workbuddy = new BuddyAuth(ctx, { product: WORKBUDDY, fetcher: network.fetch })
+  const buddy = new BuddyAuth(ctx, { product: CODEBUDDY, fetcher: fetchFor(CODEBUDDY.id) })
+  const workbuddy = new BuddyAuth(ctx, { product: WORKBUDDY, fetcher: fetchFor(WORKBUDDY.id) })
 
   /** 按凭据 ref 解析 buddy 系凭据（选号与兜底路径共用，避免两份 JSON 解析漂移）。 */
   const resolveBuddyCredentialByRef = async (refName: string): Promise<BuddyCredential | undefined> => {
@@ -1307,12 +1329,12 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
   const buddyBalanceSelector = new BuddyBalanceSelector({
     product: CODEBUDDY,
     resolveCredential: resolveBuddyCredentialByRef,
-    fetcher: network.fetch,
+    fetcher: fetchFor(CODEBUDDY.id),
   })
   const workbuddyBalanceSelector = new BuddyBalanceSelector({
     product: WORKBUDDY,
     resolveCredential: resolveBuddyCredentialByRef,
-    fetcher: network.fetch,
+    fetcher: fetchFor(WORKBUDDY.id),
   })
 
   /**
@@ -1412,8 +1434,9 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
       refresh: createPoolRefresh(pool, product.id, auth),
       fetchRemoteModels: () => auth.fetchModels(pool),
       product,
-      // ⚠️ 必须注入宿主的 channelFetch：默认的全局 fetch 会绕过应用内代理设置。
-      fetchImpl: network.fetch,
+      // ⚠️ 必须注入宿主的 channelFetch（绑定渠道身份）：默认的全局 fetch 会绕过
+      // 应用内代理设置，未绑定身份的那条又读不到本渠道的系统代理开关。
+      fetchImpl: fetchFor(product.id),
       readImage: makeReadImage(ctx),
       readImageRequest: makeReadImageRequest(ctx),
     })
@@ -1471,6 +1494,7 @@ export function apply(ctx: Context, config: { disableOpencode?: boolean; outlet?
 // Channel Pack 登录时创建的那个 ref（`ZCODE_ACCOUNT_XXXX`），而不是只认固定的
 // `ZCODE_CREDENTIAL`。不传的话「登录成功但面板显示未配置」。
 const zcode = new ZcodeAuth(ctx, {
+  fetchImpl: fetchFor(ZCODE.id),
   accountPool: pool,
   /**
    * ★ 二期内部载体（`src/captcha-carrier.ts`）的诊断日志。
@@ -1523,6 +1547,7 @@ const resolveZcodeCaptchaConfig = async (): Promise<{ region: string; prefix: st
  */
 const activeZcodeAccountId = new Map<string, string | undefined>()
 const zcodeAdapter = registerZcodeLlm(ctx, {
+  fetchImpl: fetchFor(ZCODE.id),
   credentialRef: credentialRef(ZCODE.defaultCredentialRef),
   resolveCredential: async (modelId?: string) => {
     // 只从 zcode 自己的账号池取账号，回退到自己的单凭据 ref，
@@ -1874,6 +1899,7 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
   if (config.disableOpencode !== true) {
     const opencodeUA = lazyOpencodeUserAgent()
     opencodeAdapter = registerOpencodeLlm(ctx, {
+      fetchImpl: fetchFor(OPENCODE.id),
       identitySlots: async (model?: string) => {
         const all = await pool.listAccountsByProvider(OPENCODE.id)
         if (model !== undefined && all.length > 0) {
@@ -2056,8 +2082,10 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
 
   registerChannelPackRpc(ctx, pool, lobsterai, qoder, qoderCn, trae, cline, loomy, raccoon, minimax, zcode, gemini, workbuddy, buddy, codeartsService, comateService, modelAdapters, {
     ...config,
-    // 余额/配额查询与续期共用同一条渠道出口（见 `ChannelPackRpcConfig.fetchImpl`）。
+    // 余额/配额查询与续期共用同一条渠道出口（见 `ChannelPackRpcConfig.fetchImpl`）；
+    // `fetchFor` 让「按渠道走系统代理」这一格对 RPC 路径同样生效。
     fetchImpl: network.fetch,
+    fetchFor,
   })
   // 网关是旁路功能：这里传 `pool` 只为读设置页里的开关，其内部任何失败都已
   // 自行降级为日志，绝不会让插件 apply() 失败。

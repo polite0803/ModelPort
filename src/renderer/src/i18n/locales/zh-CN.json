@@ -1717,6 +1717,14 @@
     "statAccounts": "账号",
     "statModels": "模型",
     "statCredits": "剩余积分",
+    "statCreditsToken": "剩余 token",
+    "systemProxy": {
+      "label": "走系统代理",
+      "hint": "关闭后该渠道直连，不使用应用已配置的系统或宿主机代理",
+      "saveFailed": "保存失败"
+    },
+    "creditsQuota": "额度读数",
+    "creditsMixedNote": "积分与 token 是两种计量口径：不折算、不相加，分行各自显示",
     "creditsReported": "{{reported}}/{{total}} 个账号有读数",
     "creditsUnsupported": "不适用",
     "creditsStatus": "额度状态",

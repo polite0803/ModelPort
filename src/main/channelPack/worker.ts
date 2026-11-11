@@ -46,6 +46,18 @@ const dataDir = String(workerData.dataDir)
 const attachmentDir = join(dataDir, 'attachments')
 
 /**
+ * 「按渠道走系统代理」开关（`AppConfig.channelSystemProxy` 的内存副本）。
+ *
+ * 缺省条目按「走」读：升级前所有渠道都走自动出口，缺省读成「关」会静默改掉
+ * 正在工作的出网路径。宿主保存后发 `channel-system-proxy` 消息更新，下一次
+ * 渠道请求就按新值选出口（不用重启 Worker）。
+ */
+let channelSystemProxy: Record<string, boolean> =
+  workerData.channelSystemProxy !== null && typeof workerData.channelSystemProxy === 'object'
+    ? workerData.channelSystemProxy as Record<string, boolean>
+    : {}
+
+/**
  * 宿主机代理配置文件（`scripts/wsl-host-proxy.mjs` 写的那个）跟着数据目录走：
  * daemon 是 `/root/.modelport/host-proxy.json`，Electron 是 `<userData>/host-proxy.json`。
  * 环境变量显式给了就按给出的（`off` 表示关闭；脚本也可以直接写这个路径）。
@@ -360,6 +372,12 @@ parentPort?.on('message', async (message: Record<string, any>) => {
     else pending.reject(new Error(message.error ?? '凭据操作失败'))
     return
   }
+  if (message.type === 'channel-system-proxy') {
+    channelSystemProxy = message.map !== null && typeof message.map === 'object'
+      ? { ...(message.map as Record<string, boolean>) }
+      : {}
+    return
+  }
   if (message.type === 'cancel') {
     controllers.get(message.id)?.abort()
     return
@@ -412,7 +430,7 @@ parentPort?.on('message', async (message: Record<string, any>) => {
   }
 })
 
-apply(ctx)
+apply(ctx, { systemProxy: (channel: string) => channelSystemProxy[channel] !== false })
 if (outboundDumpPath !== null) {
   // 显式声明开关生效，避免「以为开了其实没开」——路径也打出来，直接照着取文件。
   logger.info(`渠道包出站取证已开启：每次请求写一行摘要到 ${outboundDumpPath}`)

@@ -531,11 +531,16 @@ export interface CreditsEndpointDeps<
   fetchBalance?: (credential: TCredential, product: TProduct) => Promise<CreditBalance | null>
   /**
    * 余额查询的**带原因**版本（优先于 {@link fetchBalance}）。
+   *
+   * `note`：与余额**并列**的说明读数（不是失败原因）。存在的理由是一个真实形态：
+   * 华为云码道同一账号同时带积分与 token 两种计量项（每项自带 `show`），
+   * 面板只能给一个主数字，另一口径必须以说明行呈现，否则「这个号按 token 消耗多少」
+   * 就彻底看不见 —— 而把它折进主数字就是跨口径相加。
    */
   fetchBalanceDetailed?: (
     credential: TCredential,
     product: TProduct,
-  ) => Promise<{ balance: CreditBalance | null; error?: string; extra?: RpcCreditsBalanceExtra }>
+  ) => Promise<{ balance: CreditBalance | null; error?: string; note?: string; extra?: RpcCreditsBalanceExtra }>
   /** 单账号异常时的告警出口（不参与控制流）。 */
   warn?: (message: string) => void
   /**
@@ -851,6 +856,7 @@ export async function collectCreditBalances<TCredential = unknown, TProduct = un
     }
     let balance: CreditBalance | null = null
     let error: string | undefined
+    let note: string | undefined
     let extra: RpcCreditsBalanceExtra | undefined
     try {
       const resolved = await deps.resolve(credentialRef(entry.credentialRef))
@@ -863,6 +869,7 @@ export async function collectCreditBalances<TCredential = unknown, TProduct = un
           const detailed = await fetchDetailed(credential, product)
           balance = detailed.balance
           error = detailed.error
+          note = detailed.note
           extra = detailed.extra
           if (balance === null && error === undefined) error = '余额查询失败'
         } else {
@@ -883,6 +890,7 @@ export async function collectCreditBalances<TCredential = unknown, TProduct = un
       enabled: entry.enabled !== false,
       balance,
       ...error === undefined ? {} : { error },
+      ...note === undefined ? {} : { note },
       ...extra === undefined ? {} : { extra },
     })
   }
@@ -998,6 +1006,14 @@ export interface ChannelPackRpcConfig {
    * 省略时退回全局 `fetch`（既有单测无需改造）。
    */
   fetchImpl?: typeof fetch
+  /**
+   * 按渠道绑定身份的出口（`index.ts` 的 `network.fetchFor`）。
+   *
+   * `fetchImpl` 拿不到「哪个渠道在请求」，所以宿主开了「按渠道走系统代理」后，
+   * 那一格对它无效。RPC 里凡是用到**某一家的**出口都优先走这里；缺省退回
+   * `fetchImpl`，既有调用方与单测无需改造。
+   */
+  fetchFor?: (channel: string) => typeof fetch
 }
 
 /**
@@ -3593,18 +3609,27 @@ function registerChannelPackEndpoints(
               const result = await fetchCodeArtsAccountInfoDetailed(credential)
               if (!result.ok) return { balance: null, error: `账户信息查询失败：${result.message}` }
               const info = result.info
-              if (!info.isCreditPackage) {
-                return {
-                  balance: null,
-                  error: info.isTokenPackage
-                    ? 'Token 计费账户，无积分余额'
-                    : '非积分计费账户，无积分余额',
-                }
+              // 有读数就报数，**先按读数判而不是按账户类型判**：码道同时存在积分与 token
+              // 两种计量（每项自带 `show`），原实现先判类型再取数，于是老 token 版账号被
+              // 整条压成「Token 计费账户，无积分余额」—— 明明拿到了额度却按错的口径丢掉。
+              if (info.credit !== undefined) {
+                // 说明行只补「主数字没表达的那件事」：配额与已用（同口径，不产生歧义），
+                // 或另一口径的用量。跨口径永远不相加，故主数字仍只有一个数。
+                const meter = info.tokenMeter
+                const secondary = meter === undefined
+                  ? undefined
+                  : meter.quota === undefined
+                    ? `本周期 token 用量 ${meter.used}（该套餐不按 token 限额）`
+                    : `本周期 token 配额 ${meter.quota}，已用 ${meter.used}`
+                return { balance: info.credit, ...secondary === undefined ? {} : { note: secondary } }
               }
-              // 积分账户但没有 credit metric：如实报「无积分数据」，不显示 0 ——
-              // 0 会让用户以为自己把积分用光了。
-              if (info.credit === undefined) return { balance: null, error: '未返回积分数据' }
-              return { balance: info.credit }
+              if (info.isCreditPackage) return { balance: null, error: '未返回积分数据' }
+              return {
+                balance: null,
+                error: info.isTokenPackage
+                  ? 'Token 计费账户，且未返回 token 配额'
+                  : '非积分计费账户，无积分余额',
+              }
             },
             warn: (msg) => ctx.logger?.warn?.(msg),
           })
@@ -3785,7 +3810,10 @@ function registerChannelPackEndpoints(
             // 2) config.fetchImpl 是 `createChannelFetch` 的出口，与续期同一条
             //    路径 —— 否则应用内代理/环境代理对余额查询不生效。
             fetchBalanceDetailed: (credential) =>
-              fetchMinimaxCreditBalanceDetailed(credential, config.fetchImpl),
+              fetchMinimaxCreditBalanceDetailed(
+                credential,
+                config.fetchFor?.(MINIMAX.id) ?? config.fetchImpl,
+              ),
             warn: (msg) => ctx.logger?.warn?.(msg),
           })
           return { ok: true, value: { accounts: values } satisfies RpcCreditsBalancesResponse }
@@ -3818,7 +3846,7 @@ function registerChannelPackEndpoints(
                 force: req.force === true,
                 // 与续期共用渠道出口：全局 fetch 下这里只会报裸 `fetch failed`，
                 // 而同一时刻的续期日志写的是 `渠道网络请求失败（直连；ETIMEDOUT）`。
-                fetcher: config.fetchImpl,
+                fetcher: config.fetchFor?.(GEMINI.id) ?? config.fetchImpl,
               })
               const extra: RpcCreditsBalanceExtra | undefined = tier === undefined
                 ? undefined

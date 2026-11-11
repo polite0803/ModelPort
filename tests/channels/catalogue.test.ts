@@ -104,7 +104,9 @@ test('宿主没有把任何在册渠道重新关掉', () => {
     join(process.cwd(), 'src/main/channelPack/worker.ts'),
     'utf8',
   )
-  assert.match(workerSource, /apply\(ctx\)/)
+  // 现在的第二个参数只有「按渠道走系统代理」判定函数（`systemProxy`），
+  // 仍然不能带 `disableOpencode` —— 那把开关一旦回来，界面就会列出加不进账号的渠道。
+  assert.match(workerSource, /apply\(ctx, \{ systemProxy:/)
   assert.doesNotMatch(workerSource, /disableOpencode/)
 })
 

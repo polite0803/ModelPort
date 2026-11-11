@@ -175,6 +175,13 @@ export interface MinimaxAdapterOptions {
   readImage?: (attachment: unknown) => Promise<{ data: Uint8Array; mediaType: string } | undefined>
   /** 产品配置；默认 {@link MINIMAX}。 */
   product?: MinimaxProduct
+  /**
+   * 渠道出网能力（宿主按渠道注入）。
+   *
+   * ⚠️ 以前推理路径直接用全局 `fetch`：登录/续期走了代理、推理却直连，
+   * 于是「按渠道走系统代理」这个开关对 MiniMax 的对话**完全无效**。
+   */
+  fetchImpl?: typeof fetch
 }
 
 /** 单笔请求内 402 换号重试的硬上限（正常 1 次即中；上限只为防御空转）。 */
@@ -422,7 +429,7 @@ export class MinimaxAdapter extends LlmAdapter {
     })
 
     const sendInfer = (activeCredential: MinimaxCredential) =>
-      fetch(`${this.product.apiHost}${MINIMAX_INFER_PATH}`, {
+      (this.options.fetchImpl ?? fetch)(`${this.product.apiHost}${MINIMAX_INFER_PATH}`, {
         method: 'POST',
         headers: minimaxInferHeaders(activeCredential),
         body: JSON.stringify(payload),

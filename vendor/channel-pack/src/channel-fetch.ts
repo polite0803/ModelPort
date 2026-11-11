@@ -95,6 +95,14 @@ function networkFailure(error: unknown, route: string): Error {
 
 export interface ChannelFetchOptions {
   outlet?: ChannelOutlet
+  /**
+   * 按渠道决定是否走系统代理链（宿主 `AppConfig.channelSystemProxy` 的判定函数）。
+   *
+   * 缺省或返回 `true` = 沿用下面那整条自动出口（环境代理 → 宿主机代理 → Windows
+   * 系统代理）；返回 `false` = 该渠道跳过这几层直连。只在**按渠道绑定**的 fetcher
+   * 上生效（`fetchFor(id)`）；未绑定的 `fetch` 拿不到渠道身份，保持原行为。
+   */
+  systemProxy?: (channel: string) => boolean
   /** 以下依赖可注入，用于离线验证，不读取测试机的真实代理配置。 */
   environment?: NodeJS.ProcessEnv
   platform?: NodeJS.Platform
@@ -111,14 +119,22 @@ export interface ChannelFetchOptions {
   hostProxy?: (environment: NodeJS.ProcessEnv) => Promise<string | undefined>
 }
 
-/** 一次挂载一个实例：插件出口 > 环境代理 > 宿主机代理（脚本） > Windows 手动代理 > 直连。 */
-export function createChannelFetch(options: ChannelFetchOptions = {}): { fetch: typeof fetch; close: () => Promise<void> } {
+/**
+ * 一次挂载一个实例：按渠道开关（关=直连） > 插件出口 > 环境代理 > 宿主机代理（脚本）
+ * > Windows 手动代理 > 直连。
+ *
+ * `fetch` 是未绑定渠道的那条（行为与历史一致）；`fetchFor(id)` 绑定渠道身份，
+ * 让宿主 `AppConfig.channelSystemProxy` 的那一格能关掉这个渠道的系统代理。
+ */
+export function createChannelFetch(
+  options: ChannelFetchOptions = {},
+): { fetch: typeof fetch; fetchFor: (channel: string) => typeof fetch; close: () => Promise<void> } {
   const dispatchers = new Map<string, Dispatcher>()
   let system: Promise<WindowsProxy | undefined> | undefined
   let systemAt = 0
   let closed = false
   const fetchImpl: typeof fetch = (input, init) => (options.fetchImpl ?? globalThis.fetch)(input, init)
-  const fetcher: typeof fetch = async (input, init) => {
+  const fetcherFor = (channel?: string): typeof fetch => async (input, init) => {
     if (closed) throw new Error('渠道出网服务已停止')
     const target = new URL(input instanceof Request ? input.url : String(input))
     const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
@@ -131,6 +147,12 @@ export function createChannelFetch(options: ChannelFetchOptions = {}): { fetch: 
         return await fetchImpl(input, init)
       }
       if (loopback(target.hostname)) {
+        return await fetchImpl(input, init)
+      }
+      // 渠道开关关掉时连插件出口也不走：界面上的措辞是「直连」，走了出口就是
+      // 另一个会改出口 IP 的路径。放在出口判断之前是刻意的。
+      if (channel !== undefined && options.systemProxy !== undefined && !options.systemProxy(channel)) {
+        route = '直连（该渠道已关闭系统代理）'
         return await fetchImpl(input, init)
       }
       if (options.outlet?.active()) {
@@ -187,8 +209,10 @@ export function createChannelFetch(options: ChannelFetchOptions = {}): { fetch: 
       throw networkFailure(error, route)
     }
   }
+  const fetch = fetcherFor()
   return {
-    fetch: fetcher,
+    fetch,
+    fetchFor: (channel: string) => fetcherFor(channel),
     async close() {
       closed = true
       const all = [...dispatchers.values()]

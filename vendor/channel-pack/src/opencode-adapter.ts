@@ -139,6 +139,13 @@ export async function loadOpencodeCatalog(
 }
 
 export interface OpencodeAdapterOptions {
+  /**
+   * 渠道出网能力（宿主按渠道注入）。缺省为全局 `fetch`。
+   *
+   * 匿名槽与账号槽都可能要求「直连」，而各槽自己的 dispatcher 优先于这里
+   * （见 `channel-fetch.ts` 的「调用方指定代理」分支）。
+   */
+  fetchImpl?: typeof fetch
   /** 取当前槽序列（账号池顺序 + 匿名槽末位）。 */
   identitySlots: (model?: string) => Promise<readonly IdentitySlot[]>
   /** 拉远端目录；缺省时直接用兜底表。 */
@@ -596,7 +603,7 @@ export class OpencodeAdapter extends LlmAdapter {
       // **不动全局**（两个插件抢全局槽位会互相短路整个路由层）。
       ...slot.proxy === undefined ? {} : { dispatcher: buildProxyDispatcher(slot.proxy) as never },
     }
-    const response = await fetch(`${OPENCODE.baseUrl}${OPENCODE.chatPath}`, init).then(checkQueuedResponse)
+    const response = await (this.options.fetchImpl ?? fetch)(`${OPENCODE.baseUrl}${OPENCODE.chatPath}`, init).then(checkQueuedResponse)
     if (!response.ok) {
       // ⚠️ **必须先读体**：Zen 的限流语义（`GoUsageLimitError`）在响应体里，
       // 而 body 只能读一次 —— 读了不传下去，轮换层就只能按状态码猜，

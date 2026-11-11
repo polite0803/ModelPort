@@ -216,17 +216,23 @@ test('续期被拒但凭据已被他处轮换：按最新凭据对账，不标�
 
 test('余额查询与续期共用渠道出口（不得退回全局 fetch）', () => {
   const rpc = readFileSync(join(VENDOR_SRC, 'channel-pack-rpc.ts'), 'utf8')
+  // 2026-11-11 起余额查询按渠道取出口（`fetchFor(id)`），让「按渠道走系统代理」
+  // 这一格对 RPC 路径同样生效；缺 `fetchFor` 时仍回落到整体出口，绝不回全局 fetch。
   assert.match(
     rpc,
-    /fetchMinimaxCreditBalanceDetailed\(credential, config\.fetchImpl\)/,
+    /fetchMinimaxCreditBalanceDetailed\(\s*credential,\s*config\.fetchFor\?\.\(MINIMAX\.id\) \?\? config\.fetchImpl,?\s*\)/,
     'MiniMax 余额查询必须把渠道出口传进去',
   )
-  assert.match(rpc, /fetcher: config\.fetchImpl/, 'Gemini 配额查询必须把渠道出口传进去')
+  assert.match(
+    rpc,
+    /fetcher: config\.fetchFor\?\.\(GEMINI\.id\) \?\? config\.fetchImpl/,
+    'Gemini 配额查询必须把渠道出口传进去',
+  )
 
   const index = readFileSync(join(VENDOR_SRC, 'index.ts'), 'utf8')
   assert.match(
     index,
-    /new MinimaxAuth\(ctx, \{ fetchImpl: network\.fetch \}\)/,
+    /new MinimaxAuth\(ctx, \{ fetchImpl: fetchFor\(MINIMAX\.id\) \}\)/,
     '登录/续期必须走 createChannelFetch 的出口',
   )
   assert.match(index, /fetchImpl: network\.fetch,/, 'RPC 配置要带上渠道出口')

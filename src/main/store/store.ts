@@ -94,6 +94,8 @@ import type {
   ModelRouteRemoval,
 } from '../../shared/modelRouteName'
 import { validateRouteNameInput } from '../../shared/modelRouteName'
+import { sanitizeChannelSystemProxyMap } from '../../shared/channelProxy'
+import { publishChannelSystemProxy } from './channelSystemProxy'
 import { normalizeCompressionConfig } from './compressionConfig'
 import { normalizePromptCachingConfig } from '../../shared/promptCache.ts'
 import type { AppLogTrendPoint, AutoRoutingConfig } from '../../shared/types'
@@ -590,6 +592,9 @@ class StoreManager {
       // 都由同一个归一摘掉 —— 面板与管理 API 读到的就是运行态真正会用的那两个策略。
       contextManagement: normalizeContextManagementConfig(rawConfig.contextManagement),
       modelListRefresh: normalizeModelListRefresh(rawConfig.modelListRefresh),
+      // 读取侧只丢弃坏条目：缺省（含键不存在）读成「走系统代理」，与升级前的
+      // 行为一致（见 `shared/channelProxy.ts` 的模块头）。
+      channelSystemProxy: sanitizeChannelSystemProxyMap(rawConfig.channelSystemProxy),
     }
 
     // 退役掉的注入层在老 `data.json` 里留下的键。上面是 spread，死键会原样活到
@@ -1413,6 +1418,7 @@ class StoreManager {
     const incoming = (rawIsObject ? config : {}) as Partial<AppConfig>
     const normalized = this.normalizeConfig({ ...incoming, routes: previous.routes ?? {} })
     this.store!.set('config', normalized)
+    publishChannelSystemProxy(normalized.channelSystemProxy)
     this.appLogManager?.setMaxEntries(this.getMaxLogEntries(normalized))
     this.applyRequestLogConfig(normalized.requestLogConfig)
     this.applyAutoStart(previous, normalized)
@@ -1438,6 +1444,7 @@ class StoreManager {
     const incoming = (rawIsObject ? config : {}) as Partial<AppConfig>
     const normalized = this.normalizeConfig(incoming)
     this.store!.set('config', normalized)
+    publishChannelSystemProxy(normalized.channelSystemProxy)
     this.appLogManager?.setMaxEntries(this.getMaxLogEntries(normalized))
     this.applyRequestLogConfig(normalized.requestLogConfig)
     this.applyAutoStart(previous, normalized)
@@ -1476,6 +1483,7 @@ class StoreManager {
     // 键存在且为空 = 「用户删光了路由」，读取侧不会因此把 `auto` 迁移回来。
     const normalized = this.normalizeConfig(newConfig)
     this.store!.set('config', normalized)
+    publishChannelSystemProxy(normalized.channelSystemProxy)
     this.appLogManager?.setMaxEntries(this.getMaxLogEntries(normalized))
     this.applyRequestLogConfig(normalized.requestLogConfig)
     this.applyAutoStart(currentConfig, normalized)
@@ -1494,6 +1502,7 @@ class StoreManager {
     this.ensureInitialized()
     const previous = this.getConfig()
     this.store!.set('config', DEFAULT_CONFIG)
+    publishChannelSystemProxy(undefined)
     this.appLogManager?.setMaxEntries(this.getMaxLogEntries(DEFAULT_CONFIG))
     this.applyRequestLogConfig(DEFAULT_CONFIG.requestLogConfig)
     this.applyAutoStart(previous, DEFAULT_CONFIG)

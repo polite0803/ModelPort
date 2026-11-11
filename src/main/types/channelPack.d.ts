@@ -4,7 +4,15 @@
  */
 
 declare module 'virtual:channel-pack' {
-  export function apply(ctx: unknown, config?: { disableOpencode?: boolean; outlet?: unknown }): void
+  export function apply(
+    ctx: unknown,
+    config?: {
+      disableOpencode?: boolean
+      outlet?: unknown
+      /** 按渠道决定是否走系统代理链（`AppConfig.channelSystemProxy`）。 */
+      systemProxy?: (channel: string) => boolean
+    },
+  ): void
 }
 
 declare module 'virtual:channel-pack-messages' {

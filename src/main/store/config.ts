@@ -14,6 +14,7 @@ import {
 import { validateRoutesForWrite } from './modelRoutes'
 import { isLoopbackHost } from '../proxy/authPolicy'
 import { validateHttpsConfig } from '../../shared/httpsConfig'
+import { validateChannelSystemProxyWrite } from '../../shared/channelProxy'
 import { maskConfig } from '../logging/maskConfig'
 
 /**
@@ -339,6 +340,13 @@ export class ConfigManager {
     // 不敏感唯一 / 与在服模型名、用户别名的冲突）与 `checkPoolStrategyIds` 的池
     // 策略 id 检查；在这里再调一遍 `checkRouteName` 只会造出第二个口径。
     // 它刻意只拒绝**新出现**的名字冲突：已生效的路由不因后来同步进同名模型而写不进去。
+    // 按渠道的「走系统代理」开关：写入侧必须整批拒绝坏值并把原因带回界面。
+    // 静默丢弃只允许发生在读取侧对付手坏的盘（`normalizeConfig`）。
+    if (config.channelSystemProxy !== undefined) {
+      const check = validateChannelSystemProxyWrite(config.channelSystemProxy)
+      if (!check.ok) errors.push(...check.errors)
+    }
+
     if (config.routes !== undefined) {
       // 存储没起来时这里抛，由调用方（管理 API 的 try/catch）变成 500 + 原因；
       // 不在校验函数里吞掉，否则「表读不到」会被显示成「你的表是空的」。

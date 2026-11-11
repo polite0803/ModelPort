@@ -18,6 +18,7 @@ import { homedir } from 'node:os'
 import { PassThrough } from 'node:stream'
 import AccountManager from '../../store/accounts'
 import { storeManager } from '../../store/store'
+import { setChannelSystemProxySink } from '../../store/channelSystemProxy'
 import type { Provider } from '../../store/types'
 import { ChannelBridge, ChannelBridgeError } from '../../channelPack/bridge'
 import type {
@@ -32,9 +33,10 @@ import type {
   ChannelRefreshResult,
   ChannelRpcResult,
   ChannelView,
+  CreditsBalanceRow,
 } from '../../../shared/channels'
 import { CHANNEL_DISPLAY_RENAMES, renameDisplayNameRefs, renamedDisplayName } from '../../../shared/channelRename'
-import { channelModelDisplayName } from '../../../shared/channels'
+import { channelModelDisplayName, summarizeChannelCredits } from '../../../shared/channels'
 import type { ModelCapabilityHint } from '../../../shared/types'
 import { ACCOUNT_CHANNELS, getChannelDefinition } from './catalogue'
 import { accountRuntime } from '../../proxy/accountRuntime'
@@ -157,6 +159,10 @@ class AccountChannelManager {
           else console.log(`[ChannelPack] ${message}`)
         },
       })
+      // 先把当前的开关带给 Worker（spawn 时随 workerData 定型），再启动；
+      // 之后就靠 store 写路径的广播保持同步（见 `store/channelSystemProxy.ts`）。
+      bridge.setChannelSystemProxy(storeManager.getConfig().channelSystemProxy ?? {})
+      setChannelSystemProxySink((map) => bridge.setChannelSystemProxy(map))
       await bridge.start()
       this.vault = vault
       this.bridge = bridge
@@ -292,64 +298,15 @@ class AccountChannelManager {
         error: message || undefined,
       }
     }
+    // 归并逻辑在 `shared/channels.ts`（纯函数，远程 UI 与桌面同一份实现，也被
+    // `tests/channels/credits-unit-fold.test.ts` 直接钉住）：这里只做取数与降级。
     const value = result.value as
-      | {
-        accounts?: Array<{
-          accountId?: string
-          nickname?: string
-          enabled?: boolean
-          balance?: { total?: number } | null
-          status?: unknown
-          note?: unknown
-          lastAt?: unknown
-          error?: string
-        }>
-        status?: unknown
-        note?: unknown
-      }
+      | { accounts?: unknown; status?: unknown; note?: unknown }
       | undefined
-    const rows = Array.isArray(value?.accounts) ? value.accounts : []
-    let total = 0
-    let reported = 0
-    const accounts = rows.map(row => {
-      const remaining = typeof row.balance?.total === 'number' ? row.balance.total : undefined
-      if (remaining !== undefined) {
-        reported += 1
-        // 渠道总额只累计**启用**账号（worker 对停用账号也回余额，供列表展示；
-        // `enabled` 缺省按 true 处理以兼容旧 worker）。否则启停一个号总额
-        // 纹丝不动 —— 用户开/关账号就看不到积分的加或减（2026-10-30 缺陷）。
-        if (row.enabled !== false) {
-          total += remaining
-        }
-      }
-      const status: 'limited' | 'available' | 'unknown' | undefined =
-        row.status === 'limited' || row.status === 'available' || row.status === 'unknown'
-          ? row.status
-          : undefined
-      return {
-        accountId: String(row.accountId ?? ''),
-        nickname: String(row.nickname ?? row.accountId ?? ''),
-        // 逐账号读数要一路带到界面：只有渠道总额时，一个号查询失败就表现为
-        // 「总额凭空少了一截」，用户无法知道少了谁、为什么少（2026-11-01）。
-        enabled: row.enabled !== false,
-        remaining,
-        ...status !== undefined ? { status } : {},
-        ...typeof row.note === 'string' && row.note.length > 0 ? { note: row.note } : {},
-        ...typeof row.lastAt === 'number' && Number.isFinite(row.lastAt) ? { lastAt: row.lastAt } : {},
-        error: typeof row.error === 'string' ? row.error : undefined,
-      }
-    })
-    const status: 'limited' | 'available' | 'unknown' | undefined =
-      value?.status === 'limited' || value?.status === 'available' || value?.status === 'unknown'
-        ? value.status
-        : undefined
-    return {
-      reported,
-      accounts,
-      ...reported > 0 ? { remaining: Math.round(total * 100) / 100 } : {},
-      ...status !== undefined ? { status } : {},
-      ...typeof value?.note === 'string' && value.note.length > 0 ? { note: value.note } : {},
-    }
+    return summarizeChannelCredits(
+      Array.isArray(value?.accounts) ? value.accounts as CreditsBalanceRow[] : [],
+      value,
+    )
   }
 
   /**

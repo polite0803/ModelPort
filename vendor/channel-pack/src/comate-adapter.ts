@@ -36,6 +36,13 @@ export const PROVIDER = COMATE.id
 
 /** 单凭据回退 ref（无账号池时）；实际登录写 `COMATE_ACCOUNT_*`。 */
 export interface ComateAdapterOptions {
+  /**
+   * 渠道出网能力（宿主按渠道注入）。缺省为全局 `fetch`。
+   *
+   * ⚠️ 登录走 `ComateAuth` 注入的出口、推理却用全局 `fetch` 时，两边可能落在
+   * 不同网络路径上；「按渠道走系统代理」的开关也就管不到对话。
+   */
+  fetchImpl?: typeof fetch
   credentialRef: CredentialRef
   resolveCredential: (modelId?: string) => Promise<ComateCredential | undefined>
   refresh: () => Promise<void>
@@ -363,7 +370,7 @@ export class ComateAdapter extends LlmAdapter {
     payload: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<{ code?: number; message?: string; data?: unknown }> {
-    const response = await fetch(this.apiUrl(path), {
+    const response = await (this.options.fetchImpl ?? fetch)(this.apiUrl(path), {
       method: 'POST',
       headers: comateHeaders(credential.license),
       body: JSON.stringify(payload),
@@ -688,7 +695,7 @@ export class ComateAdapter extends LlmAdapter {
     options: GenerateOptions,
     state: StreamState,
   ): AsyncGenerator<StreamChunk, { toolCalls: AgentToolCall[] }, void> {
-    const response = await fetch(this.apiUrl(EXECUTE_PATH), {
+    const response = await (this.options.fetchImpl ?? fetch)(this.apiUrl(EXECUTE_PATH), {
       method: 'POST',
       headers: comateHeaders(credential.license),
       body: JSON.stringify(payload),

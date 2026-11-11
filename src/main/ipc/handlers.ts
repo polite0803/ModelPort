@@ -346,6 +346,9 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
       httpsCertPath: updates.httpsCertPath ?? current.httpsCertPath,
       httpsKeyPath: updates.httpsKeyPath ?? current.httpsKeyPath,
       httpsSanHosts: updates.httpsSanHosts ?? current.httpsSanHosts,
+      // 这条校验是渲染层唯一的写门（通用 `store:set('config')` 不走它），
+      // 所以必须把新字段一并纳入，否则坏值只能靠读取侧静默丢弃。
+      channelSystemProxy: updates.channelSystemProxy ?? current.channelSystemProxy,
     })
     if (!validation.valid) {
       const message = validation.errors.join('; ')
