@@ -6,6 +6,74 @@
 条目按"为什么改、影响什么"描述；每条末尾括号里的短哈希指向产生该变更的提交，可在 `git show <哈希>` 中核对。
 版本边界与溯源说明见文末。
 
+## [1.8.3] - 2026-11-11
+
+版本边界：tag `v1.8.3`（相对 1.8.2）。两块内容：**打包安装的主进程错误日志终于进得了应用日志**，
+以及**渠道登录不再把一个账号记成两条**；另删除一条从来不会生效的「对话记录清理」开关，仓库也不再
+跟踪构建产物。`1.8.0`–`1.8.2` 此前未在本文件成文，按提交标题回填在文末。
+
+### Fixed（修复）
+
+- **安装版主进程的错误只落在没人看的流上**：`src/main` 有 233 处 `console.*`（其中
+  `error`/`warn` 136 处），打包后的 Electron 主进程没有终端，这些输出在生产里直接丢失——线上故障
+  只剩「已迁移到应用日志」的那部分路径可查。现在 `bootstrap.ts` 装一次桥
+  （`src/main/logging/consoleBridge.ts`）：原 console 照常打印（systemd 下的 daemon、
+  `npm run dev` 都不变），再脱敏 + 截断后写进应用日志。所有宿主共用同一装配点，新增调用点自动
+  覆盖。(`9ecc3c4`)
+- **日志持久化失败会自己喂自己**：`AppLogManager` 原本用 `console.error` 报告「写盘失败」，桥接后
+  这条错误会变成新日志条目、再次触发持久化、再失败。改为直写 `process.stderr`，终端宿主仍可见。
+  (`9ecc3c4`)
+- **备份收集失败只剩错误码**：`storage-not-ready` / `write-failed` 的原始原因此前只进 console，
+  现在随同一条桥写进应用日志；返回码契约没动。(`9ecc3c4`)
+- **重复登录会多出一条账号**：同一上游账号登录两次得到两条独立条目，各自参与选号、各自耗额度，
+  界面上像两个账号。`account.create` 现在按服务端下发的稳定标识判重（不用每次登录都会换发的
+  `access_token`），移除刚建的占位条目，并把 `duplicate` / `existingAccountId` 回给界面——提示
+  改成「该账号已存在，未重复添加」。存量重复账号启动时只停用、不删除（凭据不可重建）。
+  (`de306e9`)
+- **CodeArts 积分制账号走 benefit 通道必失败**：不带 benefit 包的账号返回 HTTP 200 + SSE 内嵌
+  错误，旧实现只在一个特定错误码上去头重试，其余走「直接抛出」，于是既没重试又被报成 502，网关
+  按可切换故障把同一目标再投一次。现在「本次确实带了 `maas_type: benefit` 且流内错误未被额度/
+  排队分支接住」本身就是判据：去掉该头重试一次；不带该头时同一错误是 404 终态（这个账号供不上
+  该模型），不再重投。(`de306e9`)
+
+### Changed（变更）
+
+- **「对话记录清理」开关删除**：它配置的会话表从来没有人写入（`addSession()` 零调用，
+  `initialize()` 也没人调），开关改与不改没有区别，却让人以为行为变了。连同 `sessionManager.ts`、
+  `sessions` 键、10 条 `session:*` IPC 通道、渲染层面板与两份 locale 一起移除；`config.sessionConfig`
+  按退休键在读取时剥离，管理 API 不会再报告一个没人读的开关。(`c967add`)
+- **仓库不再跟踪构建产物**：根 `modelport-daemon.cjs`（4.7 MB）与 `renderer/`（51 个文件）是从
+  提交 `423ece3` 混进来的产物，早已与源码漂移且没有任何门比对。`bin/modelport` 改为运行
+  `out/daemon/`，缺失时提示先 `npm run build:daemon`。(`31fe546`)
+- **请求主干的类型收口**：`buildRequestBody` → `Record<string, unknown>`、`extractHeaders(unknown)`
+  窄化、`ForwardResult.body?: unknown`、`ApiWire.invoke<T>`。不改行为，只让字段名写错在类型检查
+  阶段暴露。(`c967add`)
+
+### Tests（判据）
+
+- `tests/logging/console-bridge.test.ts`：双写（原 console 拿到原文、sink 拿到脱敏副本）、
+  `api_key=` 脱敏、sink 自己打印时不回灌、重复 install 幂等、无 sink 时静默降级。(`9ecc3c4`)
+- `tests/channels/account-dedupe-wiring.test.ts`：`account.create` 的每个登录分支都接了去重
+  （MiniMax 除外——它没有稳定身份值）、判据表里不得出现 `access_token`、存量去重只停用不删除。
+  (`de306e9`)
+- `tests/channels/codearts-benefit-route.test.ts`：带 benefit 头的流内错误去掉该头重试一次、
+  抛出文本带上游 `error_code`、不带该头时同一错误 404 终态、额度耗尽分支优先。(`de306e9`)
+
+### 未取读数
+
+- **只在本机 WSL 宿主上跑过门禁**：`npm run gate` 全绿（2141 个测试、0 失败），但没有在
+  Windows / macOS 安装包上各起一次验证桥接后的日志落盘。
+- **benefit 判据只来自一份现网抓包**：`APIG.0604` + `The API does not exist ...` 这一种帧。上游
+  换错误码时判据仍按「带了头且没被额度分支接住」成立，但没有第二种调用栈可验证。
+
+### 补记：1.8.0–1.8.2（按提交标题回填，未逐条复核）
+
+- **1.8.0**：新增 CodeArts、Comate 两个账号渠道与三家聚合供应商（PPIO、华为 ModelArts Studio、
+  Infini-AI）；路由池显示渠道成本权重；模型标注与批量采纳的结果保持可见。
+- **1.8.1**：Comate 把 agent 工具桥接成客户端工具。
+- **1.8.2**：模型行显示解析后的元数据摘要；Comate 输出结构化 finish reason；发布链路补 Windows
+  arm64 产物。
+
 ## [1.7.16] - 2026-11-10
 
 版本边界：tag `v1.7.16`（相对 1.7.15）。一块内容：**控制台窗口里的「新窗口链接」不再一律甩给系统
