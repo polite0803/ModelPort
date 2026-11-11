@@ -105,3 +105,17 @@
 | 改动面 | 27 个源码/文档文件，`+83 / -707`（不含被删的 51 个根 renderer 产物） |
 
 **附带发现并修掉**：`AppLogManager` 的持久化失败原本走 `console.error`，桥接后会被回灌成新日志条目并再次触发 persist —— D3 落地即形成自持循环。现改为直写 `process.stderr`（`appLogs/manager.ts:257`），终端宿主仍可见，GUI 侧由「store 本身已坏」兜底。
+## 七、复盘补修（2026-11-11 二轮）
+
+发布后按「修复面自身是否完整」再核一遍，出两条真遗漏，本轮都修了。
+
+| 缺口 | 修前读数 | 修法 | 判据 |
+|---|---|---|---|
+| 控制台进程自己的 `console.error/warn` 仍无人读：桥只装在网关侧，`src/shell` 里还有 10 处（证书被拒、地址簿读坏、渲染进程消失、网关子进程没起来） | `grep -c console.error/warn src/shell/` = 10，且 shell 不拥有 store | 新增 `src/shell/consoleLogSink.ts`：落自己 profile 的 `logs/console.ndjson`，2 MB 上限 + 一份 `.1` 轮转，同步写（异步队列丢的正是崩溃前最后几行）。桥与脱敏按 `shared/certificateTrust` 的先例下沉到 `src/shared/logging/`——`shell-entries` 门禁止 shell 导入 `src/main`，这是唯一不用写第二份实现的位置 | `tests/shell/console-log-sink.test.ts` 三条：落盘 + 脱敏、写满即轮转、目录建不出来时返回 false 且不吞原 console；门再加两条：install 必须早于单实例锁、sink 内部禁止 `console.*` |
+| 旧 `data.json` 顶层的 `sessions` 死键永存（config 侧 `sessionConfig` 已被 `normalizeConfig` 剥离，顶层这个没管） | 现网 `/root/.modelport/data.json` 实测 `sessions=True / sessionConfig=False` | `keyMigration.ts::retiredTopLevelKeys`（纯判据，`isRecord` 兜非对象快照）+ `store.ts::dropRetiredTopLevelKeys`，在 `orphanSystemPrompts` 之后执行 | `tests/store/key-migration.test.ts` 新增一条：空数组、有行、已迁移、非对象四种输入 |
+
+**代价与回退**：桥下沉改了 4 处 import（`requestLogs/sanitizer.ts`、`logging/crashReporter.ts`、`gateway/bootstrap.ts`、`tests/logging/console-bridge.test.ts`），运行期行为不变；本轮提交整体 `git revert` 即可还原。1.8.3 已发布内容不受影响，两条留给下一个版本，CHANGELOG 也留到发版时一并写。
+
+**明确不做的部分**：控制台日志只保证事后可取证，不给它做 UI 入口——控制台的界面是远端 `/ui/`，把自己的日志塞进去等于再造一个应用日志页面。
+
+**核过确认不是遗漏的三处**：`applyReplace` 是 `store.clear()` + 逐键写，含 `sessions` 的旧备份导入后不会把死键写回来；`/v1/management/sessions` 仍返回 501 `sessions_api_retired`；`scripts/deploy-wsl-daemon.sh` 的 `SRC_DIR=out/daemon`，与 Q1-A 一致，没有指向根产物的残留。
