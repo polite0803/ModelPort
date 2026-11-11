@@ -175,12 +175,94 @@ export function planAttemptDeadline(input: {
   elapsedMs: number
   budgetMs: number
   floorMs?: number
+  /**
+   * 首轮切片上限（毫秒）。只在第一次尝试上给，作用见 {@link FIRST_ATTEMPT_CAP_MS}。
+   */
+  capMs?: number
 }): number {
   const floor = input.floorMs ?? ATTEMPT_DEADLINE_FLOOR_MS
   const remaining = input.budgetMs - input.elapsedMs
-  return Math.min(input.completeMs, Math.max(floor, remaining))
+  const granted = Math.min(input.completeMs, Math.max(floor, remaining))
+  return input.capMs === undefined ? granted : Math.min(granted, input.capMs)
 }
 
+/**
+ * 第一次尝试的墙钟切片上限（2026-11-12 用户裁定「不提高总预算，但要降低第一轮的
+ * 尝试预算」）。
+ *
+ * 出厂的 `firstEventMs` 是 60s，而整条链的预算只有 {@link AUTO_WALL_CLOCK_BUDGET_MS}
+ * = 90s：一发慢首块就能吃掉 2/3 预算，后面 9 个候选连一次像样的等待都分不到
+ * （现网 `chatcmpl-mwceepbp-zsfoaf` 就是 `tried=1` + 池里 10 家 + 文案承诺换家却没换）。
+ * 首轮压到 20s 的依据：今天 Codex 流量的首帧实测 p50 3–5s、最大 ~12s
+ * （`streamTrace.firstTokenMs`），20s 已经覆盖正常推理模型的首帧，超出就是异常慢，
+ * 让它先让位给下一家比继续等更符合「不中断任务」。
+ *
+ * ⚠️ 这是**单个常量**，要调就调它；不要把它做成配置项 —— 没有证据支持逐路由不同值。
+ */
+export const FIRST_ATTEMPT_CAP_MS = 20_000
+
+/**
+ * 剩余预算低于这个线就不再新开一次尝试（2026-11-12）。
+ *
+ * `planAttemptDeadline` 在预算归零时返回**下限**而不是 0，于是换家循环会照常用
+ * 5s 开一发注定假超时的尝试：客户端多等 5s、拿回一个「渠道未产出首块」的错误，
+ * 而这一发本来就不可能成功。预算已经花完就该直接收口（回 503 + `Retry-After`，
+ * 让客户端退避），而不是再烧一次注定失败的往返。
+ */
+export const MIN_REMAINING_FOR_NEXT_ATTEMPT_MS = ATTEMPT_DEADLINE_FLOOR_MS
+
+/**
+ * 换家链被**可恢复类**失败耗尽后，网关自己等一次再走一遍链的等待计划。
+ *
+ * ## 为什么需要（2026-11-12 用户裁定）
+ *
+ * 池子里全是限流/额度类失败时，原先直接回 503 让客户端中断任务。协议上 503 +
+ * `Retry-After` 叫「等一会再来」，但 Codex 不会自动重试 agent 回合 —— 对用户就是
+ * 任务断了。所以等待必须由网关自己兑现，而不是甩给客户端。
+ *
+ * ## 预算从哪来
+ *
+ * 只用 **A2 腾出的那部分**：`AUTO_WALL_CLOCK_BUDGET_MS` 不提高（用户明确「不提高」），
+ * 首轮切片压到 20s 之后剩下的墙钟就是恢复轮的额度。等待时长受三重夹住：
+ * 剩余预算、上游给的解禁时刻（没有则用出厂退避）、以及 {@link RECOVERY_MAX_WAIT_MS}。
+ *
+ * ## 等待不占 AIMD 并发槽
+ *
+ * 槽在每次尝试返回时就 `endAttempt` 释放了（`forwarder.ts`），本等待发生在**整条链
+ * 走完之后**，所以结构上不可能持有槽 —— 不需要为此改持有期语义。
+ *
+ * @returns 要等待的毫秒数；`undefined` = 不该恢复（预算不够、或这不是可恢复类耗尽）。
+ */
+export function planRecoveryWaitMs(input: {
+  /** 上游给的解禁秒数（渠道包/`Retry-After`）；聚合 429 常常没有。 */
+  retryAfterSeconds?: number
+  /** 距整笔请求起点已花掉的毫秒数。 */
+  elapsedMs: number
+  /** 整条链的墙钟预算。 */
+  budgetMs: number
+}): number | undefined {
+  const remaining = input.budgetMs - input.elapsedMs
+  if (remaining < RECOVERY_MIN_BUDGET_MS) return undefined
+  const backoffMs = input.retryAfterSeconds === undefined
+    ? RECOVERY_DEFAULT_BACKOFF_MS
+    : Math.max(1_000, Math.round(input.retryAfterSeconds * 1000))
+  return Math.min(RECOVERY_MAX_WAIT_MS, backoffMs, remaining)
+}
+
+/** 恢复轮的等待上限：再长就该让客户端自己重试，而不是把连接挂着。 */
+export const RECOVERY_MAX_WAIT_MS = 15_000
+/** 上游没给解禁时刻时的出厂退避（聚合 429 全部走这条）。 */
+export const RECOVERY_DEFAULT_BACKOFF_MS = 5_000
+/** 剩余预算低于这个线就不值得再等一轮。 */
+export const RECOVERY_MIN_BUDGET_MS = 2_000
+
+/**
+ * 一次等待的睡眠。抽出来是为了让换家循环的恢复轮可被单测注入假计时器钉住，
+ * 而不是真的挂 5 秒。
+ */
+export function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, Math.max(0, ms)))
+}
 /** 一次转发重试的预算（次数不含首次尝试）。 */
 export interface ForwardRetryProfile {
   /** 额外重试次数；`0` = 只打一次（此时宿主不会睡任何一秒）。 */

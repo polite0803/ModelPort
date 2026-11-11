@@ -14,7 +14,10 @@ import {
   DEFAULT_FIRST_EVENT_TIMEOUT_MS,
   DEFAULT_FORWARD_RETRY_DELAY_MS,
   DEFAULT_REQUEST_TIMEOUT_MS,
+  FIRST_ATTEMPT_CAP_MS,
+  MIN_REMAINING_FOR_NEXT_ATTEMPT_MS,
   planAttemptDeadline,
+  planRecoveryWaitMs,
   planForwardRetries,
   planRequestDeadlines,
 } from '../../src/main/proxy/retryPolicy.ts'
@@ -134,4 +137,44 @@ test('墙钟预算折算成单次截止：既不超过计划值也不低于下�
   assert.equal(planAttemptDeadline({ ...base, elapsedMs: 95_000 }), 5_000)
   // 也永远不放宽到计划值以上（旋钮 30s 时不该等到 90s）。
   assert.equal(planAttemptDeadline({ completeMs: 30_000, elapsedMs: 0, budgetMs: 90_000 }), 30_000)
+})
+
+test('首轮切片上限只压低、不抬高（2026-11-12 用户裁定：不提高总预算，降低第一轮）', () => {
+  const base = { completeMs: 90_000, budgetMs: 90_000 }
+  // 首轮：预算充裕也只给 20s，把后面的等待与换家空间留出来
+  assert.equal(planAttemptDeadline({ ...base, elapsedMs: 0, capMs: FIRST_ATTEMPT_CAP_MS }), 20_000)
+  // 非首轮（不传 capMs）：维持原语义，逐字不变
+  assert.equal(planAttemptDeadline({ ...base, elapsedMs: 0 }), 90_000)
+  // 只压不抬：剩余预算本来就小于上限时，capMs 不该把它放大
+  assert.equal(planAttemptDeadline({ ...base, elapsedMs: 80_000, capMs: FIRST_ATTEMPT_CAP_MS }), 10_000)
+  // 预算归零时仍回下限，capMs 不改变这一点
+  assert.equal(planAttemptDeadline({ ...base, elapsedMs: 95_000, capMs: FIRST_ATTEMPT_CAP_MS }), 5_000)
+  // 出厂首事件等待是 60s，首轮压到 20s 才是「降低第一轮」
+  assert.ok(FIRST_ATTEMPT_CAP_MS < DEFAULT_FIRST_EVENT_TIMEOUT_MS)
+  assert.equal(FIRST_ATTEMPT_CAP_MS, 20_000)
+})
+
+test('恢复轮的等待计划：只用剩余墙钟，受上限与解禁时刻夹住', () => {
+  const BUDGET = 90_000
+  // 没有解禁时刻（聚合 429 的常态）→ 出厂退避
+  assert.equal(planRecoveryWaitMs({ elapsedMs: 20_000, budgetMs: BUDGET }), 5_000)
+  // 上游给了时刻 → 照它等，但不超过上限
+  assert.equal(planRecoveryWaitMs({ retryAfterSeconds: 3, elapsedMs: 20_000, budgetMs: BUDGET }), 3_000)
+  assert.equal(planRecoveryWaitMs({ retryAfterSeconds: 600, elapsedMs: 20_000, budgetMs: BUDGET }), 15_000)
+  // 剩余预算是硬顶：A2 腾出多少就只能等多少，总预算不因此变大
+  assert.equal(planRecoveryWaitMs({ retryAfterSeconds: 20, elapsedMs: 82_000, budgetMs: BUDGET }), 8_000)
+  // 剩余不够就不等（返回 undefined，由调用方直接收口）
+  assert.equal(planRecoveryWaitMs({ elapsedMs: 89_000, budgetMs: BUDGET }), undefined)
+  assert.equal(planRecoveryWaitMs({ elapsedMs: 95_000, budgetMs: BUDGET }), undefined)
+  // 亚秒级的解禁时刻向上取到 1s，不等 0 毫秒装成等过了
+  assert.equal(planRecoveryWaitMs({ retryAfterSeconds: 0.2, elapsedMs: 0, budgetMs: BUDGET }), 1_000)
+})
+
+test('剩余预算低于下限时不再新开尝试（避免一发注定假超时的请求）', () => {
+  // 收口线必须等于 planAttemptDeadline 的下限，否则会出现「还能开尝试、
+  // 但一发下去只有 5s」的中间态 —— 那正是现网那句假「渠道未产出首块」的来源。
+  assert.equal(MIN_REMAINING_FOR_NEXT_ATTEMPT_MS, 5_000)
+  assert.equal(planAttemptDeadline({ completeMs: 90_000, elapsedMs: 85_000, budgetMs: 90_000 }), 5_000)
+  assert.equal(90_000 - 85_000 < MIN_REMAINING_FOR_NEXT_ATTEMPT_MS, false, '刚好等于下限时边界归循环自己判')
+  assert.equal(90_000 - 86_000 < MIN_REMAINING_FOR_NEXT_ATTEMPT_MS, true)
 })

@@ -46,7 +46,7 @@ import { accountChannelManager } from '../../providers/accountChannels/manager'
 import { accountRuntime } from '../accountRuntime'
 import { storeManager } from '../../store/store'
 import { AUTO_PREFERENCES, type AutoPreference } from '../../../shared/types'
-import { isEmptyTurnAfterStream, shouldRevokeStickyAfterStream } from '../streamOutcomePolicy'
+import { isEmptyTurnAfterStream, isAnnouncedStopAfterStream, shouldRevokeStickyAfterStream } from '../streamOutcomePolicy'
 import { readRequestContextFit } from '../../../shared/requestContextFit.ts'
 import { DEFAULT_REPETITION_GUARD, measureStreamEmptyTurn, measureStreamRepetition } from '../../../shared/streamRepetition.ts'
 import { readOrEstimateUsage, usageInputText, type UsageReading } from '../quota/usage'
@@ -1460,7 +1460,8 @@ router.post('/completions', async (ctx: Context) => {
             endReason,
             elapsed,
             (outcome.finishReason === 'length' && requestedMaxTokens === undefined)
-            || isEmptyTurnAfterStream(trace),
+            || isEmptyTurnAfterStream(trace)
+            || isAnnouncedStopAfterStream(trace),
           )
           // One reading feeds both the log row and the ledger; a second read of
           // the collected stream is how the two figures drift apart.
@@ -1581,7 +1582,8 @@ router.post('/completions', async (ctx: Context) => {
             endReason,
             elapsed,
             (delivered.finishReason === 'length' && requestedMaxTokens === undefined)
-            || isEmptyTurnAfterStream(trace),
+            || isEmptyTurnAfterStream(trace)
+            || isAnnouncedStopAfterStream(trace),
           )
           const streamReading = readOrEstimateUsage(usageInputText(request), collectedContent)
           const streamUsage = upstreamUsageOf(streamReading)

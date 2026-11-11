@@ -19,13 +19,57 @@
  * - **可复现随机**：Thompson 的后验采样由每请求 seed 派生，同一请求内的
  *   排序可复现；候选身份也进 seed，避免候选在输入数组里的位置改变它自己的
  *   采样。
- * - **两类不可用成功**：`finish_reason=length` 且客户端未请求上限，以及流内重复
- *   退化读数命中（`shared/streamRepetition.ts`）。后者是 2026-11-03 补的：那一类
- *   流 HTTP 200、`finish_reason=tool_calls`，被客户端掐掉后在我们这边只是
- *   `client_abort`，评分上等于没发生。
+ * - **四类不可用成功**（`isDegradedSuccess`）：① `finish_reason=length` 且客户端未请求
+ *   上限；② 流内重复退化（`shared/streamRepetition.ts`，2026-11-03 补 —— 那一类流
+ *   HTTP 200、`finish_reason=tool_calls`，被客户端掐掉后在我们这边只是 `client_abort`，
+ *   评分上等于没发生）；③ 空转（`streamTrace.emptyTurn.empty`，200 正常收尾但正文与
+ *   工具调用皆零）；④ 宣布即停（`emptyTurn.announcedStop`，有正文、零工具调用、正文
+ *   以冒号收尾）。②③④ 都从分子移出并计入分母，所以「连得上但不干活」的候选会被
+ *   时间筛下去 —— 这正是本模块存在的意义：让真正好用的免费来源自己浮上来。
+ * - **读数要从 `streamTrace` 里读**：2026-11-12 之前 ②③ 只读顶层 `repetition`，
+ *   而真实日志行把它们嵌在 `streamTrace` 下，于是两类**从未生效**，Codex 会话被
+ *   反复派给只会宣布下一步的免费模型。判据存在不等于通路存在。
  */
 
-import type { StreamRepetitionReading } from '../../shared/streamRepetition.ts'
+import type { StreamEmptyTurnReading, StreamRepetitionReading } from '../../shared/streamRepetition.ts'
+import { isAccountArrearsError, isRecoverableChannelFailure } from './failover.ts'
+
+/**
+ * 配额轴：这一家**暂时**供不了（限流、当日/累计额度、排队、欠费），或者整条链
+ * 就是因为这些原因被掏空（503 `no_available_model`）。
+ *
+ * ## 为什么它必须与能力轴分开（2026-11-12 用户裁定）
+ *
+ * 本网关的存在意义就是用免费额度跑 agent。免费来源的常态就是**配额到顶**：
+ * 一天里 `codex` 线路 50 笔有 26 笔 503，最后一家分别是 open_router 403（×11）、
+ * `cline: model not supported`（×9）、ppio 403 余额不足（×3）。原先这些和
+ * 「模型答得烂」进同一个 Beta 后验，结果是**好用但配额小的家被永久压住**，
+ * 而「有配额但只会宣布下一步」的家反而排前面 —— 正好是「时间一久筛出好免费模型」
+ * 的反面。
+ *
+ * 拆开后两轴各自负责一件事：
+ * - **能力轴**（本模块的后验与退化计数）：只回答「这一家能不能把 agent 回合干完」。
+ *   配额类失败**不进分母**，所以配额恢复后它的成绩不会被历史限流拖住。
+ * - **配额轴**（`accountRuntime` 的 (账号,模型) 冷却、`modelCatalogCooldown`、
+ *   解禁时刻）：只回答「现在能不能派给它」。429 的冷却已由
+ *   `forwardChatCompletion` 记档，欠费/未订阅走 `isAccountArrearsError` 那条换家分支。
+ *
+ * ⚠️ 这里的两个文案判据**复用 failover 的既有权威**，不在本模块另立一套；
+ * 但「配额类不占换家预算」是 failover 自己的口径，两边刻意不必相同 ——
+ * 本函数只决定**评分要不要记这一笔**。
+ */
+export function isCapacityDrivenFailure(input: {
+  /** HTTP 状态码。⚠️ 不叫 `status` —— 日志行的 `status` 是 `'success' | 'error'` 字符串。 */
+  httpStatus?: number
+  statusCode?: number
+  errorCode?: string | number | null
+  errorMessage?: string
+}): boolean {
+  const code = input.httpStatus ?? input.statusCode
+  if (code === 429 || code === 402) return true
+  if (code === 503 && String(input.errorCode ?? '') === 'no_available_model') return true
+  return isRecoverableChannelFailure(input.errorMessage) || isAccountArrearsError(input.errorMessage)
+}
 
 /** One upstream attempt as it appears in a request log row. */
 export interface BanditAttemptLogEntry {
@@ -35,6 +79,11 @@ export interface BanditAttemptLogEntry {
   status?: number
   errorCode?: string | number | null
   latencyMs?: number
+  /**
+   * 上游错误原文 —— 配额轴的识别要靠它（`isRecoverableChannelFailure` 是文案判据）。
+   * 请求日志的 `attempts[]` 本来就带这个字段，此前没进 Bandit 的切片类型。
+   */
+  errorMessage?: string
 }
 
 /** 参与 Bandit 统计的日志最小切片（RequestLogEntry 的相关字段）。 */
@@ -61,12 +110,38 @@ export interface BanditLogEntry {
    */
   repetition?: StreamRepetitionReading
   /**
+   * 「协议完成、内容空转/宣布即停」读数（第三、第四类退化）。
+   *
+   * ⚠️ 生产日志里这两个读数都嵌在 `streamTrace` 下（`shared/types.ts`
+   * `RequestStreamTrace`），**不是**顶层字段。顶层形态留着只为兼容手工构造的
+   * 样本；真实行一律走下面的 `streamTrace`。
+   */
+  emptyTurn?: StreamEmptyTurnReading
+  /**
+   * 请求行的流读数容器 —— 生产数据的真实形状。
+   *
+   * 2026-11-12 修：本模块此前只读**顶层** `repetition`，而 `getRequestLogs()`
+   * 交进来的行把它放在 `streamTrace.repetition` 里，于是「流内重复退化」和后来加的
+   * 「空转」两类**从未进过后验评分** —— 只有 `finish_reason=length` 那一类生效。
+   * 后果正对着「让好用的免费模型自己排出来」这个目标：一发 HTTP 200、
+   * `finish_reason=tool_calls`、正文以冒号收尾却零工具调用的回合，在评分里是**加分**的。
+   */
+  streamTrace?: {
+    repetition?: StreamRepetitionReading
+    emptyTurn?: StreamEmptyTurnReading
+  }
+  /**
    * Per-candidate attempts. A successful row only names the winner at the top
    * level, so without this a candidate that failed earlier in the chain looks
    * like it has no record at all — the 2026-11-02 Codex incident: OpenCode 404
    * and WorkBuddy risk-control were invisible while OVH/Spark kept winning.
    */
   attempts?: readonly BanditAttemptLogEntry[]
+  /** 终态状态码与错误码 —— 配额轴的排除要靠它们（见 `isCapacityDrivenFailure`）。 */
+  statusCode?: number
+  errorCode?: string | number | null
+  /** 终态错误原文。 */
+  errorMessage?: string
 }
 
 /** 一个 (provider, model) 的滚动窗口战绩。 */
@@ -140,7 +215,13 @@ export function latencyP50(latenciesMs: number[]): number | undefined {
  */
 export function isDegradedSuccess(entry: BanditLogEntry): boolean {
   if (entry.status !== 'success') return false
-  if (entry.repetition?.degraded === true) return true
+  // 读**两种形状**：生产行把读数嵌在 `streamTrace` 下，手工样本历史上写在顶层。
+  // 只读顶层就是那个「200 但没干活」从不降权的缺陷本身。
+  const repetition = entry.repetition ?? entry.streamTrace?.repetition
+  if (repetition?.degraded === true) return true
+  const emptyTurn = entry.emptyTurn ?? entry.streamTrace?.emptyTurn
+  if (emptyTurn?.empty === true) return true
+  if (emptyTurn?.announcedStop === true) return true
   if (entry.finishReason !== 'length') return false
   return entry.maxTokens === undefined || entry.maxTokens <= 0
 }
@@ -158,6 +239,13 @@ export function aggregateBanditStats(
   const windowed = entries
     .filter(entry => entry.timestamp >= from && entry.timestamp <= nowMs)
     .filter(entry => entry.providerId && entry.actualModel)
+    // 能力轴不收配额类失败：503「池子被限流/额度掏空」是**整条链**的结局，
+    // 不是最后那一家的能力判决（各候选的真相在 attempts 里，那边同样按轴过滤）。
+    .filter(entry => entry.status === 'success' || !isCapacityDrivenFailure({
+      statusCode: entry.statusCode,
+      errorCode: entry.errorCode,
+      errorMessage: entry.errorMessage,
+    }))
     .slice()
     .sort((a, b) => a.timestamp - b.timestamp)
 
@@ -269,6 +357,12 @@ function aggregateAttemptStats(
       order += 1
       if (attempt.outcome === 'client_abort') continue
       if (!attempt.providerId || !attempt.model) continue
+      // 配额轴：429/402/额度/欠费/排队不进能力后验 —— 它们由冷却与解禁时刻负责。
+      if (isCapacityDrivenFailure({
+        httpStatus: attempt.status,
+        errorCode: attempt.errorCode,
+        errorMessage: attempt.errorMessage,
+      })) continue
       const hard = isHardCandidateFailure(attempt.status, attempt.errorCode)
       // A plain fatal 400 is the client's contract problem; counting it would
       // penalize every model for one malformed request.

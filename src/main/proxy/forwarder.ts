@@ -84,7 +84,7 @@ export interface FailoverBudget {
 import { attemptTraceOf } from './attemptTrace.ts'
 import { accountRuntime } from './accountRuntime'
 import { dispatchLedger } from './dispatchLedger.ts'
-import { planAttemptDeadline, planForwardRetries } from './retryPolicy'
+import { FIRST_ATTEMPT_CAP_MS, MIN_REMAINING_FOR_NEXT_ATTEMPT_MS, planAttemptDeadline, planForwardRetries, planRecoveryWaitMs, sleep } from './retryPolicy'
 import { stripUnsupportedForBuiltin } from './parameterPolicy'
 import { ensureAnthropicOutputCap, outputCapFallbackOf } from './utils/outputCap.ts'
 import { opencodeAffinityHeaders } from './utils/opencodeAffinity.ts'
@@ -120,12 +120,15 @@ import {
   isForcedToolChoiceUnsupported,
   isMissingReasoningHistoryError,
   isMissingSessionAffinityError,
+  isAccountArrearsError,
   isReasoningEffortUnsupportedError,
   isOpaqueAggregateBadRequest,
+  isRecoverableChainExhaustion,
   isRecoverableChannelFailure,
   isSameTargetRetryableStatus,
   isToolOverflowError,
   isUpstreamCatalogMissError,
+  parseRetryAfterSeconds,
   probeSseHead,
   shouldTryNextAutoCandidate,
 } from './failover.ts'
@@ -646,13 +649,22 @@ export class RequestForwarder {
     request: ChatCompletionRequest,
     candidates: T[],
     context: ProxyContext,
-    budget: FailoverBudget
+    budget: FailoverBudget,
+    /**
+     * 恢复轮状态（见 `planRecoveryWaitMs`）。默认给一次机会；递归调用时传
+     * `roundsLeft: 0`，所以**最多一轮**，不会滚成循环重试。
+     */
+    recovery: {
+      roundsLeft: number
+      failures: AutoAttemptFailure[]
+      attemptTrace: RequestAttemptTrace[]
+    } = { roundsLeft: 1, failures: [], attemptTrace: [] }
   ): Promise<ForwardChainOutcome<T> | null> {
     let last: { result: ForwardResult; candidate: T; attempts: number } | null = null
     // 被跳过的候选各自的失败样貌（判据与换家分支同源，见 describeAttemptFailure）。
     // 请求日志只记最终赢家，没有这个数组就分不清「这家天天错」和「这家偶发排队」。
-    const failures: AutoAttemptFailure[] = []
-    const attemptTrace: RequestAttemptTrace[] = []
+    const failures: AutoAttemptFailure[] = recovery.failures
+    const attemptTrace: RequestAttemptTrace[] = recovery.attemptTrace
     let attempts = 0
     // 账号故障类（5xx/网络）失败计数：达到基础上限就停手 —— 积分账号每次失败
     // 都可能烧钱，5xx 通常意味着系统性问题，多试只是多烧（PLAN P0-1）。
@@ -675,6 +687,8 @@ export class RequestForwarder {
           }
 
     for (const candidate of candidates) {
+      const budgetElapsedMs = Date.now() - budgetStart
+      const remainingBudgetMs = AUTO_WALL_CLOCK_BUDGET_MS - budgetElapsedMs
       // 分级尝试上限 + 墙钟预算（分级判据本体与测试在 failover.ts）。
       // `extendedCap` 现在就是整条候选链的长度：选号阶段不再裁家数，所以可恢复类
       // 失败实际由墙钟预算收口，账号故障类由 `baseCap` 收口。
@@ -683,20 +697,32 @@ export class RequestForwarder {
         accountFailures,
         baseCap,
         extendedCap: candidates.length,
-        elapsedMs: Date.now() - budgetStart,
+        elapsedMs: budgetElapsedMs,
         budgetMs: AUTO_WALL_CLOCK_BUDGET_MS,
       })) {
         break
       }
+      // 预算见底就不再新开一次尝试。`planAttemptDeadline` 在预算归零时返回**下限**
+      // 而不是 0，于是循环照常用 5s 开一发注定假超时的请求 —— 客户端多等 5s、
+      // 拿回一句「渠道未产出首块」，而这一发本来就不可能成。直接收口回 503 +
+      // `Retry-After`（Codex 语义里 503 才是「等一会再来」）才是诚实的结局。
+      // 第一次尝试不受此限：一上来就不打，等于整条路由不可用。
+      if (attempts > 0 && remainingBudgetMs < MIN_REMAINING_FOR_NEXT_ATTEMPT_MS) {
+        break
+      }
 
+      const attemptDeadlineMs = planAttemptDeadline({
+        completeMs: requestDeadlines().completeMs,
+        elapsedMs: budgetElapsedMs,
+        budgetMs: AUTO_WALL_CLOCK_BUDGET_MS,
+        // 首轮切片压低：一发慢首块不该吃掉 90s 预算的 2/3，让后面几家连一次
+        // 像样的等待都分不到（见 `FIRST_ATTEMPT_CAP_MS` 的实测依据）。
+        ...(attempts === 0 ? { capMs: FIRST_ATTEMPT_CAP_MS } : {}),
+      })
       const attemptRequest: ChatCompletionRequest = {
         ...request,
         model: candidate.displayName,
-        attemptDeadlineMs: planAttemptDeadline({
-          completeMs: requestDeadlines().completeMs,
-          elapsedMs: Date.now() - budgetStart,
-          budgetMs: AUTO_WALL_CLOCK_BUDGET_MS,
-        }),
+        attemptDeadlineMs,
       }
       const attemptContext: ProxyContext = {
         ...context,
@@ -753,6 +779,9 @@ export class RequestForwarder {
         // 实测 400）：说的是这一家的接入契约，不是客户端写错了什么。换一个候选就能成，
         // 账号健康 —— 但它同时意味着这一家在聚合路上**还没法用**，见判据注释。
         || isMissingSessionAffinityError(result.error)
+        // 这一家的账号欠费（百炼 `Arrearage` 实测 400）：说的是账务状态，不是客户端
+        // 写错了什么。原先 400 终止整条链，一家欠费就把后面所有候选一起打死。
+        || isAccountArrearsError(result.error)
         // 普通 404 同样是「这一家供不了这个模型」（目录漂移/能力差异），不是账号
         // 故障：换下一家，但不给账号记冷却 —— 否则一次模型改名会连坐整个账号。
         || result.status === 404
@@ -770,6 +799,9 @@ export class RequestForwarder {
         error: result.error,
         status: result.status,
         providerType: candidate.provider.type,
+        // 预算读数原样落到日志：没有它们，「为什么只试了一家就收口」永远只能猜。
+        budgetElapsedMs,
+        attemptDeadlineMs,
       }))
       // 本地并发准入拒绝不是上游故障：换下一家，但不给账号记冷却/失败。
       if (result.localAdmissionRejected) continue
@@ -806,6 +838,35 @@ export class RequestForwarder {
         if (!opaqueAggregateBadRequest) {
           loadBalancer.markAccountFailed(candidate.account.id)
         }
+      }
+    }
+
+    // 恢复轮（2026-11-12 用户裁定）：链被**可恢复类**失败耗尽时，网关自己等一次再
+    // 走一遍，而不是把 503 甩给客户端。协议上 503 + Retry-After 叫「稍后再试」，
+    // 但 Codex 不会自动重试 agent 回合 —— 对用户那就是任务断了。
+    //
+    // 三条边界：预算只用 A2 腾出的剩余墙钟（总预算不提高）；最多一轮
+    // （`recovery.roundsLeft`）；等待发生在所有 `endAttempt` 之后，所以不持有
+    // AIMD 并发槽。欠费/未订阅不在范围内 —— 那些不会在十几秒内自己变好。
+    if (last !== null
+      && recovery.roundsLeft > 0
+      && isRecoverableChainExhaustion({
+        status: last.result.status,
+        error: last.result.error,
+        localAdmissionRejected: last.result.localAdmissionRejected,
+      })) {
+      const waitMs = planRecoveryWaitMs({
+        retryAfterSeconds: parseRetryAfterSeconds(last.result.retryAfter),
+        elapsedMs: Date.now() - budgetStart,
+        budgetMs: AUTO_WALL_CLOCK_BUDGET_MS,
+      })
+      if (waitMs !== undefined) {
+        await sleep(waitMs)
+        return this.forwardFirstReachable(request, candidates, context, budget, {
+          roundsLeft: 0,
+          failures,
+          attemptTrace,
+        })
       }
     }
 
@@ -887,7 +948,19 @@ export class RequestForwarder {
         // 它永远等不到检查点，所以超时必须在这里兑现：销毁源流触发 openStream
         // 的 close → cancel，渠道 worker 才会中止上游请求；504 参与换家。
         upstream.destroy()
-        const timeoutMessage = `渠道 ${Math.round(firstEventMs / 1000)}s 内未产出任何首块（疑似假死），已中止并换下一家`
+        // ⚠️ 文案不能再无条件写「已中止并换下一家」。2026-11-12 现网两笔
+        // （`chatcmpl-mwceepbp-zsfoaf`、`chatcmpl-mwcekfbq-0fmjrm`）都是
+        // `tried=1` + 池里还有 10 个候选 + 耗时 ~100s：`firstEventMs` 是
+        // `min(出厂值, 剩余墙钟预算)`，那一发打印出的「5s」其实是**剩余预算**，
+        // 说明预算在第一次尝试之前就被吃光了，换家根本无从发生。
+        // 承诺一个不会执行的下一步，比报一个错更难查 —— 用户据此判断「网关会自己换」
+        // 而一直等下去。
+        const factoryFirstEventMs = requestDeadlines().firstEventMs
+        const budgetClamped = firstEventMs < factoryFirstEventMs
+        const timeoutMessage = `渠道 ${Math.round(firstEventMs / 1000)}s 内未产出任何首块（疑似假死），已中止`
+          + (budgetClamped
+            ? `；${Math.round(firstEventMs / 1000)}s 是剩余墙钟预算（出厂上限 ${Math.round(factoryFirstEventMs / 1000)}s），预算耗尽时不再换家`
+            : '')
         return {
           success: false,
           status: 504,

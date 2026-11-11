@@ -175,3 +175,60 @@ test('[DONE]、PING 注释与坏帧不贡献任何计数', () => {
   assert.equal(reading.toolCallDeltas, 0)
   assert.equal(reading.empty, true)
 })
+
+// ── 「宣布要做」读数（第四类退化）────────────────────────────────────────────
+
+test('有正文、零工具调用、正文以冒号收尾：判宣布即停', () => {
+  // 2026-11-12 05:24 现网 `chatcmpl-mwcmniyx-797qi1` 的形状
+  // （cline/nemotron-3.5-lightning-free：「首先，让我看一下 appearanceSections() 的当前结构：」）
+  const sseText = frames([
+    { choices: [{ delta: { role: 'assistant' } }] },
+    { choices: [{ delta: { content: '# 第三步：修改 SettingsNavigator.kt' } }] },
+    { choices: [{ delta: { content: '\n\n首先，让我看一下 appearanceSections() 的当前结构：' } }] },
+    { choices: [{ delta: {}, finish_reason: 'stop' }] },
+  ])
+  const reading = measureStreamEmptyTurn(sseText, true)
+  assert.equal(reading.empty, false, '有正文，所以不是空转那一格')
+  assert.equal(reading.lastChar, '：')
+  assert.equal(reading.announcedStop, true, JSON.stringify(reading))
+  assert.equal(measureStreamRepetition(sseText)?.notJudged, 'too_short', '去重率对这一发同样是瞎的')
+})
+
+test('半角冒号同样判；结尾空白不算', () => {
+  assert.equal(
+    measureStreamEmptyTurn(frames([{ choices: [{ delta: { content: 'now let me read the file:' } }] }]), true).announcedStop,
+    true,
+  )
+  assert.equal(
+    measureStreamEmptyTurn(frames([{ choices: [{ delta: { content: 'now let me read the file:  \n\n' } }] }]), true).announcedStop,
+    true,
+    '尾部空白与换行不该影响收尾字符',
+  )
+})
+
+test('内容段数组以冒号收尾也判；正文非冒号收尾不判', () => {
+  assert.equal(
+    measureStreamEmptyTurn(frames([{ choices: [{ delta: { content: [{ type: 'text', text: '下一步：' }] } }] }]), true).announcedStop,
+    true,
+  )
+  const done = measureStreamEmptyTurn(frames([{ choices: [{ delta: { content: '改完了，构建通过。' } }] }]), true)
+  assert.equal(done.lastChar, '。')
+  assert.equal(done.announcedStop, false, '这是合法的最终答复，不能降权')
+})
+
+test('有工具调用、没给工具、或正文为空时都不判宣布即停', () => {
+  assert.equal(
+    measureStreamEmptyTurn(frames([{ choices: [{ delta: { content: '先看这个：' } }] }, { choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'exec' } }] } }] }]), true).announcedStop,
+    false,
+    '真发了工具调用就不是「只说不做」',
+  )
+  assert.equal(
+    measureStreamEmptyTurn(frames([{ choices: [{ delta: { content: '先看这个：' } }] }]), false).announcedStop,
+    false,
+    '客户端没带工具时说话是合法答案',
+  )
+  const empty = measureStreamEmptyTurn(frames([{ choices: [{ delta: {}, finish_reason: 'stop' }] }]), true)
+  assert.equal(empty.empty, true)
+  assert.equal(empty.announcedStop, false, '零正文归 empty 那一格')
+  assert.equal('lastChar' in empty, false, '没有正文时不该造出收尾字符')
+})

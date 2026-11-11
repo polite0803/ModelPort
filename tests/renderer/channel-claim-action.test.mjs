@@ -77,13 +77,14 @@ test('渠道卡片：任务按钮包在 growthTasks 条件里，且条件只包�
     /\{channel\.growthTasks && \(\s*<Button[^]*?claimTasks\(channel\)[^]*?\)\}/,
     '领取任务按钮必须由 channel.growthTasks 条件渲染',
   )
-  // 2026-11-09 加了接单与清单两个入口，所以这里锁**数量与归属**而不是只锁一处：
-  // 判据的本意是「能力位必须门住每一个入口」，不是「只能有一个入口」。
-  // 出现第 4 处＝有人又挂了一个没被能力位管住的成长任务入口，要显式改这条。
+  // 2026-11-09 加了接单与清单两个入口，2026-11-12 又加了一键完成，所以这里锁
+  // **数量与归属**而不是只锁一处：判据的本意是「能力位必须门住每一个入口」，
+  // 不是「只能有一个入口」。出现第 5 处＝有人又挂了一个没被能力位管住的
+  // 成长任务入口，要显式改这条。
   assert.equal(
     source.match(/\{channel\.growthTasks && \(/g)?.length,
-    3,
-    'growthTasks 应当恰好门住三个入口：领取任务、接取任务、任务清单',
+    4,
+    'growthTasks 应当恰好门住四个入口：领取任务、一键完成、接取任务、任务清单',
   )
   // 锁的是**调用点**（`rpc('…'`）而不是字符串出现次数：方法名也会出现在注释里，
   // 按字符串数会把「唯一入口」这条判据变成随机红。
@@ -91,6 +92,36 @@ test('渠道卡片：任务按钮包在 growthTasks 条件里，且条件只包�
     source.match(/rpc\('onboarding\.claimAll'/g)?.length,
     1,
     'onboarding.claimAll 只应有一处调用点',
+  )
+})
+
+/**
+ * 「一键完成」是接单 + 领取的组合入口（2026-11-12，用户点名加在领取之后）。
+ *
+ * 它**不新增 RPC**：只按顺序复用上面两个动作，所以能力位与「每个 RPC 一个调用点」
+ * 两条判据都继续成立。这条门锁住「复用而不是另起一条」这件事 —— 若有人给它单写
+ * 一遍 `rpc('onboarding.…')`，上面两条计数会红，这条会指出根因。
+ */
+test('一键完成入口：由 growthTasks 门住，且只复用接单/领取两个动作', () => {
+  const source = page()
+  // 从调用点往回截一段，断言它和守卫之间只有这个 <Button>：跨按钮的宽松匹配
+  // 会让「按钮被复制到条件外面」照样绿。
+  const callIndex = source.indexOf('finishTasks(channel)')
+  assert.notEqual(callIndex, -1, '界面缺 finishTasks 调用点')
+  assert.match(
+    source.slice(Math.max(0, callIndex - 400), callIndex),
+    /\{channel\.growthTasks && \(\s*<Button[^]*$/,
+    '一键完成按钮必须由 channel.growthTasks 条件渲染',
+  )
+  assert.equal(
+    source.match(/t\('channels\.tasks\.finish'\)/g)?.length,
+    1,
+    '一键完成只用一处文案（finish），不得与领取按钮共用 key',
+  )
+  assert.match(
+    source,
+    /const finishTasks = async[^]*?acceptTasks\(channel, false, false\)[^]*?claimTasks\(channel, false, false\)/,
+    '一键完成必须先接单后领取，且复用既有动作函数而非直发 RPC',
   )
 })
 

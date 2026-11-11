@@ -49,6 +49,8 @@ import {
   isForcedToolChoiceUnsupported,
   isMissingReasoningHistoryError,
   isMissingSessionAffinityError,
+  isAccountArrearsError,
+  isRecoverableChainExhaustion,
   isOpaqueAggregateBadRequest,
   isRecoverableChannelFailure,
   isSameTargetRetryableStatus,
@@ -737,7 +739,7 @@ test('换家取证必须落到源码：循环记录每次失败，日志写出 f
   // 否则「为什么链在这里断了」仍然无处可查。
   assert.match(
     forwarderSource,
-    /failures\.push\(describeAttemptFailure\(\{\s*\r?\n\s*candidate: candidate\.displayName,\s*\r?\n\s*error: result\.error,\s*\r?\n\s*status: result\.status,\s*\r?\n\s*providerType: candidate\.provider\.type,\s*\r?\n\s*\}\)\)[\s\S]{0,1600}?if \(!capabilityMismatch\)/,
+    /failures\.push\(describeAttemptFailure\(\{\s*\r?\n\s*candidate: candidate\.displayName,\s*\r?\n\s*error: result\.error,\s*\r?\n\s*status: result\.status,\s*\r?\n\s*providerType: candidate\.provider\.type,[\s\S]{0,240}?\}\)\)[\s\S]{0,1600}?if \(!capabilityMismatch\)/,
     'every failed attempt must be described before the failover branch decides where to go next',
   )
   // 每个出口都要带上清单（成功那轮的返回值同样含此前被跳过的家）
@@ -876,8 +878,16 @@ test('请求超时这一格必须被读进等待计划（否则设置又是装�
 })
 
 test('墙钟预算必须折算成单次截止（不然一笔悬挂就吃掉整条链）', () => {
-  assert.match(forwarderSource, /attemptDeadlineMs\s*:\s*planAttemptDeadline\(/,
-    'the failover loop must pass a per-attempt deadline derived from the remaining wall budget')
+  assert.match(forwarderSource, /const attemptDeadlineMs = planAttemptDeadline\(\{/,
+    'the failover loop must derive a per-attempt deadline from the remaining wall budget')
+  assert.match(forwarderSource, /attemptRequest: ChatCompletionRequest = \{[\s\S]{0,220}?attemptDeadlineMs,/,
+    'the derived deadline must actually reach the attempt request')
+  assert.match(forwarderSource, /elapsedMs: budgetElapsedMs,/,
+    'the deadline must be planned from elapsed wall time, not re-derived from a second clock')
+  assert.match(forwarderSource, /capMs: FIRST_ATTEMPT_CAP_MS/,
+    'the first attempt must get the lowered slice (user ruling 2026-11-12)')
+  assert.match(forwarderSource, /remainingBudgetMs < MIN_REMAINING_FOR_NEXT_ATTEMPT_MS/,
+    'the loop must not start another attempt once the wall budget is spent')
   assert.match(forwarderSource, /request\.attemptDeadlineMs\s*\?\?\s*requestDeadlines\(\)\.completeMs/,
     'the account-channel forward must honour that per-attempt deadline')
 })
@@ -1051,6 +1061,12 @@ test('「上游目录不认这个模型」识别：按目录缺失语义判 capa
   ))
 
   // 客户端自己的请求错误不构成「换一家就能成」：换家不会改变写错的名字
+  // 2026-11-12 现网补的两条（`codex` 线路 26 笔 503 里占 20 笔）
+  assert.ok(isUpstreamCatalogMissError('cline: model not supported [request_id: chatcmpl-mwcdwma1-4sdbds]'),
+    '这一家的目录里没有这个模型 —— 与 Unknown model 同一类，换一家就能成')
+  assert.ok(isUpstreamCatalogMissError('This model is not available in your region.'),
+    '这一家对本账号所在地区供不了这个模型')
+  // 客户端写坏参数/写错名字的 400 仍然不算（换家没有意义）
   assert.equal(isUpstreamCatalogMissError('model not found'), false)
   assert.equal(isUpstreamCatalogMissError("Invalid value for 'tools': maximum number of items is 128."), false)
   assert.equal(isUpstreamCatalogMissError('messages: must be a non-empty array'), false)
@@ -1136,4 +1152,95 @@ test('「这一家要求我们没发的会话亲和头」识别：命中报障�
   // 接线：auto 换家分支与 attemptTrace 的 outcome 分类都要接上
   assert.match(forwarderSource, /\|\| isMissingSessionAffinityError\(result\.error\)/,
     'session-affinity 400 must take the capability-mismatch branch (fail over without account penalty)')
+})
+
+test('「这一家账号欠费」识别：命中百炼 Arrearage 原文，且不吞掉别的 400', () => {
+  // 2026-11-12 05:24 实测原文（bailian/qwen3.7-max-2026-05-17，kind=fatal，整条链打死）
+  assert.ok(isAccountArrearsError(
+    'Access denied, please make sure your account is in good standing. For details, see: '
+    + 'https://help.aliyun.com/zh/model-studio/error-code#overdue-payment [request_id: chatcmpl-mwbx7zpn-sc18ep]',
+  ))
+  assert.ok(isAccountArrearsError('Arrearage'))
+  assert.ok(isAccountArrearsError('账户已欠费，请充值后继续使用'), '中文文案同样认')
+  assert.ok(isAccountArrearsError('overdue payment detected'))
+
+  // 窄口径：泛化的 access denied / 权限措辞不算（那些本来就走 403 换家）
+  assert.equal(isAccountArrearsError('Access denied: invalid API key'), false)
+  assert.equal(isAccountArrearsError('permission_error: not allowed to use this model'), false)
+  assert.equal(isAccountArrearsError("Invalid value for 'tools': maximum number of items is 128."), false)
+  assert.equal(isAccountArrearsError(undefined), false)
+  assert.equal(isAccountArrearsError(''), false)
+
+  // 接线：auto 换家分支与 attemptTrace 的 outcome 分类都要接上
+  assert.match(forwarderSource, /\|\| isAccountArrearsError\(result\.error\)/,
+    'arrears 400 must fail over instead of ending the whole chain')
+})
+
+test('首块超时的文案不许承诺一个不会执行的换家（2026-11-12 现网 tried=1）', () => {
+  // 那两行打印的「5s」是剩余墙钟预算，不是出厂 60s —— 预算在第一次尝试前就烧光了，
+  // 池里还有 10 个候选却一个没试。无条件写「已中止并换下一家」会让人一直等。
+  assert.doesNotMatch(forwarderSource, /疑似假死），已中止并换下一家/,
+    'the timeout message must not promise a switch unconditionally')
+  assert.match(forwarderSource, /budgetClamped/,
+    'the message must say when the printed timeout is the remaining budget, not the factory cap')
+})
+
+test('kind 必须与换家分支一致：新接入的两类 400 不能只改一侧', () => {
+  // 换家链（forwarder::capabilityMismatch）接了这两条，`describeAttemptFailure` 漏掉
+  // 就会让 `auto.failures[].kind` 记成 fatal —— 同一笔尝试在日志里两种结论。
+  assert.equal(describeAttemptFailure({
+    candidate: 'bailian/qwen3.7-max-2026-05-17',
+    status: 400,
+    error: 'Access denied, please make sure your account is in good standing. '
+      + 'For details, see: https://help.aliyun.com/zh/model-studio/error-code#overdue-payment',
+  }).kind, 'capability')
+  assert.equal(describeAttemptFailure({
+    candidate: 'opencode_go/kimi-k3.1-pro',
+    status: 400,
+    error: 'Request is missing x-opencode-session and cannot be routed efficiently.',
+  }).kind, 'capability')
+})
+
+test('失败记录带上预算读数，没传时不造空字段', () => {
+  const row = describeAttemptFailure({
+    candidate: 'cline/deepseek-v4-pro-0813',
+    status: 504,
+    error: '渠道 20s 内未产出任何首块（疑似假死），已中止',
+    budgetElapsedMs: 85_000,
+    attemptDeadlineMs: 5_000,
+  })
+  assert.equal(row.budgetElapsedMs, 85_000)
+  assert.equal(row.attemptDeadlineMs, 5_000, '等于下限 ⇒ 规划时预算已归零，这就是那两行的形状')
+  const bare = describeAttemptFailure({ candidate: 'cline/x', status: 502 })
+  assert.equal('budgetElapsedMs' in bare, false)
+  assert.equal('attemptDeadlineMs' in bare, false)
+})
+
+test('恢复轮的准入范围：限流/额度/本地准入算，欠费与永久失败不算', () => {
+  assert.equal(isRecoverableChainExhaustion({ status: 429 }), true)
+  assert.equal(isRecoverableChainExhaustion({ status: 402 }), true)
+  assert.equal(isRecoverableChainExhaustion({ localAdmissionRejected: true }), true,
+    '自家 AIMD 并发满了，等就对了')
+  assert.equal(isRecoverableChainExhaustion({ status: 502, error: '该模型全部启用账号均在限流中' }), true)
+  assert.equal(isRecoverableChainExhaustion({ status: 502, error: '上游排队中 isQueued' }), true)
+
+  // 不会在十几秒内自己变好的，等一轮只是白占客户端时间
+  assert.equal(isRecoverableChainExhaustion({
+    status: 400,
+    error: 'Access denied, please make sure your account is in good standing. #overdue-payment',
+  }), false)
+  assert.equal(isRecoverableChainExhaustion({ status: 502, error: 'cline: model not supported' }), false)
+  assert.equal(isRecoverableChainExhaustion({ status: 500, error: 'Request failed after retries' }), false)
+  assert.equal(isRecoverableChainExhaustion({}), false)
+})
+
+test('恢复轮最多一次，且等待用剩余墙钟（不提高总预算）', () => {
+  assert.match(forwarderSource, /roundsLeft: 1, failures: \[\], attemptTrace: \[\]/,
+    'the chain gets exactly one recovery round by default')
+  assert.match(forwarderSource, /roundsLeft: 0,/,
+    'the recursive recovery pass must carry zero rounds left — no rolling retry loop')
+  assert.match(forwarderSource, /await sleep\(waitMs\)/,
+    'the wait must be honoured by the gateway itself, not handed to the client as 503')
+  assert.match(forwarderSource, /elapsedMs: Date\.now\(\) - budgetStart,\s*\r?\n\s*budgetMs: AUTO_WALL_CLOCK_BUDGET_MS,/,
+    'the recovery wait is bounded by the same wall budget, never beyond it')
 })

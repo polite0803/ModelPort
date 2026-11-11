@@ -182,11 +182,25 @@ export interface StreamEmptyTurnReading {
   toolsOffered: boolean
   /** true = 带了工具、却既无正文也无工具调用 —— 这一轮不会产生任何动作。 */
   empty: boolean
+  /** 正文最后一个非空白字符；没有正文时缺省。 */
+  lastChar?: string
+  /**
+   * true = 带了工具、零工具调用、**有**正文且正文以冒号收尾 —— 「宣布接下来要做」
+   * 却就地结束回合（第四类退化，2026-11-12 现网 `chatcmpl-mwcmniyx-797qi1`：
+   * `cline/nemotron-3.5-lightning-free` 连发三句「现在我将修改 X：」然后 `stop`，
+   * 零工具调用，84 个 output token）。
+   *
+   * 与 {@link StreamEmptyTurnReading.empty} 是互补的两格：`empty` 抓「一个字都没给」，
+   * 这里抓「给了一句承诺、没给动作」。两者都只在 `done` 收尾上判（见
+   * `streamOutcomePolicy.ts`）—— 被掐断的流零内容是**被掐**造成的，不判。
+   */
+  announcedStop: boolean
 }
 
 export function measureStreamEmptyTurn(sse: string, toolsOffered: boolean): StreamEmptyTurnReading {
   let contentChars = 0
   let toolCallDeltas = 0
+  let lastChar: string | undefined
   for (const rawLine of sse.split('\n')) {
     const line = rawLine.trimEnd()
     if (!line.startsWith('data:')) continue
@@ -203,11 +217,19 @@ export function measureStreamEmptyTurn(sse: string, toolsOffered: boolean): Stre
     const content = delta.content
     if (typeof content === 'string') {
       contentChars += content.length
+      const trimmed = content.trimEnd()
+      if (trimmed !== '') lastChar = trimmed.slice(-1)
     } else if (Array.isArray(content)) {
       for (const part of content) {
-        if (typeof part === 'string') contentChars += part.length
+        if (typeof part === 'string') {
+          contentChars += part.length
+          const trimmedPart = part.trimEnd()
+          if (trimmedPart !== '') lastChar = trimmedPart.slice(-1)
+        }
         else if (typeof (part as { text?: unknown })?.text === 'string') {
           contentChars += (part as { text: string }).text.length
+          const trimmedText = (part as { text: string }).text.trimEnd()
+          if (trimmedText !== '') lastChar = trimmedText.slice(-1)
         }
       }
     }
@@ -218,5 +240,12 @@ export function measureStreamEmptyTurn(sse: string, toolsOffered: boolean): Stre
     toolCallDeltas,
     toolsOffered,
     empty: toolsOffered && contentChars === 0 && toolCallDeltas === 0,
+    ...(lastChar === undefined ? {} : { lastChar }),
+    // 半角 `:` 与全角 `：` 都算。判据要求「有工具、零调用、有正文、冒号收尾」四条同时
+    // 成立，少任何一条都不判 —— 那可能是合法的最终答复。
+    announcedStop: toolsOffered
+      && toolCallDeltas === 0
+      && contentChars > 0
+      && (lastChar === ':' || lastChar === '：'),
   }
 }

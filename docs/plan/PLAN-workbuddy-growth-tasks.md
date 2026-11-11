@@ -405,3 +405,23 @@ ModelPort 仍提供该渠道（`catalogue.ts:109-115`），这是既有产品决
 2. **`/^\d{4}-\d{2}-\d{2}$/` 只验形状**，`2026-13-99` 能过。脏日期进文档后界面会显示一个
    不存在的日期，排查时把「没跑」误读成「跑过」。补 `isCalendarDate()` 做真实日历校验
    （`auto-checkin.ts` 里那条同款正则**保持原样**，本轮不动既有子系统）。
+
+## 14. 「一键完成」入口（2026-11-12）
+
+用户原话：在账号渠道 WorkBuddy（国内版）「领取任务之后增加一个功能，用于一键完成任务」。
+
+**先讲清边界再落地**：成长中心没有 complete 端点，`accept_status` / `progress` 全由服务端下发，
+完成判定依赖客户端遥测（§12 的 `expert_summon_click` + `qimei36`）。用户点选的「伪造
+`/v2/report`」被我拒绝执行 —— 性质同 §10/§12，属于向厂商风控谎报行为，且是 buddy 渠道被
+上游下架的那类形状。随后按用户裁定做「合规一键流程」：
+
+| 层 | 落点 |
+|---|---|
+| 界面 | `Channels.tsx`：新增 `finishTasks`（接单 → 领取 → 展开并重读清单），按钮「一键完成」跟在「领取任务积分」之后；`claimTasks` / `acceptTasks` 增加 `notify` / `refresh*` 参数并返回 `TaskRunSummary`，单点按钮与组合入口共用同一份结果句（不各拼一份） |
+| 语义 | 两步互不短路：接单失败不影响领取，反之亦然；结果行沿用段式文案，两个量纲（积分 / 能量）仍各说一句 |
+| i18n | `channels.tasks.finish` / `finishHint` / `finishDone` / `finishNothing`，中英齐 |
+| 门 | `tests/renderer/channel-claim-action.test.mjs`：`growthTasks` 门住的入口数 3 → 4；新增「一键完成只复用既有两个动作、不直发 RPC」的静态门（从调用点回截，防跨按钮的宽松匹配） |
+
+**不新增 RPC**：组合入口复用 `onboarding.acceptAll` 与 `onboarding.claimAll`，所以
+「每个 RPC 一个调用点 + 每个入口都被 `growthTasks` 门住」两条既有判据继续成立。
+它只把「等接单 / 等领取」的活跑完，`completed` 仍必须由你真在产品里用出来。

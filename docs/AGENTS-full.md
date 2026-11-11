@@ -1041,7 +1041,10 @@ request (`isContextOverflowError`, `failover.ts`), a model that rejects the clie
 entry carries no reasoning annotation the route-side hard filter cannot catch it in advance), a
 session-affinity header the upstream demands and we never sent
 (`isMissingSessionAffinityError` - OpenCode Go answers 400 `Request is missing x-opencode-session and
-cannot be routed efficiently`, 2026-11-11 16:51, `attempts: 1` with nine candidates untried), and
+cannot be routed efficiently`, 2026-11-11 16:51, `attempts: 1` with nine candidates untried), an
+account that has not paid (`isAccountArrearsError` - Bailian answers 400 `Arrearage`, "make sure your
+account is in good standing", 2026-11-12 05:24, and because 400 was terminal the whole chain died on
+that one unpaid account), and
 **any plain `404`** - a renamed or
 capability-divergent model is "this channel does not supply it", not an account fault, so since
 2026-11-02 (new-api parity) it switches too; previously 400/404 were terminal and one such answer ended

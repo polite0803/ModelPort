@@ -158,7 +158,14 @@ export function isChannelModelUnavailableError(message: string | undefined): boo
  *
  * 判据与工具数超限同类：**这一家供不了这个模型，换一家就能成**，而账号本身
  * 是健康的（请求在生成之前就被拒，零上游调用、不烧积分）—— 所以换下一家继续试，
- * 同时不记冷却、不计账号故障。
+ * 并且**不计账号故障、不进账号退避**。
+ *
+ * ⚠️ 两类「冷却」要分清：账号级退避（`accountRuntime`）确实不记，但
+ * **(provider, model) 级的目录缺失冷却必须记**（`modelCatalogCooldown`，默认 6h）。
+ * 2026-11-12 的现网教训：`codex` 线路 50 笔里 26 笔 503，其中 20 笔的最后一家就是
+ * `cline: model not supported` 与 `not available in your region` —— 因为这一类原先
+ * 只换家、不留模型级冷却，每一笔新请求都把同一家再撞一遍，白付 0.1–3.5s 往返，
+ * 并把候选链拖到 12–16 跳。判据命中即记冷却，到期自动回池，不需要人工干预。
  *
  * ⚠️ 识别口径必须**窄**：只认「目录里没有这个模型」这一个语义，且要求文案里
  * **点名了模型**（否则「你传的参数不对」之类也会命中）。`model not found`
@@ -171,6 +178,14 @@ const UPSTREAM_CATALOG_MISS_PATTERNS: readonly RegExp[] = [
   // BazaarLink：`Unknown model: mimo-v2.5-pro. This model is not in our catalog.`
   /(?:unknown|invalid)\s+model\b/i,
   /\bnot\s+in\s+(?:our|the)\s+catalog\b/i,
+  // 2026-11-12 01:18–01:48 现网补的两条（`codex` 线路 26 笔 503 里的 20 笔）：
+  // - `cline: model not supported`（×9）—— 这一家的目录里就没有这个模型；
+  // - `This model is not available in your region.`（×11，open_router）—— 这一家
+  //   对**本账号所在地区**供不了这个模型。
+  // 这两句不点名模型，但语义唯一：说的都是「这个模型这一家供不了」。上面「要求点名
+  // 模型」的约束是为了挡「你传的参数不对」，这两句没有那种歧义，所以允许例外。
+  /\bmodel\s+not\s+supported\b/i,
+  /not\s+available\s+in\s+your\s+region/i,
 ]
 
 export function isUpstreamCatalogMissError(message: string | undefined): boolean {
@@ -276,6 +291,56 @@ export function isMissingSessionAffinityError(message: string | undefined): bool
   if (!message) return false
   return /missing\s*['"`]?x-opencode-session/i.test(message)
     || (/session/i.test(message) && /cannot be routed efficiently/i.test(message))
+}
+
+/**
+ * 「这一家的账号欠费/停用」类 400 的识别（2026-11-12 05:24 实测：`codex` 线路命中
+ * `bailian/qwen3.7-max-2026-05-17`，上游回 400 `Arrearage`
+ * 「Access denied, please make sure your account is in good standing…#overdue-payment」，
+ * `kind: fatal` —— 一家欠费把整条链打死，后面所有候选一个没试）。
+ *
+ * 与窗口装不下、`reasoning_effort` 不支持同一类：**说的是这个账号的账务状态，
+ * 不是客户端写错了什么**。请求在生成之前就被拒，换一个候选就能成。
+ *
+ * ⚠️ 这里只放行「换家」，**不**给账号记失败：400 在
+ * `shouldCountAccountFailure` 里一律不记账号（客户端写坏的 400 不该连坐账号），
+ * 而这条判据走的正是那条通道。后果是欠费的候选下一轮仍可能被选中、再白撞一次
+ * 1.3 秒。要彻底不撞，得让账号在欠费信号上被停用 —— 那是写盘的账号动作，
+ * 与 `vendor/channel-pack/src/account-stop.ts` 的「上游明说不服务」同级，
+ * 属于另一个决定，这里不擅自扩。
+ *
+ * ⚠️ 识别口径必须**窄**：只认欠费/账务状态的明确措辞，不认泛化的
+ * `access denied`（那是权限类 403 的常见说法，403 本来就会换家）。
+ */
+export function isAccountArrearsError(message: string | undefined): boolean {
+  if (!message) return false
+  return /arrearage/i.test(message)
+    || /overdue[-\s]payment/i.test(message)
+    || /account is in good standing/i.test(message)
+    || /欠费/.test(message)
+}
+
+/**
+ * 整条链的结局是否属于「等一会再走一遍就可能成」。
+ *
+ * 命中范围刻意**窄**：
+ * - 上游限流 429 / 额度 402；
+ * - 本地 AIMD 准入拒绝（`localAdmissionRejected`，那是自家并发满了，等就对了）；
+ * - 渠道包明说的排队 / 均在限流中 / 频率超限（`isRecoverableChannelFailure`）。
+ *
+ * ⚠️ **不**包含欠费与未订阅（`isAccountArrearsError`、OpenCode Go 无订阅）：
+ * 那些不会在 15 秒内自己变好，等一轮只是白占客户端的时间。它们该走的是
+ * 换下一家（已接进 `capabilityMismatch`）与账号级停用，不是恢复等待。
+ */
+export function isRecoverableChainExhaustion(input: {
+  status?: number
+  error?: string
+  localAdmissionRejected?: boolean
+}): boolean {
+  if (input.localAdmissionRejected === true) return true
+  if (input.status === 429 || input.status === 402) return true
+  if (isAccountArrearsError(input.error)) return false
+  return isRecoverableChannelFailure(input.error)
 }
 
 /**
@@ -486,6 +551,13 @@ const CREDIT_EXHAUSTED_PATTERN = new RegExp(
       + '\\s*[\\w-]*\\s*credits?',
     'credits?\\s+(?:balance\\s+)?(?:is\\s+)?(?:exhausted|depleted|insufficient|empty|zero|too\\s+low)',
     'credit\\s+balance\\s+(?:is\\s+)?(?:too\\s+low|insufficient|exhausted|empty|zero)',
+    // 2026-11-12 现网补：**只说 balance、不说 credit** 的两家 ——
+    // siliconflow 402 `Sorry, your account balance is insufficient`、
+    // ppio 403 `not enough balance`。它们和 credits 用尽是同一件事（账号没钱了），
+    // 但文案里没有 `credit` 这个词，前面的三支都盖不住；盖不住就会被当成
+    // 「这一家的能力/凭据问题」记进能力轴，并占掉账号故障上限。
+    '(?:account\\s+)?balance\\s+(?:is\\s+)?(?:too\\s+low|insufficient|exhausted|empty|zero|depleted)',
+    '(?:not\\s+enough|insufficient)\\s+balance',
     'can\\s+only\\s+afford',
   ].join('|'),
   'i',
@@ -577,6 +649,9 @@ export function describeAttemptFailure(input: {
   status?: number
   /** 只有聚合条目会把「不透明 400」当可换家；缺省按账号渠道处理 */
   providerType?: string
+  /** 预算读数，原样落到日志（见 `AutoAttemptFailure` 的注释）。 */
+  budgetElapsedMs?: number
+  attemptDeadlineMs?: number
 }): AutoAttemptFailure {
   const reason = (input.error ?? '').trim().slice(0, ATTEMPT_REASON_MAX_CHARS)
   const kind: AutoAttemptFailure['kind'] = isToolOverflowError(input.error)
@@ -588,6 +663,11 @@ export function describeAttemptFailure(input: {
     // （本函数的口径就是「kind 必须与当时实际走的分支一致」）。
     || isContextOverflowError(input.error)
     || isReasoningEffortUnsupportedError(input.error)
+    // 这两条同样是「kind 必须与当时实际走的分支一致」：换家链里已经接了它们
+    // （`forwarder.ts::capabilityMismatch`），这里漏掉就会让日志把一笔实际**继续往下试**
+    // 的尝试记成 `fatal`（2026-11-12 补）。
+    || isMissingSessionAffinityError(input.error)
+    || isAccountArrearsError(input.error)
     // 普通 404 同因：换家循环按「这一家供不了这个模型」继续往下试且不记账号故障
     // （`forwarder.ts` 的 `capabilityMismatch` 里有这一条），漏在这里就会把同一笔
     // 尝试在 `attempts[].outcome`（capability）与 `auto.failures[].kind`（failover）
@@ -608,6 +688,8 @@ export function describeAttemptFailure(input: {
     kind,
     ...(input.status === undefined ? {} : { status: input.status }),
     ...(reason.length > 0 ? { reason } : { reason: '上游未给出错误文本' }),
+    ...(input.budgetElapsedMs === undefined ? {} : { budgetElapsedMs: input.budgetElapsedMs }),
+    ...(input.attemptDeadlineMs === undefined ? {} : { attemptDeadlineMs: input.attemptDeadlineMs }),
   }
 }
 

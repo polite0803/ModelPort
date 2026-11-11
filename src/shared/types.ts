@@ -1161,6 +1161,17 @@ export interface AutoAttemptFailure {
   status?: number
   /** Upstream wording, capped by `describeAttemptFailure`. */
   reason: string
+  /**
+   * 本次尝试**规划时**距整笔请求起点的毫秒数（墙钟预算已花掉多少）。
+   *
+   * 2026-11-12 现网两笔 504（`chatcmpl-mwceepbp-zsfoaf`、`chatcmpl-mwcekfbq-0fmjrm`）
+   * 打印的「渠道 5s 内未产出首块」其实是 `ATTEMPT_DEADLINE_FLOOR_MS` —— 即
+   * `planAttemptDeadline` 看到剩余预算 ≤0 时回的下限。同一行 `tried=1`，说明 90s
+   * 预算在第一次尝试规划之前就已花完。没有这两个数，「等待重试」就是盲设计。
+   */
+  budgetElapsedMs?: number
+  /** 本次尝试被批准的墙钟切片（毫秒）；等于下限 ⇒ 规划时预算已归零。 */
+  attemptDeadlineMs?: number
 }
 
 /**

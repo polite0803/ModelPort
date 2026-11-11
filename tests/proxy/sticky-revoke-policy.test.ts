@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { isEmptyTurnAfterStream, shouldRevokeStickyAfterStream } from '../../src/main/proxy/streamOutcomePolicy.ts'
+import { isEmptyTurnAfterStream, isAnnouncedStopAfterStream, shouldRevokeStickyAfterStream } from '../../src/main/proxy/streamOutcomePolicy.ts'
 
 test('内容重复退化：正常收尾也要撤锚点', () => {
   assert.equal(
@@ -63,6 +63,35 @@ test('有正文或有工具调用：不撤（本轮确实交付了东西）', ()
     shouldRevokeStickyAfterStream({
       endReason: 'done',
       emptyTurn: { contentChars: 0, toolCallDeltas: 2, toolsOffered: true, empty: false } as never,
+    }),
+    false,
+  )
+})
+
+test('宣布要做却零调用：撤锚点（2026-11-12 `chatcmpl-mwcmniyx-797qi1` 的形状）', () => {
+  // 那一轮有 84 个 output token 的正文（所以不是空转）、零工具调用、正文以「：」收尾。
+  // 前两类判据都算它健康，锚点不撤 → 会话永久钉在同一台免费模型上，用户连着问三次
+  // 「为什么停下来」都还是停。这一格补的就是那一下。
+  const announced = {
+    endReason: 'done',
+    emptyTurn: { contentChars: 120, toolCallDeltas: 0, toolsOffered: true, empty: false, lastChar: '：', announcedStop: true },
+  } as never
+  assert.equal(isAnnouncedStopAfterStream(announced as never), true)
+  assert.equal(shouldRevokeStickyAfterStream(announced as never), true)
+})
+
+test('宣布即停只在 done 上判；被掐断的流不因此降权', () => {
+  const reading = { contentChars: 120, toolCallDeltas: 0, toolsOffered: true, empty: false, announcedStop: true } as never
+  assert.equal(isAnnouncedStopAfterStream({ endReason: 'client_gone', emptyTurn: reading }), false)
+  assert.equal(isAnnouncedStopAfterStream({ endReason: 'eof', emptyTurn: reading }), false)
+  assert.equal(isAnnouncedStopAfterStream({ endReason: 'done', emptyTurn: undefined }), false)
+})
+
+test('正常答复不撤（正文非冒号收尾）', () => {
+  assert.equal(
+    shouldRevokeStickyAfterStream({
+      endReason: 'done',
+      emptyTurn: { contentChars: 200, toolCallDeltas: 0, toolsOffered: true, empty: false, lastChar: '。', announcedStop: false } as never,
     }),
     false,
   )

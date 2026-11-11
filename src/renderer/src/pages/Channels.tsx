@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   CalendarCheck,
+  CheckCheck,
   ChevronDown,
   ChevronUp,
   Copy,
@@ -75,6 +76,19 @@ interface RpcTaskItem {
 
 /** 一行清单 = 一条任务 + 它属于哪个账号。 */
 type TaskRow = RpcTaskItem & { account: string }
+
+/**
+ * 一次成长任务动作的结构化结果。
+ *
+ * ⚠️ 单独按钮与「一键完成」共用同一个形状：结果句与错误计数只生成一次，
+ * 两个入口各拼一份文案就是会互相漂移的两套口径。
+ */
+interface TaskRunSummary {
+  /** 只含非零段的结果句。 */
+  segments: string[]
+  /** 需要标红的项数（失败任务 + 问不出结果的账号）。 */
+  problems: number
+}
 
 /**
  * 「自动领取已完成的成长任务」状态（渠道包 `RpcUsageAutoGrowthState` 的渲染层镜像）。
@@ -816,17 +830,18 @@ export function Channels() {
    * 和「有 5 项还没做完」读起来一样。两个量纲（积分 / 能量）**各说一句、不相加**
    * —— 渠道包与上游都是分开计量的，合成一个数就无从核对。
    */
-  const claimTasks = async (channel: ChannelView) => {
+  const claimTasks = async (
+    channel: ChannelView,
+    notify = true,
+    refreshAfter = true,
+  ): Promise<TaskRunSummary> => {
     setBusyId(channel.id)
     const result = await window.electronAPI.channels.rpc('onboarding.claimAll', { provider: channel.id })
     setBusyId(null)
     if (!result.ok) {
-      toast({
-        title: t('common.error'),
-        description: result.error?.message ?? t('channels.claimTasksError'),
-        variant: 'destructive',
-      })
-      return
+      const message = result.error?.message ?? t('channels.claimTasksError')
+      if (notify) toast({ title: t('common.error'), description: message, variant: 'destructive' })
+      return { segments: [message], problems: 1 }
     }
     const value = result.value as {
       summary?: {
@@ -866,12 +881,16 @@ export function Channels() {
     // 用户看不出该去重新登录（同 `actionRequired` 的那条教训）。
     const firstError = (value?.accounts ?? []).find((account) => typeof account?.error === 'string')?.error
     if (firstError !== undefined && firstError.length > 0) segments.push(firstError)
-    toast({
-      title: t('channels.claimTasksDone'),
-      description: segments.length > 0 ? segments.join(t('channels.listSeparator')) : t('channels.claimTasksNothing'),
-      variant: failed > 0 || errors > 0 ? 'destructive' : 'default',
-    })
-    await refresh()
+    const problems = failed + errors
+    if (notify) {
+      toast({
+        title: t('channels.claimTasksDone'),
+        description: segments.length > 0 ? segments.join(t('channels.listSeparator')) : t('channels.claimTasksNothing'),
+        variant: problems > 0 ? 'destructive' : 'default',
+      })
+    }
+    if (refreshAfter) await refresh()
+    return { segments, problems }
   }
 
   /**
@@ -880,17 +899,18 @@ export function Channels() {
    * ⚠️ 结果句子必须把这件事说明白：用户点完如果只看到「接了 20 项」而没有分数，
    * 第一反应是「没生效」。所以这里固定带一句「接下来正常使用就会陆续完成」。
    */
-  const acceptTasks = async (channel: ChannelView) => {
+  const acceptTasks = async (
+    channel: ChannelView,
+    notify = true,
+    refreshList = true,
+  ): Promise<TaskRunSummary> => {
     setBusyId(channel.id)
     const result = await window.electronAPI.channels.rpc('onboarding.acceptAll', { provider: channel.id })
     setBusyId(null)
     if (!result.ok) {
-      toast({
-        title: t('common.error'),
-        description: result.error?.message ?? t('channels.tasks.acceptError'),
-        variant: 'destructive',
-      })
-      return
+      const message = result.error?.message ?? t('channels.tasks.acceptError')
+      if (notify) toast({ title: t('common.error'), description: message, variant: 'destructive' })
+      return { segments: [message], problems: 1 }
     }
     const summary = (result.value as {
       summary?: { acceptedTasks?: number; untouchedTasks?: number; errors?: number }
@@ -906,15 +926,21 @@ export function Channels() {
     const firstError = (result.value as { accounts?: Array<{ error?: string }> } | undefined)?.accounts
       ?.find(account => typeof account?.error === 'string')?.error
     if (firstError) segments.push(firstError)
-    toast({
-      title: t('channels.tasks.acceptDone'),
-      description: segments.length > 0
-        ? `${segments.join(t('channels.listSeparator'))}${accepted > 0 ? ` · ${t('channels.tasks.acceptNote')}` : ''}`
-        : t('channels.tasks.acceptNothing'),
-      variant: errors > 0 ? 'destructive' : 'default',
-    })
+    // 接单不产生积分：这一句必须出现在结果里，否则用户点完只看到「接了 20 项」，
+    // 第一反应是「没生效」。
+    if (accepted > 0) segments.push(t('channels.tasks.acceptNote'))
+    if (notify) {
+      toast({
+        title: t('channels.tasks.acceptDone'),
+        description: segments.length > 0
+          ? segments.join(t('channels.listSeparator'))
+          : t('channels.tasks.acceptNothing'),
+        variant: errors > 0 ? 'destructive' : 'default',
+      })
+    }
     // 清单展开着就刷新，让用户立刻看到状态从「未接单」变成「进行中」。
-    if (openTasks[channel.id] === true) await loadTasks(channel)
+    if (refreshList && openTasks[channel.id] === true) await loadTasks(channel)
+    return { segments, problems: errors }
   }
 
   const loadTasks = async (channel: ChannelView) => {
@@ -960,6 +986,34 @@ export function Channels() {
     }
     setTaskErrors(current => ({ ...current, [channel.id]: failures[0] ?? '' }))
     setTasks(current => ({ ...current, [channel.id]: rows }))
+  }
+
+  /**
+   * 一键完成：接单 → 领取 → 展开清单。
+   *
+   * ⚠️ 「完成」只指**跑完官方流程里不需要你本人动手的三步**：接单让服务端开始计进度、
+   * 领取把服务端已认定完成的任务收下、清单告诉你还差什么。任务变成 `completed`
+   * 仍由服务端按真实使用判定（进度来自客户端行为），这里既不推、也不伪造 ——
+   * 剩下的项必须在产品里真的用一次才会涨。
+   *
+   * ⚠️ 两步各跑各的、不短路：接单失败不该让已完成的奖励领不回来，反之亦然。
+   */
+  const finishTasks = async (channel: ChannelView) => {
+    const accept = await acceptTasks(channel, false, false)
+    const claim = await claimTasks(channel, false, false)
+    const segments = [...accept.segments, ...claim.segments]
+    const problems = accept.problems + claim.problems
+    toast({
+      title: t('channels.tasks.finishDone'),
+      description: segments.length > 0
+        ? segments.join(t('channels.listSeparator'))
+        : t('channels.tasks.finishNothing'),
+      variant: problems > 0 ? 'destructive' : 'default',
+    })
+    // 结果里最要紧的是「还差什么」：直接展开并重读清单，而不是让用户再点一次。
+    setOpenTasks(current => ({ ...current, [channel.id]: true }))
+    await loadTasks(channel)
+    await refresh()
   }
 
   const toggleTasks = async (channel: ChannelView) => {
@@ -1853,6 +1907,18 @@ export function Channels() {
                     >
                       <Ticket className="mr-1 h-3.5 w-3.5" />
                       {t('channels.claimTasks')}
+                    </Button>
+                  )}
+                  {channel.growthTasks && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={busy || !connected}
+                      title={t('channels.tasks.finishHint')}
+                      onClick={() => void finishTasks(channel)}
+                    >
+                      <CheckCheck className="mr-1 h-3.5 w-3.5" />
+                      {t('channels.tasks.finish')}
                     </Button>
                   )}
                   {channel.growthTasks && (

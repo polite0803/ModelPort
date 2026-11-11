@@ -80,6 +80,8 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
    * 绝不并进免费或任何付费档。
    */
   const [costFilter, setCostFilter] = useState<'all' | CostBucket>('all')
+  /** 供应商筛选：按候选模型的 providerId 精确过滤，选项来自当前预览里出现过的供应商。 */
+  const [providerFilter, setProviderFilter] = useState<string>('all')
   const [needsVision, setNeedsVision] = useState(false)
   const [needsTools, setNeedsTools] = useState(false)
   const [estimatedTokens, setEstimatedTokens] = useState('')
@@ -227,12 +229,22 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
     })
   }
 
+  /** 供应商下拉的选项：当前预览里出现过的供应商（id 去重，按显示名排序）。 */
+  const providerOptions = useMemo(() => {
+    const seen = new Map<string, string>()
+    for (const model of preview?.models ?? []) {
+      if (!seen.has(model.providerId)) seen.set(model.providerId, model.providerName)
+    }
+    return [...seen.entries()].sort((a, b) => a[1].localeCompare(b[1]))
+  }, [preview])
+
   const visibleModels = useMemo(() => {
     const query = search.trim().toLowerCase()
     return (preview?.models ?? []).filter((model) => {
       if (statusFilter === 'kept' && model.status !== 'kept' && model.status !== 'included') return false
       if (statusFilter === 'dropped' && model.status !== 'filtered' && model.status !== 'excluded' && model.status !== 'not-pinned') return false
       if (statusFilter === 'unavailable' && model.status !== 'unavailable') return false
+      if (providerFilter !== 'all' && model.providerId !== providerFilter) return false
       // 与模型管理页同一个判据：渠道报的倍率 + 是否免费（聚合侧由成本台账给出免费标记）。
       // 没有倍率也不是免费的模型自成一档 —— 折进免费会让人以为不要钱，折进付费则是凭空定价。
       if (costFilter !== 'all' && costBucketOf(model.weight, model.costBucket === 'free') !== costFilter) {
@@ -244,7 +256,7 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
         model.providerName.toLowerCase().includes(query)
       )
     })
-  }, [preview, search, statusFilter, costFilter])
+  }, [preview, search, statusFilter, costFilter, providerFilter])
 
   const statusLabel = (status: RoutePreviewModel['status']): string =>
     t(`proxy.routePoolStatus_${status}`)
@@ -449,6 +461,19 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
             <SelectItem value="base">{t('models.costBase')}</SelectItem>
             <SelectItem value="above-base">{t('models.costAboveBase')}</SelectItem>
             <SelectItem value="unknown">{t('models.costUnknown')}</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select value={providerFilter} onValueChange={(value) => setProviderFilter(value)}>
+          <SelectTrigger className="h-8 w-[150px] text-xs" title={t('proxy.routePoolFilterProvider')}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">{t('proxy.routePoolFilterProvider_all')}</SelectItem>
+            {providerOptions.map(([providerId, providerName]) => (
+              <SelectItem key={providerId} value={providerId}>
+                {providerName}
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
       </div>

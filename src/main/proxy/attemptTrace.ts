@@ -7,6 +7,7 @@ import {
   isForcedToolChoiceUnsupported,
   isMissingReasoningHistoryError,
   isMissingSessionAffinityError,
+  isAccountArrearsError,
   isToolOverflowError,
 } from './failover.ts'
 
@@ -31,6 +32,7 @@ export function attemptTraceOf(input: {
     || isChannelModelUnavailableError(result.error)
     || isForcedToolChoiceUnsupported(result.error)
     || isMissingSessionAffinityError(result.error)
+    || isAccountArrearsError(result.error)
     || result.status === 404
   const outcome: RequestAttemptTrace['outcome'] = result.success
     ? 'success'

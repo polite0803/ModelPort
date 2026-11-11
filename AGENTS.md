@@ -286,10 +286,38 @@ ended `done`, with zero `content` characters **and** zero `tool_calls` deltas. T
 `streamTrace.emptyTurn`, counts as degraded for AIMD/Bandit and revokes the sticky anchor - an agent
 client ends its turn on such a completion, so without this the session stays pinned to a model that
 never acts (2026-11-12 `chatcmpl-mwcghqtq-td1xm6`: 176 KB out, 1108 output tokens, all reasoning).
+* **"Announced then stopped" is the fourth degraded class** (same reading, `announcedStop`). It slips
+past both earlier gates: the stream has content (so `empty` is false) and is one short line (so the
+dedup ratio says `too_short`). Judged only when the client offered `tools`, the stream ended `done`,
+there were **zero** `tool_calls` deltas, and the content's last non-whitespace character is `:` or
+`：` - a promise of a following action that never came. Revokes the sticky anchor and counts as
+degraded, same as the other two. Measured 2026-11-12 05:24 (`chatcmpl-mwcmniyx-797qi1`,
+`cline/nvidia/nemotron-3.5-lightning-free`: three consecutive "现在我将修改 X：" turns, 84 output
+tokens, zero calls) after every strong candidate in the `codex` route went unpayable - without this
+class the anchor never lifts, so the session stays pinned to the model that only talks. The action is
+still only "re-rank next turn": no account failure is recorded and no candidate is removed.
+* **A degraded reading must reach the Bandit table, or it is decoration.** `autoBandit` aggregates the
+request-log rows, and those rows carry `repetition`/`emptyTurn` **nested under `streamTrace`**;
+reading only the top-level field (as it did until 2026-11-12) means classes ②③④ never entered the
+Beta posterior, so every "200 but did nothing" turn scored as a success. `isDegradedSuccess` now
+accepts both shapes, and `tests/proxy/bandit-repetition.test.ts` pins the production shape plus the
+outcome the whole feature exists to produce: a free candidate that does the work must rank above one
+that only announces the next step.
 * Per-`(account, model)` AIMD admission: default concurrency 4; 429/timeout/5xx shrink it
 multiplicatively (5s cooldown), 5 clean successes grow it by one (30s quiet period). Short-window
 EWMA first-token latency plus 429/timeout/degraded rates feed candidate scoring. A locally rejected
 admission is a 429 `local_concurrency_limit` that fails over without penalising the account.
+* **A chain exhausted by recoverable failures waits and re-runs once, inside the gateway.** 503 +
+`Retry-After` is "try later" at the protocol level, but Codex does not retry an agent turn by itself -
+to the user that is a broken task (measured 2026-11-12: 26 of 50 Codex requests died as 503).
+`planRecoveryWaitMs` budgets the wait from the **wall clock left over** after the lowered first-round
+slice (`FIRST_ATTEMPT_CAP_MS` = 20s; the 90s total is deliberately **not** raised), takes
+`min(remaining budget, upstream unlock time, 15s)`, and defaults to a 5s backoff when the upstream
+gives no unlock time - which is the case for every aggregate 429. Exactly one recovery round
+(`recovery.roundsLeft`), never a rolling retry. Out of scope by design: arrears and
+not-subscribed - those do not heal in fifteen seconds, so waiting only holds the client's socket.
+The wait runs after every `endAttempt`, so it structurally holds **no AIMD slot**; that is why no
+change to the slot's holding period was needed.
 * Live account credit is a **gate, never a number**: `shared/aggregateCredit.ts::creditSnapshotExhausted` is
 the only judgement (row complete, explicitly not `unlimited`, a number returned, `remaining <= 0`, `asOf`
 inside `CREDIT_SNAPSHOT_TTL_MS` = 15 min) and a hit folds `aggregateHeadroom` to the existing `-1`. USD credit,

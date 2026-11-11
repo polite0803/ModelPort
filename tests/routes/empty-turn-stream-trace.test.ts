@@ -49,6 +49,12 @@ const upstream = createServer((req, res) => {
       res.write(frame({ role: 'assistant' }))
       res.write(frame({ reasoning_details: [{ type: 'reasoning.text', text: 'I should inspect the workspace first. '.repeat(40) }] }))
       res.write(frame({}, 'stop'))
+    } else if (body.model === 'announce-turn') {
+      // 2026-11-12 05:24 现网 `chatcmpl-mwcmniyx-797qi1` 的形状：有正文、零工具调用、
+      // 正文以全角冒号收尾 —— 前两类判据都算它健康。
+      res.write(frame({ role: 'assistant' }))
+      res.write(frame({ content: '现在我将修改 UiModeSelector.kt，先看一下 appearanceSections() 的当前结构：' }))
+      res.write(frame({}, 'stop'))
     } else {
       res.write(frame({ role: 'assistant' }))
       res.write(frame({ tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'exec_command', arguments: '{"cmd":"uname -s"}' } }] }))
@@ -90,8 +96,8 @@ sm.addProvider({
   enabled: true,
   createdAt: 1,
   updatedAt: 2,
-  supportedModels: ['Empty-Turn', 'Acts-Turn'],
-  modelMappings: { 'Empty-Turn': 'empty-turn', 'Acts-Turn': 'acts-turn' },
+  supportedModels: ['Empty-Turn', 'Acts-Turn', 'Announce-Turn'],
+  modelMappings: { 'Empty-Turn': 'empty-turn', 'Acts-Turn': 'acts-turn', 'Announce-Turn': 'announce-turn' },
 } as never)
 sm.addAccount({
   id: 'orf-acct',
@@ -157,7 +163,7 @@ test('带工具、零正文、零工具调用的完成流：请求行留下 empt
   assert.equal(trace.endReason, 'done')
   assert.equal(trace.sawDone, true)
   assert.ok((trace.bytesOut as number) > 0, '确实出站了字节 —— 不是断流，是空转')
-  assert.deepEqual(trace.emptyTurn, { contentChars: 0, toolCallDeltas: 0, toolsOffered: true, empty: true })
+  assert.deepEqual(trace.emptyTurn, { contentChars: 0, toolCallDeltas: 0, toolsOffered: true, empty: true, announcedStop: false })
   assert.equal(trace.repetition.degraded, false, '去重率判据对这一发失明：读数必须是 notJudged')
   assert.equal(trace.repetition.notJudged, 'too_short')
   // 读数不只是一行日志：它必须进 AIMD/Bandit 的退化计数，否则下一轮照样派给同一台空转机。
@@ -178,5 +184,24 @@ test('同一形状但交付了工具调用：不判空转（正文为零也不�
     accountRuntime.snapshot('orf-acct', Date.now(), 'acts-turn').degradedRate ?? 0,
     0,
     '正常交付的一发不许被记成退化',
+  )
+})
+
+test('有正文、零工具调用、正文以冒号收尾：请求行留下 announcedStop 读数并计入退化', async () => {
+  // 2026-11-12 05:24 现网 `chatcmpl-mwcmniyx-797qi1`：`cline/nemotron-3.5-lightning-free`
+  // 连发三句「现在我将修改 X：」然后 stop，84 个 output token、零工具调用。
+  // 空转那格判不到它（有正文），去重率那格判不到它（1 行 → too_short），
+  // 于是锚点不撤、Bandit 记胜 —— 用户连着问三次「为什么停下来」都还是停。
+  const row = await streamOnce('Announce-Turn')
+  const trace = row.streamTrace as Payload
+
+  assert.equal(trace.endReason, 'done')
+  assert.equal(trace.emptyTurn.empty, false, '有正文，所以不是空转那一格')
+  assert.equal(trace.emptyTurn.lastChar, '：')
+  assert.equal(trace.emptyTurn.announcedStop, true, JSON.stringify(trace.emptyTurn))
+  assert.equal(trace.repetition.notJudged, 'too_short', '去重率对这一发同样是瞎的')
+  assert.ok(
+    (accountRuntime.snapshot('orf-acct', Date.now(), 'announce-turn').degradedRate ?? 0) > 0,
+    '宣布即停要按 degraded 记进这一家的运行时窗口，否则下一轮照样派给同一台',
   )
 })

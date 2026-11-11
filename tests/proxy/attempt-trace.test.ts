@@ -59,3 +59,16 @@ test('尝试链：会话亲和头缺失的 400 记成 capability，不是 fatal'
   // 普通 400 仍然是终止（客户端自己写坏了请求，换家也救不了）
   assert.equal(trace({ status: 400, error: "Invalid value: 'session_id' must be a string" }).outcome, 'fatal')
 })
+
+test('尝试链：账号欠费的 400 记成 capability，不是 fatal', () => {
+  // 2026-11-12 05:24 实测：百炼 `Arrearage` 原先落进 fatal，一家欠费把整条链打死，
+  // 日志里只有这一条失败行，看不出「换下一家就能成」。
+  assert.equal(trace({
+    status: 400,
+    error: 'Access denied, please make sure your account is in good standing. '
+      + 'For details, see: https://help.aliyun.com/zh/model-studio/error-code#overdue-payment',
+    errorDetails: { message: 'arrears', code: 'Arrearage' },
+  }).outcome, 'capability')
+  // 客户端自己写坏的 400 仍然是终止
+  assert.equal(trace({ status: 400, error: 'messages: must be a non-empty array' }).outcome, 'fatal')
+})

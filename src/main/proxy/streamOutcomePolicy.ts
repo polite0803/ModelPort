@@ -25,7 +25,9 @@ export function shouldRevokeStickyAfterStream(
   trace: Pick<RequestStreamTrace, 'endReason' | 'repetition' | 'emptyTurn'>,
 ): boolean {
   if (trace.endReason === 'timeout' || trace.endReason === 'error') return true
-  return trace.repetition?.degraded === true || isEmptyTurnAfterStream(trace)
+  return trace.repetition?.degraded === true
+    || isEmptyTurnAfterStream(trace)
+    || isAnnouncedStopAfterStream(trace)
 }
 
 /**
@@ -39,4 +41,29 @@ export function isEmptyTurnAfterStream(
   trace: Pick<RequestStreamTrace, 'endReason' | 'emptyTurn'>,
 ): boolean {
   return trace.endReason === 'done' && trace.emptyTurn?.empty === true
+}
+
+/**
+ * 「宣布要做、然后就地结束」的判据 —— 第四类退化（2026-11-12 现网）。
+ *
+ * `codex` 线路的强候选全部不可用（cline 的 Claude Opus 全系 402 额度用尽、
+ * ppio/siliconflow 余额不足、bailian 欠费、comate 限额、opencode_go 无订阅），
+ * 于是会话被粘在 `cline/nvidia/nemotron-3.5-lightning-free` 上。那一轮它连发三句
+ * 「现在我将修改 `UiModeSelector.kt`：」「首先，让我看一下 appearanceSections()
+ * 的当前结构：」，`finish_reason=stop`、84 个 output token、**零工具调用**，
+ * 回合就地结束 —— 用户读到的就是「只承诺不执行」。
+ *
+ * 为什么前两类盖不住它：去重率要 12 行才有得判（这轮 1 行，`notJudged: too_short`）；
+ * 空回合判据要**正文字符为 0**（这轮有 84 token 正文）。两个判据都算它健康，于是
+ * 锚点不撤、Bandit 记胜，下一轮继续派给同一台 —— 这正是「为什么连着问三次都停」
+ * 的机制，不是模型单次表现问题。
+ *
+ * 只在 `done` 上判，与空回合同一口径。误判的代价是**撤一次粘性**（换一家重派），
+ * 不剔除候选、不记账号失败，所以判据取四条同时成立：本轮给了工具、零工具调用、
+ * 有正文、正文以冒号收尾。
+ */
+export function isAnnouncedStopAfterStream(
+  trace: Pick<RequestStreamTrace, 'endReason' | 'emptyTurn'>,
+): boolean {
+  return trace.endReason === 'done' && trace.emptyTurn?.announcedStop === true
 }

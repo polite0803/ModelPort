@@ -1,7 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { aggregateBanditStats, isDegradedSuccess, type BanditLogEntry } from '../../src/main/proxy/autoBandit.ts'
+import {
+  aggregateBanditStats,
+  createBanditRandom,
+  isDegradedSuccess,
+  sampleBanditSuccessRate,
+  type BanditLogEntry,
+} from '../../src/main/proxy/autoBandit.ts'
 
 /**
  * Bandit 的第二类 degraded：协议正常（HTTP 200、`finish_reason=tool_calls`）但内容
@@ -71,4 +77,69 @@ test('a clean turn in between resets the streak', () => {
   const one = stats.get('cline|cline/dots-studio/dots-3-note-preview:free')
   assert.equal(one?.degraded, 2)
   assert.equal(one?.consecutiveDegraded, 1, 'the streak is consecutive, not cumulative')
+})
+
+// ── 生产形状：读数嵌在 streamTrace 下（2026-11-12 缺陷回归）──────────────────
+// 本模块此前只读顶层 `repetition`，而 `getRequestLogs()` 交进来的请求行把它放在
+// `streamTrace.repetition`。于是「重复退化」与后来加的「空转/宣布即停」两类从未进过
+// 后验评分 —— 判据存在，通路不存在。
+
+const EMPTY_TURN = { contentChars: 0, toolCallDeltas: 0, toolsOffered: true, empty: true, announcedStop: false }
+const ANNOUNCED = {
+  contentChars: 42, toolCallDeltas: 0, toolsOffered: true, empty: false, lastChar: '：', announcedStop: true,
+}
+
+test('生产行形状（streamTrace 嵌套）也要被认成 degraded', () => {
+  assert.equal(isDegradedSuccess(entry({ streamTrace: { repetition: degenerate } })), true,
+    '顶层读法在真实日志上永远拿到 undefined —— 这就是那两类失效的原因')
+  assert.equal(isDegradedSuccess(entry({ streamTrace: { emptyTurn: EMPTY_TURN } })), true)
+  assert.equal(isDegradedSuccess(entry({ streamTrace: { emptyTurn: ANNOUNCED } })), true)
+  assert.equal(isDegradedSuccess(entry({ streamTrace: { repetition: healthy, emptyTurn: EMPTY_TURN } })), true,
+    '任一类命中即算不可用成功')
+})
+
+test('正常交付的生产行不许被降权', () => {
+  assert.equal(
+    isDegradedSuccess(entry({ streamTrace: { repetition: healthy, emptyTurn: { ...EMPTY_TURN, empty: false } } })),
+    false,
+  )
+  assert.equal(
+    isDegradedSuccess(entry({ streamTrace: { emptyTurn: { ...ANNOUNCED, announcedStop: false, lastChar: '。' } } })),
+    false,
+    '正文以句号收尾的最终答复是合法答案，不是宣布即停',
+  )
+})
+
+test('宣布即停累计进 degraded 并驱动连击重罚', () => {
+  const stats = aggregateBanditStats(
+    [
+      entry({ timestamp: NOW - 3000, streamTrace: { emptyTurn: ANNOUNCED } }),
+      entry({ timestamp: NOW - 2000, streamTrace: { emptyTurn: ANNOUNCED } }),
+      entry({ timestamp: NOW - 1000, streamTrace: { emptyTurn: ANNOUNCED } }),
+    ],
+    NOW,
+  )
+  const one = stats.get('cline|cline/dots-studio/dots-3-note-preview:free')
+  assert.equal(one?.successes, 3, 'HTTP 层面三笔都是成功')
+  assert.equal(one?.degraded, 3)
+  assert.equal(one?.consecutiveDegraded, 3)
+})
+
+test('会干活的免费候选排在只宣布的前面（这就是「时间一久筛出来」）', () => {
+  const talker = 'cline|cline-free/talker'
+  const worker = 'cline|cline-free/worker'
+  const entries: BanditLogEntry[] = []
+  for (let i = 0; i < 8; i++) {
+    const ts = NOW - (8 - i) * 1000
+    entries.push(entry({ timestamp: ts, providerId: 'cline', actualModel: 'cline-free/talker', streamTrace: { emptyTurn: ANNOUNCED } }))
+    entries.push(entry({ timestamp: ts, providerId: 'cline', actualModel: 'cline-free/worker', streamTrace: { repetition: healthy, emptyTurn: { ...EMPTY_TURN, contentChars: 20, empty: false } } }))
+  }
+  const stats = aggregateBanditStats(entries, NOW)
+  const random = createBanditRandom(42)
+  const rateOf = (key: string): number => {
+    const found = stats.get(key)
+    assert.ok(found, `missing stats for ${key}`)
+    return sampleBanditSuccessRate(found, random)
+  }
+  assert.ok(rateOf(worker) > rateOf(talker), `worker=${rateOf(worker)} talker=${rateOf(talker)}`)
 })
