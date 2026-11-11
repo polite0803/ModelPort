@@ -153,19 +153,24 @@ export function RequestLogList({ highlightId }: RequestLogListProps) {
     }
   }, [highlightId, logs])
 
+  /**
+   * 虚拟列表必须给定像素高度。过去按「条数 × 行高、封顶 600」算，窗口再高也只铺到 600px，
+   * 下方一片空白。现在直接量容器：容器是 flex-1 的剩余空间，窗口变高它就变高。
+   */
   useEffect(() => {
+    const element = containerRef.current
+    if (!element) return
     const updateSize = () => {
-      if (containerRef.current) {
-        setContainerSize({
-          width: containerRef.current.clientWidth,
-          height: Math.max(100, Math.min(600, logs.length * ITEM_HEIGHT)),
-        })
-      }
+      setContainerSize({
+        width: element.clientWidth,
+        height: Math.max(ITEM_HEIGHT, element.clientHeight),
+      })
     }
     updateSize()
-    window.addEventListener('resize', updateSize)
-    return () => window.removeEventListener('resize', updateSize)
-  }, [logs.length])
+    const observer = new ResizeObserver(updateSize)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
 
   const handleClearLogs = async () => {
     await window.electronAPI?.requestLogs?.clear()
@@ -236,8 +241,8 @@ export function RequestLogList({ highlightId }: RequestLogListProps) {
   }), [logs, handleSelectLog])
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between mb-4">
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="mb-4 flex shrink-0 items-center justify-between">
         <div className="flex items-center gap-4">
           <h2 className="text-lg font-semibold">{t('logs.requestLogs')}</h2>
           <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as 'all' | 'success' | 'error')}>
@@ -263,7 +268,7 @@ export function RequestLogList({ highlightId }: RequestLogListProps) {
 
       {stats && <RequestLogStats stats={stats} />}
 
-      <div ref={containerRef} className="flex-1 mt-4">
+      <div ref={containerRef} className="mt-4 min-h-0 flex-1">
         {isLoading ? (
           <div className="flex h-32 items-center justify-center text-[var(--text-muted)]">
             {t('common.loading')}
