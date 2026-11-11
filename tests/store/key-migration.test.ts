@@ -6,6 +6,7 @@ import {
   orphanedPromptPayload,
   legacyBackupCandidates,
   planKeySetup,
+  retiredTopLevelKeys,
 } from '../../src/main/store/keyMigration.ts'
 
 test('a machine-bound key is only planned when the OS keystore exists', () => {
@@ -95,4 +96,19 @@ test('leftover prompts are only exported when there is something to keep', () =>
   const payload = orphanedPromptPayload([{ id: 'legacy-prompt', name: 'legacy' }])
   assert.equal(typeof payload, 'string')
   assert.deepEqual(JSON.parse(payload as string), [{ id: 'legacy-prompt', name: 'legacy' }])
+})
+
+test('a retired top-level key is reported whatever it holds', () => {
+  // The live case: a `data.json` written before the session table was retired keeps its
+  // empty `sessions` key forever unless startup drops it.
+  assert.deepEqual(retiredTopLevelKeys({ providers: [], accounts: [], sessions: [] }), ['sessions'])
+  // No released version had a writer for that table, so rows there are not user data worth
+  // moving aside the way the prompt library's were - the key goes either way.
+  assert.deepEqual(retiredTopLevelKeys({ sessions: [{ id: 'x' }] }), ['sessions'])
+  // A file that was already migrated reports nothing to do.
+  assert.deepEqual(retiredTopLevelKeys({ providers: [], accounts: [], config: {} }), [])
+  // And an unreadable snapshot is never a drop list.
+  assert.deepEqual(retiredTopLevelKeys(undefined), [])
+  assert.deepEqual(retiredTopLevelKeys(null), [])
+  assert.deepEqual(retiredTopLevelKeys('sessions'), [])
 })

@@ -98,3 +98,16 @@ export function orphanedPromptPayload(value: unknown): string | null {
   return JSON.stringify(value, null, 2)
 }
 
+/**
+ * Top-level `data.json` keys whose subsystem no longer exists. `sessions` is the live case:
+ * the table was retired with nothing ever writing it, so every file written before 1.8.3 still
+ * carries an empty `sessions` key. Leaving it is not harmless - a key rewrite compares its
+ * snapshot against the schema, so the dead key would be carried over by every migration.
+ */
+const RETIRED_TOP_LEVEL_KEYS = ['sessions'] as const
+
+export function retiredTopLevelKeys(snapshot: unknown): string[] {
+  if (!isRecord(snapshot)) return []
+  return RETIRED_TOP_LEVEL_KEYS.filter((key) => snapshot[key] !== undefined)
+}
+

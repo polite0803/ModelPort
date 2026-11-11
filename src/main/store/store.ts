@@ -68,6 +68,7 @@ import {
   legacyBackupCandidates,
   orphanedPromptPayload,
   planKeySetup,
+  retiredTopLevelKeys,
 } from './keyMigration'
 import { applyServed, buildModelCatalogue, namespaceModelOverrides } from './modelServing'
 import { DEFAULT_AUTO_ROUTING_CONFIG, RETIRED_PROVIDER_IDS, normalizeModelListRefresh } from '../../shared/types'
@@ -186,6 +187,7 @@ class StoreManager {
         encryptionKey: this.encryptionKey,
       })
       this.orphanSystemPrompts(storagePath)
+      this.dropRetiredTopLevelKeys()
 
       await this.initializeAppLogManager(storagePath)
       await this.initializeRequestLogManager(storagePath)
@@ -478,6 +480,18 @@ class StoreManager {
       console.log('[Store] Moved leftover system prompts out of data.json to', target)
     } catch (error) {
       console.warn('[Store] Could not move leftover system prompts aside; leaving them in place:', error)
+    }
+  }
+
+  /**
+   * Drop a `sessions` key left in `data.json` by a version that still declared the table.
+   * No released version ever wrote rows into it (`addSession()` had no callers), so there is
+   * nothing to move aside the way the prompt library needed.
+   */
+  private dropRetiredTopLevelKeys(): void {
+    for (const key of retiredTopLevelKeys(this.store?.store)) {
+      this.store!.delete(key)
+      console.log('[Store] Dropped retired data.json key', key)
     }
   }
   /**
