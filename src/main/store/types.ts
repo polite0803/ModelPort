@@ -28,7 +28,7 @@ import {
   DEFAULT_COMPRESSION_CONFIG,
   DEFAULT_PROMPT_CACHING_CONFIG,
 } from '../../shared/types.ts'
-import { RETIRED_PROVIDER_IDS } from '../../shared/types.ts'
+import { isRetiredProviderId } from '../providers/providerRetirement.ts'
 import type { DayTokenBucket } from '../../shared/tokenAccounting.ts'
 import type { CatalogAdoption } from '../../shared/modelCatalog.ts'
 import type { AggregateCreditSnapshot, AggregateCreditSnapshots } from '../../shared/aggregateCredit.ts'
@@ -799,7 +799,10 @@ export function createDefaultModelMappings(): Record<string, ModelMapping> {
  *
  * Three kinds of row are dropped:
  *
- * 1. retired request names / retired owners (the old DeepSeek integration);
+ * 1. retired request names, and owners that are retired in the sense of
+ *    `providers/providerRetirement::isRetiredProviderId` (a retired name that a
+ *    live catalogue entry or channel still claims is not retired - it is the
+ *    old integration's name reused, and dropping it would delete user data);
  * 2. an owner provider that no longer exists — such a pin can never select a
  *    candidate, so it is a zombie left behind by `deleteProvider`;
  * 3. **machine wiring**: every aggregate and account-channel sync used to also
@@ -819,7 +822,6 @@ export function normalizeModelMappingsWithDefaults(
   mappings?: Record<string, ModelMapping>,
   providers?: ReadonlyArray<Pick<Provider, 'id' | 'modelMappings'>>
 ): Record<string, ModelMapping> {
-  const retired = new Set<string>(RETIRED_PROVIDER_IDS)
   const legacyModelNames = new Set(DEEPSEEK_LEGACY_MODEL_MAPPING_NAMES)
   const ledgers = new Map((providers ?? []).map(provider => [provider.id, provider.modelMappings ?? {}]))
   const knowOwners = ledgers.size > 0
@@ -829,7 +831,7 @@ export function normalizeModelMappingsWithDefaults(
       if (legacyModelNames.has(requestModel)) return false
       const ownerId = mapping.preferredProviderId
       if (ownerId === undefined) return true
-      if (retired.has(ownerId)) return false
+      if (isRetiredProviderId(ownerId)) return false
       if (!knowOwners) return true
       const ledger = ledgers.get(ownerId)
       if (ledger === undefined) return false

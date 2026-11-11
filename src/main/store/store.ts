@@ -71,7 +71,8 @@ import {
   retiredTopLevelKeys,
 } from './keyMigration'
 import { applyServed, buildModelCatalogue, namespaceModelOverrides } from './modelServing'
-import { DEFAULT_AUTO_ROUTING_CONFIG, RETIRED_PROVIDER_IDS, normalizeModelListRefresh } from '../../shared/types'
+import { isRetiredProviderId } from '../providers/providerRetirement'
+import { DEFAULT_AUTO_ROUTING_CONFIG, normalizeModelListRefresh } from '../../shared/types'
 import { normalizeAutoRoutingConfig } from './autoRoutingConfig'
 import {
   allModelRoutes,
@@ -698,14 +699,19 @@ class StoreManager {
 
     // Retired providers leave accounts (cookies, refresh tokens, SSO tickets)
     // and per-model switches behind. Delete them instead of keeping orphans.
-    const retiredIds = new Set<string>(RETIRED_PROVIDER_IDS)
+    //
+    // The judgement is `isRetiredProviderId`, not the bare name list: that list
+    // also names live aggregate entries (`deepseek`, `glm`, `kimi`, `zai`) and the
+    // live `minimax` channel, whose API keys are stored as accounts of the same
+    // providerId. Keying off the list alone purged a configured DeepSeek key on
+    // every gateway start - reported 2026-11-11 as "the update ate my key".
     const accounts = (this.store?.get('accounts') || []) as Account[]
-    const keptAccounts = accounts.filter(account => !retiredIds.has(account.providerId))
+    const keptAccounts = accounts.filter(account => !isRetiredProviderId(account.providerId))
     if (keptAccounts.length !== accounts.length) {
       this.store?.set('accounts', keptAccounts)
     }
-    for (const id of RETIRED_PROVIDER_IDS) {
-      if (id in userModelOverrides) {
+    for (const id of Object.keys(userModelOverrides)) {
+      if (isRetiredProviderId(id)) {
         delete userModelOverrides[id]
         userModelOverridesChanged = true
       }

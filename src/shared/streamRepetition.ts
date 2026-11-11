@@ -158,3 +158,65 @@ export function measureStreamRepetition(
     degraded: dedupRatio <= settings.maxDedupRatio,
   }
 }
+
+/**
+ * 「这一发什么都没做」的读数 —— 第三类退化。
+ *
+ * ## 为什么去重率判据盖不住它（2026-11-12 现网 `chatcmpl-mwcghqtq-td1xm6`）
+ *
+ * 去重率读尾部行的重复度，而那一发是 176 KB、`[DONE]` 正常收尾、**行数为 0**：
+ * 模型把 1108 个 output token 全花在思考上（OpenRouter 的 `reasoning_details` 是
+ * 对象数组，不在 {@link extractStreamText} 认的三个字符串字段里），正文与工具调用
+ * 都是空。客户端（Codex）拿到一个 `finish` 正常、却没有任何可执行动作的回合，界面
+ * 就停在上一句「先确认当前 shell 位置」的承诺上，而网关这行记的是 `success`。
+ *
+ * 判据只看「本轮有没有交付任何东西」，不看思考量，因此没有阈值可调 —— 也调不出来：
+ * 任何去重率都会把「零行」判成健康（`notJudged: too_short`）。
+ */
+export interface StreamEmptyTurnReading {
+  /** 助手可见正文的字符数（`delta.content`，字符串与内容段数组都计入）。 */
+  contentChars: number
+  /** 工具调用增量的条数（`delta.tool_calls`）。 */
+  toolCallDeltas: number
+  /** 客户端本轮带了工具。没带工具时「只说不做」是合法答案，不判空。 */
+  toolsOffered: boolean
+  /** true = 带了工具、却既无正文也无工具调用 —— 这一轮不会产生任何动作。 */
+  empty: boolean
+}
+
+export function measureStreamEmptyTurn(sse: string, toolsOffered: boolean): StreamEmptyTurnReading {
+  let contentChars = 0
+  let toolCallDeltas = 0
+  for (const rawLine of sse.split('\n')) {
+    const line = rawLine.trimEnd()
+    if (!line.startsWith('data:')) continue
+    const payload = line.slice(5).trim()
+    if (payload === '' || payload === '[DONE]') continue
+    let frame: unknown
+    try {
+      frame = JSON.parse(payload)
+    } catch {
+      continue
+    }
+    const delta = (frame as { choices?: Array<{ delta?: Record<string, unknown> }> }).choices?.[0]?.delta
+    if (!delta) continue
+    const content = delta.content
+    if (typeof content === 'string') {
+      contentChars += content.length
+    } else if (Array.isArray(content)) {
+      for (const part of content) {
+        if (typeof part === 'string') contentChars += part.length
+        else if (typeof (part as { text?: unknown })?.text === 'string') {
+          contentChars += (part as { text: string }).text.length
+        }
+      }
+    }
+    if (Array.isArray(delta.tool_calls)) toolCallDeltas += delta.tool_calls.length
+  }
+  return {
+    contentChars,
+    toolCallDeltas,
+    toolsOffered,
+    empty: toolsOffered && contentChars === 0 && toolCallDeltas === 0,
+  }
+}

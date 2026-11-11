@@ -56,10 +56,11 @@ import { registerMinimaxLlm } from './minimax-adapter.js'
 import { MINIMAX } from './minimax-product.js'
 import type { MinimaxCredential } from './minimax.js'
 import { fetchTraeCreditBalance } from './trae-credits.js'
-import { fetchQoderCreditBalance, qoderPlanGrantsCredits } from './qoder-credits.js'
+import { fetchQoderCreditBalance } from './qoder-credits.js'
 import { fetchZcodeBalance } from './zcode-upstream.js'
 import { fetchClineCreditBalance } from './cline-credits.js'
 import { fetchGeminiCreditBalance } from './gemini-credits.js'
+import { creditTotalIfPlanGrants } from './credits.js'
 import { fetchLobsteraiCreditBalance } from './lobsterai-credits.js'
 import { fetchRaccoonCreditBalance } from './raccoon-credits.js'
 import { fetchMinimaxCreditBalance } from './minimax-credits.js'
@@ -310,7 +311,8 @@ export function apply(ctx: Context, config: {
   // 背景：除 loomy / buddy 有余额感知选号外，其余渠道选号不知道积分余额，
   // 排在手动顺序首位的 0 积分号会持续被选中并失败（计费错误不写限流标记，
   // 也不触发换号）。这里给 8 个渠道各注册一个 `AccountBalanceGate`（见
-  // `account-balance-gate.ts`）：选号时确认为 0 的账号跳过，查询失败/超时
+  // `account-balance-gate.ts`）：选号时确认为 0 的账号降级排到最后（不剔除，见
+  // `account-pool.ts` 的 `demoted`），查询失败/超时
   // 一律 fail-open 放行，TTL 缓存保证选号热路径基本零网络开销。
   //
   // - loomy / buddy 不注册：它们已有 selector 分档选号（会自己查余额），
@@ -328,8 +330,11 @@ export function apply(ctx: Context, config: {
     balance: { total: number } | null | undefined,
   ): number | null => (balance === null || balance === undefined ? null : balance.total)
   const balanceGate = (probe: BalanceProbe) => new AccountBalanceGate({ probe })
+  // TRAE 的包来自 `user_entitlement_pack_list`：`total` 是上游给的 `credits_limit`、
+  // `used` 是 `usage.credits_amount` —— 有「发放过多少」的证据才谈得上「烧光」。
+  // 只有 0 额度包的号（免费档一次没领过）按「未知」放行，与 qoder 同一条判据。
   pool.setBalanceGate(TRAE.id, balanceGate(async credential =>
-    creditTotal(await fetchTraeCreditBalance(credential as TraeCredential, TRAE))))
+    creditTotalIfPlanGrants(await fetchTraeCreditBalance(credential as TraeCredential, TRAE))))
   // Qoder 两个产品实例共用同一判据：只有**发放过积分**的号才参与余额门控。
   // 免费/标准档的 `userQuota` 是 `{total:0,used:0,remaining:0}`——该计划本来
   // 不发积分，把它当成「余额为 0」拦号，会把仍能服务免费模型的账号排掉；
@@ -338,11 +343,8 @@ export function apply(ctx: Context, config: {
   const qoderCreditTotal = async (
     credential: QoderCredential,
     product: QoderProduct,
-  ): Promise<number | null> => {
-    const balance = await fetchQoderCreditBalance(credential, product)
-    if (balance === null) return null
-    return qoderPlanGrantsCredits(balance.packages) ? balance.total : null
-  }
+  ): Promise<number | null> =>
+    creditTotalIfPlanGrants(await fetchQoderCreditBalance(credential, product))
   pool.setBalanceGate(QODER.id, balanceGate(credential =>
     qoderCreditTotal(credential as QoderCredential, QODER)))
   pool.setBalanceGate(QODER_CN.id, balanceGate(credential =>
@@ -352,15 +354,24 @@ export function apply(ctx: Context, config: {
     if (result === undefined || result.enterprise === true) return null
     return result.remaining
   }))
+  // ⚠️ cline / raccoon / lobsterai / minimax **不套用**上面那条计费感知判据：它们的余额
+  // 响应只有一个汇总数字（cline `data.balance` 单值、raccoon `available_points`、
+  // lobsterai 各包只有 `creditsRemaining`、minimax 是 `remaining_amount` 之和且不带发放量），
+  // `packages` 里的 `total`/`used` 是汇总值伪造出来的，用它判「发放过没有」会让 0 一律放行 ——
+  // 那是把门关掉，不是计费感知。这一格要真做，需要各家的档位/免费模型清单（渠道包现在没有），
+  // 或由宿主侧按「本次请求的模型吃不吃积分」放行（选号时 `modelId` 已在参数里）。
   pool.setBalanceGate(CLINE.id, balanceGate(async credential => {
     const result = await fetchClineCreditBalance(credential as ClineCredential, CLINE)
     return result.balance === null ? null : result.balance.total
   }))
+  // Gemini 的「包」是两个配额窗口，`total` 恒为 100（百分比口径），所以窗口存在时
+  // 判据等价于原样读剩余；**两个窗口都没下发**才是这条线真正的「没有配额概念」，
+  // 原先它落成 `{total:0, packages:[]}` 被当成余额 0 拦号 —— 按未知放行。
   pool.setBalanceGate(GEMINI.id, balanceGate(async credential => {
     const result = await fetchGeminiCreditBalance(credential as GeminiCredential, GEMINI, {
       fetcher: fetchFor(GEMINI.id),
     })
-    return result.balance === null ? null : result.balance.total
+    return result.balance === null ? null : creditTotalIfPlanGrants(result.balance)
   }))
   pool.setBalanceGate(LOBSTERAI.id, balanceGate(async credential =>
     creditTotal(await fetchLobsteraiCreditBalance(credential as LobsteraiCredential, LOBSTERAI))))

@@ -22,15 +22,16 @@ import {
 import { useProvidersStore } from '@/stores/providersStore'
 import { useProxyStore } from '@/stores/proxyStore'
 import { useToast } from '@/hooks/use-toast'
-import { Search, Copy, CheckCircle2, XCircle, Cpu, Check, Square, Database, ChevronLeft, ChevronRight, Loader2, Ban, Wifi } from 'lucide-react'
+import { Search, Copy, CheckCircle2, XCircle, Cpu, Check, Square, Database, ChevronLeft, ChevronRight, Loader2, Ban, Wifi, RefreshCw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { weightTone } from '@/lib/costTone'
 import { Switch } from '@/components/ui/switch'
 import type { Account, CatalogueModel } from '@/types/electron'
-import type { ProviderModelTestResult } from '@shared/types'
+import type { ProviderModelTestResult, ProviderModelSyncResult, ModelCapabilityHint } from '@shared/types'
 import type { ChannelCredits, CostBucket } from '@shared/channels'
 import { costBucketOf } from '@shared/channels'
-import { aggregateCostOf } from '@shared/aggregateCost'
+import type { AggregateCostClass } from '@shared/aggregateCost'
+import { aggregateCostOf, costBucketOfAggregateClass } from '@shared/aggregateCost'
 import modelMappingIcon from '@/assets/providers/model-mapping.svg'
 
 const providerIcons: Record<string, string> = {
@@ -69,6 +70,14 @@ interface ModelInfo {
   free?: boolean
   /** 上游生效倍率；缺失表示渠道没报，不能当成 0 */
   weight?: number
+  /** 倍率来自手工标注（manual > 渠道）；界面要说清出处，否则「同步会覆盖标注」会被误解 */
+  weightManual?: boolean
+  /** 这一行有没有「倍率」这个概念：账号渠道有，聚合走成本分类，别名/自定义没有 */
+  weightApplicable: boolean
+  /** 聚合条目的成本分类（只有聚合行有），行上按它显示免费/套餐内/按量/未标注 */
+  costClass?: AggregateCostClass
+  /** 与路由同口径的消耗档位：免费/低倍率/基准/高倍率/未知 */
+  costBucket: CostBucket
   /**
    * 模型映射别名的键。有这一格才说明这行是别名：它的启用位落在映射表自身的
    * `disabled` 上（别名不归任何供应商目录管，`excludedModels` 记不到它）。
@@ -93,8 +102,8 @@ interface ModelRowProps {
   onTestModel: (model: ModelInfo) => void
 }
 
-/** 测试失败的机读原因 → 文案 key。未登记的原因不硬猜，只显示 detail。 */
-const TEST_REASON_KEYS: Record<string, string> = {
+/** 测试/同步失败的机读原因 → 文案 key。未登记的原因不硬猜，只显示 detail。 */
+const MODEL_REASON_KEYS: Record<string, string> = {
   unknown_provider: 'models.testReasonUnknownProvider',
   unknown_entry: 'models.testReasonUnknownProvider',
   not_configured: 'models.testReasonNotConfigured',
@@ -109,6 +118,33 @@ const TEST_REASON_KEYS: Record<string, string> = {
   timeout: 'models.testReasonTimeout',
   invalid_request: 'models.testReasonInvalid',
   unsupported: 'models.testReasonUnsupported',
+  empty: 'models.syncReasonEmpty',
+  custom_no_source: 'models.syncReasonNoSource',
+}
+
+/** 同步失败的一行文案：reason 有登记就翻译，否则退回主进程给的 detail。 */
+function syncReasonText(
+  result: ProviderModelSyncResult,
+  t: (key: string, params?: Record<string, any>) => string
+): string {
+  const key = result.reason === undefined ? undefined : MODEL_REASON_KEYS[result.reason]
+  if (key !== undefined) return t(key)
+  return result.detail ?? result.reason ?? t('models.testReasonUnsupported')
+}
+
+/** 聚合行的成本分类 → 文案 key（与聚合详情页同一套说法）。 */
+const AGGREGATE_COST_LABELS: Record<AggregateCostClass, string> = {
+  free: 'aggregate.manage.models.costFree',
+  included: 'aggregate.manage.models.costIncluded',
+  priced: 'aggregate.manage.models.costPriced',
+  unknown: 'aggregate.manage.models.costUnknown',
+}
+
+/** 悬停解释；`free` 用旁边的「免费」徽标已足够，不再加提示。 */
+const AGGREGATE_COST_HINTS: Partial<Record<AggregateCostClass, string>> = {
+  included: 'aggregate.manage.models.costIncludedHint',
+  priced: 'aggregate.manage.models.costPricedHint',
+  unknown: 'aggregate.manage.models.costUnknownHint',
 }
 
 const PAGE_SIZE = 50
@@ -129,7 +165,7 @@ const ModelRow = memo(({
   const credit = credits[model.providerId]
   // 别名行没有固定供应商时（映射表未指定 preferredProviderId）没有可测的落点。
   const testable = model.source !== undefined || model.providerId !== 'mapping'
-  const testReasonKey = testResult?.reason === undefined ? undefined : TEST_REASON_KEYS[testResult.reason]
+  const testReasonKey = testResult?.reason === undefined ? undefined : MODEL_REASON_KEYS[testResult.reason]
   const testTitle = testResult === undefined
     ? t('models.testHint')
     : [
@@ -158,31 +194,53 @@ const ModelRow = memo(({
           <code className="text-sm bg-muted px-2 py-1 rounded">
             {model.name}
           </code>
-          {/* 倍率取自渠道目录；渠道没报的就标「未标注」，不拿 1 倍冒充 */}
-          <Badge
-            variant="outline"
-            className={
-              model.free === true
-                ? 'text-success'
-                : model.weight === undefined
-                  ? 'text-muted-foreground'
-                  : weightTone(model.weight)
-            }
-            title={
-              model.free === true
-                ? undefined
-                : model.weight === undefined
-                  ? t('models.weightUnknownHint')
-                  : undefined
-            }
-          >
-            {model.free === true
-              ? 'x0'
-              : model.weight === undefined
-                ? t('models.costUnknown')
-                : `x${model.weight}`}
-          </Badge>
-          {model.free === true && (
+          {/* 费用一栏：账号渠道按倍率（手工标注优先），聚合按成本分类；
+              别名/自定义供应商没有倍率这个概念 —— 显示「不适用」而不是「未标注」，
+              否则「按构造补不上」的行会把缺口统计撑成一个假的待办。 */}
+          {model.weight !== undefined ? (
+            <Badge
+              variant="outline"
+              className={model.free === true ? 'text-success' : weightTone(model.weight)}
+              title={model.weightManual === true ? t('models.weightManualHint') : undefined}
+            >
+              {`x${model.weight}`}
+            </Badge>
+          ) : model.costClass !== undefined ? (
+            <Badge
+              variant="outline"
+              className={
+                model.costClass === 'free'
+                  ? 'text-success'
+                  : model.costClass === 'unknown'
+                    ? 'text-muted-foreground'
+                    : undefined
+              }
+              title={
+                AGGREGATE_COST_HINTS[model.costClass] === undefined
+                  ? undefined
+                  : t(AGGREGATE_COST_HINTS[model.costClass]!)
+              }
+            >
+              {t(AGGREGATE_COST_LABELS[model.costClass])}
+            </Badge>
+          ) : model.weightApplicable ? (
+            <Badge
+              variant="outline"
+              className="text-muted-foreground"
+              title={t('models.weightUnknownHint')}
+            >
+              {t('models.costUnknown')}
+            </Badge>
+          ) : (
+            <Badge
+              variant="outline"
+              className="text-muted-foreground"
+              title={t('models.weightNotApplicable')}
+            >
+              —
+            </Badge>
+          )}
+          {model.free === true && model.costClass === undefined && (
             <Badge variant="outline" className="text-success">
               {t('models.free')}
             </Badge>
@@ -308,6 +366,8 @@ export function ModelList() {
   const [currentPage, setCurrentPage] = useState(1)
   const [catalogueMap, setCatalogueMap] = useState<Record<string, CatalogueModel[]>>({})
   const [serving, setServing] = useState(false)
+  /** 「同步模型」进行中：一次只跑一轮，按钮同时被禁用 */
+  const [syncingModels, setSyncingModels] = useState(false)
   /** 正在测的那一行；同一时刻只发一条真实测试请求 */
   const [testingModelId, setTestingModelId] = useState<string | null>(null)
   /** 行 id -> 最近一次测试结果（不落盘：这是现场读数，不是配置） */
@@ -320,6 +380,10 @@ export function ModelList() {
   const [freeFlags, setFreeFlags] = useState<Record<string, boolean>>({})
   /** `<provider>/<model>` -> 上游生效倍率；缺失表示渠道没报，不是 0 */
   const [weightFlags, setWeightFlags] = useState<Record<string, number>>({})
+  /** `<entryId>/<modelId>` -> 聚合成本分类；行上与路由同口径，不拿「未标注倍率」糊过去 */
+  const [costClasses, setCostClasses] = useState<Record<string, AggregateCostClass>>({})
+  /** providerId -> 展示名 -> 手工标注：倍率/免费按 manual > 渠道目录 合并 */
+  const [modelMarks, setModelMarks] = useState<Record<string, Record<string, ModelCapabilityHint>>>({})
 
   /** `<provider>/<model>` -> 目录是否声明接受图片；缺失表示没有这份信息 */
   const [modalityFlags, setModalityFlags] = useState<Record<string, boolean>>({})
@@ -380,6 +444,7 @@ export function ModelList() {
     const free: Record<string, boolean> = {}
     const weights: Record<string, number> = {}
     const images: Record<string, boolean> = {}
+    const classes: Record<string, AggregateCostClass> = {}
     const channelProviders = providers.filter(p => p.enabled && p.type === 'account')
     await Promise.all(channelProviders.map(async (provider) => {
       try {
@@ -407,7 +472,9 @@ export function ModelList() {
             modelId: model.id,
             ...(entry.freeModelsHint ? { freeModelsHint: entry.freeModelsHint } : {}),
           })
-          if (signal.class === 'free') free[`${entry.id}/${model.id}`] = true
+          const key = `${entry.id}/${model.id}`
+          classes[key] = signal.class
+          if (signal.class === 'free') free[key] = true
         }
       }
     } catch (error) {
@@ -416,11 +483,31 @@ export function ModelList() {
     setFreeFlags(free)
     setWeightFlags(weights)
     setModalityFlags(images)
+    setCostClasses(classes)
   }, [providers])
 
   useEffect(() => {
     loadCatalogueFacts()
   }, [loadCatalogueFacts, modelsLastUpdated])
+
+  /**
+   * 手工标注读一次：行上的倍率/免费必须显示路由实际使用的那一层
+   * （`manual > 供应商记录`，见 `autoRouting::mergedHintOf`）。不读它，
+   * 用户标注了倍率、路由也按它打了分，界面上却还写着「未标注倍率」。
+   */
+  useEffect(() => {
+    const api = window.electronAPI?.providers
+    if (!api?.getModelMarks) return
+    let cancelled = false
+    api.getModelMarks()
+      .then(marks => {
+        if (!cancelled) setModelMarks(marks)
+      })
+      .catch(error => console.error('Failed to load model marks:', error))
+    return () => {
+      cancelled = true
+    }
+  }, [modelsLastUpdated])
 
   /**
    * 余额/积分是**渠道级**数据，不是模型级：走渠道包的 `credits.balances`。
@@ -497,9 +584,26 @@ export function ModelList() {
 
         // 目录已用上游展示名，渠道事实仍按 `<channel>/<内部 id>`（即
         // actualModelId）记录，所以先按它查，再回落到展示名（内置供应商两者相同）。
-        const free = freeFlags[model.actualModelId] ?? freeFlags[model.displayName]
-        const weight = weightFlags[model.actualModelId] ?? weightFlags[model.displayName]
+        const channelFree = freeFlags[model.actualModelId] ?? freeFlags[model.displayName]
+        const channelWeight = weightFlags[model.actualModelId] ?? weightFlags[model.displayName]
         const supportsImage = modalityFlags[model.actualModelId] ?? modalityFlags[model.displayName]
+        // 手工标注只在写了的字段上覆盖渠道（与路由的 manual > record 同序）。
+        const manual = modelMarks[provider.id]?.[model.displayName]
+        const free = manual?.free ?? channelFree
+        const weight = manual?.weight ?? channelWeight
+        const costClass =
+          provider.type === 'aggregate'
+            ? costClasses[model.actualModelId] ?? costClasses[model.displayName]
+            : undefined
+        // 与 `autoRouter::costSignalFor` 同一个判定顺序：免费 → 倍率 → 聚合分类 → 未知。
+        const costBucket: CostBucket =
+          free === true
+            ? 'free'
+            : weight !== undefined
+              ? costBucketOf(weight, false)
+              : costClass !== undefined
+                ? costBucketOfAggregateClass(costClass)
+                : 'unknown'
 
         models.push({
           id: modelId,
@@ -514,6 +618,10 @@ export function ModelList() {
           modality: toModality(supportsImage),
           free,
           weight,
+          weightManual: manual?.weight !== undefined,
+          weightApplicable: provider.type === 'account',
+          costClass,
+          costBucket,
         })
       }
     }
@@ -538,12 +646,14 @@ export function ModelList() {
           served: mapping.disabled !== true,
           alias: mapping.requestModel,
           modality: 'unknown',
+          weightApplicable: false,
+          costBucket: 'unknown',
         })
       }
     }
     
     return models
-  }, [providers, accounts, modelMappings, catalogueMap, freeFlags, weightFlags, modalityFlags, t])
+  }, [providers, accounts, modelMappings, catalogueMap, freeFlags, weightFlags, modalityFlags, modelMarks, costClasses, t])
   
   const filteredModels = useMemo(() => {
     let filtered = modelList
@@ -556,9 +666,10 @@ export function ModelList() {
       filtered = filtered.filter(m => m.modality === modalityFilter)
     }
     
-    // 倍率缺失自成一档：没有倍率标注既不是便宜也不是付费确定，折进任何一档都会误导选择
+    // 消耗档位与路由同口径：手工标注 > 渠道倍率 > 聚合成本分类；未知自成一档，
+    // 既不是便宜也不是付费确定，折进任何一档都会误导选择
     if (costFilter !== 'all') {
-      filtered = filtered.filter(m => costBucketOf(m.weight, m.free === true) === costFilter)
+      filtered = filtered.filter(m => m.costBucket === costFilter)
     }
     
     if (servedFilter !== 'all') {
@@ -751,6 +862,66 @@ export function ModelList() {
     setSelectAll(false)
   }, [changeServed, modelList, selectedModels, t, toast])
   
+  /**
+   * 「同步模型」：作用域跟供应商筛选走——选中一家就同步那一家，`all` 同步全部
+   * 已启用的可同步供应商。同步会重写供应商记录（`supportedModels` 变了），所以
+   * 结束后要重取一次供应商、再触发目录重读；增删数字取主进程的对账结果，不从
+   * 界面上现算——两边各算一份必然漂移。
+   */
+  const handleSyncModels = useCallback(async () => {
+    if (syncingModels || selectedProvider === 'mapping') return
+    setSyncingModels(true)
+    try {
+      const scope = selectedProvider === 'all' ? undefined : [selectedProvider]
+      const results = await window.electronAPI.providers.syncModels(scope)
+      // 目录重读先触发：供应商重取失败也不该让整页停在旧目录上。
+      setModelsLastUpdated(Date.now())
+      try {
+        // 账号也重取：聚合的无 Key 条目在保存时会补一条本地账号，账号表不能停在旧副本上。
+        const [providerRows, accountRows] = await Promise.all([
+          window.electronAPI.providers.getAll(),
+          window.electronAPI.accounts.getAll(),
+        ])
+        setProviders(providerRows)
+        setAccounts(accountRows)
+      } catch (error) {
+        console.error('Failed to reload providers after model sync:', error)
+      }
+
+      const failed = results.filter(result => !result.success)
+      const succeeded = results.length - failed.length
+      const added = results.reduce((sum, result) => sum + result.added, 0)
+      const removed = results.reduce((sum, result) => sum + result.removed, 0)
+
+      if (results.length === 0) {
+        toast({ title: t('models.syncNothing') })
+      } else if (failed.length === 0) {
+        toast({
+          title: added === 0 && removed === 0
+            ? t('models.syncUnchanged', { providers: succeeded })
+            : t('models.syncDone', { providers: succeeded, added, removed }),
+        })
+      } else {
+        toast({
+          title: t('models.syncPartial', { providers: succeeded, failed: failed.length }),
+          description: failed
+            .slice(0, 3)
+            .map(result => `${result.providerName}: ${syncReasonText(result, t)}`)
+            .join(' · '),
+          variant: succeeded === 0 ? 'destructive' : 'default',
+        })
+      }
+    } catch (error) {
+      toast({
+        title: t('common.error'),
+        description: error instanceof Error ? error.message : String(error),
+        variant: 'destructive',
+      })
+    } finally {
+      setSyncingModels(false)
+    }
+  }, [selectedProvider, setAccounts, setModelsLastUpdated, setProviders, syncingModels, t, toast])
+
   const handleCopySelected = useCallback(async () => {
     const selectedModelNames = filteredModels
       .filter(m => selectedModels.has(m.id))
@@ -957,6 +1128,26 @@ export function ModelList() {
           </div>
           
           <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void handleSyncModels()}
+              disabled={
+                syncingModels ||
+                selectedProvider === 'mapping' ||
+                providers.filter(p => p.enabled).length === 0
+              }
+              title={t('models.syncModelsHint')}
+            >
+              {syncingModels ? (
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+              ) : (
+                <RefreshCw className="h-4 w-4 mr-2" />
+              )}
+              {syncingModels
+                ? t('models.syncRunning')
+                : selectedProvider === 'all' ? t('models.syncAllModels') : t('models.syncModels')}
+            </Button>
             <Button
               variant="outline"
               size="sm"

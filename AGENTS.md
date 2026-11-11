@@ -174,6 +174,12 @@ deletes builtins whose id no longer exists. Edit builtin config in
 `src/main/providers/builtin/<provider>.ts` only; UI edits to those fields are discarded on restart.
 (There is currently no builtin to edit - `builtinProviders` has been empty since the OpenCode runtime
 retirement.)
+* A name counts as a retired provider only when no shipped definition still claims it - read it through
+`providers/providerRetirement.ts::isRetiredProviderId` (builtin registry + aggregate catalogue + channel
+catalogue), never off `RETIRED_PROVIDER_IDS` alone. Five of its names (`deepseek`, `glm`, `kimi`,
+`minimax`, `zai`) are live ids, and a configured API key is an account of that same `providerId`, so the
+bare list purged a user's DeepSeek key on every gateway start (fixed 2026-11-11, guarded by
+`tests/store/retired-name-collision.test.ts`).
 
 Host boundary (`docs/plan/PLAN-wsl-headless-daemon-and-shell.md`):
 
@@ -272,6 +278,14 @@ reading lands on `streamTrace.repetition` as aggregates only, `runChars` is evid
 judgement input, a degraded turn **revokes** the sticky anchor (`autoRouter.revokeSticky`), and
 non-streaming responses are deliberately not judged. A `client_abort` still counts as neither
 success nor failure - that skip is exactly why this second signal exists.
+* **A completed stream that delivers nothing is the third degraded class**
+(`shared/streamRepetition.ts::measureStreamEmptyTurn`). The dedup ratio is structurally blind to it:
+OpenRouter-style reasoning arrives as `reasoning_details` **objects**, so the reading is `lines: 0` /
+`notJudged: too_short` and looks healthy. Judged only when the client offered `tools` and the stream
+ended `done`, with zero `content` characters **and** zero `tool_calls` deltas. The reading lands on
+`streamTrace.emptyTurn`, counts as degraded for AIMD/Bandit and revokes the sticky anchor - an agent
+client ends its turn on such a completion, so without this the session stays pinned to a model that
+never acts (2026-11-12 `chatcmpl-mwcghqtq-td1xm6`: 176 KB out, 1108 output tokens, all reasoning).
 * Per-`(account, model)` AIMD admission: default concurrency 4; 429/timeout/5xx shrink it
 multiplicatively (5s cooldown), 5 clean successes grow it by one (30s quiet period). Short-window
 EWMA first-token latency plus 429/timeout/degraded rates feed candidate scoring. A locally rejected

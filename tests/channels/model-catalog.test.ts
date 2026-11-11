@@ -36,6 +36,24 @@ test('a label without a rate keeps an unknown weight, never 0', () => {
   assert.equal(splitModelLabel('').weight, undefined)
 })
 
+test('同名变体标记跟在倍率后面时，倍率照样拆出来，名字原样保留', () => {
+  // buddy 给两条同名模型追加变体（`… · x0.03 SG`）：变体是去重键，拆掉它会吞掉一条
+  // 模型；倍率不拆出来则这条模型的消耗档永远是「未标注」。
+  assert.deepEqual(splitModelLabel('Deepseek-V4.1-Flash · x0.03 SG'), {
+    name: 'Deepseek-V4.1-Flash · x0.03 SG',
+    free: false,
+    weight: 0.03,
+  })
+  assert.deepEqual(splitModelLabel('GLM-5-3-Flash · x0.2→x0.1 X'), {
+    name: 'GLM-5-3-Flash · x0.2→x0.1 X',
+    free: false,
+    weight: 0.1,
+    baseWeight: 0.2,
+  })
+  // 变体后面还有空格的多词尾巴不认：只接受单个短标记，避免把名字里的普通词当变体。
+  assert.equal(splitModelLabel('Some Model · x2 extra words').weight, undefined)
+})
+
 test('目录来源只认已知三态，未知值按「没有来源概念」处理', () => {
   assert.equal(readModelListSource({ source: 'upstream' }), 'upstream')
   assert.equal(readModelListSource({ source: 'official-cache' }), 'official-cache')

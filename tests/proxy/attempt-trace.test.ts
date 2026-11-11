@@ -46,3 +46,16 @@ test('尝试链：保留状态、错误码与耗时，供日志直接读取', ()
   assert.equal(row.latencyMs, 12)
   assert.equal(row.retryIndex, 0)
 })
+
+test('尝试链：会话亲和头缺失的 400 记成 capability，不是 fatal', () => {
+  // 2026-11-11 报障：opencode_go 的 `missing x-opencode-session` 原先落进 fatal，
+  // 日志里只剩一条失败行，看不出「换一家就能成」。
+  assert.equal(trace({
+    status: 400,
+    error: 'Request is missing x-opencode-session and cannot be routed efficiently. '
+      + 'Please see https://opencode.ai/v2/docs/console/go/#where-can-i-use-it',
+    errorDetails: { message: 'missing session', type: 'MissingSessionID' },
+  }).outcome, 'capability')
+  // 普通 400 仍然是终止（客户端自己写坏了请求，换家也救不了）
+  assert.equal(trace({ status: 400, error: "Invalid value: 'session_id' must be a string" }).outcome, 'fatal')
+})

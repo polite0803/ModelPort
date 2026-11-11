@@ -758,6 +758,33 @@ exactly - it must never reject what the gateway accepts - and reports the coordi
 received type (`messages[2].tool_calls[0].function.arguments must be a string, received object`).
 It throws with `status: 400` so the client sees `invalid_request_error` rather than a 500.
 
+**Pairing is repaired, not rejected.** Shape is only half of what a strict upstream checks: it also
+requires every `tool_calls` entry to have exactly one `role: tool` result and vice versa. Measured
+2026-11-11 on a Codex turn routed through `codex`: the same history was refused by
+`buddy/deepseek-v4-pro` and `buddy/kimi-k3.1-pro` with 502
+`工具记录不完整，请新建任务 tool calls and tool results do not match` (that Chinese sentence is the
+upstream's own - `grep -rn 工具记录不完整 src vendor` returns nothing), then served 200 by
+`buddy/mimo-v2.6-pro`. The cost is three full attempts (each one a full prefill of the same history)
+plus a mid-conversation model rotation: that session had been served by `cline/anthropic/claude-opus-4.5`
+and `agnes-2.5-pro` up to 15:46, and after these rejections every following turn reports
+`auto.reason: sticky` on mimo. Do not read the rotation as "fell back to a weak model" - measured on
+this same session mimo drove `finishReason=tool_calls` correctly on turns 12 and 13 (including one
+response with four parallel `exec_command` calls), so the two later `finish_reason=stop` turns are not
+attributable to model quality; what they had in common was that no permission-request tool was listed
+for the turn at all, which is a client-side approval-profile gap, not a routing one. So
+`repairToolCallPairing` runs at the same worker site and **only deletes**: a call nobody answered, a
+duplicate declaration of the same `call_id`, a result with no call, and the second result for one call.
+It never invents a tool result, because the gateway authors no prompt text (裁定 2026-11-03) - a
+synthetic "（无结果）" would be a third `GATEWAY-TEXT` site for what deletion already fixes. Deleting the
+call keeps the assistant's text when it has any, and drops the message when it does not, since
+`content: null` with no calls reads to the upstream as an empty reply. Rejecting locally instead was the
+other option and is wrong here: 400 is terminal under the failover policy, so it would turn "slow but
+working" into a hard failure. Two boundaries: this site sees only the OpenAI messages the host hands
+the worker, so if the counts stay 0 while the upstream still answers that 502, the defect is being
+introduced further down inside the pack's own harness conversion - do not "fix" it here; and the repair
+is logged as a warn carrying `kind messages[i].tool_calls[j] (call_id)`, coordinates only, because the
+body-logging route is structurally blind to the tail (see `countToolCallShapes`).
+
 **Qoder's numeric business codes are classified by code/payload, never by HTTP status**, and each
 one has exactly one home: `model-queue.ts` for `10605` (queue) and `110` (daily billing quota:
 `QUOTA_EXCEEDED`, switch account and mark the model until 00:00 UTC+8), `qoder-plan-gate.ts` for
@@ -777,7 +804,14 @@ readable `PERMISSION_DENIED` (non-retryable) error carrying the pricing URL, nev
 refresh. Leaving it as `SERVER` produced the reported symptom: raw JSON plus `(112/model_error)` in
 the client, and five pointless retries. `compat/dshLlm.ts` also keeps the upstream status in
 `failure.status` (the contract `openai-gateway/stream.ts` and `opencode-adapter.ts` already read),
-so a 4xx survives to the client instead of degrading to 502.
+so a 4xx survives to the client instead of degrading to 502. **The SSE frame has to carry it too**:
+a pre-first-chunk failure only reaches the host as one error frame, and a frame without
+`error.status` is judged by wording alone - `forwardAccountChannel` then records 502, the failover
+loop books it as an account fault, and three cline `:batch` variants (upstream 404 `model not
+supported`, every time) spend a `maxAttempts: 3` route whole and end the chain at attempt 7 of 1152
+(2026-11-12 `chatcmpl-mwcbjari-izjtek`, client sees `503 no_available_model`). Both halves are
+fenced: `tests/channels/openai-gateway-error-frame-status.test.ts` puts the number in the frame,
+`tests/routes/account-channel-stream-error-status.test.ts` proves the loop reads it.
 
 **Qoder's `session_id` is a conversation identity, not a per-request nonce**
 (`qoder-session.ts::deriveQoderSessionId`, consumed by `buildQoderInferPayload` via
@@ -1004,7 +1038,10 @@ history (`isMissingReasoningHistoryError`), the channel worker's own `模型不�
 request (`isContextOverflowError`, `failover.ts`), a model that rejects the client's
 `reasoning_effort` (`isReasoningEffortUnsupportedError` - OVH's `Meta-Llama-3_3-70B-Instruct` answers
 `feature 'reasoning_effort for this model' is not currently supported`, and because that catalogue
-entry carries no reasoning annotation the route-side hard filter cannot catch it in advance), and
+entry carries no reasoning annotation the route-side hard filter cannot catch it in advance), a
+session-affinity header the upstream demands and we never sent
+(`isMissingSessionAffinityError` - OpenCode Go answers 400 `Request is missing x-opencode-session and
+cannot be routed efficiently`, 2026-11-11 16:51, `attempts: 1` with nine candidates untried), and
 **any plain `404`** - a renamed or
 capability-divergent model is "this channel does not supply it", not an account fault, so since
 2026-11-02 (new-api parity) it switches too; previously 400/404 were terminal and one such answer ended
@@ -1022,6 +1059,28 @@ wrong request from being retried down a whole pool. Message-keyed matching stays
 `tests/routes/proxy-routes-catalog-404.test.ts`, which drives a real local upstream and asserts the
 reproducible candidate order, the catalogue-drift 404 switch and the plain-404 switch, plus
 `tests/proxy/failover.test.ts` for the detectors themselves.
+
+**OpenCode's session-affinity headers are sent, and only those.** Switching away from the 400 keeps the
+turn alive but leaves `opencode_go` permanently at the head of the candidate list, paying one wasted
+round-trip per turn, because the aggregate lane never sent the header at all
+(`forwarder.ts::buildHeaders` had no request in scope). `src/main/proxy/utils/opencodeAffinity.ts`
+sends the four same-value headers the endpoint names (`x-opencode-session`, `x-opencode-session-id`,
+`x-session-affinity`, `x-session-id`), keyed on the **client's own** conversation identity where it
+declared one (`prompt_cache_key` -> `user` -> `metadata.user_id`, the same precedence as
+`clientSessionKey`) and falling back to a per-account value, because "cannot be routed efficiently" is
+an affinity request - a fresh random id per call would split one conversation into N sessions and
+defeat the thing the header is for. Both branches are pure hashes, so there is **no cross-request cache**
+to bound or leak. Two limits, both measured rather than assumed (a five-variant probe against
+`/zen/go/v1/chat/completions` with the stored key, reading only status codes): the *value's shape does
+not matter* - a plain `mp-<24hex>` clears the gate exactly as well as the pack's CLI-minted
+`ses_+12hex+14base62` - so we do **not** copy `x-opencode-project` / `x-opencode-client` / the minted id
+/ the v2 `user-agent`, which are a claim that this machine is the OpenCode client, and the gate does not
+ask for them; and `x-opencode-request` stays unsent (v1-only, v2 answers 403). After this the same call
+answers 403 `An active OpenCode Go subscription is required to use OpenCode Go models.` - the header
+gate is cleared and what remains is an account entitlement we cannot and do not fabricate. Pinned by
+`tests/proxy/opencode-affinity.test.ts` (host matching incl. `notopencode.ai` / `opencode.ai.example.com`
+false positives, the four headers carrying one value, the identity headers asserted **absent**, value
+stability and precedence, and a source pin that both `buildHeaders` call sites pass `request`).
 
 **An account the upstream says it will not serve is parked, not rotated - on every channel.**
 `vendor/channel-pack/src/account-stop.ts` holds the shared judgement (`ACCOUNT_STOP_MARKERS`:

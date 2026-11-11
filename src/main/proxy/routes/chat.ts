@@ -11,7 +11,7 @@ import type { AccountSelection, ForwardResult } from '../types'
 import { loadBalancer } from '../loadbalancer'
 import { requestForwarder } from '../forwarder'
 import { isAccountFault, isSameProviderRotationStatus, isContextOverflowError } from '../failover'
-import { autoExhaustedResponse } from '../failover'
+import { autoExhaustedResponse, parseRetryAfterSeconds } from '../failover'
 import { SSEParser, extractStreamErrorFrame, streamHandler, type StreamErrorFrame } from '../stream'
 import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
@@ -46,9 +46,9 @@ import { accountChannelManager } from '../../providers/accountChannels/manager'
 import { accountRuntime } from '../accountRuntime'
 import { storeManager } from '../../store/store'
 import { AUTO_PREFERENCES, type AutoPreference } from '../../../shared/types'
-import { shouldRevokeStickyAfterStream } from '../streamOutcomePolicy'
+import { isEmptyTurnAfterStream, shouldRevokeStickyAfterStream } from '../streamOutcomePolicy'
 import { readRequestContextFit } from '../../../shared/requestContextFit.ts'
-import { DEFAULT_REPETITION_GUARD, measureStreamRepetition } from '../../../shared/streamRepetition.ts'
+import { DEFAULT_REPETITION_GUARD, measureStreamEmptyTurn, measureStreamRepetition } from '../../../shared/streamRepetition.ts'
 import { readOrEstimateUsage, usageInputText, type UsageReading } from '../quota/usage'
 import { aggregateCostUsdOf } from '../../../shared/aggregateCost.ts'
 import { getAggregateEntry } from '../../providers/aggregate/registry.ts'
@@ -995,7 +995,16 @@ router.post('/completions', async (ctx: Context) => {
       // 原样透传会让 Anthropic 客户端（Claude）把候选耗尽当成模型被删除，
       // 后续整段会话不再请求；路由确实存在时统一收口成可重试的 503。
       const exhausted = autoDecision
-        ? autoExhaustedResponse(result.status, autoDecision.routeName, result.error, autoAttempts)
+        ? autoExhaustedResponse(
+            result.status,
+            autoDecision.routeName,
+            result.error,
+            autoAttempts,
+            parseRetryAfterSeconds(result.retryAfter)
+              ?? parseRetryAfterSeconds(
+                retryAfterHeader(result.headers as Record<string, unknown> | undefined),
+              ),
+          )
         : null
       const mapped = exhausted
         ? {
@@ -1005,7 +1014,7 @@ router.post('/completions', async (ctx: Context) => {
             param: null,
             code: exhausted.code as string | number | null,
             metadata: undefined,
-            retryAfter: undefined,
+            retryAfter: String(exhausted.retryAfterSeconds),
           }
         : mapForwardFailure({
             status: result.status,
@@ -1309,6 +1318,11 @@ router.post('/completions', async (ctx: Context) => {
           ? {}
           : { upstreamRequestId: result.upstreamRequestId }),
         repetition: measureStreamRepetition(collectedContent, repetitionGuard) ?? undefined,
+        // 空转读数与去重率同源于这一份累计 SSE 文本：两次各读一遍就是两个数打架的开始。
+        emptyTurn: measureStreamEmptyTurn(
+          collectedContent,
+          Array.isArray(request.tools) && request.tools.length > 0,
+        ),
       })
 
       /**
@@ -1445,7 +1459,8 @@ router.post('/completions', async (ctx: Context) => {
           reportStreamOutcome(
             endReason,
             elapsed,
-            outcome.finishReason === 'length' && requestedMaxTokens === undefined,
+            (outcome.finishReason === 'length' && requestedMaxTokens === undefined)
+            || isEmptyTurnAfterStream(trace),
           )
           // One reading feeds both the log row and the ledger; a second read of
           // the collected stream is how the two figures drift apart.
@@ -1565,7 +1580,8 @@ router.post('/completions', async (ctx: Context) => {
           reportStreamOutcome(
             endReason,
             elapsed,
-            delivered.finishReason === 'length' && requestedMaxTokens === undefined,
+            (delivered.finishReason === 'length' && requestedMaxTokens === undefined)
+            || isEmptyTurnAfterStream(trace),
           )
           const streamReading = readOrEstimateUsage(usageInputText(request), collectedContent)
           const streamUsage = upstreamUsageOf(streamReading)

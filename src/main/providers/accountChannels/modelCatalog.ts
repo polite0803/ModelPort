@@ -13,15 +13,26 @@
  * `{ name, weight, baseWeight, free }`. Everything else (UI badges, `/v1/models`
  * display names) reads the parsed shape.
  *
- * ⚠️ 缺失 `weight` 一律保持 undefined（= 不知道），绝不回落成 0：trae / minimax
- * 这些渠道根本不报倍率，把它们当成免费模型会让用户按免费额度选一个按量计费的
- * 模型。
+ * ⚠️ 缺失 `weight` 一律保持 undefined（= 不知道），绝不回落成 0：minimax / zcode /
+ * gemini / codearts / comate 这些渠道的目录里根本没有倍率字段，把「不知道」当成
+ * 免费模型会让用户按免费额度选一个按量计费的模型。
  */
 import type { ChannelModelInfo, ChannelModelSource } from '../../../shared/channels'
 import type { ModelCapabilityHint } from '../../../shared/types.ts'
 
 /** `名称 · 免费` / `名称 · x1.5` / `名称 · x0.2→x0.1`。 */
 const LABEL_SUFFIX = /^(.*?)\s*·\s*(免费|x\d+(?:\.\d+)?(?:\s*→\s*x\d+(?:\.\d+)?)?)$/
+
+/**
+ * `名称 · x0.03 SG`：倍率后面还跟着「同名变体」标记（buddy / workbuddy 在远端
+ * 给两条不同 id 配同一个 name 时追加，见 `vendor/channel-pack/src/buddy-adapter.ts`
+ * 的 `displaySuffix`）。
+ *
+ * 名字**原样保留**（含倍率与变体）：变体是这两条同名模型唯一的区分键，拆掉它，
+ * `syncProviders` 的同名去重就会吞掉一条模型；只把倍率拆出来给路由用。
+ */
+const LABEL_SUFFIX_WITH_VARIANT =
+  /^(.*?)\s*·\s*(免费|x\d+(?:\.\d+)?(?:\s*→\s*x\d+(?:\.\d+)?)?)\s+([A-Za-z0-9][A-Za-z0-9_-]*)$/
 
 export interface ParsedModelLabel {
   name: string
@@ -34,10 +45,17 @@ export interface ParsedModelLabel {
 export function splitModelLabel(raw: unknown): ParsedModelLabel {
   const label = typeof raw === 'string' ? raw.trim() : ''
   const match = LABEL_SUFFIX.exec(label)
-  if (match === null) return { name: label, free: false }
+  if (match === null) {
+    const withVariant = LABEL_SUFFIX_WITH_VARIANT.exec(label)
+    if (withVariant === null) return { name: label, free: false }
+    return parseRate(label, withVariant[2])
+  }
 
-  const name = match[1].trim()
-  const marker = match[2]
+  return parseRate(match[1].trim(), match[2])
+}
+
+/** 名字与倍率标记 → 归一结果。`name` 由调用方决定（变体形态保留原样）。 */
+function parseRate(name: string, marker: string): ParsedModelLabel {
   if (marker === '免费') return { name, free: true, weight: 0 }
 
   const values = marker.split('→').map(part => Number(part.trim().slice(1)))

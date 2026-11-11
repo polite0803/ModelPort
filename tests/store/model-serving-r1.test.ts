@@ -36,7 +36,7 @@ const LEGACY_SYNCED_ID = 'legacy-runtime-model'
 const STALE_ROW = 'opencode/model-retired-by-sync'
 
 /** 退役供应商（`RETIRED_PROVIDER_IDS`）：它的整份 overrides 应当被删，而不是变成排除项。 */
-const RETIRED_ID = 'deepseek'
+const RETIRED_ID = 'mimo'
 
 const INITIAL_DATA = {
   providers: [
@@ -76,9 +76,9 @@ const INITIAL_DATA = {
     // 刻意**没有** `routes` 键：启动会跑一次 legacy 迁移（读取侧归一）。
     modelMappings: {
       'opencode/big-pickle': { requestModel: 'opencode/big-pickle', actualModel: SHIPPED_BARE_ID },
-      'deepseek-chat': {
-        requestModel: 'deepseek-chat',
-        actualModel: 'deepseek-chat',
+      'mimo-flash': {
+        requestModel: 'mimo-flash',
+        actualModel: 'mimo-flash',
         preferredProviderId: RETIRED_ID,
       },
     },
@@ -90,7 +90,7 @@ const INITIAL_DATA = {
       excludedModels: [SHIPPED_BARE_ID],
       fetchedModels: [{ displayName: LEGACY_SYNCED_ID, actualModelId: LEGACY_SYNCED_ID }],
     },
-    [RETIRED_ID]: { addedModels: [], excludedModels: ['deepseek-chat'] },
+    [RETIRED_ID]: { addedModels: [], excludedModels: ['mimo-flash'] },
     // 一个既非内建也非退役的键：启动不许动它（既不整删，也不追加排除项）。
     'kept-but-unknown': { addedModels: [], excludedModels: ['kept/one'] },
   },
@@ -172,7 +172,7 @@ test('R1-启动：退役供应商的 overrides 是整删，绝不把它的模型
 
   // config 侧的退役归一（`normalizeModelMappingsWithDefaults`）同理：只删映射，不动目录。
   const mappings = sm.getConfig().modelMappings as Record<string, any>
-  assert.equal('deepseek-chat' in mappings, false, '指向退役供应商的全局映射会被归一丢弃')
+  assert.equal('mimo-flash' in mappings, false, '指向退役供应商的全局映射会被归一丢弃')
   assert.equal(mappings['opencode/big-pickle'].actualModel, SHIPPED_BARE_ID, '在服供应商的映射原样保留')
   assert.equal(overrides().opencode.excludedModels.length, 1, '归一没有顺手停用任何东西')
 })

@@ -61,7 +61,7 @@ import { proxyStatusManager } from '../proxy/status'
 import { ConfigManager } from '../store/config'
 import { generateManagementSecret } from '../proxy/middleware/managementAuth'
 import { buildRequestDiagnosticBundle } from '../logging/diagnosticBundle'
-import type { Provider, Account, ProxyStatus, ProviderCheckResult, OAuthResult, AuthType, CredentialField, LogLevel, LogEntry, ProviderVendor, ModelRoute, ModelCapabilityHint } from '../../shared/types'
+import type { Provider, Account, ProxyStatus, ProviderCheckResult, OAuthResult, AuthType, CredentialField, LogLevel, LogEntry, ProviderVendor, ModelRoute, ModelCapabilityHint, ProviderModelSyncResult } from '../../shared/types'
 import type { RouteListResult, RouteMutationResult, RouteRemovalResult, RoutePoolSizesResult } from '../../shared/modelRouteName'
 import type { ManagementApiConfig, AppConfig } from '../store/types'
 import { DEFAULT_CONTEXT_MANAGEMENT_CONFIG } from '../store/types'
@@ -667,6 +667,161 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
       detail: result.detail,
     }
   })
+
+  /**
+   * 「同步模型」：界面上的一个按钮，作用是把整份清单对齐上游——新报的加进来、
+   * 不再报的删掉。
+   *
+   * 三种来源各有各的对账方式，这里只做编排与统一回报：
+   * - 账号渠道：整包一次 `resync`（逐渠道调用会把同一轮目录扫描重跑 N 次），
+   *   再按同步前后的 `supportedModels` 差值回报增删；
+   * - 聚合：逐条目 `syncModels`（上游亲自答了清单才删，models.dev 兜底只增）；
+   * - 内置 / 自定义：拉 `modelsFetch` 后 `applyFetchedModels`（fetched 账本整份
+   *   替换，自然删旧增新）。自定义供应商声明不了清单来源，明确回 `unsupported`，
+   *   而不是静默跳过。
+   *
+   * 显式给 `providerIds` 就只同步这些（界面里筛选到的那一家）；缺省同步所有
+   * **已启用**的可同步供应商——停用的不进界面，也没有同步的意义。
+   */
+  registerMainHandler(
+    IpcChannels.PROVIDERS_SYNC_MODELS,
+    async (_, providerIds?: string[]): Promise<ProviderModelSyncResult[]> => {
+      const all = storeManager.getProviders()
+      const targets = Array.isArray(providerIds) && providerIds.length > 0
+        ? [...new Set(providerIds)]
+            .map(id => all.find(provider => provider.id === id))
+            .filter((provider): provider is Provider => provider !== undefined)
+        : all.filter(provider =>
+            provider.enabled &&
+            (provider.type === 'aggregate' || provider.type === 'account' || provider.type === 'builtin'))
+
+      const results = new Map<string, ProviderModelSyncResult>()
+      const nameOf = (id: string): string => all.find(provider => provider.id === id)?.name ?? id
+
+      const channelIds = targets.filter(provider => provider.type === 'account').map(provider => provider.id)
+      if (channelIds.length > 0) {
+        try {
+          for (const entry of await accountChannelManager.syncModels(channelIds)) {
+            results.set(entry.id, {
+              providerId: entry.id,
+              providerName: nameOf(entry.id),
+              type: 'account',
+              success: entry.success,
+              added: entry.added,
+              removed: entry.removed,
+              total: entry.count,
+              ...(entry.reason === undefined ? {} : { reason: entry.reason }),
+              ...(entry.source === undefined ? {} : { source: entry.source }),
+            })
+          }
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error)
+          console.warn('[IPC] Account channel model sync failed:', detail)
+          for (const id of channelIds) {
+            results.set(id, {
+              providerId: id,
+              providerName: nameOf(id),
+              type: 'account',
+              success: false,
+              reason: 'channel_runtime_stopped',
+              detail,
+              added: 0,
+              removed: 0,
+              total: storeManager.getModelCatalogue(id).length,
+            })
+          }
+        }
+      }
+
+      for (const provider of targets.filter(item => item.type === 'aggregate')) {
+        try {
+          const synced = await aggregateProviderManager.syncModels(provider.id)
+          results.set(provider.id, {
+            providerId: provider.id,
+            providerName: provider.name,
+            type: 'aggregate',
+            success: synced.success,
+            added: synced.addedCount ?? 0,
+            removed: synced.removedCount ?? 0,
+            total: synced.modelCount ?? storeManager.getModelCatalogue(provider.id).length,
+            ...(synced.reason === undefined ? {} : { reason: aggregateSyncFailureReason(synced.reason) }),
+            ...(synced.detail === undefined ? {} : { detail: synced.detail }),
+            ...(synced.modelSource === undefined ? {} : { source: synced.modelSource }),
+          })
+        } catch (error) {
+          results.set(provider.id, {
+            providerId: provider.id,
+            providerName: provider.name,
+            type: 'aggregate',
+            success: false,
+            reason: 'unsupported',
+            detail: error instanceof Error ? error.message : String(error),
+            added: 0,
+            removed: 0,
+            total: storeManager.getModelCatalogue(provider.id).length,
+          })
+        }
+      }
+
+      for (const provider of targets.filter(item => item.type === 'builtin' || item.type === 'custom')) {
+        const before = new Set(storeManager.getModelCatalogue(provider.id).map(model => model.displayName))
+        if (provider.type === 'custom') {
+          // 自定义供应商的模型是用户手工维护的，没有上游清单可对齐。
+          results.set(provider.id, {
+            providerId: provider.id,
+            providerName: provider.name,
+            type: 'custom',
+            success: false,
+            reason: 'custom_no_source',
+            added: 0,
+            removed: 0,
+            total: before.size,
+          })
+          continue
+        }
+        const fetched = await fetchProviderModels(provider.id)
+        if (!fetched.ok) {
+          results.set(provider.id, {
+            providerId: provider.id,
+            providerName: provider.name,
+            type: provider.type,
+            success: false,
+            reason: fetched.reason,
+            ...(fetched.detail === undefined ? {} : { detail: fetched.detail }),
+            added: 0,
+            removed: 0,
+            total: before.size,
+          })
+          continue
+        }
+        storeManager.applyFetchedModels(provider.id, fetched.models)
+        const after = storeManager.getModelCatalogue(provider.id)
+        const afterNames = new Set(after.map(model => model.displayName))
+        const removed = [...before].filter(name => !afterNames.has(name))
+        if (removed.length > 0) storeManager.setModelsServed(provider.id, removed, true)
+        results.set(provider.id, {
+          providerId: provider.id,
+          providerName: provider.name,
+          type: provider.type,
+          success: true,
+          added: after.filter(model => !before.has(model.displayName)).length,
+          removed: removed.length,
+          total: after.length,
+        })
+      }
+
+      return targets.map(provider => results.get(provider.id) ?? {
+        providerId: provider.id,
+        providerName: provider.name,
+        type: provider.type,
+        success: false,
+        reason: 'unsupported',
+        added: 0,
+        removed: 0,
+        total: storeManager.getModelCatalogue(provider.id).length,
+      })
+    },
+  )
 
   registerMainHandler(IpcChannels.PROVIDERS_GET_EFFECTIVE_MODELS, async (_, providerId: string) => {
     try {

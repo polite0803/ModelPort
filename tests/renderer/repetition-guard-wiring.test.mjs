@@ -103,7 +103,7 @@ test('each check fails on the mutation it is meant to catch', () => {
   )
 
   // 只在一个结算点撤粘性（另一个分支漏了）⇒ 也是红，而且是计数那条。
-  const oneRevoke = chat.replace('settleSticky(trace)\n          reportStreamOutcome(\n            endReason,\n            elapsed,\n            delivered', 'reportStreamOutcome(\n            endReason,\n            elapsed,\n            delivered')
+  const oneRevoke = chat.replace('settleSticky(trace)\n          reportStreamOutcome(\n            endReason,\n            elapsed,\n            (delivered', 'reportStreamOutcome(\n            endReason,\n            elapsed,\n            (delivered')
   assert.match(checkMainProcess(oneRevoke, router, policy).join('\n'), /saw 2/)
 
   // 阈值写死成常量（不再读配置）⇒ 红。

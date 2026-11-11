@@ -171,7 +171,7 @@
 | Q2 | 匿名 OpenCode 免费车道是否移植 | 不移植：本机实测已 429；`opencode` 本机运行时提供同一批模型 | 免费模型可用性取决于该运行时额度 | **不移植，已按建议落地**；补充：`opencode` 本机运行时也已于 2026-11-01 退役（npm `opencode-ai` 线冻结 1.19.5、官方拒装 2.x，无可用分发），其模型改由渠道包 `opencode` 账号渠道提供 |
 | Q3 | 模型名是否加 `provider/` 命名空间 | 加：502 个模型重名太多，不加则路由不可预测 | 客户端模型名变长；旧名不再广播 | **加，已落地**：`manager.ts:913` 写 `preferredProviderId` 映射，README 同步 |
 | Q4 | UI 形态 | 一个「聚合渠道」页，按需建供应商 | 新增 1 页；不动现有 ProviderCard | **已落地**：`pages/Aggregate.tsx` |
-| Q5 | 退役后是否删除已存账密 | 删除，先备份 data.json | 用户需重新填 Key（本来也要换） | **已落地**：`shared/types.ts:26` `RETIRED_PROVIDER_IDS` 八家；启动时 `store/store.ts:617-627` 清无主账号与 userModelOverrides |
+| Q5 | 退役后是否删除已存账密 | 删除，先备份 data.json | 用户需重新填 Key（本来也要换） | **已落地**：`shared/types.ts:26` `RETIRED_PROVIDER_IDS` 八家；启动时 `store/store.ts:701-716`（2026-11-11 更正：这条清账按八个名字直接判死，删到了活人——`deepseek`/`glm`/`kimi`/`minimax`/`zai` 同时是聚合目录现役条目的 id，`minimax` 还同时是现役账号渠道 id，而用户填的 API Key 正是 `accounts` 里同 `providerId` 的那几行，于是每次网关启动都重演一次，用户侧读作「更新后 Key 丢了」。判据改为「名单里**且**随包代码无任何现役定义」，见 `providers/providerRetirement.ts::isRetiredProviderId`；门测 `tests/store/retired-name-collision.test.ts`，AGENTS.md「Data / store」同步） 清无主账号与 userModelOverrides |
 | Q6 | 聚合供应商的参数策略 | 直通，不套内置那套静默丢弃 | 少数端点会因未知字段 400，按错误如实回报 | **已落地（有一处偏差，见 §6）**：默认确实直通；但注册表允许条目声明 `dropParams` 显式丢弃规则（79 条中 2 条声明），规则注册在案且有专测（`tests/proxy/aggregate-drop-params.test.ts`），不是内置那套无声明静默丢 |
 | Q7 | Responses 线路 | 不做；`openai_api` 走 chat | ChatGPT 订阅 OAuth 与 FleetRelay 不上线 | **已落地**：`registry.ts` 剔除 `openai`/`github_copilot`/`fleetrelay_t1`，`openai_api` 走 chat |
 

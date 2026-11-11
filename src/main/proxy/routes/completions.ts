@@ -21,6 +21,7 @@ import { createTextCompletionChunkTransform, toTextCompletion } from '../utils/t
 import { routeHeaderValue, toHeaderValue } from '../utils/headerValue'
 import { clientHeaderValue, identifyClientByUserAgent } from '../../../shared/clientProfile'
 import { mapForwardFailure, retryAfterHeader, withRequestId } from '../errorMapping'
+import { autoExhaustedResponse, parseRetryAfterSeconds } from '../failover'
 import { startSseHeartbeat } from '../utils/sseHeartbeat'
 
 const router = new Router({ prefix: '/v1' })
@@ -249,6 +250,7 @@ router.post('/completions', async (ctx: Context) => {
   let provider = selection ? selection.provider : firstCandidate!.provider
   let actualModel = selection ? selection.actualModel : firstCandidate!.actualModel
   let chosenCandidate: AutoCandidate | null = null
+  let autoAttempts = 0
 
   const chatRequest = {
     // auto 路由时 chatRequest.model 由 forwardAutoCompletion 按候选替换
@@ -297,6 +299,7 @@ router.post('/completions', async (ctx: Context) => {
       }
 
       result = outcome.result
+      autoAttempts = outcome.attempts
       chosenCandidate = outcome.candidate
       account = outcome.candidate.account
       provider = outcome.candidate.provider
@@ -327,12 +330,36 @@ router.post('/completions', async (ctx: Context) => {
     if (!result.success) {
       proxyStatusManager.recordRequestFailure(latency)
 
-      const mapped = mapForwardFailure({
-        status: result.status,
-        message: result.error,
-        details: result.errorDetails,
-        retryAfter: result.retryAfter,
-      })
+      // 与 chat 路由同一个收口：多家候选都失败是「这一路没有可服务候选」，
+      // 不是最后一一家渠道的错误，也不是客户端的额度。
+      const exhausted = autoDecision
+        ? autoExhaustedResponse(
+            result.status,
+            autoDecision.routeName,
+            result.error,
+            autoAttempts,
+            parseRetryAfterSeconds(result.retryAfter)
+              ?? parseRetryAfterSeconds(
+                retryAfterHeader(result.headers as Record<string, unknown> | undefined),
+              ),
+          )
+        : null
+      const mapped = exhausted
+        ? {
+            status: exhausted.status,
+            type: exhausted.type,
+            message: exhausted.message,
+            param: null,
+            code: exhausted.code as string | number | null,
+            metadata: undefined,
+            retryAfter: String(exhausted.retryAfterSeconds),
+          }
+        : mapForwardFailure({
+            status: result.status,
+            message: result.error,
+            details: result.errorDetails,
+            retryAfter: result.retryAfter,
+          })
       const message = withRequestId(mapped.message, requestId)
       ctx.status = mapped.status
       if (mapped.status === 429 || mapped.status === 503) {

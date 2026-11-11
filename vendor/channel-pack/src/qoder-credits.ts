@@ -67,7 +67,7 @@
  * `description: "每日 10:00（UTC+8）刷新，领取后 30 天有效"`）。
  */
 
-import { roundCredits, type CheckinStatus, type ClaimOutcome, type CreditBalance, type CreditPackage } from './credits.js'
+import { roundCredits, planGrantsCredits, type CheckinStatus, type ClaimOutcome, type CreditBalance, type CreditPackage } from './credits.js'
 import { QODER_BILLING_UTC_OFFSET_MS } from './model-queue.js'
 import { withQoderMachineHeadersAsync } from './qoder-machine.js'
 import { qoderBearerToken, type QoderCredential } from './qoder.js'
@@ -400,7 +400,7 @@ export async function fetchQoderCreditBalance(
  * `fetchZcodeBalance` 用 `enterprise === true` 表达「额度无数字」同一思路。
  */
 export function qoderPlanGrantsCredits(packages: readonly CreditPackage[]): boolean {
-  return packages.some(pkg => pkg.total > 0 || pkg.used > 0)
+  return planGrantsCredits(packages)
 }
 
 /** 把 `CreditBalance` 压成一行可读摘要（供探针与日志使用）。 */

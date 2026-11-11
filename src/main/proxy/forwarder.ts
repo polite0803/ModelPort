@@ -87,6 +87,7 @@ import { dispatchLedger } from './dispatchLedger.ts'
 import { planAttemptDeadline, planForwardRetries } from './retryPolicy'
 import { stripUnsupportedForBuiltin } from './parameterPolicy'
 import { ensureAnthropicOutputCap, outputCapFallbackOf } from './utils/outputCap.ts'
+import { opencodeAffinityHeaders } from './utils/opencodeAffinity.ts'
 import { createContextManagementService, trimAppliesToProvider } from './services/contextManagementService'
 import { accountChannelManager } from '../providers/accountChannels/manager'
 import { sanitizeChatToolDefinitions } from '../channelPack/toolCallValidation'
@@ -118,6 +119,7 @@ import {
   isFailoverEligibleStatus,
   isForcedToolChoiceUnsupported,
   isMissingReasoningHistoryError,
+  isMissingSessionAffinityError,
   isReasoningEffortUnsupportedError,
   isOpaqueAggregateBadRequest,
   isRecoverableChannelFailure,
@@ -747,6 +749,10 @@ export class RequestForwarder {
         // 这一家不接受 `reasoning_effort`（OVH 的 Llama 3.3 70B 实测 400）：换一个
         // 候选就能成，账号健康。这类模型常常没有推理标注，路由侧硬筛拦不住。
         || isReasoningEffortUnsupportedError(result.error)
+        // 这一家要求一个我们没发的会话亲和头（OpenCode Go 的 `x-opencode-session`
+        // 实测 400）：说的是这一家的接入契约，不是客户端写错了什么。换一个候选就能成，
+        // 账号健康 —— 但它同时意味着这一家在聚合路上**还没法用**，见判据注释。
+        || isMissingSessionAffinityError(result.error)
         // 普通 404 同样是「这一家供不了这个模型」（目录漂移/能力差异），不是账号
         // 故障：换下一家，但不给账号记冷却 —— 否则一次模型改名会连坐整个账号。
         || result.status === 404
@@ -933,13 +939,17 @@ export class RequestForwarder {
         upstream.destroy()
         return {
           success: false,
-          status: isToolOverflowError(probe.message)
+          // 帧里的状态码优先（与 `probeAndWrapStream` 同一口径）：渠道包把上游的
+          // 404/403/429 放在 `error.status` 里带出来，只按文案判 400/502 会把
+          // 「这一家供不了这个模型」记成账号故障，白占换家上限。
+          status: probe.details?.status
+            ?? (isToolOverflowError(probe.message)
             || isMissingReasoningHistoryError(probe.message)
             || isContextOverflowError(probe.message)
             || isReasoningEffortUnsupportedError(probe.message)
             || isUpstreamCatalogMissError(probe.message)
             ? 400
-            : 502,
+            : 502),
           error: probe.message,
           errorDetails: channelErrorDetails(probe.message, probe.details?.code),
           latency: Date.now() - startTime,
@@ -1117,7 +1127,7 @@ export class RequestForwarder {
     try {
       const chatPath = provider.chatPath || '/chat/completions'
       const url = this.buildUrl(provider, chatPath)
-      const headers = this.buildHeaders(provider, account)
+      const headers = this.buildHeaders(provider, account, request)
       // 工具三件套原生透传，`buildRequestBody` 自己按 `request.tools` 组装。
       // 托管层（把工具描述写进 system、再把回复文本解析回 tool_calls）已于 2026-11-03
       // 退役：网关不写提示词，不支持工具的模型由能力路由（`autoRouting::hardFilterFailure`
@@ -1256,7 +1266,7 @@ export class RequestForwarder {
   ): Promise<ForwardResult> {
     try {
       const url = this.buildUrl(provider, provider.chatPath || '/responses')
-      const headers = this.buildHeaders(provider, account)
+      const headers = this.buildHeaders(provider, account, request)
       const body = chatToResponsesRequest(request, actualModel)
 
       const modelParams = provider.modelParameters?.[actualModel]
@@ -1441,7 +1451,11 @@ export class RequestForwarder {
   /**
    * Build Request Headers
    */
-  private buildHeaders(provider: Provider, account: Account): Record<string, string> {
+  private buildHeaders(
+    provider: Provider,
+    account: Account,
+    request?: unknown,
+  ): Record<string, string> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     // 逐条滤而不是整串展开：`...provider.headers` 让配置里的 `Host` / `Content-Length`
     // 直接顶掉 axios 自己算出来的值，而配置可以来自导入文件或渠道包。
@@ -1468,6 +1482,17 @@ export class RequestForwarder {
     if (credentials.sessionKey) {
       headers['X-Session-Key'] = credentials.sessionKey
     }
+
+    // OpenCode 上游把「没有会话亲和头」判成 400（`MissingSessionID`），聚合这一路
+    // 此前从不发。只发它点名要的四个同值头，不发 project / client / 铸造 id ——
+    // 受控探测证明那些不是过闸所需，带上就是替这台机认领 OpenCode 客户端身份。
+    // 取值口径、探测读数与「补头也不解决订阅资格」的边界都在模块注释里。
+    const affinity = opencodeAffinityHeaders({
+      baseUrl: provider.apiEndpoint,
+      request,
+      accountId: account.id,
+    })
+    if (affinity !== undefined) Object.assign(headers, affinity)
 
     return headers
   }

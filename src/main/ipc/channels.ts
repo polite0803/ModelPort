@@ -66,6 +66,8 @@ export const IpcChannels = {
   PROVIDERS_EXPORT: 'providers:export',
   PROVIDERS_IMPORT: 'providers:import',
   PROVIDERS_UPDATE_MODELS: 'providers:updateModels',
+  // 「同步模型」按钮：一次同步所选供应商（聚合 / 账号渠道 / 内置），逐家回报增删。
+  PROVIDERS_SYNC_MODELS: 'providers:syncModels',
   PROVIDERS_GET_EFFECTIVE_MODELS: 'providers:getEffectiveModels',
   PROVIDERS_GET_MODEL_CATALOGUE: 'providers:getModelCatalogue',
   PROVIDERS_SET_MODELS_SERVED: 'providers:setModelsServed',

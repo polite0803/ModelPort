@@ -32,6 +32,7 @@ import { PassThrough } from 'stream'
 
 import {
   ATTEMPT_REASON_MAX_CHARS,
+  AUTO_EXHAUSTED_RETRY_AFTER_SECONDS,
   AUTO_WALL_CLOCK_BUDGET_MS,
   autoExhaustedResponse,
   createIdleWatchdog,
@@ -47,6 +48,7 @@ import {
   isSameProviderRotationStatus,
   isForcedToolChoiceUnsupported,
   isMissingReasoningHistoryError,
+  isMissingSessionAffinityError,
   isOpaqueAggregateBadRequest,
   isRecoverableChannelFailure,
   isSameTargetRetryableStatus,
@@ -54,6 +56,7 @@ import {
   isReasoningEffortUnsupportedError,
   isToolOverflowError,
   isUpstreamCatalogMissError,
+  parseRetryAfterSeconds,
   probeSseHead,
   shouldTryNextAutoCandidate,
 } from '../../src/main/proxy/failover.ts'
@@ -464,6 +467,10 @@ test('可恢复类失败识别：各家渠道的排队/额度原文命中', () =
   assert.ok(isRecoverableChannelFailure(
     'opencode: 所有通道对该模型均受限（opencode-anon-7b81de(free_usage_limit)）',
   ))
+  // 渠道包池空门控：「账号池中的账号当前均不可用（余额为 0、已停用或凭据不可用）」（2026-11-11 codex 路由那笔 429）
+  assert.ok(isRecoverableChannelFailure(
+    'Cline：账号池中的账号当前均不可用（余额为 0、已停用或凭据不可用），已停止回退默认单凭据；请在 Channel Pack 重测账号或充值（这不是重新登录能解决的问题）。',
+  ))
 })
 
 test('可恢复类失败识别：窄口径，账号故障与无关文案不得误判', () => {
@@ -669,18 +676,60 @@ test('失败记录：文案去首尾空白并按上限截断（日志体积有�
   assert.ok(!record.reason.startsWith(' '), '首尾空白必须先去掉')
 })
 
-test('自动路由候选耗尽：多家试过仍 404 才收口成 503，不伪装成模型不存在', () => {
+test('自动路由候选耗尽：多家试过且失败在候选侧才收口成可重试 503', () => {
   assert.deepEqual(autoExhaustedResponse(404, 'daily', '模型不存在或已停用', 2), {
     status: 503,
     type: 'service_unavailable_error',
     code: 'no_available_model',
-    message: "Route 'daily' exhausted all candidates (last: 模型不存在或已停用)",
+    message: "Route 'daily' exhausted all 2 candidates (last: 模型不存在或已停用)",
+    retryAfterSeconds: AUTO_EXHAUSTED_RETRY_AFTER_SECONDS,
   })
-  // 第一家就 404 是「客户端写了个不存在的模型」，原样透传才准确。
+
+  // 2026-11-11 codex 路由那笔：链在第 3 家收手，最后一笔是渠道包的池空门控，透传成
+  // 429 insufficient_quota ⇒ Codex 读成「你已达到使用上限」并终止这一轮。429 在客户端
+  // 是终止语义，必须收成 503 + Retry-After 才是「等一会再来」。
+  const poolExhausted = autoExhaustedResponse(
+    429,
+    'codex',
+    'Cline：账号池中的账号当前均不可用（余额为 0、已停用或凭据不可用），已停止回退默认单凭据；'
+    + '请在 Channel Pack 重测账号或充值（这不是重新登录能解决的问题）。',
+    3,
+  )
+  assert.equal(poolExhausted?.status, 503)
+  assert.equal(poolExhausted?.code, 'no_available_model')
+  assert.equal(poolExhausted?.retryAfterSeconds, AUTO_EXHAUSTED_RETRY_AFTER_SECONDS)
+
+  // 上游给了解禁时刻就用它，不吃默认值
+  assert.equal(autoExhaustedResponse(429, 'codex', '均在限流中', 4, 1800)?.retryAfterSeconds, 1800)
+
+  // 5xx / 401 / 403 在多家之后同属候选侧耗尽
+  assert.ok(autoExhaustedResponse(500, 'daily', 'boom', 3))
+  assert.ok(autoExhaustedResponse(401, 'daily', 'invalid api key', 2))
+  assert.ok(autoExhaustedResponse(403, 'daily', 'permission_error', 2))
+
+  // 第一家就失败：那是上游对这条请求的真回答，原样透传才准确
   assert.equal(autoExhaustedResponse(404, 'daily', 'The model does not exist', 1), null)
-  assert.equal(autoExhaustedResponse(429, 'daily', '排队中', 3), null)
-  assert.equal(autoExhaustedResponse(500, 'daily', 'boom', 3), null)
+  assert.equal(autoExhaustedResponse(429, 'daily', '排队中', 1), null)
+
+  // 客户端形状问题永不收口成「等一会再来」
+  assert.equal(autoExhaustedResponse(400, 'daily', "Invalid value for 'tools'", 5), null)
+  assert.equal(autoExhaustedResponse(422, 'daily', 'unprocessable', 5), null)
+
+  // 既不是候选侧也不是客户端形状：不猜，交回既有映射
+  assert.equal(autoExhaustedResponse(200, 'daily', 'stream ended without a message', 3), null)
   assert.equal(autoExhaustedResponse(undefined, 'daily', undefined, 3), null)
+})
+
+test('Retry-After 归一：秒数与 HTTP 日期都读，读不懂就当没给', () => {
+  assert.equal(parseRetryAfterSeconds('120'), 120)
+  assert.equal(parseRetryAfterSeconds(' 30 '), 30)
+  assert.equal(parseRetryAfterSeconds(45), 45)
+  assert.equal(parseRetryAfterSeconds(undefined), undefined)
+  assert.equal(parseRetryAfterSeconds(''), undefined)
+  assert.equal(parseRetryAfterSeconds('not a time'), undefined)
+  assert.equal(parseRetryAfterSeconds(-1), undefined)
+  const seconds = parseRetryAfterSeconds(new Date(Date.now() + 90_000).toUTCString())
+  assert.ok(seconds !== undefined && seconds >= 80 && seconds <= 95, `date form -> ${seconds}`)
 })
 
 test('换家取证必须落到源码：循环记录每次失败，日志写出 failures（源码钉点）', () => {
@@ -1065,4 +1114,26 @@ test('2026-11-03 DSH 那笔 402：额度/限流类失败必须不占账号故障
   ]) {
     assert.equal(describeAttemptFailure(failure).kind, 'failover', failure.candidate)
   }
+})
+
+test('「这一家要求我们没发的会话亲和头」识别：命中报障原文，且不吞掉别的 400', () => {
+  // 2026-11-11 16:51 实测原文（`codex` 线路按分数首选 opencode_go/kimi-k3.1-pro，
+  // att=1、outcome=fatal，其后 9 个候选一个没试）
+  assert.ok(isMissingSessionAffinityError(
+    'Request is missing x-opencode-session and cannot be routed efficiently. '
+    + 'Please see https://opencode.ai/v2/docs/console/go/#where-can-i-use-it [request_id: chatcmpl-mwbvqma3-2v4h6i]',
+  ))
+  // 第二判据单独成立（文案换了头名也认）
+  assert.ok(isMissingSessionAffinityError('missing session affinity header: cannot be routed efficiently'))
+
+  // 窄口径：只提 session 不构成换家理由 —— 客户端自己漏传会话参数不该被替他绕开
+  assert.equal(isMissingSessionAffinityError("Invalid value: 'session_id' must be a string"), false)
+  assert.equal(isMissingSessionAffinityError('session expired, please re-authenticate'), false)
+  assert.equal(isMissingSessionAffinityError("Invalid value for 'tools': maximum number of items is 128."), false)
+  assert.equal(isMissingSessionAffinityError(undefined), false)
+  assert.equal(isMissingSessionAffinityError(''), false)
+
+  // 接线：auto 换家分支与 attemptTrace 的 outcome 分类都要接上
+  assert.match(forwarderSource, /\|\| isMissingSessionAffinityError\(result\.error\)/,
+    'session-affinity 400 must take the capability-mismatch branch (fail over without account penalty)')
 })

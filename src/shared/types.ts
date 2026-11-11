@@ -3,12 +3,12 @@ import { DEFAULT_PROMPT_CACHING_CONFIG, type PromptCachingConfig } from './promp
 import type { ChannelLoginKind, CostBucket } from './channels'
 import type { AggregateCostClass } from './aggregateCost'
 import type { ClientIdentity } from './clientProfile'
-import { DEFAULT_REPETITION_GUARD, type RepetitionGuardSettings, type StreamRepetitionReading } from './streamRepetition.ts'
+import { DEFAULT_REPETITION_GUARD, type RepetitionGuardSettings, type StreamRepetitionReading, type StreamEmptyTurnReading } from './streamRepetition.ts'
 
 export type { AggregateWire }
 export type { PromptCachingConfig }
 export { DEFAULT_PROMPT_CACHING_CONFIG }
-export type { RepetitionGuardSettings, StreamRepetitionReading }
+export type { RepetitionGuardSettings, StreamRepetitionReading, StreamEmptyTurnReading }
 export { DEFAULT_REPETITION_GUARD }
 
 export type AccountStatus = 'active' | 'inactive' | 'expired' | 'error'
@@ -22,9 +22,15 @@ export type ProviderType = 'builtin' | 'custom' | 'aggregate' | 'account'
 export type ProviderVendor = 'opencode' | 'custom'
 
 /**
- * The web-page integrations that were retired in 1.5. Startup purges their
- * providers, accounts and model mappings from stored data, so this list is the
- * single place that names them.
+ * The web-page integrations that were retired in 1.5 - as a **name list** only.
+ *
+ * Five of these names (`deepseek`, `glm`, `kimi`, `minimax`, `zai`) are also live
+ * ids: the aggregate catalogue ships key-based entries under them, and `minimax`
+ * doubles as an account channel. Their credentials land in the same `accounts`
+ * table under the same `providerId`, so nothing may purge by this list directly.
+ * The startup cleanup therefore reads it through
+ * `src/main/providers/providerRetirement.ts::isRetiredProviderId`, which drops a
+ * name once any shipped definition still claims it.
  */
 export const RETIRED_PROVIDER_IDS = [
   'deepseek',
@@ -1203,6 +1209,12 @@ export interface RequestStreamTrace {
    * Non-streaming requests carry nothing here by design - see `shared/streamRepetition.ts`.
    */
   repetition?: StreamRepetitionReading
+  /**
+   * 「这一发什么都没做」读数（`shared/streamRepetition.ts`）：带了工具、却既无正文
+   * 也无工具调用的完成流。与去重率读数是两种判据，分开存 —— 一条零行的流在去重率
+   * 那一格只会得到 `notJudged: too_short`，看着像健康。
+   */
+  emptyTurn?: StreamEmptyTurnReading
 }
 
 export interface RequestLogEntry {
@@ -1710,3 +1722,25 @@ export type ModelsFetchFailure =
 export type ModelsFetchResult =
   | { ok: true; models: FetchedModel[]; detail?: string }
   | { ok: false; reason: ModelsFetchFailure; detail?: string }
+
+/**
+ * 一家供应商在「同步模型」里的对账结果。
+ *
+ * 三种来源（聚合 / 账号渠道 / 内置）各自的写盘路径不同，但界面只需要这一份
+ * 统一回报：新增几个、移除几个、同步后一共几个，以及失败时的机读原因。
+ */
+export interface ProviderModelSyncResult {
+  providerId: string
+  providerName: string
+  type: ProviderType
+  success: boolean
+  /** 机读原因；成功时缺省。见 `models.testReason*` 那套文案。 */
+  reason?: string
+  detail?: string
+  added: number
+  removed: number
+  /** 同步后该供应商对外的模型数 */
+  total: number
+  /** 清单来源：聚合可能落到 models.dev，账号渠道来自渠道包自己的目录 */
+  source?: 'upstream' | 'models.dev' | 'official-cache' | 'static-fallback'
+}

@@ -39,6 +39,7 @@ import type {
   TlsStatus,
   TlsTrustResult,
   ProviderModelTestResult,
+  ProviderModelSyncResult,
 } from './types'
 import type {
   BackupApplyResult,
@@ -251,6 +252,13 @@ const providersAPI = {
     fetchedAt?: number
   }> => 
     wire.invoke(IpcChannels.PROVIDERS_UPDATE_MODELS, providerId),
+
+  /**
+   * 「同步模型」：一次同步所选供应商（聚合 / 账号渠道 / 内置），把清单对齐上游。
+   * 缺省同步全部已启用的可同步供应商；返回逐家对账结果，界面据此汇总增删。
+   */
+  syncModels: (providerIds?: string[]): Promise<ProviderModelSyncResult[]> =>
+    wire.invoke(IpcChannels.PROVIDERS_SYNC_MODELS, providerIds),
   
   getEffectiveModels: (providerId: string): Promise<EffectiveModel[]> => 
     wire.invoke(IpcChannels.PROVIDERS_GET_EFFECTIVE_MODELS, providerId),

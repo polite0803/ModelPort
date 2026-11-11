@@ -61,11 +61,13 @@ test('a pin whose provider no longer exists is dropped instead of staying a dead
 test('with no providers to judge against, nothing is mass-dropped except retired owners', () => {
   const table = {
     ghost: row('ghost', 'anything', 'deleted-provider'),
-    legacy: row('legacy', 'anything', 'kimi'),
+    legacy: row('legacy', 'anything', 'mimo'),
+    // 名字在退役名单里、但现役聚合条目仍叫这个：不算退役，不许删用户的钉。
+    liveName: row('live-name', 'anything', 'deepseek'),
   }
 
-  assert.deepEqual(Object.keys(normalizeModelMappingsWithDefaults(table, [])), ['ghost'])
-  assert.deepEqual(Object.keys(normalizeModelMappingsWithDefaults(table)), ['ghost'])
+  assert.deepEqual(Object.keys(normalizeModelMappingsWithDefaults(table, [])), ['ghost', 'liveName'])
+  assert.deepEqual(Object.keys(normalizeModelMappingsWithDefaults(table)), ['ghost', 'liveName'])
 })
 
 test('derivePreferredProvider pins the owner a machine row used to carry', () => {

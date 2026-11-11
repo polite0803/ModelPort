@@ -215,6 +215,38 @@ export interface CreditBalance {
 }
 
 /**
+ * 「这个计划发放过积分吗」—— 余额门控的唯一判据（原先只有 qoder 有，见
+ * `qoder-credits.ts::qoderPlanGrantsCredits`，现收到这里给所有渠道共用）。
+ *
+ * ## 为什么必须分这一步
+ *
+ * 余额为 0 有两种完全不同的语义：
+ * - **计划本来不发积分**（免费/标准档、没有配额窗口、只发过 0 额度的包）：
+ *   这种号仍能服务免费模型，按「余额为 0」拦号会把它们排掉，最后抛出
+ *   「账号池中的账号当前均不可用（余额为 0…）」，而真实原因是不该拦；
+ * - **发过又烧光**：任一包 `total > 0` 或 `used > 0` 就是发过，剩余 0 是确凿的额度用尽，该拦。
+ *
+ * 判据只用响应自身的算术，不引入外部费率表，也不按模型名猜「这家是不是免费」。
+ */
+export function planGrantsCredits(packages: readonly CreditPackage[]): boolean {
+  return packages.some(pkg => pkg.total > 0 || pkg.used > 0)
+}
+
+/**
+ * 门控探针的归一：计划不发积分 ⇒ `null`（未知，门控放行）；发过 ⇒ 报实际余额。
+ *
+ * ⚠️ 只能用在**包里带真实发放量**的渠道（`total`/`used` 来自上游字段）。把汇总数字
+ * 硬塞成一个包（`total = 余额, used = 0`）的渠道用这个判据会退化成「0 一律放行」，
+ * 那是把门关掉而不是计费感知 —— 那些渠道维持原判定，理由写在 `index.ts` 的注册处。
+ */
+export function creditTotalIfPlanGrants(
+  balance: Pick<CreditBalance, 'total' | 'packages'> | null | undefined,
+): number | null {
+  if (balance === null || balance === undefined) return null
+  return planGrantsCredits(balance.packages) ? balance.total : null
+}
+
+/**
  * 把额度规整为两位小数。
  *
  * 用 `Math.round(v * 100) / 100` 而不是 `toFixed` 后 parse：后者对

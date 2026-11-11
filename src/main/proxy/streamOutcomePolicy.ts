@@ -15,10 +15,28 @@ import type { RequestStreamTrace } from '../../shared/types'
  *
  * 客户端主动断开（`client_gone`）不算失败，按 AGENTS 的口径既不加分也不扣分，
  * 因此不撤锚点。
+ *
+ * 2026-11-12 补上第三类：`openrouter/free` 对 Codex 的一发返回 176 KB、`[DONE]`
+ * 正常收尾、正文与工具调用皆空（1108 个 output token 全是思考）。客户端把这一轮
+ * 当「已完成」就地结束，界面停在上一句「先确认当前 shell 位置」的承诺上，而日志
+ * 记的是 `success` —— 锚点不撤、Bandit 记胜，下一轮继续派给同一台空转机。
  */
 export function shouldRevokeStickyAfterStream(
-  trace: Pick<RequestStreamTrace, 'endReason' | 'repetition'>,
+  trace: Pick<RequestStreamTrace, 'endReason' | 'repetition' | 'emptyTurn'>,
 ): boolean {
   if (trace.endReason === 'timeout' || trace.endReason === 'error') return true
-  return trace.repetition?.degraded === true
+  return trace.repetition?.degraded === true || isEmptyTurnAfterStream(trace)
+}
+
+/**
+ * 「协议完成、内容空转」的判据：流正常收尾（`done`）、客户端本轮带了工具，
+ * 却既没有正文也没有工具调用。
+ *
+ * 只在 `done` 上判：`client_gone` / `timeout` / `error` 的零内容是**被掐掉**造成的，
+ * 不是模型没东西可给，按既有口径那些既不加分也不扣分。
+ */
+export function isEmptyTurnAfterStream(
+  trace: Pick<RequestStreamTrace, 'endReason' | 'emptyTurn'>,
+): boolean {
+  return trace.endReason === 'done' && trace.emptyTurn?.empty === true
 }

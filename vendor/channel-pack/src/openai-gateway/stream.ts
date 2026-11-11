@@ -271,7 +271,19 @@ export async function* toOpenAiSse(
     yield 'data: [DONE]\n\n'
   } catch (error) {
     const converted = failureToOpenAiError(error)
-    yield line({ id: requestId, object: 'chat.completion.chunk', created, model, choices: [], error: converted.body.error })
+    // ⚠️ `status` 必须进帧，与上面流内错误帧同一口径：建流阶段的失败也只能以
+    // HTTP 200 的 SSE 帧浮现，而宿主换家循环读的就是这个数。丢掉它，上游的
+    // 404「这一家供不了这个模型」就退化成 502 账号故障，白占路由的换家上限
+    // （实测：cline 的 `:batch` 变体每条一发 404，三条撞满 `maxAttempts: 3`，
+    // 整条链在第 7 家收手，后面一千多个候选一个没试到，客户端拿到 503）。
+    yield line({
+      id: requestId,
+      object: 'chat.completion.chunk',
+      created,
+      model,
+      choices: [],
+      error: { ...converted.body.error, status: converted.status },
+    })
     yield 'data: [DONE]\n\n'
   }
 }

@@ -27,6 +27,7 @@ import type {
   ChannelIdentitySnapshot,
   ChannelModelInfo,
   ChannelModelSource,
+  ChannelModelSyncResult,
   ChannelModelsResult,
   ChannelModelUpdateResult,
   ChannelOperationResult,
@@ -703,6 +704,57 @@ class AccountChannelManager {
       count,
       ...source === undefined ? {} : { source },
     }
+  }
+
+  /**
+   * 「同步模型」的批量入口：整包只 `resync` 一轮，再按同步前后的
+   * `supportedModels` 差值回报每家渠道的增删。
+   *
+   * `refreshModels` 是单渠道语义、却同样走整包 `resync`；逐个渠道调用等于把同一轮
+   * 目录扫描（每个渠道一次 `model.list` 加一次 `/v1/models` 视图）重复 N 次，所以
+   * 批量入口必须自己只跑一轮。
+   *
+   * 移除项顺带清掉停用标记：与聚合同步同一条理由——下架的模型不该把「停用」留给
+   * 未来重新上架的同名模型。记录本身已被 `applyChannel` 摘掉的渠道不清（那里没有
+   * 账本可写了）。
+   */
+  async syncModels(ids: string[]): Promise<ChannelModelSyncResult[]> {
+    const targets = [...new Set(ids)].filter(id => getChannelDefinition(id) !== undefined)
+    if (targets.length === 0) return []
+    await this.bridgeOrThrow()
+
+    const before = new Map(targets.map(id => [
+      id,
+      new Set(storeManager.getProviderById(id)?.supportedModels ?? []),
+    ]))
+    await this.resync()
+
+    const sourceByChannel = this.modelsCache?.sourceByChannel
+    // 缓存仍为空 = 这一轮目录扫描没跑成（`syncProviders` 把错误吞在日志里）：
+    // 此时记录还是旧的，报「没有增删」就是在拿旧读数冒充同步结果。
+    const swept = this.modelsCache !== null
+    return targets.map(id => {
+      const record = storeManager.getProviderById(id)
+      const after = record?.supportedModels ?? []
+      const afterSet = new Set(after)
+      const beforeSet = before.get(id) ?? new Set<string>()
+      const added = after.filter(name => !beforeSet.has(name)).length
+      const removed = [...beforeSet].filter(name => !afterSet.has(name))
+      if (removed.length > 0 && record !== undefined) {
+        storeManager.setModelsServed(id, removed, true)
+      }
+      const source = sourceByChannel?.get(id)
+      const success = swept && after.length > 0
+      return {
+        id,
+        success,
+        count: after.length,
+        added,
+        removed: removed.length,
+        ...(success ? {} : { reason: 'empty' }),
+        ...(source === undefined ? {} : { source }),
+      }
+    })
   }
 
   /**

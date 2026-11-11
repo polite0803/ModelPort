@@ -182,6 +182,245 @@ export function sanitizeChatToolDefinitions(tools: unknown): unknown {
   return sanitized
 }
 
+/**
+ * 调用↔结果的**配对**缺陷类别。与上面的形状判据是两件事：形状判「字段对不对」，
+ * 这里判「每一条调用是否恰好有一条结果回填它」。
+ */
+export type ToolCallPairingDefectKind =
+  /** 历史里声明了调用，却没有任何结果回填 —— 客户端那一轮被中断的残留。 */
+  | 'unanswered_call'
+  /** 同一个 `call_id` 声明了两次 —— 流式收尾重复发同一个块。 */
+  | 'duplicate_call'
+  /** 结果找不到产生它的调用。 */
+  | 'orphan_result'
+  /** 同一个调用被回填了多次。 */
+  | 'duplicate_result'
+
+export interface ToolCallPairingDefect {
+  kind: ToolCallPairingDefectKind
+  /** JSON 路径，形如 `messages[7].tool_calls[0]` 或 `messages[9]`。 */
+  path: string
+  callId: string
+  /** 工具名；结果项取不到名字时是空串。 */
+  name: string
+}
+
+export interface ToolCallPairingCounts {
+  unansweredCalls: number
+  duplicateCalls: number
+  orphanResults: number
+  duplicateResults: number
+}
+
+export interface ToolCallPairingRepair {
+  /** 没有缺陷时**原样返回同一个数组**；删过东西才是新数组。 */
+  messages: unknown
+  counts: ToolCallPairingCounts
+  /** 缺陷明细（只有下标、id 与工具名，不含任何用户内容），按扫描顺序。 */
+  defects: ToolCallPairingDefect[]
+}
+
+interface PairingPlan {
+  defects: ToolCallPairingDefect[]
+  /** 整条丢弃的消息下标。 */
+  dropMessage: Set<number>
+  /** 消息下标 → 该条 `tool_calls` 里要丢弃的下标。 */
+  dropCall: Map<number, Set<number>>
+}
+
+function callIdOf(call: unknown): string {
+  const id = (call as { id?: unknown } | null)?.id
+  return typeof id === 'string' ? id : ''
+}
+
+function callNameOf(call: unknown): string {
+  const name = (call as { function?: { name?: unknown } } | null)?.function?.name
+  return typeof name === 'string' ? name : ''
+}
+
+/**
+ * 扫一遍历史，算出配对缺陷与对应的丢弃下标。
+ *
+ * 非数组入参返回 `undefined`（与 `findToolCallViolation` 同样的宽容：校验层不该
+ * 因为形状怪异而崩，怪异由形状判据去管）。
+ */
+function planToolCallPairing(messages: unknown): PairingPlan | undefined {
+  if (!Array.isArray(messages)) return undefined
+
+  const declared = new Map<string, { messageIndex: number; callIndex: number }>()
+  const answered = new Set<string>()
+  const defects: ToolCallPairingDefect[] = []
+  const dropMessage = new Set<number>()
+  const dropCall = new Map<number, Set<number>>()
+
+  const dropCallAt = (messageIndex: number, callIndex: number): void => {
+    const existing = dropCall.get(messageIndex)
+    if (existing === undefined) dropCall.set(messageIndex, new Set([callIndex]))
+    else existing.add(callIndex)
+  }
+
+  // 第一遍登记调用：只认第一次声明，重复声明的丢掉（保留第一条，因为它才是
+  // 结果所对应的那一次）。
+  messages.forEach((message, messageIndex) => {
+    const record = message as { role?: unknown; tool_calls?: unknown } | null
+    if (record === null || typeof record !== 'object') return
+    if (record.role !== 'assistant' || !Array.isArray(record.tool_calls)) return
+
+    record.tool_calls.forEach((call, callIndex) => {
+      const id = callIdOf(call)
+      if (id === '') return
+      const path = `messages[${messageIndex}].tool_calls[${callIndex}]`
+      const first = declared.get(id)
+      if (first !== undefined) {
+        defects.push({ kind: 'duplicate_call', path, callId: id, name: callNameOf(call) })
+        dropCallAt(messageIndex, callIndex)
+        return
+      }
+      declared.set(id, { messageIndex, callIndex })
+    })
+  })
+
+  // 第二遍登记结果：调用都不存在的结果、以及同一调用的第二次回填，都丢掉。
+  messages.forEach((message, messageIndex) => {
+    const record = message as { role?: unknown; tool_call_id?: unknown } | null
+    if (record === null || typeof record !== 'object') return
+    if (record.role !== 'tool') return
+
+    const id = typeof record.tool_call_id === 'string' ? record.tool_call_id : ''
+    const path = `messages[${messageIndex}]`
+    if (id === '' || !declared.has(id)) {
+      defects.push({ kind: 'orphan_result', path, callId: id, name: '' })
+      dropMessage.add(messageIndex)
+      return
+    }
+    if (answered.has(id)) {
+      defects.push({ kind: 'duplicate_result', path, callId: id, name: '' })
+      dropMessage.add(messageIndex)
+      return
+    }
+    answered.add(id)
+  })
+
+  // 第三遍：声明了却没人回填的调用。放最后，保证明细里先出现「重复/孤儿」再出现
+  // 「未回答」，读日志时和丢弃的因果顺序一致。
+  for (const [id, where] of declared) {
+    if (answered.has(id)) continue
+    const call = (messages[where.messageIndex] as { tool_calls: unknown[] }).tool_calls[where.callIndex]
+    defects.push({
+      kind: 'unanswered_call',
+      path: `messages[${where.messageIndex}].tool_calls[${where.callIndex}]`,
+      callId: id,
+      name: callNameOf(call),
+    })
+    dropCallAt(where.messageIndex, where.callIndex)
+  }
+
+  return { defects, dropMessage, dropCall }
+}
+
+/**
+ * 只检测、不改写 —— 给测试和「先看清是哪一侧悬空」用。
+ */
+export function findToolCallPairingDefects(messages: unknown): ToolCallPairingDefect[] {
+  return planToolCallPairing(messages)?.defects ?? []
+}
+
+/**
+ * 把配对不齐的历史修成配平的，**只做删除**。
+ *
+ * ## 为什么需要（2026-11-11 实测）
+ *
+ * Codex 经 `/v1/responses` 打 `codex` 线路时，同一份历史被三家账号渠道判死：
+ * `buddy/deepseek-v4-pro` 与 `buddy/kimi-k3.1-pro` 回 502
+ * `工具记录不完整，请新建任务 tool calls and tool results do not match`，
+ * 换到 `buddy/mimo-v2.6-pro` 才 200。那句中文文案不在本仓与渠道包源码里
+ * （`grep -rn 工具记录不完整 src vendor` 零命中），是上游服务自己的判据。
+ * 后果不是「这一条失败」而是**整轮粘到弱候选**：此后 turn 13–16 的
+ * `auto.reason` 全是 `sticky`，弱模型开始「宣布要做→直接结束回合」，
+ * 用户读到的就是 15:52 / 16:10 / 16:11 三次无故停下。
+ *
+ * ## 为什么是删除而不是补一条结果
+ *
+ * 本网关不注入任何提示词（AGENTS.md 裁定 2026-11-03）。凭空造一句
+ * 「（无结果）」就是往用户对话里写正文，要过 `gateway-authored-text` 的双向对账；
+ * 而删除属于明确放行的「deletion-only trimming」，且语义上诚实：客户端既然没带回
+ * 结果，那次尝试在本轮记录里本来就不成立。重复声明/重复回填同理 —— 保留第一条，
+ * 因为后面的那条与它同 id、不带新信息，留着才是上游拒收的直接原因。
+ *
+ * ## 边界（别把这里当成万能修复）
+ *
+ * 本入口只看得见**宿主交给渠道 worker 的 OpenAI messages**。若失配是更下游的
+ * harness 转换（`vendor/channel-pack/src/openai-gateway/`）造成的，这里删不掉，
+ * 但 warn 行的计数会一直是 0 而上游仍报同样的 502 —— 那个组合就是「缺陷在下游」的
+ * 判据，别回头改这里。
+ */
+export function repairToolCallPairing(messages: unknown): ToolCallPairingRepair {
+  const plan = planToolCallPairing(messages)
+  const defects = plan?.defects ?? []
+  const counts: ToolCallPairingCounts = {
+    unansweredCalls: 0,
+    duplicateCalls: 0,
+    orphanResults: 0,
+    duplicateResults: 0,
+  }
+  for (const defect of defects) {
+    if (defect.kind === 'unanswered_call') counts.unansweredCalls += 1
+    else if (defect.kind === 'duplicate_call') counts.duplicateCalls += 1
+    else if (defect.kind === 'orphan_result') counts.orphanResults += 1
+    else counts.duplicateResults += 1
+  }
+
+  if (plan === undefined || defects.length === 0) {
+    return { messages, counts, defects }
+  }
+
+  const repaired: unknown[] = []
+  ;(messages as unknown[]).forEach((message, messageIndex) => {
+    if (plan.dropMessage.has(messageIndex)) return
+
+    const droppedCallIndexes = plan.dropCall.get(messageIndex)
+    if (droppedCallIndexes === undefined) {
+      repaired.push(message)
+      return
+    }
+
+    const record = message as { content?: unknown; tool_calls?: unknown }
+    const keptCalls = (record.tool_calls as unknown[]).filter(
+      (_, callIndex) => !droppedCallIndexes.has(callIndex),
+    )
+    if (keptCalls.length > 0) {
+      repaired.push({ ...(message as object), tool_calls: keptCalls })
+      return
+    }
+
+    // 调用被清空了：还有正文就留正文，没有就整条删除 —— 一条 `content:null` 且
+    // 不带调用的 assistant 消息会被上游当成空回复。
+    const content = record.content
+    const hasText = typeof content === 'string'
+      ? content.trim() !== ''
+      : content !== undefined && content !== null
+    if (!hasText) return
+
+    const withoutCalls = { ...(message as object) } as Record<string, unknown>
+    delete withoutCalls.tool_calls
+    repaired.push(withoutCalls)
+  })
+
+  return { messages: repaired, counts, defects }
+}
+
+/**
+ * 把配对明细压成一行日志文本（调用方负责决定级别与是否落行）。
+ *
+ * 只输出下标、`call_id` 与工具名：请求体 1.8MB、落盘只保头部 2%，内容取证结构性
+ * 走不通（见 `countToolCallShapes` 注释），而配对问题本来就不需要内容就能定位。
+ */
+export function formatToolCallPairing(defects: ToolCallPairingDefect[], limit = 12): string {
+  const head = defects.slice(0, limit).map(defect => `${defect.kind} ${defect.path} (${defect.callId})`).join(', ')
+  const rest = defects.length - Math.min(defects.length, limit)
+  return rest > 0 ? `${head}, 另有 ${rest} 条同类` : head
+}
+
 export function countToolCallShapes(messages: unknown): ToolCallShapeCounts {
   const counts: ToolCallShapeCounts = {
     assistantWithCalls: 0,

@@ -1066,6 +1066,19 @@ export class AccountPool {
     //
     // 逐个尝试解析凭据，跳过占位/损坏条目（并记录原因，避免静默失败）
     const failures: string[] = []
+    /**
+     * 「确凿 0 余额」的账号：降级为**最后手段**，不是剔除。
+     *
+     * 为什么不能剔除（2026-11-11 codex 路由那笔 429）：门控读到的 0 只有汇总数字，
+     * 分不清「发过又烧光」和「这个计划本来不发积分」，而后者仍能服务免费模型。剔除会把
+     * 候选踢空，适配器据此抛「账号池中的账号当前均不可用（余额为 0…）」，客户端读到的是
+     * 额度类错误并终止会话 —— 真相只是「这一路当时没有*有余额*的号」。
+     * 与本仓既有裁定同一条：耗尽的候选是最后手段，不是强制选中，也不许封杀。
+     *
+     * ⚠️ 只在**没有任何有余额/未知账号**时才动用这一桶，所以健康路径上一个号都不多探
+     *    （门控读的是 TTL 缓存，见 `usableFromCache`）。
+     */
+    const demoted: { entry: ProviderAccountEntry; credential: StoredTokenCredential }[] = []
     // Sticky serving account: see `activeAccounts` and `moveActiveFirst`.
     const ordered = moveActiveFirst(candidates, this.activeAccounts.get(provider))
     for (const entry of ordered) {
@@ -1082,7 +1095,7 @@ export class AccountPool {
       }
       try {
         const credential = JSON.parse(resolved.value) as StoredTokenCredential
-        // 余额门控：确认为 0 的账号跳过；查询失败/超时返回 undefined → fail-open。
+        // 余额门控：确认为 0 的账号**降级到最后**（见 `demoted`）；查询失败/超时返回 undefined → fail-open。
         const gate = this.balanceGates.get(provider)
         if (gate !== undefined && isBalanceGateEnabled(process.env.DSH_ACCOUNT_BALANCE_GATE)) {
           // Hot path: read the cached reading and refresh in the background. An
@@ -1090,7 +1103,7 @@ export class AccountPool {
           // account pick (see `usableFromCache`).
           const usable = gate.usableFromCache(entry.id, credential)
           if (usable === false) {
-            failures.push(`${entry.id}: 余额为 0（余额门控跳过）`)
+            demoted.push({ entry, credential })
             continue
           }
         }
@@ -1108,6 +1121,19 @@ export class AccountPool {
         failures.push(`${entry.id}: 凭据 JSON 损坏 (${String(error)})`)
         continue
       }
+    }
+    // 一个有余额/未知的号都没有，才动用降级桶：宁可带着 0 余额去试一次（结果交给
+    // 换家与 503+Retry-After 收口），也不把「门控读不出语义的 0」变成整池不可用。
+    const fallback = demoted[0]
+    if (fallback !== undefined) {
+      this.ctx.logger?.warn?.(
+        `[channel-pack] ${provider} 没有有余额或未知的账号，降级使用余额为 0 的`
+        + ` ${fallback.entry.id}（本池被降级候选 ${demoted.length} 个）`,
+      )
+      if (this.activeAccounts.get(provider) !== fallback.entry.id) {
+        this.activeAccounts.set(provider, fallback.entry.id)
+      }
+      return { entry: fallback.entry, credential: fallback.credential }
     }
     if (failures.length > 0) {
       this.ctx.logger?.warn?.(

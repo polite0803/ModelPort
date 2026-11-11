@@ -5,6 +5,7 @@ import {
   DEFAULT_REPETITION_GUARD,
   REPETITION_TAIL_LINES,
   extractStreamText,
+  measureStreamEmptyTurn,
   measureStreamRepetition,
   normalizeStreamRepetitionGuard,
 } from '../../src/shared/streamRepetition.ts'
@@ -124,4 +125,53 @@ test('the verdict is taken over the tail, so a late collapse is not diluted', ()
   assert.ok(reading)
   assert.equal(reading.lines, REPETITION_TAIL_LINES)
   assert.equal(reading.degraded, true, JSON.stringify(reading))
+})
+
+// ── 空转读数（第三类退化）───────────────────────────────────────────────────
+
+function frames(payloads: unknown[]): string {
+  return payloads.map(p => `data: ${JSON.stringify(p)}\n\n`).join('') + 'data: [DONE]\n\n'
+}
+
+test('思考走 reasoning_details 数组时：正文与工具调用都是空，判空转', () => {
+  // 2026-11-12 现网 `chatcmpl-mwcghqtq-td1xm6` 的形状：176 KB 全在 reasoning_details 里，
+  // 而 extractStreamText 只认三个字符串字段 —— 去重率那一格得到 notJudged: too_short。
+  const sseText = frames([
+    { choices: [{ delta: { role: 'assistant' } }] },
+    { choices: [{ delta: { reasoning_details: [{ type: 'reasoning.text', text: 'thinking…' }] } }] },
+    { choices: [{ delta: { reasoning_details: [{ type: 'reasoning.text', text: 'more thinking…' }] } }] },
+    { choices: [{ delta: {}, finish_reason: 'stop' }] },
+  ])
+  const reading = measureStreamEmptyTurn(sseText, true)
+  assert.equal(reading.contentChars, 0)
+  assert.equal(reading.toolCallDeltas, 0)
+  assert.equal(reading.empty, true, JSON.stringify(reading))
+  assert.equal(measureStreamRepetition(sseText)?.degraded, false, '去重率判据对这一发是瞎的，所以才要这一格')
+})
+
+test('有正文或有工具调用就不算空转', () => {
+  assert.equal(measureStreamEmptyTurn(frames([{ choices: [{ delta: { content: 'hi' } }] }]), true).empty, false)
+  assert.equal(
+    measureStreamEmptyTurn(frames([{ choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'exec' } }] } }] }]), true).empty,
+    false,
+  )
+  const parts = measureStreamEmptyTurn(frames([{ choices: [{ delta: { content: [{ type: 'text', text: 'segmented' }] } }] }]), true)
+  assert.equal(parts.contentChars, 'segmented'.length, '内容段数组也是正文，不能读成空')
+  assert.equal(parts.empty, false)
+})
+
+test('客户端没带工具时不判空转（只说话是合法答案）', () => {
+  const reading = measureStreamEmptyTurn(frames([{ choices: [{ delta: {}, finish_reason: 'stop' }] }]), false)
+  assert.equal(reading.toolsOffered, false)
+  assert.equal(reading.empty, false)
+})
+
+test('[DONE]、PING 注释与坏帧不贡献任何计数', () => {
+  const reading = measureStreamEmptyTurn(
+    [': PING', 'data: [DONE]', 'data: {not json', frames([]).trim(), 'event: foo'].join('\n'),
+    true,
+  )
+  assert.equal(reading.contentChars, 0)
+  assert.equal(reading.toolCallDeltas, 0)
+  assert.equal(reading.empty, true)
 })

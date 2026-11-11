@@ -249,6 +249,36 @@ export function isReasoningEffortUnsupportedError(message: string | undefined): 
 }
 
 /**
+ * 「这一家要求一个我们没发的会话亲和头」类 400 的识别（2026-11-11 16:51 实测：
+ * `codex` 线路按分数首选 `opencode_go/kimi-k3.1-pro`，上游回 400
+ * `Request is missing x-opencode-session and cannot be routed efficiently`，
+ * `att=1`、`outcome: fatal`，其后 9 个候选一个没试，整轮打死）。
+ *
+ * 与强制 `tool_choice`、`reasoning_effort`、工具数超限同一类：**说的是这一家的
+ * 接入契约，不是客户端写错了什么**。请求死在生成之前，账号健康、不烧积分，换一个
+ * 候选就能成。
+ *
+ * ⚠️ 本判据只救「整轮被打死」，**不让 `opencode_go` 变得可用**：聚合这一路
+ * （`forwarder.ts::buildHeaders`）拿不到会话键，所以那个头至今没人发。要让它成为
+ * 真候选，得把会话键从路由侧穿到 `buildHeaders`，并按 `channelPack` 里
+ * `vendor/channel-pack/src/opencode.ts` 的既有口径成组发出
+ * （`x-opencode-session` / `x-opencode-session-id` / `x-session-affinity` /
+ * `x-session-id` 同值 + `x-opencode-project` + `x-opencode-client`，且**不能发
+ * `x-opencode-request`**，那是 v1 专用头，v2 收到即 403）。
+ *
+ * 单模型路径仍按原样把 400 交回客户端：用户点名了这一家，换家等于替他改需求。
+ *
+ * ⚠️ 识别口径必须**窄**：要么点名 `x-opencode-session` 这个头，要么同时出现
+ * `session` 与「cannot be routed efficiently」这句 —— 客户端自己漏传会话参数
+ * 的正常报错不会带这句上游文案。
+ */
+export function isMissingSessionAffinityError(message: string | undefined): boolean {
+  if (!message) return false
+  return /missing\s*['"`]?x-opencode-session/i.test(message)
+    || (/session/i.test(message) && /cannot be routed efficiently/i.test(message))
+}
+
+/**
  * 哪些状态码值得**换下一家**。
  *
  * 对齐 new-api 的 `AutomaticRetryStatusCodeRanges`（`1xx/3xx/401-407/409-499/
@@ -338,35 +368,80 @@ export function isOpaqueAggregateBadRequest(
   return text === '' || /^unknown error$/i.test(text)
 }
 
-/** 自动路由候选耗尽时的收口形状（chat 路由直接拿去回客户端）。 */
+/** 自动路由候选耗尽时的收口形状（chat / completions 路由直接拿去回客户端）。 */
 export interface AutoExhaustedResponse {
   status: 503
   type: 'service_unavailable_error'
   code: 'no_available_model'
   message: string
+  /** 回给客户端的 `Retry-After` 秒数（候选侧耗尽是暂时状态，必须给等待时长而不是让它判死）。 */
+  retryAfterSeconds: number
 }
 
 /**
- * 自动路由的最后一个候选报 404 时，不能把「候选供不了」原样透传成
- * 「这条路由/模型不存在」：客户端（Claude 等）会把 404 当模型被删，后续
- * 整段会话不再请求。路由确实存在时统一收口成可重试的 503。
+ * 上游没给解禁时刻时的默认 `Retry-After`。
  *
- * ⚠️ 只在**确实试过多家**（`attempts > 1`）时收口。普通上游 404 在第一家就是
- * fatal（「客户端写了个不存在的模型」），原样透传才准确 —— 见
- * `tests/routes/proxy-routes-catalog-404.test.ts` 的窄判据。
+ * 取余额门控的确定性缓存 TTL（`vendor/channel-pack/src/account-balance-gate.ts` 的 60 秒）：
+ * 被这道门跳过的账号最快也要下一个 60 秒窗口才会重新判定，所以「60 秒后再试」不是拍的数。
+ */
+export const AUTO_EXHAUSTED_RETRY_AFTER_SECONDS = 60
+
+/** `Retry-After` 可以是秒数也可以是 HTTP 日期；两种都归一成秒数，读不懂就当没给。 */
+export function parseRetryAfterSeconds(
+  value: string | number | undefined,
+): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  if (trimmed === '') return undefined
+  const seconds = Number(trimmed)
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds)
+  const at = Date.parse(trimmed)
+  if (Number.isNaN(at)) return undefined
+  return Math.max(0, Math.round((at - Date.now()) / 1000))
+}
+
+/**
+ * 自动路由的**候选侧**失败耗尽整条链时，不能把最后一家的状态码原样抛给客户端。
+ *
+ * ## 为什么判据是「试过多家 + 失败不是客户端造成的」
+ *
+ * - **第一家就失败**：那是上游对这条请求的真回答（模型不存在、客户端写坏的 400、
+ *   这一家自己的 429），原样透传才准确，收口会把责任推给代理。
+ * - **多家都失败**：客户端要的是「这一路此刻没有可服务候选」，而不是某一家渠道的
+ *   错误文案。2026-11-11 的真实事故：链在第 3 家收手，最后一笔是渠道包的池空门控，
+ *   被透传成 `429 insufficient_quota`，Codex 把它读成自己的订阅额度到顶
+ *   （`codexErrorInfo: usageLimitExceeded`）⇒ 界面显示「你已达到使用上限」并终止这一轮，
+ *   而当时池里 75 个候选大多还活着。429 在客户端是**终止**语义，503 才是**等一会再来**。
+ * - **400 / 422 永不收口**：请求形状是客户端的问题，伪装成可重试会让它反复撞同一堵墙。
+ *   工具数超限、`tool_choice` 不支持这类「带 400 形状但换家能成」的失败，在换家阶段
+ *   就已经按可恢复类继续走了，走不到这里。
+ *
+ * ⚠️ 只在**确实试过多家**（`attempts > 1`）时收口 —— 普通上游 404 在第一家就是 fatal
+ * （「客户端写了个不存在的模型」），见 `tests/routes/proxy-routes-catalog-404.test.ts` 的窄判据。
  */
 export function autoExhaustedResponse(
   status: number | undefined,
   routeName: string,
   lastError: string | undefined,
   attempts: number,
+  upstreamRetryAfterSeconds?: number,
 ): AutoExhaustedResponse | null {
-  if (status !== 404 || attempts <= 1) return null
+  if (attempts <= 1) return null
+  if (status === 400 || status === 422) return null
+  const candidateSide = status === 404
+    || isRecoverableChannelFailure(lastError)
+    || status === 401
+    || status === 403
+    || status === 429
+    || (status !== undefined && status >= 500)
+  if (!candidateSide) return null
   return {
     status: 503,
     type: 'service_unavailable_error',
     code: 'no_available_model',
-    message: `Route '${routeName}' exhausted all candidates (last: ${lastError ?? '404'})`,
+    message: `Route '${routeName}' exhausted all ${attempts} candidates (last: ${lastError ?? status ?? 'no status'})`,
+    retryAfterSeconds: upstreamRetryAfterSeconds ?? AUTO_EXHAUSTED_RETRY_AFTER_SECONDS,
   }
 }
 
@@ -434,6 +509,12 @@ export function isRecoverableChannelFailure(message: string | undefined): boolea
     // 「所有账号均受限」这一支，于是它被当成普通 502 账号故障，白白吃掉
     // 账号故障上限的一家（2026-11-03 DSH 那笔 402 的链就是这样在第 3 家收手的）。
     || /所有通道.*均受限/.test(message)
+    // 渠道包的池空门控：「Cline：账号池中的账号当前均不可用（余额为 0、已停用或凭据不可用）…」。
+    // 它抛出时带 code `QUOTA_EXCEEDED` + status 403（`vendor/channel-pack/src/index.ts`），但桥接层
+    // 只透传 message/status，code 到不了宿主，所以只能按原文认这一支。2026-11-11 codex 路由那笔
+    // 就是这样：两家撞上它再加一家 502 就吃满账号故障上限，而池里 75 个候选当时都活着，
+    // 客户端读到的是 Codex 自己的「你已达到使用上限」。
+    || message.includes('账号池中的账号当前均不可用')
     || isChannelCredentialFailure(message)
 }
 
@@ -507,6 +588,11 @@ export function describeAttemptFailure(input: {
     // （本函数的口径就是「kind 必须与当时实际走的分支一致」）。
     || isContextOverflowError(input.error)
     || isReasoningEffortUnsupportedError(input.error)
+    // 普通 404 同因：换家循环按「这一家供不了这个模型」继续往下试且不记账号故障
+    // （`forwarder.ts` 的 `capabilityMismatch` 里有这一条），漏在这里就会把同一笔
+    // 尝试在 `attempts[].outcome`（capability）与 `auto.failures[].kind`（failover）
+    // 两处记成两种结论。
+    || input.status === 404
     ? 'capability'
     : isChannelHumanRequiredFailure(input.error)
       // 风控类落的是 400，按纯状态码会被记成 `fatal`，而换家循环实际是**继续往下试**

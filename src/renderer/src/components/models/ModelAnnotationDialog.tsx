@@ -212,6 +212,11 @@ const MODALITIES: InputModality[] = ['text', 'image', 'audio', 'video', 'pdf']
  */
 const MAX_MARK_CONTEXT_TOKENS = 100_000_000
 const MAX_MARK_OUTPUT_TOKENS = 1_000_000
+/**
+ * 消耗倍率的人工标注上界。渠道报的倍率实际都在 0.03–8 之间，这只是一道防手滑的
+ * 闸门（与 token 字段同理：越界输入当场拒绝并说明，不能等主进程静默丢掉）。
+ */
+const MAX_MARK_WEIGHT = 10_000
 
 /** 手动标注的原始草稿：只保留用户显式设置的字段。 */
 type MarkDraft = Record<string, unknown> & ModelCapabilityHint
@@ -265,6 +270,8 @@ export function ModelMarkEditor({
   // 两个数值字段用文本草稿：非法输入要留在框里并给出提示，不能一按保存就被归一函数静默丢掉。
   const [contextDraft, setContextDraft] = useState('')
   const [outputDraft, setOutputDraft] = useState('')
+  // 倍率也走文本草稿：`0.03` 这种小数是常态，非法输入要留在框里而不是被静默丢掉。
+  const [weightDraft, setWeightDraft] = useState('')
 
   // 只在换模型时重置草稿：保存失败时用户输入不会被清掉。
   // 保存成功则由 handleSave 用主进程返回的归一结果回填（见下），两处口径一致。
@@ -272,6 +279,7 @@ export function ModelMarkEditor({
     setDraft(mark ? { ...mark, modalities: mark.modalities ? [...mark.modalities] : undefined } : {})
     setContextDraft(mark?.contextTokens !== undefined ? String(mark.contextTokens) : '')
     setOutputDraft(mark?.maxOutputTokens !== undefined ? String(mark.maxOutputTokens) : '')
+    setWeightDraft(mark?.weight !== undefined ? String(mark.weight) : '')
     setError(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [providerId, displayName])
@@ -303,6 +311,13 @@ export function ModelMarkEditor({
 
   const contextError = validateMarkTokens(contextDraft, MAX_MARK_CONTEXT_TOKENS, t, 'context')
   const outputError = validateMarkTokens(outputDraft, MAX_MARK_OUTPUT_TOKENS, t, 'output')
+  const weightError = validateMarkWeight(weightDraft, t)
+
+  const changeWeight = (raw: string) => {
+    setWeightDraft(raw)
+    const parsed = parseMarkWeight(raw)
+    patch({ weight: parsed === null ? undefined : parsed.value })
+  }
 
   /** 两个数值字段共用一条判据：留空 = 未标注，非法值留在框里并清掉草稿里的旧值。 */
   const changeTokens = (field: 'context' | 'output', raw: string) => {
@@ -315,8 +330,8 @@ export function ModelMarkEditor({
   }
 
   const handleSave = async () => {
-    if (contextError !== null || outputError !== null) {
-      setError(contextError ?? outputError)
+    if (contextError !== null || outputError !== null || weightError !== null) {
+      setError(contextError ?? outputError ?? weightError)
       return
     }
     const api = window.electronAPI?.providers
@@ -335,6 +350,7 @@ export function ModelMarkEditor({
         setDraft(saved ? { ...saved, modalities: saved.modalities ? [...saved.modalities] : undefined } : {})
         setContextDraft(saved?.contextTokens !== undefined ? String(saved.contextTokens) : '')
         setOutputDraft(saved?.maxOutputTokens !== undefined ? String(saved.maxOutputTokens) : '')
+        setWeightDraft(saved?.weight !== undefined ? String(saved.weight) : '')
         onSaved(result.marks)
       } else {
         setError(result.error ?? t('proxy.routePoolMarkSaveFailed'))
@@ -444,6 +460,45 @@ export function ModelMarkEditor({
         <p className="text-[10px] text-muted-foreground">{t('proxy.routePoolMarkModalitiesHelp')}</p>
       </div>
 
+      <div className="space-y-1">
+        <Label className="text-xs">{t('proxy.routePoolMarkWeight')}</Label>
+        <Input
+          type="text"
+          inputMode="decimal"
+          className="h-8 text-xs"
+          value={weightDraft}
+          onChange={(event) => changeWeight(event.target.value)}
+          placeholder={t('proxy.routePoolMarkWeightPlaceholder')}
+          aria-invalid={weightError !== null}
+        />
+        <p className="text-[10px] text-muted-foreground">
+          {t('proxy.routePoolMarkWeightHelp', { max: MAX_MARK_WEIGHT.toLocaleString('en-US') })}
+        </p>
+        {weightError !== null && (
+          <p className="text-[10px] text-destructive break-words">{weightError}</p>
+        )}
+      </div>
+
+      <div className="space-y-1">
+        <Label className="text-xs">{t('proxy.routePoolMarkFree')}</Label>
+        <Select
+          value={draft.free === undefined ? 'inherit' : draft.free ? 'yes' : 'no'}
+          onValueChange={(value) =>
+            patch({ free: value === 'inherit' ? undefined : value === 'yes' })
+          }
+        >
+          <SelectTrigger className="h-8 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="inherit">{t('proxy.routePoolMarkInherit')}</SelectItem>
+            <SelectItem value="yes">{t('proxy.routePoolMarkFreeYes')}</SelectItem>
+            <SelectItem value="no">{t('proxy.routePoolMarkFreeNo')}</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-[10px] text-muted-foreground">{t('proxy.routePoolMarkFreeHelp')}</p>
+      </div>
+
       {sources && (
         <div className="flex flex-wrap gap-1.5">
           {sources.map((entry) => (
@@ -496,6 +551,24 @@ function validateMarkTokens(
     return t(key, { max: max.toLocaleString('en-US') })
   }
   return t('proxy.routePoolMarkMaxOutputInvalid')
+}
+
+/** 留空 = 未标注；非负小数 = 值；其余 = `null`（负数 / 非数字 / 越界都不接受）。 */
+function parseMarkWeight(raw: string): { value?: number } | null {
+  const trimmed = raw.trim()
+  if (trimmed === '') return { value: undefined }
+  if (!/^\d+(?:\.\d+)?$/.test(trimmed)) return null
+  const value = Number(trimmed)
+  if (!Number.isFinite(value) || value < 0 || value > MAX_MARK_WEIGHT) return null
+  return { value }
+}
+
+function validateMarkWeight(raw: string, t: Translator): string | null {
+  if (parseMarkWeight(raw) !== null) return null
+  if (Number(raw.trim()) > MAX_MARK_WEIGHT) {
+    return t('proxy.routePoolMarkWeightTooLarge', { max: MAX_MARK_WEIGHT.toLocaleString('en-US') })
+  }
+  return t('proxy.routePoolMarkWeightInvalid')
 }
 
 // ---------------------------------------------------------------------------

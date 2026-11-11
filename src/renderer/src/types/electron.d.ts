@@ -39,6 +39,7 @@ import type {
   TlsStatus,
   TlsTrustResult,
   ProviderModelTestResult,
+  ProviderModelSyncResult,
 } from '../../../shared/types'
 import type {
   AggregateDetail,
@@ -213,6 +214,7 @@ interface ProvidersAPI {
     addedCount?: number
     fetchedAt?: number
   }>
+  syncModels: (providerIds?: string[]) => Promise<ProviderModelSyncResult[]>
   getEffectiveModels: (providerId: string) => Promise<EffectiveModel[]>
   getModelCatalogue: (providerId: string) => Promise<CatalogueModel[]>
   setModelsServed: (providerId: string, names: string[], served: boolean) => Promise<{

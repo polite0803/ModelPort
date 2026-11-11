@@ -25,7 +25,7 @@ import {
   toGenerateOptions,
 } from 'virtual:channel-pack-messages'
 import { collectOpenAiCompletion, toOpenAiSse } from 'virtual:channel-pack-stream'
-import { assertValidToolCalls, countToolCallShapes } from './toolCallValidation'
+import { assertValidToolCalls, countToolCallShapes, formatToolCallPairing, repairToolCallPairing } from './toolCallValidation'
 import { ReasoningReplay, reasoningReplayEnabled } from './reasoningReplay'
 import { appendOutboundDump, resolveDumpTarget, summarizeOutbound } from './outboundDump'
 
@@ -308,6 +308,19 @@ async function complete(request: CompleteRequest, jobId: string, signal: AbortSi
   // 先按网关的同一套判据校验入站 tool_calls：网关那句「invalid function call」
   // 不带坐标，客户端无从知道是哪条消息、哪个调用、哪个字段不对。
   assertValidToolCalls(body.messages)
+  // 配对修复：调用与结果必须一一对应。严格上游（2026-11-11 实测
+  // `buddy/deepseek-v4-pro`、`buddy/kimi-k3.1-pro`）对不齐时整段拒收 502
+  // 「tool calls and tool results do not match」，换到宽松候选才 200 —— 代价是整轮
+  // 从此粘在弱模型上。这里只做删除、不造结果，边界见 repairToolCallPairing 注释。
+  const pairing = repairToolCallPairing(body.messages)
+  if (pairing.defects.length > 0) {
+    body.messages = pairing.messages
+    logger.warn(
+      `${request.model} 工具记录配对不齐：删无结果调用 ${pairing.counts.unansweredCalls}、`
+      + `无调用结果 ${pairing.counts.orphanResults}、重复声明 ${pairing.counts.duplicateCalls}、`
+      + `重复回填 ${pairing.counts.duplicateResults}；明细 ${formatToolCallPairing(pairing.defects)}`,
+    )
+  }
   // 影子诊断（纯观测，不影响校验）：只记"规范合法但上游可能不认"的形状计数。
   // 不记任何内容 —— 真实请求体 1.8MB，落盘只保留开头 2%，而 tool_calls 在尾部，
   // 所以想从请求体日志取证这条路结构性地走不通（详见 countToolCallShapes 注释）。

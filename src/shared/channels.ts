@@ -524,6 +524,23 @@ export interface ChannelRefreshResult {
   reason?: string
 }
 
+/**
+ * 「同步模型」里一家账号渠道的对账结果。
+ *
+ * 整包只跑一轮 `resync`，增删按同步前后的 `supportedModels` 差值算出来：
+ * 上游新报的算新增，不再报的算移除（同时清掉它的停用标记）。
+ */
+export interface ChannelModelSyncResult {
+  id: string
+  success: boolean
+  /** 同步后可路由的模型数量 */
+  count: number
+  added: number
+  removed: number
+  reason?: string
+  source?: ChannelModelSource
+}
+
 /** 模型开关 / 失效恢复的结果；成功时带回最新目录，界面一次往返即可重绘。 */
 export interface ChannelModelUpdateResult {
   success: boolean
