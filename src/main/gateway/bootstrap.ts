@@ -18,6 +18,7 @@ import { configureModelListRefresh } from '../scheduler/modelListRefresh'
 import { aggregateProviderManager } from '../providers/aggregate'
 import { primeModelProbeCache } from '../providers/modelProbeStore'
 import { shutdownCatalogBatchJobs } from '../providers/modelCatalogBatchRunner'
+import { installConsoleBridge, setMainConsoleSink } from '../logging/consoleBridge'
 
 export interface GatewayListening {
   host: string
@@ -49,6 +50,12 @@ export async function bootstrapGateway(input: GatewayBootstrapInput = {}): Promi
       port: 0,
     }
   }
+
+  // Everything below reports through `console.*`. On a windowless Electron process that
+  // stream has no reader, so mirror error/warn into the app log; the terminal copy still
+  // prints for hosts that have one (the daemon under systemd, `npm run dev`).
+  setMainConsoleSink((level, message) => storeManager.addLog(level, message))
+  installConsoleBridge()
 
   if (storeManager.isCredentialEncryptionDegraded()) {
     input.onWarning?.(

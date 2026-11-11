@@ -248,6 +248,17 @@ export class AppLogManager {
     }, this.persistDelayMs)
   }
 
+  /**
+   * Persist failures write to stderr, never `console.*`: the console bridge mirrors
+   * error/warn into this very log, so "could not persist" reported as an error entry
+   * would schedule another failing persist - one self-sustaining loop per retry delay.
+   * A headless host still sees the line; in the GUI the store is the broken part anyway.
+   */
+  private reportPersistFailure(message: string, error: unknown): void {
+    const detail = error instanceof Error ? error.message : String(error)
+    process.stderr.write(`[AppLogs] ${message}: ${detail}\n`)
+  }
+
   private persistAsync(): void {
     if (!this.dirty || this.persistInFlight) return
     this.persistInFlight = true
@@ -260,7 +271,7 @@ export class AppLogManager {
         this.persistInFlight = false
         const code = (error as NodeJS.ErrnoException).code
         this.dirty = code !== 'ENOENT'
-        console.error('[AppLogs] async persist failed:', error)
+        this.reportPersistFailure('async persist failed', error)
         if (code !== 'ENOENT') this.schedulePersist()
         return
       }
@@ -274,7 +285,7 @@ export class AppLogManager {
         if (renameError) {
           const code = (renameError as NodeJS.ErrnoException).code
           this.dirty = code !== 'ENOENT'
-          console.error('[AppLogs] async rename failed:', renameError)
+          this.reportPersistFailure('async rename failed', renameError)
           unlink(tempFile, () => {})
           if (code !== 'ENOENT') this.schedulePersist()
           return
@@ -298,7 +309,7 @@ export class AppLogManager {
       renameSync(tempFile, this.logFile)
     } catch (error) {
       this.dirty = true
-      console.error('[AppLogs] sync persist failed:', error)
+      this.reportPersistFailure('sync persist failed', error)
       unlink(tempFile, () => {})
     }
   }
