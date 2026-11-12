@@ -920,9 +920,13 @@ export class RequestForwarder {
       // `forwardChatCompletion` 的 aborted 分支），不是这一家的意见。
       const clientAborted = result.status === 400 && request.signal?.aborted === true
       // 「这一家拒收这次请求」：池语义下换下一家，裸名链不换（见 FailoverBudget）。
+      // 不透明 400（聚合条目的空错误体 / `Unknown error`）**不算**这一类：它说的是
+      // 「这一家供不了」，1.8.6 起就是换家且不罚账号。若让它数进这里的两次上限，
+      // 池里两家抖这种 400 就把整条链收口在第 2 家，下面那条专属分支也永远到不了。
       const rejectedRequest = result.status === 400
         && !clientAborted
         && !capabilityMismatch
+        && !opaqueAggregateBadRequest
         && switchOnRejectedRequest
       // 无论后面走哪个分支，这次尝试都已经发生且没有成功 —— 先记账（含 fatal：
       // 它同时是客户端拿到的错误，日志里两处都能看到，宁重不漏）。
