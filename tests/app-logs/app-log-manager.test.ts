@@ -110,3 +110,24 @@ test('错误行保底：info 洪峰不能把最近错误挤出保留窗口', asy
   assert.ok(ids.includes('err-1'), '错误行必须留在日志里')
   assert.ok(ids.includes('info-4'), '最新行仍然保留')
 })
+
+test('错误行保底有时限：超过 7 天的旧错误不再无限期占住错误计数', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'app-log-manager-error-age-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+
+  const DAY_MS = 86_400_000
+  const now = 1_794_500_000_000
+  const manager = new AppLogManager({ storageDir: root, maxEntries: 2 })
+  await manager.initialize()
+  manager.addLog(createLog('err-ancient', now - 30 * DAY_MS, 'error'))
+  manager.addLog(createLog('err-fresh', now - DAY_MS, 'error'))
+  for (let index = 0; index < 5; index++) {
+    manager.addLog(createLog(`info-${index}`, now - 60_000 + index, 'info'))
+  }
+  manager.flushSync()
+
+  const ids = manager.getLogs().map((entry) => entry.id)
+  assert.ok(ids.includes('err-fresh'), '窗口内的错误仍然保住')
+  // 无时限的保底会让 getStats().error 一旦到过 500 就永远显示 500。
+  assert.equal(ids.includes('err-ancient'), false, '超窗的旧错误不再占位')
+})

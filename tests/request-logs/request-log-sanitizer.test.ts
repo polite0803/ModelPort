@@ -126,6 +126,25 @@ test('错误行保底保留：成功行再多也不挤掉最近 100 条错误', 
   assert.ok(trimmed.some((entry) => entry.id === 'ok-4'), '仍然保留最新的成功行')
 })
 
+test('错误行保底有时限：超过 7 天的旧错误不再无限期占住列表', () => {
+  const DAY_MS = 86_400_000
+  const now = 1_794_500_000_000
+  const entries = [
+    { id: 'err-ancient', ...createEntry({ timestamp: now - 30 * DAY_MS, status: 'error' }) },
+    { id: 'err-fresh', ...createEntry({ timestamp: now - DAY_MS, status: 'error' }) },
+    ...Array.from({ length: 5 }, (_, index) => ({
+      id: `ok-${index}`,
+      ...createEntry({ timestamp: now - 60_000 + index, status: 'success' }),
+    })),
+  ]
+
+  const trimmed = trimRequestLogsToMaxEntries(entries, createConfig({ maxEntries: 2 }))
+
+  assert.ok(trimmed.some((entry) => entry.id === 'err-fresh'), '窗口内的错误仍要被保住')
+  // 没有这条时限，错误列表一旦攒到 100 条就再也不变化：保底值会被当成读数。
+  assert.equal(trimmed.some((entry) => entry.id === 'err-ancient'), false, '超窗的旧错误不再占位')
+})
+
 test('normalizeRequestLogConfig：默认 maxBodyChars 抬到 200000，存量旧默认随升级迁移', () => {
   // 全新配置：直接拿新默认（用户要求 2026-10-30，8000 排查 1.8MB 请求体时不够用）
   assert.equal(normalizeRequestLogConfig().maxBodyChars, 200_000)

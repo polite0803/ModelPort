@@ -7,15 +7,6 @@ export interface RequestLogFilter {
   providerId?: string
 }
 
-export interface RequestLogStats {
-  total: number
-  success: number
-  error: number
-  todayTotal: number
-  todaySuccess: number
-  todayError: number
-}
-
 /**
  * 请求体截断上限的默认值（用户要求 2026-10-30 从 8000 调大）：排查流内错误帧、
  * 工具调用改写这类问题时 8000 字符只够看到头部与第一条消息（真实请求体实测

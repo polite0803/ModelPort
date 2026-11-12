@@ -583,6 +583,15 @@ export interface DailyStatistics {
   date: string
   /** Total requests */
   totalRequests: number
+  /**
+   * 这一行的 `totalRequests` 不是本行逐笔数出来时出现，值就是那本账的名字。
+   *
+   * `tokenLedger` = 总数取自按日用量桶（`tokenUsage`）的实测请求数：请求日志被清空时
+   * 统计连带丢失，用量桶没被清。此时 `successRequests` 是按本账本的构造
+   * （`success + failed == total`）由总数减去**已记**失败得出，缺口段的失败因此被计成
+   * 成功；已知高估量与取证过程见 `docs/audit/2026-11-13-clear-logs-statistics-loss.md`。
+   */
+  totalRequestsSource?: 'tokenLedger'
   /** Successful requests */
   successRequests: number
   /** Failed requests */

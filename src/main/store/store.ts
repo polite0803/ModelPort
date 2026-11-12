@@ -531,6 +531,7 @@ class StoreManager {
     this.requestLogManager = new RequestLogManager({
       storageDir: join(storagePath, 'request-logs'),
       config: config.requestLogConfig,
+      errorRetentionDays: config.logRetentionDays,
     })
     setContentLoggingEnabled(config.requestLogConfig.includeBodies)
     await this.requestLogManager.initialize()
@@ -552,6 +553,7 @@ class StoreManager {
     this.appLogManager = new AppLogManager({
       storageDir: join(storagePath, 'logs'),
       maxEntries: this.getMaxLogEntries(config),
+      errorRetentionDays: config.logRetentionDays,
     })
     await this.appLogManager.initialize()
 
@@ -1360,6 +1362,20 @@ class StoreManager {
   }
 
   /**
+   * 日志保留的旋钮一次全下发：条数（`logRetentionDays × 1000`）与错误保底的天数窗口。
+   *
+   * 保底窗口必须跟着 `logRetentionDays` 走。写死一个常量的话，界面上那个「日志保留天数」
+   * 对失败能回溯多久毫无作用，而面板显示的条数还是那个谁也没配过的数。四个写配置的入口
+   * （`setConfig` / 备份恢复 / `updateConfig` / `resetConfig`）都从这里过，免得漏一处。
+   */
+  private applyLogRetention(config: AppConfig): void {
+    this.appLogManager?.setMaxEntries(this.getMaxLogEntries(config))
+    this.appLogManager?.setErrorRetentionDays(config.logRetentionDays)
+    this.requestLogManager?.setErrorRetentionDays(config.logRetentionDays)
+    this.applyRequestLogConfig(config.requestLogConfig)
+  }
+
+  /**
    * Mirrors `autoStart` into the OS login item / XDG autostart entry.
    *
    * Runs on every config write that lands here rather than only on
@@ -1432,8 +1448,7 @@ class StoreManager {
     const normalized = this.normalizeConfig({ ...incoming, routes: previous.routes ?? {} })
     this.store!.set('config', normalized)
     publishChannelSystemProxy(normalized.channelSystemProxy)
-    this.appLogManager?.setMaxEntries(this.getMaxLogEntries(normalized))
-    this.applyRequestLogConfig(normalized.requestLogConfig)
+    this.applyLogRetention(normalized)
     this.applyAutoStart(previous, normalized)
     return normalized
   }
@@ -1458,8 +1473,7 @@ class StoreManager {
     const normalized = this.normalizeConfig(incoming)
     this.store!.set('config', normalized)
     publishChannelSystemProxy(normalized.channelSystemProxy)
-    this.appLogManager?.setMaxEntries(this.getMaxLogEntries(normalized))
-    this.applyRequestLogConfig(normalized.requestLogConfig)
+    this.applyLogRetention(normalized)
     this.applyAutoStart(previous, normalized)
     return normalized
   }
@@ -1497,8 +1511,7 @@ class StoreManager {
     const normalized = this.normalizeConfig(newConfig)
     this.store!.set('config', normalized)
     publishChannelSystemProxy(normalized.channelSystemProxy)
-    this.appLogManager?.setMaxEntries(this.getMaxLogEntries(normalized))
-    this.applyRequestLogConfig(normalized.requestLogConfig)
+    this.applyLogRetention(normalized)
     this.applyAutoStart(currentConfig, normalized)
     return normalized
   }
@@ -1516,8 +1529,7 @@ class StoreManager {
     const previous = this.getConfig()
     this.store!.set('config', DEFAULT_CONFIG)
     publishChannelSystemProxy(undefined)
-    this.appLogManager?.setMaxEntries(this.getMaxLogEntries(DEFAULT_CONFIG))
-    this.applyRequestLogConfig(DEFAULT_CONFIG.requestLogConfig)
+    this.applyLogRetention(DEFAULT_CONFIG)
     this.applyAutoStart(previous, DEFAULT_CONFIG)
     return this.getConfig()
   }
@@ -2013,11 +2025,13 @@ class StoreManager {
 
   /**
    * Clear Request Logs
+   *
+   * 只清日志行。`statistics` 与 `tokenUsage` 是独立的计量账本，一次「清空日志」不该
+   * 把它们一起归零 —— `replaceRequestLogs`（备份导入）早就按这条口径写了。
    */
   clearRequestLogs(): void {
     this.ensureInitialized()
     this.getRequestLogManager().clearRequestLogs()
-    this.store!.set('statistics', DEFAULT_STATISTICS)
   }
 
   /**
@@ -2035,10 +2049,25 @@ class StoreManager {
 
   /**
    * Get Request Log Statistics
+   *
+   * 数字取自统计账本，不是数保留窗里的行：日志只留最近 `maxEntries` 行外加错误保底，
+   * 数行会把「今日请求」压成保留上限（实测当天 886 次只数出 200），让「今日错误」在
+   * 到过保底值之后永远停在那个数，而一次「清空日志」还能把它们整片归零。两边都不计
+   * 探测行：请求日志靠 `kind: 'probe'`，账本靠 `forwarder` 的 `!isProbe`。
    */
   getRequestLogStats(): { total: number; success: number; error: number; todayTotal: number; todaySuccess: number; todayError: number } {
     this.ensureInitialized()
-    return this.getRequestLogManager().getRequestLogStats()
+    const stats = this.store!.get('statistics') || DEFAULT_STATISTICS
+    const today = stats.dailyStats?.[localDayKey(Date.now())]
+
+    return {
+      total: stats.totalRequests,
+      success: stats.successRequests,
+      error: stats.failedRequests,
+      todayTotal: today?.totalRequests ?? 0,
+      todaySuccess: today?.successRequests ?? 0,
+      todayError: today?.failedRequests ?? 0,
+    }
   }
 
   // ==================== Statistics Operations ====================

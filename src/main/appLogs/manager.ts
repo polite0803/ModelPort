@@ -8,16 +8,21 @@ import type { AppLogFilter, AppLogStats, AppLogTrendPoint } from './types.ts'
 interface AppLogManagerOptions {
   storageDir: string
   maxEntries?: number
+  /** 错误行保底覆盖的天数，取自 `logRetentionDays`。 */
+  errorRetentionDays?: number
 }
 
 /** Error lines kept in addition to maxEntries, so info/debug traffic cannot evict them. */
 const APP_ERROR_LOG_RETENTION = 500
+/** 保底必须有时限：无时限的错误行永远占位，级别计数一旦到过 500 就永远显示 500。 */
+const DEFAULT_APP_ERROR_RETENTION_DAYS = 7
 
 export class AppLogManager {
   private readonly logFile: string
   private readonly storageDir: string
   private logs: LogEntry[] = []
   private maxEntries: number
+  private errorRetentionDays: number
   private initialized = false
   private persistTimer: NodeJS.Timeout | null = null
   private dirty = false
@@ -29,6 +34,7 @@ export class AppLogManager {
     this.storageDir = options.storageDir
     this.logFile = join(options.storageDir, 'app-logs.ndjson')
     this.maxEntries = Math.max(0, options.maxEntries ?? 7000)
+    this.errorRetentionDays = Math.max(1, options.errorRetentionDays ?? DEFAULT_APP_ERROR_RETENTION_DAYS)
   }
 
   async initialize(): Promise<void> {
@@ -42,6 +48,14 @@ export class AppLogManager {
   setMaxEntries(maxEntries: number): void {
     this.ensureInitialized()
     this.maxEntries = Math.max(0, maxEntries)
+    this.logs = this.trimLogs(this.logs)
+    this.schedulePersist()
+  }
+
+  /** 错误保底的天数窗口跟着 `logRetentionDays` 走；调小当场生效。 */
+  setErrorRetentionDays(days: number): void {
+    this.ensureInitialized()
+    this.errorRetentionDays = Math.max(1, Math.round(days))
     this.logs = this.trimLogs(this.logs)
     this.schedulePersist()
   }
@@ -229,7 +243,10 @@ export class AppLogManager {
 
     if (logs.length <= this.maxEntries) return logs
     const keptIds = new Set(logs.slice(-this.maxEntries).map((entry) => entry.id))
-    for (const entry of logs.filter((entry) => entry.level === 'error').slice(-APP_ERROR_LOG_RETENTION)) {
+    const floorCutoff = logs[logs.length - 1].timestamp - this.errorRetentionDays * 86_400_000
+    for (const entry of logs
+      .filter((entry) => entry.level === 'error' && entry.timestamp >= floorCutoff)
+      .slice(-APP_ERROR_LOG_RETENTION)) {
       keptIds.add(entry.id)
     }
     return logs.filter((entry) => keptIds.has(entry.id))

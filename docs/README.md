@@ -88,6 +88,7 @@
 | [`audit/PLAN-api-defects-status.md`](audit/PLAN-api-defects-status.md) | 上述修复的门禁读数、完成清单与遗留项状态 | v1.4.0 | 历史记录 | 2026-10-27 |
 | [`audit/PLAN-channel-auto-stability.md`](audit/PLAN-channel-auto-stability.md) | 渠道与 auto 路由连接稳定性的实测取证（192.168.85.131）与修复批次 | v1.4.10 | 历史记录 | 2026-11-01 |
 | [`audit/DEFECT_ANALYSIS_REPORT.md`](audit/DEFECT_ANALYSIS_REPORT.md) | 主进程关键子系统的逐文件缺陷核查（限流、脱敏、调试输出、探测终局、巡检写盘放大）与完善建议；本仓按 `AGENTS-full.md` 口径对照，落地的修复见 CHANGELOG v1.7.3 | v1.7.3 | 历史记录 | 2026-11-04 |
+| [`audit/2026-11-13-clear-logs-statistics-loss.md`](audit/2026-11-13-clear-logs-statistics-loss.md) | 「清空日志连带删除使用统计」的现场读数、副本普查、恢复口径与已知失真量（重建段的成功数高估、渠道成败撤为未记录） | v1.8.8 | 历史记录 | 2026-11-13 |
 
 ## 功能手册（features/）
 

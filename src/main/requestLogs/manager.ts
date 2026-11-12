@@ -2,15 +2,14 @@ import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, writeFi
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 
-import { currentLocalDay } from '../../shared/localDay.ts'
 import type { RequestLogEntry } from '../store/types.ts'
 import type {
   RequestLogConfig,
   RequestLogFilter,
-  RequestLogStats,
 } from './types.ts'
 import { normalizeRequestLogConfig } from './types.ts'
 import {
+  DEFAULT_ERROR_LOG_RETENTION_DAYS,
   sanitizeRequestLogEntry,
   sanitizeRequestLogUpdates,
   trimRequestLogsToMaxEntries,
@@ -20,6 +19,8 @@ import { isBodySampleSelected } from './sampling.ts'
 interface RequestLogManagerOptions {
   storageDir: string
   config?: Partial<RequestLogConfig>
+  /** 错误行保底覆盖的天数，取自 `logRetentionDays`。 */
+  errorRetentionDays?: number
 }
 
 /** 保留窗按「这次请求顺手扫一遍」执行，最多十分钟一次；不给它单独开定时器。 */
@@ -30,6 +31,7 @@ export class RequestLogManager {
   private readonly storageDir: string
   private requestLogs: RequestLogEntry[] = []
   private config: RequestLogConfig
+  private errorRetentionDays: number
   private initialized = false
   private persistTimer: NodeJS.Timeout | null = null
   private dirty = false
@@ -42,6 +44,7 @@ export class RequestLogManager {
     this.storageDir = options.storageDir
     this.logFile = join(options.storageDir, 'request-logs.ndjson')
     this.config = normalizeRequestLogConfig(options.config)
+    this.errorRetentionDays = options.errorRetentionDays ?? DEFAULT_ERROR_LOG_RETENTION_DAYS
   }
 
   async initialize(): Promise<void> {
@@ -59,9 +62,20 @@ export class RequestLogManager {
 
   setConfig(config: Partial<RequestLogConfig>): void {
     this.config = normalizeRequestLogConfig(config)
-    this.requestLogs = trimRequestLogsToMaxEntries(this.requestLogs, this.config)
+    this.requestLogs = trimRequestLogsToMaxEntries(this.requestLogs, this.config, this.errorRetentionDays)
     // 调小保留窗应当当场生效，而不是等下一个十分钟。
     this.stripExpiredBodies()
+    this.schedulePersist()
+  }
+
+  /**
+   * 错误保底的天数窗口，取自 `logRetentionDays`：天数调大，能回头查的失败窗口一起变长；
+   * 调小当场生效。它必须跟着这个已有设置走，否则界面上调「日志保留天数」对错误保底
+   * 没有任何作用，而面板上读到的条数还是那个没人配过的数。
+   */
+  setErrorRetentionDays(days: number): void {
+    this.errorRetentionDays = Math.max(1, Math.round(days))
+    this.requestLogs = trimRequestLogsToMaxEntries(this.requestLogs, this.config, this.errorRetentionDays)
     this.schedulePersist()
   }
 
@@ -80,6 +94,7 @@ export class RequestLogManager {
           id: entry.id,
         })),
       this.config,
+      this.errorRetentionDays,
     )
     this.schedulePersist()
 
@@ -103,7 +118,7 @@ export class RequestLogManager {
     }
 
     this.requestLogs.push(logEntry)
-    this.requestLogs = trimRequestLogsToMaxEntries(this.requestLogs, this.config)
+    this.requestLogs = trimRequestLogsToMaxEntries(this.requestLogs, this.config, this.errorRetentionDays)
     this.sweepBodiesIfDue()
     this.schedulePersist()
 
@@ -171,25 +186,8 @@ export class RequestLogManager {
    */
   replaceRequestLogs(entries: RequestLogEntry[]): void {
     this.ensureInitialized()
-    this.requestLogs = trimRequestLogsToMaxEntries([...entries], this.config)
+    this.requestLogs = trimRequestLogsToMaxEntries([...entries], this.config, this.errorRetentionDays)
     this.schedulePersist()
-  }
-
-  getRequestLogStats(): RequestLogStats {
-    this.ensureInitialized()
-    const today = currentLocalDay()
-    // 探测行只用于诊断展示；把它们算进成功率会让一次手动探测改变仪表盘读数。
-    const clientLogs = this.requestLogs.filter((entry) => entry.kind !== 'probe')
-    const todayLogs = clientLogs.filter((entry) => entry.timestamp >= today.start && entry.timestamp < today.end)
-
-    return {
-      total: clientLogs.length,
-      success: clientLogs.filter((entry) => entry.status === 'success').length,
-      error: clientLogs.filter((entry) => entry.status === 'error').length,
-      todayTotal: todayLogs.length,
-      todaySuccess: todayLogs.filter((entry) => entry.status === 'success').length,
-      todayError: todayLogs.filter((entry) => entry.status === 'error').length,
-    }
   }
 
   exportRequestLogs(): RequestLogEntry[] {

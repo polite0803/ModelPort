@@ -237,10 +237,11 @@ test('a real model-404 error row still counts in stats; unmounted probes write n
     isStream: false,
   })
 
-  const stats = manager.getRequestLogStats()
-  assert.equal(stats.total, 2, '不许出现「把所有 404 一刀切排除」的旁路')
-  assert.equal(stats.todayError, 1)
-  assert.equal(stats.todaySuccess, 1)
+  // 面板的计数已改由统计账本提供（`store::getRequestLogStats`），这里钉的是请求表本身：
+  // 那条 model_not_found 404 必须留下行。
+  assert.equal(manager.getRequestLogs().length, 2, '不许出现「把所有 404 一刀切排除」的旁路')
+  assert.equal(manager.getRequestLogs(undefined, { status: 'error' }).length, 1)
+  assert.equal(manager.getRequestLogs(undefined, { status: 'success' }).length, 1)
 
   // 折叠的未挂载 404 走的是 app 日志，请求表里没有它的行 —— 上面两条就是全表。
   // 若有人把 route_not_found 重新塞回 addRequestLog，这里会先变红。

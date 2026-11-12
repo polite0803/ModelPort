@@ -10,6 +10,12 @@ const MAX_ATTEMPT_MESSAGE_CHARS = 500
 const MAX_UPSTREAM_REQUEST_ID_CHARS = 200
 /** 错误行保底条数：普通成功行再多也不能把要查的那条错误挤掉。 */
 export const REQUEST_ERROR_LOG_RETENTION = 100
+/**
+ * 保底覆盖的天数，取自 `logRetentionDays`（缺省 7 天）。少了这个时限，错误行就永远
+ * 占着保底名额：列表攒到 100 条之后不再变化，「今日错误」也被同一个数钉死，几周前的
+ * 失败一直压在今天要查的那几条前面 —— 保底值被当成了读数。
+ */
+export const DEFAULT_ERROR_LOG_RETENTION_DAYS = 7
 
 export function sanitizeRequestLogEntry(
   entry: Omit<RequestLogEntry, 'id'>,
@@ -115,6 +121,7 @@ export function sanitizeRequestLogUpdates(
 export function trimRequestLogsToMaxEntries(
   entries: RequestLogEntry[],
   config: RequestLogConfig,
+  errorRetentionDays: number = DEFAULT_ERROR_LOG_RETENTION_DAYS,
 ): RequestLogEntry[] {
   const maxEntries = Math.max(0, config.maxEntries)
   if (maxEntries === 0) {
@@ -128,7 +135,12 @@ export function trimRequestLogsToMaxEntries(
   // Recent rows plus an error floor: a burst of successful traffic must not
   // evict the one failure we need to diagnose.
   const keptIds = new Set(entries.slice(entries.length - maxEntries).map((entry) => entry.id))
-  for (const entry of entries.filter((entry) => entry.status === 'error').slice(-REQUEST_ERROR_LOG_RETENTION)) {
+  // 时钟用最新一行的时间而不是 `Date.now()`：裁剪只在有新行落进来时发生，两者等价，
+  // 而这个函数因此保持不依赖外部时钟。
+  const floorCutoff = entries[entries.length - 1].timestamp - Math.max(1, errorRetentionDays) * 86_400_000
+  for (const entry of entries
+    .filter((entry) => entry.status === 'error' && entry.timestamp >= floorCutoff)
+    .slice(-REQUEST_ERROR_LOG_RETENTION)) {
     keptIds.add(entry.id)
   }
   return entries.filter((entry) => keptIds.has(entry.id))
