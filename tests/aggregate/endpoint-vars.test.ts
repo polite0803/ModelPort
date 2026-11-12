@@ -100,6 +100,8 @@ interface SeenRequest {
 let server: Server
 let port = 0
 let seen: SeenRequest[] = []
+/** 让 GET 回一个指定状态码：探针的失败分支要靠它驱动。 */
+let getStatus = 200
 
 const harness = await bootstrapStore({})
 const { aggregateProviderManager } = await loadModule('main/providers/aggregate/manager.ts')
@@ -107,7 +109,7 @@ const { aggregateProviderManager } = await loadModule('main/providers/aggregate/
 before(async () => {
   server = createServer((req, res) => {
     seen.push({ method: req.method ?? 'GET', url: req.url ?? '' })
-    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.writeHead(req.method === 'GET' ? getStatus : 200, { 'Content-Type': 'application/json' })
     res.end(req.method === 'POST' ? '{"id":"cmpl-1","choices":[]}' : '{"result":[]}')
   })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
@@ -185,4 +187,27 @@ test('a second key carries its own account id; a keyless variable is refused', a
   const byKey = new Map(stored.map(account => [account.credentials.apiKey, account.credentials.account_id]))
   assert.equal(byKey.get('sk-test-1'), 'acct-123')
   assert.equal(byKey.get('sk-test-2'), 'acct-999')
+})
+
+// Cloudflare 的 OpenAI 兼容面只有 chat/completions：`GET .../ai/v1/models` 回 405
+// code 7001。这条不是"端点拒绝了请求"（那是 4xx/5xx 的通用说法），而是这家没有清单。
+test('a model list endpoint that refuses GET is "no list", a wrong path stays an HTTP failure', async () => {
+  // kimchi 在 models.dev 里没有切片（回退取不到），失败原因因此原样上抛。
+  const kimchi = getAggregateEntry('kimchi')!
+  aggregateProviderManager.save({
+    id: 'kimchi',
+    baseUrl: baseAt('/v1'),
+    apiKeys: ['sk-test-kimchi'],
+    models: [kimchi.models[0].id],
+  })
+
+  getStatus = 405
+  const noList = await aggregateProviderManager.syncModels('kimchi')
+  assert.equal(noList.reason, 'no_model_list', '405 = 这条 URI 不接 GET，不是它拒绝了请求')
+
+  getStatus = 404
+  const notFound = await aggregateProviderManager.syncModels('kimchi')
+  assert.equal(notFound.reason, 'http_status', '404 仍可能是地址写错，不能被说成"没有清单"')
+
+  getStatus = 200
 })

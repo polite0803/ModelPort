@@ -27,6 +27,22 @@ type Payload = Record<string, unknown>
 /** 允许出现的"聊天"类型标记；缺省视为聊天。 */
 const NON_CHAT_TYPE = new Set(['embedding', 'reranking', 'transcription', 'image', 'video', 'speech'])
 
+/**
+ * 目录 id 与 models.dev 键名不一致的几家。
+ *
+ * 只收**实测过是同一家**的：102 个条目里 68 个没有同 id 的键，其中大多数只是叫法不同
+ * （`together` / `togetherai`、`vertex` / `google-vertex`），按名字相似去猜会把别家的
+ * 清单拉进来。这里一条一条加，加之前先看那份切片的模型 id 是不是同一个命名空间。
+ */
+const MODELS_DEV_PROVIDER_IDS: Record<string, string> = {
+  // 同为 `@cf/...` 模型命名空间；Cloudflare 的 OpenAI 兼容面不提供 GET /models（405）。
+  cloudflare: 'cloudflare-workers-ai',
+}
+
+function modelsDevKey(providerId: string): string {
+  return MODELS_DEV_PROVIDER_IDS[providerId] ?? providerId
+}
+
 function asRecord(value: unknown): Payload | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Payload)
@@ -54,7 +70,7 @@ export function readModelsDevProvider(payload: unknown, providerId: string): Mod
   const root = asRecord(payload)
   if (!root) return null
 
-  const provider = asRecord(root[providerId])
+  const provider = asRecord(root[modelsDevKey(providerId)])
   if (!provider) return null
 
   // models 必须是对象；缺失或形状不对都算"读不懂"，不是"没有模型"。
@@ -75,7 +91,7 @@ export function readModelsDevProvider(payload: unknown, providerId: string): Mod
 export function listModelsDevModels(payload: unknown, providerId: string): FetchedModel[] {
   const root = asRecord(payload)
   if (!root) return []
-  const provider = asRecord(root[providerId])
+  const provider = asRecord(root[modelsDevKey(providerId)])
   if (!provider) return []
   const models = asRecord(provider.models)
   if (!models) return []

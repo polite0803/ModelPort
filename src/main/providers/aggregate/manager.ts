@@ -1188,6 +1188,12 @@ class AggregateProviderManager {
         })
 
         if (response.status >= 400) {
+          // 405/501：这条 URI 不接 GET —— 该上游根本没有模型清单（Cloudflare 的 OpenAI
+          // 兼容面只开 chat/completions，`GET .../ai/v1/models` 回 405 code 7001），
+          // 不是它拒绝了我们的请求。404 不并进来：路径写错与「没有清单」是两件事。
+          if (response.status === 405 || response.status === 501) {
+            return { ok: false, result: { success: false, reason: 'no_model_list' } }
+          }
           // 401/403 是这把 Key 的问题，换下一把；其余状态码同样换，最后的失败拼上尝试次数。
           lastFailure = {
             success: false,

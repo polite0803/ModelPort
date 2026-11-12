@@ -61,6 +61,23 @@ test('a provider outside the catalogue is empty, not an error', () => {
   assert.equal(readModelsDevProvider(catalogue(), 'not-in-catalogue'), null)
 })
 
+test('a catalogue id that models.dev spells differently still finds its slice', () => {
+  // Cloudflare 的 OpenAI 兼容面没有 GET /models（405），同步只能靠这层回退；
+  // 而 models.dev 的键叫 cloudflare-workers-ai。映射按命名空间实测，不按名字相似猜。
+  const payload = {
+    'cloudflare-workers-ai': {
+      id: 'cloudflare-workers-ai',
+      name: 'Cloudflare Workers AI',
+      models: { '@cf/meta/llama-3.2-1b-instruct': { id: '@cf/meta/llama-3.2-1b-instruct', name: 'Llama 3.2 1B' } },
+    },
+  }
+  assert.deepEqual(
+    listModelsDevModels(payload, 'cloudflare').map(model => model.actualModelId),
+    ['@cf/meta/llama-3.2-1b-instruct']
+  )
+  assert.equal(readModelsDevProvider(payload, 'cloudflare')?.name, 'Cloudflare Workers AI')
+})
+
 test('a malformed payload is reported as such, never as "no models"', () => {
   // 与 readModelList 同一条纪律：形状不认识就说形状不认识，
   // 否则上游改版会表现成"这家没有模型"，用户会去换 Key。
