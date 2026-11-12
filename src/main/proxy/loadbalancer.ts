@@ -11,6 +11,7 @@ import { AGGREGATE_REGISTRY } from '../providers/aggregate/registry'
 import { resolveAggregateChain } from '../../shared/aggregateRouting'
 import { aggregateHeadroom, quotaBlockReason } from './quota/gate'
 import { resolveCaps } from './quota/limits'
+import { dailyUsageOf } from '../../shared/dailyUsage.ts'
 import { pickBestPace, pickSoonestReset, type AccountQuotaFacts } from '../../shared/quotaPacing'
 import { debugLog } from '../logging/debugLog'
 
@@ -271,7 +272,7 @@ export class LoadBalancer {
       return false
     }
 
-    if (account.dailyLimit && account.todayUsed && account.todayUsed >= account.dailyLimit) {
+    if (account.dailyLimit && dailyUsageOf(account) >= account.dailyLimit) {
       return false
     }
 
@@ -337,8 +338,8 @@ export class LoadBalancer {
    */
   private selectFillFirst(candidates: AccountSelection[]): AccountSelection {
     return candidates.reduce((best, current) => {
-      const bestUsed = best.account.todayUsed || 0
-      const currentUsed = current.account.todayUsed || 0
+      const bestUsed = dailyUsageOf(best.account)
+      const currentUsed = dailyUsageOf(current.account)
 
       if (currentUsed < bestUsed) {
         return current

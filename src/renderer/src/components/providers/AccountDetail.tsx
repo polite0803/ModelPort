@@ -6,6 +6,7 @@
 import { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { AppLogTrendPoint } from '@shared/types'
+import { dailyUsageOf } from '@shared/dailyUsage'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -133,7 +134,7 @@ export function AccountDetail({
   }
 
   const usagePercent = account.dailyLimit 
-    ? Math.min(100, ((account.todayUsed || 0) / account.dailyLimit) * 100)
+    ? Math.min(100, (dailyUsageOf(account) / account.dailyLimit) * 100)
     : 0
 
   const handleValidate = async () => {
@@ -160,7 +161,7 @@ export function AccountDetail({
     },
     {
       labelKey: 'providers.usedToday',
-      value: account.todayUsed || 0,
+      value: dailyUsageOf(account),
       subtitle: account.dailyLimit ? `${t('providers.dailyLimit')}: ${account.dailyLimit}` : undefined,
       icon: Zap,
       color: 'text-warning',
@@ -315,7 +316,7 @@ export function AccountDetail({
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm text-muted-foreground">{t('providers.usedToday')}</span>
                   <span className="text-sm font-medium">
-                    {account.todayUsed || 0} / {account.dailyLimit}
+                    {dailyUsageOf(account)} / {account.dailyLimit}
                   </span>
                 </div>
                 <div className="h-2 bg-[var(--bg-tertiary)] rounded-full overflow-hidden">

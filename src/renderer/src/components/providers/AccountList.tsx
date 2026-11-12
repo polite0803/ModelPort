@@ -5,6 +5,7 @@
 
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { dailyUsageOf } from '@shared/dailyUsage'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -112,9 +113,9 @@ export function AccountList({
 
   const formatUsage = (account: Account) => {
     if (account.dailyLimit) {
-      return `${account.todayUsed || 0} / ${account.dailyLimit}`
+      return `${dailyUsageOf(account)} / ${account.dailyLimit}`
     }
-    return account.todayUsed || 0
+    return dailyUsageOf(account)
   }
 
   if (accounts.length === 0) {

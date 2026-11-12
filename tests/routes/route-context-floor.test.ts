@@ -19,6 +19,7 @@ import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { bootstrapStore, loadModule, startProxy } from './harness.mjs'
+import { localDayKey } from '../../src/shared/localDay.ts'
 
 const PORT = 18935
 
@@ -190,7 +191,11 @@ test('瞬时状态不动广告值：账号当日额度打满后下界仍是原�
 
   // 把 small 的账号标成当日已用满：请求决策会把它的模型剔掉（否则就是白发的上游请求），
   // 但广告值不能跟着抖 —— 客户端按它安排压缩时机，一个每次请求都可能变小的数更糟。
-  sm.updateAccount('small-acct', { dailyLimit: 1, todayUsed: 1 })
+  sm.updateAccount('small-acct', {
+    dailyLimit: 1,
+    todayUsed: 1,
+    todayUsedDay: localDayKey(Date.now()),
+  })
   assert.equal(await floorOf('auto'), 8192)
   assert.equal(await floorOf('wide'), 1_000_000, '另一条路由同理')
 

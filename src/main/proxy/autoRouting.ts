@@ -1261,10 +1261,28 @@ function scoreCandidate(
 }
 
 /**
+ * 全池冷却时的兜底集合：只保留冷却最早到期的那一组（同一时刻到期的都留下）。
+ *
+ * 全池都在冷却说明刚撞过一轮上游限流；把它们全丢掉等于告诉调用方「这条路由没有
+ * 模型」。留最早恢复的一组，换家循环最多付一次必败的上游往返，换来一个**真实**的
+ * 429/402 与 `Retry-After`，而不是一个假的 503。
+ */
+function soonestCooling(candidates: RankCandidate[]): RankCandidate[] {
+  let earliest = Number.POSITIVE_INFINITY
+  for (const candidate of candidates) {
+    if (candidate.coolingUntil !== undefined && candidate.coolingUntil < earliest) {
+      earliest = candidate.coolingUntil
+    }
+  }
+  if (earliest === Number.POSITIVE_INFINITY) return candidates
+  return candidates.filter(candidate => candidate.coolingUntil === earliest)
+}
+
+/**
  * 排序候选项，返回按「份额轮次 → 分数」排好的候选链，最多 `limit` 个。
  *
  * 规则：
- * 1. 冷却中的账号直接排除；
+ * 1. 冷却中的账号排除；**全部**在冷却时只留最早恢复的一组（排除不能制造空池）；
  * 2. 先按视觉/工具/上下文做硬过滤；
  * 3. 硬过滤后为空时只放宽上下文长度（最容易被估算误差误伤）；
  * 4. 视觉/工具仍然不满足则返回空数组，由调用方报 503，绝不把图片发给不支持的模型；
@@ -1297,9 +1315,15 @@ export function rankCandidates(
   const sticky = options.sticky
   const fairness = options.fairness
 
-  const usable = candidates.filter(candidate =>
+  // 冷却中的账号默认不进候选（换家优先选热的），但**全部**在冷却时这条排除必须
+  // 失效：排除完剩一个空池，上层只能报「这条路由没有模型」——而事实是这一轮谁都
+  // 刚被上游拒过，客户端却按「路由没了」处理。与模型熔断「全池熔断时票不生效」
+  // 同一条纪律：没有落脚点的排除等于制造空池。兜底只留最早恢复的那一组账号，
+  // 不把整池都送进换家循环。
+  const warm = candidates.filter(candidate =>
     candidate.coolingUntil === undefined || candidate.coolingUntil <= now
   )
+  const usable = warm.length > 0 ? warm : soonestCooling(candidates)
 
   const capabilityOf = (candidate: RankCandidate): ModelCapability =>
     capabilityOfCandidate(candidate)

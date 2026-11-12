@@ -11,7 +11,7 @@ import { requestForwarder } from '../forwarder'
 import { streamHandler } from '../stream'
 import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
-import { autoRouter } from '../autoRouter'
+import { autoRouter, describeTransientCause } from '../autoRouter'
 import type { AutoCandidate } from '../autoRouter'
 import type { AccountSelection, ForwardResult } from '../types'
 import { storeManager } from '../../store/store'
@@ -20,6 +20,7 @@ import { rejectionEntryFromContext } from '../rejectionLog'
 import { createTextCompletionChunkTransform, toTextCompletion } from '../utils/textCompletion'
 import { routeHeaderValue, toHeaderValue } from '../utils/headerValue'
 import { clientHeaderValue, identifyClientByUserAgent } from '../../../shared/clientProfile'
+import { nextDailyUsage } from '../../../shared/dailyUsage.ts'
 import { mapForwardFailure, retryAfterHeader, withRequestId } from '../errorMapping'
 import { autoExhaustedResponse, parseRetryAfterSeconds } from '../failover'
 import { startSseHeartbeat } from '../utils/sseHeartbeat'
@@ -242,6 +243,25 @@ router.post('/completions', async (ctx: Context) => {
   }
 
   if (autoDecision && !firstCandidate) {
+    // 判据与 chat 路由同源：瞬时空池报 429 + `Retry-After`，配置筛空才报 503。
+    const transient = autoDecision.transientUnavailable
+    if (transient) {
+      ctx.set('Retry-After', String(transient.retryAfterSeconds))
+      ctx.status = 429
+      ctx.body = {
+        error: {
+          message: `All candidates for route '${autoDecision.routeName}' are temporarily unavailable (${describeTransientCause(transient.cause)}); retry in ${transient.retryAfterSeconds}s`,
+          type: 'rate_limit_error',
+          code: 'model_temporarily_unavailable',
+          details: {
+            cause: transient.cause,
+            skipped: transient.skipped,
+            retry_after_seconds: transient.retryAfterSeconds,
+          },
+        },
+      }
+      return
+    }
     ctx.status = 503
     ctx.body = {
       error: {
@@ -429,7 +449,7 @@ router.post('/completions', async (ctx: Context) => {
     storeManager.updateAccount(account.id, {
       lastUsed: Date.now(),
       requestCount: (account.requestCount || 0) + 1,
-      todayUsed: (account.todayUsed || 0) + 1,
+      ...nextDailyUsage(account),
     })
 
     storeManager.addLog('debug', `Request succeeded`, {

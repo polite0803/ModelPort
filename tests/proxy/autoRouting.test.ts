@@ -574,6 +574,20 @@ test('份额轮转不把唯一能用的候选筛掉：无人领先时公平是 n
   )
 })
 
+test('rankCandidates keeps the soonest-waking group when every account is cooling', () => {
+  const profile = profileRequest(textRequest('hi'))
+
+  const ranked = rankCandidates(profile, [
+    candidate({ accountId: 'later-a', coolingUntil: NOW + 60_000 }),
+    candidate({ accountId: 'later-b', coolingUntil: NOW + 60_000 }),
+    candidate({ accountId: 'soon', coolingUntil: NOW + 5_000 }),
+  ], { now: NOW })
+
+  // 全池冷却时排除必须失效：返回空池会被上层报成「这条路由没有模型」，而事实是
+  // 刚撞过一轮限流。只留最早恢复的一组 —— 不把整池都送进换家循环。
+  assert.deepEqual(ranked.map(item => item.accountId), ['soon'])
+})
+
 test('rankCandidates drops accounts in cooldown', () => {
   const profile = profileRequest(textRequest('hi'))
 

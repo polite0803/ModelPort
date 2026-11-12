@@ -6,6 +6,7 @@
 import { storeManager } from './store'
 import { Account, AccountStatus, ValidationResult } from './types'
 import { validateCredentials } from './validator'
+import { dailyUsageOf, nextDailyUsage } from '../../shared/dailyUsage.ts'
 
 /**
  * Account Manager class
@@ -184,24 +185,10 @@ export class AccountManager {
     if (account) {
       storeManager.updateAccount(id, {
         requestCount: (account.requestCount || 0) + 1,
-        todayUsed: (account.todayUsed || 0) + 1,
+        ...nextDailyUsage(account),
         lastUsed: Date.now(),
       })
     }
-  }
-
-  /**
-   * Reset daily usage count
-   * Should be called at midnight
-   */
-  static resetDailyUsage(): void {
-    const accounts = storeManager.getAccounts()
-    
-    for (const account of accounts) {
-      storeManager.updateAccount(account.id, { todayUsed: 0 })
-    }
-    
-    storeManager.addLog('info', 'Reset daily usage count for all accounts')
   }
 
   /**
@@ -273,7 +260,7 @@ export class AccountManager {
       return false
     }
     
-    if (account.dailyLimit && account.todayUsed && account.todayUsed >= account.dailyLimit) {
+    if (account.dailyLimit && dailyUsageOf(account) >= account.dailyLimit) {
       return false
     }
     
@@ -297,7 +284,7 @@ export class AccountManager {
         return false
       }
       
-      if (account.dailyLimit && account.todayUsed && account.todayUsed >= account.dailyLimit) {
+      if (account.dailyLimit && dailyUsageOf(account) >= account.dailyLimit) {
         return false
       }
       
@@ -323,8 +310,8 @@ export class AccountManager {
     
     if (strategy === 'fill-first') {
       return available.reduce((prev, curr) => {
-        const prevUsed = prev.todayUsed || 0
-        const currUsed = curr.todayUsed || 0
+        const prevUsed = dailyUsageOf(prev)
+        const currUsed = dailyUsageOf(curr)
         return currUsed < prevUsed ? curr : prev
       })
     }

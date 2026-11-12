@@ -102,6 +102,11 @@ registry) → `adapters/<provider>.ts` → upstream; `loadbalancer.ts` picks the
   re-introduce a per-model fence inside `pool`; never widen `single` back into one. A bare 400
   switches without an account penalty, capped at `MAX_REJECTED_REQUEST_SWITCHES` = 2; a client abort
   is terminal.
+- **An empty pool names its cause.** Config pruning and capability mismatch stay 503
+  `no_available_model` + `details.missing`; a pool emptied only by self-resetting state (quota window,
+  exhaustion mark, daily limit) is 429 `model_temporarily_unavailable` + `Retry-After`
+  (`transientUnavailable`). Cooldown never empties the pool (the soonest-waking group is kept, so the
+  client sees the real upstream 429); `todayUsed` is day-keyed (`dailyUsageOf`) - never read raw.
 - **Soft pin > `preferredModel` > sticky.** `ModelPin` lives in memory only (route or session scope,
   30 min), and a pin is **not** vetoed by the model circuit: user intent outranks an automated
   ticket, and the menu still marks that model as circuited. A pin naming a model absent from the

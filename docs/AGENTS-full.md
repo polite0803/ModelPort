@@ -1324,6 +1324,50 @@ gate, the four label markers, three absences), `tests/ipc/routes-menu-wire.test.
 `error` shape, unpin clearing both the pin and `preferredModel`). The older pool tests declare
 `modelScope: 'pool'` explicitly, which is what they actually prove.
 
+### An empty pool: three causes, three answers (2026-11-13)
+
+Live report after A shipped: `unexpected status 503 Service Unavailable: No available model for route
+'codex-deepseek'`. The shape of the message said which branch fired - `chat.ts`'s empty-pool 503 has no
+`details` unless `missing` is non-empty, while `autoExhaustedResponse` only exists when `attempts > 1`
+and quotes the last account - so this was "the selection produced zero candidates", not "the chain ran
+out". Under `single` that is easy to reach: the scoped list is the head model's accounts, and every
+prune that removes one of them can remove all of them.
+
+Three prunes could empty it, and none of them is a configuration fact:
+
+1. **Cooldown.** `rankCandidates` dropped every `coolingUntil > now` candidate. When every account of
+   the head model had just been refused upstream, the pool became `[]` and the client was told the route
+   had no model. It now falls back to the **soonest-waking group** (`soonestCooling`): the turn pays at
+   most one doomed upstream round trip and returns that upstream's own 429/402 with its `Retry-After`.
+   Same discipline as "a circuit that condemns every model is disabled": a prune with no landing spot
+   manufactures an empty pool.
+2. **A transient block.** Quota windows (`rpm/rpd/tpm/tpd/monthly_exhausted`), a witnessed exhaustion
+   mark (`quota-exhausted`), live credit (`no-credit`) and the account daily limit all reset by
+   themselves. `collectCandidates` now records them as `TransientSkip[]`; when those are the *only*
+   reasons the pool is empty, `AutoRouteDecision.transientUnavailable` carries
+   `{ cause: 'quota' | 'daily_limit' | 'mixed', skipped, retryAfterSeconds }` and both routes project
+   429 `model_temporarily_unavailable` + `Retry-After` (see §Public API Contract). `retryAfterSeconds`
+   is derived where a fact exists - an exhaustion mark's `until` (30 min TTL when absent) or the next
+   local midnight for a daily limit - and falls back to 60 s for window reasons, whose reset instant the
+   local ledger does not track.
+3. **The daily limit never reset.** `Account.todayUsed` only ever went up: `resetDailyUsage()`'s comment
+   said "should be called at midnight" and nothing in the tree called it, so `dailyLimit` behaved as a
+   lifetime cap and an account that crossed it was pruned forever. The counter is now day-keyed
+   (`todayUsedDay`, `shared/dailyUsage.ts`): `dailyUsageOf(account, now)` reads 0 when the key is not
+   today (a missing key reads 0 - keeping the stale value *is* the permanent block), `nextDailyUsage`
+   stamps the key when incrementing, and the console's "used today" cards read the same function. The
+   reset is a derived quantity, not a timer: sleep, restart and timezone changes cannot skip it.
+
+Config-emptied pools (`pool_strategy`, `manual_filter`) and capability mismatches keep the 503 +
+`details.missing`: those are the two cases where the user really does have to change something.
+
+Tests: `tests/proxy/transient-empty-pool.test.ts` (an exhaustion mark's `until` becomes `Retry-After`;
+a daily limit reports `daily_limit` and the account re-enters the pool once its day key rolls over),
+`tests/routes/transient-empty-pool-http.test.ts` (both entries answer 429 + `Retry-After` +
+`model_temporarily_unavailable`, and forward again after the rollover), `tests/shared/daily-usage.test.ts`
+(day-key arithmetic), `tests/proxy/autoRouting.test.ts` (the all-cooling fallback keeps the soonest group
+and still drops cooling accounts when a warm one exists).
+
 ### Fallback-served prose-only stop (2026-11-13, the seventh degraded class)
 
 `codex-deepseek` kept stopping mid-task while the client reported no error. Row
@@ -1506,6 +1550,12 @@ would flush the log list.
   `Retry-After` (and the account is penalised), other 4xx → `invalid_request_error`, 5xx →
   `api_error`. A failure after the stream started is an `data: {"error": ...}` frame, never
   assistant text, and every stream carries exactly one `[DONE]`.
+- **An empty candidate pool names its cause.** Configuration pruning (`pool_strategy`,
+  `manual_filter`) and capability mismatch are 503 `no_available_model` with `details.missing`.
+  A pool emptied only by self-resetting state is 429 `model_temporarily_unavailable` with
+  `Retry-After` and `details: { cause, skipped, retry_after_seconds }` - retryable, and it makes no
+  upstream call while it holds. Cooldown pruning never empties the pool (see §An empty pool).
+  `no_available_model` with a 503 therefore always means "change a setting", never "wait".
 - **A provider's own content-policy refusal is forwarded, never rewritten or routed around.** Bailian
   answers a request whose image it refuses with 400 `data_inspection_failed` and `[Input image [0]
   data may contain inappropriate content.]` (measured 2026-11-07: six rows on

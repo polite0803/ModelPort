@@ -724,6 +724,8 @@ export interface Account {
   requestCount?: number
   dailyLimit?: number
   todayUsed?: number
+  /** `todayUsed` 属于哪个本地日期（`YYYY-MM-DD`）；与今天不同即读作 0 */
+  todayUsedDay?: string
 }
 
 export interface Provider {

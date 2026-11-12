@@ -74,6 +74,13 @@ import {
   type StickyHint,
 } from './autoRouting'
 import { createQuotaGateContext, quotaBlockReason, aggregateHeadroom } from './quota/gate.ts'
+import type { QuotaBlockReason } from './quota/limits.ts'
+import { dailyUsageOf } from '../../shared/dailyUsage.ts'
+import {
+  exhaustionExpiresAt,
+  findExhaustion,
+  type AggregateQuotaExhaustionRecord,
+} from '../../shared/aggregateQuotaExhaustion.ts'
 import { aggregateBanditStats, banditKeyOf } from './autoBandit.ts'
 import { dispatchLedger, dispatchKeyOf } from './dispatchLedger.ts'
 import { aggregateContextWindow } from './modelCapabilities.ts'
@@ -127,6 +134,22 @@ export interface AutoCandidate {
   provider: Provider
   displayName: string
   actualModel: string
+}
+
+/**
+ * 被**瞬时**状态挡在候选池外的 (账号, 模型)。
+ *
+ * 与 `skipped` 的分工：`skipped` 是给人和日志看的字符串，这里是可以据此算
+ * 「什么时候会有候选回来」的结构化记录。两类瞬时原因——额度窗口/上游亲口拒
+ * 与账号当日上限——都会自己复位，复位前这一轮确实无人可派，但**不是**「这条
+ * 路由没有模型」。
+ */
+interface TransientSkip {
+  providerId: string
+  accountId: string
+  /** 上游真实模型名：额度耗尽标记按这个键记（不是 displayName）。 */
+  model: string
+  reason: QuotaBlockReason | 'daily_limit'
 }
 
 /**
@@ -233,6 +256,17 @@ export interface AutoRouteDecision {
   pinMiss?: string
   /** 本轮被模型级熔断排到队尾的模型。 */
   circuited?: string[]
+  /**
+   * 空池不是配置筛空的，而是候选全被**瞬时状态**挡掉（额度窗口/上游亲口拒、
+   * 账号当日上限）。调用方把它投影成 429 + `Retry-After` —— 可重试，而不是
+   * 503「这条路由没有模型」：后者会让用户去查供应商，而真正要等的是一个窗口复位。
+   */
+  transientUnavailable?: {
+    cause: 'quota' | 'daily_limit' | 'mixed'
+    /** 被瞬时状态挡掉的 (账号, 模型) 条数。 */
+    skipped: number
+    retryAfterSeconds: number
+  }
   /** 本条路由的换家墙钟预算；缺省用 `AUTO_WALL_CLOCK_BUDGET_MS`。 */
   wallClockBudgetMs?: number
 }
@@ -471,6 +505,95 @@ function capabilityHintsFor(
   }
 }
 
+/**
+ * 瞬时剔除里**能等回来**的那几类原因。字符串形态由 `collectCandidates` 写入
+ * `skipped`（`<供应商>/<模型>:<原因>`），这里按最后一个冒号后的原因判定 ——
+ * 模型名里带冒号也不会误判。
+ */
+const TRANSIENT_SKIP_REASONS = new Set<string>([
+  'daily_limit',
+  'no-credit',
+  'quota-exhausted',
+  'rpm_exhausted',
+  'rpd_exhausted',
+  'tpm_exhausted',
+  'tpd_exhausted',
+  'monthly_exhausted',
+])
+
+/** 算不出解禁时刻时的重试间隔（秒）：窗口类原因最短的复位粒度就是分钟级。 */
+const DEFAULT_TRANSIENT_RETRY_AFTER_SECONDS = 60
+
+function skippedAreAllTransient(skipped: ReadonlySet<string>): boolean {
+  if (skipped.size === 0) return false
+  for (const marker of skipped) {
+    if (!TRANSIENT_SKIP_REASONS.has(marker.slice(marker.lastIndexOf(':') + 1))) return false
+  }
+  return true
+}
+
+/**
+ * 瞬时空池的人话成因：客户端读得到、用户也读得懂，且与 `details.cause` 同源。
+ */
+export function describeTransientCause(cause: 'quota' | 'daily_limit' | 'mixed'): string {
+  if (cause === 'daily_limit') return 'daily request limit reached'
+  if (cause === 'mixed') return 'quota and daily limits reached'
+  return 'quota or credit exhausted'
+}
+
+function nextLocalMidnight(now: number): number {
+  const day = new Date(now)
+  day.setHours(24, 0, 0, 0)
+  return day.getTime()
+}
+
+/**
+ * 把一串瞬时剔除折成「等多久会有候选回来」。
+ *
+ * 能算准的只有两种：上游给了 `until` 的额度耗尽标记（没给时按
+ * `QUOTA_EXHAUSTION_TTL_MS` 过期），以及账号当日上限（下一个本地午夜）。窗口类
+ * 原因（rpm/tpm/…）本地账本没有复位时刻，退回一分钟 —— 给一个短的重试间隔，
+ * 比编一个精确到毫秒的假时刻好。一次取最早解禁的那一个：那一刻起池子里就重新
+ * 有人了。
+ */
+function summarizeTransientSkips(
+  skips: readonly TransientSkip[],
+  now: number
+): NonNullable<AutoRouteDecision['transientUnavailable']> | undefined {
+  if (skips.length === 0) return undefined
+  let quota = false
+  let daily = false
+  let unlockAt = Number.POSITIVE_INFINITY
+  const exhaustions = new Map<string, AggregateQuotaExhaustionRecord[] | undefined>()
+  for (const skip of skips) {
+    if (skip.reason === 'daily_limit') {
+      daily = true
+      unlockAt = Math.min(unlockAt, nextLocalMidnight(now))
+      continue
+    }
+    quota = true
+    if (skip.reason !== 'quota-exhausted') continue
+    if (!exhaustions.has(skip.providerId)) {
+      try {
+        exhaustions.set(skip.providerId, storeManager.getAggregateQuotaExhaustionsOf(skip.providerId))
+      } catch (error) {
+        // 读不出标记只说明算不了精确时刻，不能让空池报告整个失败
+        console.error('[AutoRouter] quota exhaustion records unavailable:', error)
+        exhaustions.set(skip.providerId, undefined)
+      }
+    }
+    const record = findExhaustion(exhaustions.get(skip.providerId), skip.accountId, skip.model, now)
+    if (record !== undefined) unlockAt = Math.min(unlockAt, exhaustionExpiresAt(record))
+  }
+  return {
+    cause: quota && daily ? 'mixed' : daily ? 'daily_limit' : 'quota',
+    skipped: skips.length,
+    retryAfterSeconds: unlockAt === Number.POSITIVE_INFINITY
+      ? DEFAULT_TRANSIENT_RETRY_AFTER_SECONDS
+      : Math.max(1, Math.ceil((unlockAt - now) / 1000)),
+  }
+}
+
 class AutoRouter {
   private seed = 0
   /**
@@ -647,6 +770,8 @@ class AutoRouter {
     rankInputs: PoolStrategyCandidate[]
     candidatesByKey: Map<string, AutoCandidate>
     skipped: Set<string>
+    /** 因瞬时状态被剔除的候选（`skipped` 的字符串形态里分不出「等一会儿会回来」）。 */
+    transientSkips: TransientSkip[]
   } {
     const providers = storeManager.getProviders().filter(provider => provider.enabled)
     const needs = contractNeeds(request)
@@ -659,6 +784,8 @@ class AutoRouter {
     const candidatesByKey = new Map<string, AutoCandidate>()
     // 前置剔除的候选及原因（Set 去重：同一模型多账号命中同一原因只记一条）
     const skipped = new Set<string>()
+    // 同一批剔除里「等一会儿会回来」的那些：空池时据此把 503 翻成可重试的 429
+    const transientSkips: TransientSkip[] = []
     // Bandit 实时战绩（PLAN P2-5 第一步）：从请求日志内存副本滚动 24h 聚合。
     // 每请求一次、单遍 O(n)，n 受 requestLogs.maxEntries 上限约束。
     const bandit = aggregateBanditStats(storeManager.getRequestLogs(), now)
@@ -715,7 +842,14 @@ class AutoRouter {
 
         for (const account of accounts) {
           if (!options.ignoreTransientAvailability) {
-            if (account.dailyLimit && (account.todayUsed ?? 0) >= account.dailyLimit) {
+            if (account.dailyLimit && dailyUsageOf(account, now) >= account.dailyLimit) {
+              skipped.add(`${provider.id}/${model.displayName}:daily_limit`)
+              transientSkips.push({
+                providerId: provider.id,
+                accountId: account.id,
+                model: model.actualModelId,
+                reason: 'daily_limit',
+              })
               continue
             }
 
@@ -723,6 +857,12 @@ class AutoRouter {
             const quotaBlocked = quotaBlockReason(provider, account.id, model.actualModelId, gateContext)
             if (quotaBlocked !== undefined) {
               skipped.add(`${provider.id}/${model.displayName}:${quotaBlocked}`)
+              transientSkips.push({
+                providerId: provider.id,
+                accountId: account.id,
+                model: model.actualModelId,
+                reason: quotaBlocked,
+              })
               continue
             }
           }
@@ -763,7 +903,7 @@ class AutoRouter {
             actualModelId: model.actualModelId,
             accountId: account.id,
             providerType: provider.type,
-            todayUsed: account.todayUsed,
+            todayUsed: dailyUsageOf(account, now),
             dailyLimit: account.dailyLimit,
             lastUsed: account.lastUsed,
             inFlight: runtime.inFlight,
@@ -800,7 +940,7 @@ class AutoRouter {
       }
     }
 
-    return { rankInputs, candidatesByKey, skipped }
+    return { rankInputs, candidatesByKey, skipped, transientSkips }
   }
 
   /**
@@ -842,7 +982,7 @@ class AutoRouter {
     const stickyMinutes = route?.stickyMinutes ?? autoConfig?.stickyMinutes ?? 0
     const prefer = preferOverride ?? route?.prefer ?? autoConfig?.prefer ?? 'balanced'
 
-    const { rankInputs, candidatesByKey, skipped } = this.collectCandidates(request, now)
+    const { rankInputs, candidatesByKey, skipped, transientSkips } = this.collectCandidates(request, now)
     const needs = contractNeeds(request)
 
     // 策略筛选（静态、用户预设）：在候选池构建处、契约过滤之前生效。
@@ -1072,6 +1212,18 @@ class AutoRouter {
       }
     }
 
+    // 空池的三种成因必须分开报：配置筛空（`missing` 已经写上 `pool_strategy` /
+    // `manual_filter`）、能力不满足（`explainMissing`）、以及**候选全被瞬时状态挡掉**。
+    // 只认最后一种、且剔除记录里一个非瞬时原因都没有（掺了 `tools_limit` /
+    // `catalog_miss` 就不叫「等一会儿会回来」）。
+    // 注意判据是 `skipped` 而不是 `rankInputs`：全被瞬时剔除时 `rankInputs` 恰好是空的，
+    // 拿它当门槛会让这条分支永远不成立。
+    const transientUnavailable = candidates.length === 0
+      && missing.length === 0
+      && skippedAreAllTransient(skipped)
+      ? summarizeTransientSkips(transientSkips, now)
+      : undefined
+
     // 命中粘性的原因如实报出去，供响应头/日志使用。
     const stickyHit = sticky !== undefined
       && candidates[0] !== undefined
@@ -1121,6 +1273,7 @@ class AutoRouter {
             },
           }),
       ...(pinMiss === undefined ? {} : { pinMiss }),
+      ...(transientUnavailable === undefined ? {} : { transientUnavailable }),
       ...(circuited.length === 0 ? {} : { circuited: [...circuited] }),
       // 单模型作用域的换家墙钟预算更短：链只剩同一模型的几个账号，继续等不会
       // 等到新模型上台（换模型只能发生在回合之间），只会让客户端多挂几十秒。

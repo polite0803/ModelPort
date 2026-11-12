@@ -15,7 +15,7 @@ import { autoExhaustedResponse, parseRetryAfterSeconds } from '../failover'
 import { SSEParser, extractStreamErrorFrame, streamHandler, type StreamErrorFrame } from '../stream'
 import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
-import { autoRouter } from '../autoRouter'
+import { autoRouter, describeTransientCause } from '../autoRouter'
 import type { AutoCandidate, AutoRouteDecision } from '../autoRouter'
 import { resolveRouteRequest, routePoolBreakMessage } from '../../store/modelRoutes'
 import type {
@@ -25,6 +25,7 @@ import type {
   RequestStreamTrace,
 } from '../../../shared/types'
 import { buildStreamErrorFrame, mapForwardFailure, retryAfterHeader, withRequestId } from '../errorMapping'
+import { nextDailyUsage } from '../../../shared/dailyUsage.ts'
 import { startSseHeartbeat, type SseHeartbeat } from '../utils/sseHeartbeat'
 import { findUnsupportedParameter, unsupportedParameterError } from '../parameterPolicy'
 import { createToolViolationTap } from '../utils/toolViolationTap'
@@ -837,6 +838,29 @@ router.post('/completions', async (ctx: Context) => {
   }
 
   if (autoDecision && !firstCandidate) {
+    // 空池但成因是**瞬时**的（额度窗口打满 / 账号当日上限 / 上游亲口拒过额度）：
+    // 这不是「路由没有模型」，等一会儿池子里就重新有人。报 503 会让客户端把它当
+    // 配置问题、且不重试；`429 + Retry-After` 才是这件事的形状（客户端据此退避，
+    // 退避期间不产生任何上游调用 —— 候选在选号阶段就被剔掉了）。
+    const transient = autoDecision.transientUnavailable
+    if (transient) {
+      ctx.set('Retry-After', String(transient.retryAfterSeconds))
+      ctx.status = 429
+      ctx.body = {
+        error: {
+          message: `All candidates for route '${autoDecision.routeName}' are temporarily unavailable (${describeTransientCause(transient.cause)}); retry in ${transient.retryAfterSeconds}s`,
+          type: 'rate_limit_error',
+          param: null,
+          code: 'model_temporarily_unavailable',
+          details: {
+            cause: transient.cause,
+            skipped: transient.skipped,
+            retry_after_seconds: transient.retryAfterSeconds,
+          },
+        },
+      }
+      return
+    }
     ctx.status = 503
     ctx.body = {
       error: {
@@ -1200,7 +1224,7 @@ router.post('/completions', async (ctx: Context) => {
     storeManager.updateAccount(account.id, {
       lastUsed: Date.now(),
       requestCount: (account.requestCount || 0) + 1,
-      todayUsed: (account.todayUsed || 0) + 1,
+      ...nextDailyUsage(account),
     })
 
     storeManager.addLog('debug', `Request succeeded`, {
