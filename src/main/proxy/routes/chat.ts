@@ -15,7 +15,7 @@ import { autoExhaustedResponse, parseRetryAfterSeconds } from '../failover'
 import { SSEParser, extractStreamErrorFrame, streamHandler, type StreamErrorFrame } from '../stream'
 import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
-import { autoRouter, describeTransientCause } from '../autoRouter'
+import { autoRouter, AUTO_SKIPPED_REPORT_LIMIT, describeTransientCause } from '../autoRouter'
 import type { AutoCandidate, AutoRouteDecision } from '../autoRouter'
 import { resolveRouteRequest, routePoolBreakMessage } from '../../store/modelRoutes'
 import type {
@@ -55,7 +55,7 @@ import { aggregateCostUsdOf } from '../../../shared/aggregateCost.ts'
 import { getAggregateEntry } from '../../providers/aggregate/registry.ts'
 import { learnFromErrorBody, learnFromHeaders } from '../quota/observations'
 import { applyQuotaExhaustions } from '../quota/exhaustionMarks.ts'
-import { rejectionEntryFromContext } from '../rejectionLog'
+import { rejectionEntryFromContext, selectionRefusalEntry } from '../rejectionLog'
 import { clientHeaderValue, identifyClientByUserAgent } from '../../../shared/clientProfile'
 import { takeCompressionReport, type CompressionReport } from '../compression'
 import { takeDuplication } from '../compression/duplication.ts'
@@ -69,15 +69,6 @@ import {
 } from '../utils/toolFormatConverter'
 
 const router = new Router({ prefix: '/v1/chat' })
-
-/**
- * `X-ModelPort-Auto-Skipped` 一次最多透几条跳过原因。
- *
- * 候选链不再裁短之后，「渠道整条限流」这类跳过可以一次性攒几十条，而这个头每请求都发，
- * 超长头会让客户端（以及中间代理）把整条响应判坏。只透最前面这几条，其余折成 `+N`；
- * 完整清单走请求日志的 `auto.skipped` / `auto.skippedMore`，两头口径不同是有意的。
- */
-const AUTO_SKIPPED_HEADER_LIMIT = 8
 
 /**
  * 与 `channelPack/worker.ts` 请求前闸门抛出的 404 **逐字节同一**的原文。
@@ -548,7 +539,7 @@ router.post('/completions', async (ctx: Context) => {
         code: 'route_disabled',
       },
     }
-    const rejected = rejectionEntryFromContext(ctx, 404, 'route_disabled', disabledMessage)
+    const rejected = rejectionEntryFromContext(ctx, 404, 'route_disabled', disabledMessage, requestId)
     rejected.client = client
     storeManager.addRequestLog(rejected)
     storeManager.recordRequestInStats(false, rejected.latency, rejected.model || undefined)
@@ -569,7 +560,7 @@ router.post('/completions', async (ctx: Context) => {
         code: 'route_reference_broken',
       },
     }
-    const rejected = rejectionEntryFromContext(ctx, 404, 'route_reference_broken', breakMessage)
+    const rejected = rejectionEntryFromContext(ctx, 404, 'route_reference_broken', breakMessage, requestId)
     rejected.client = client
     storeManager.addRequestLog(rejected)
     storeManager.recordRequestInStats(false, rejected.latency, rejected.model || undefined)
@@ -669,10 +660,10 @@ router.post('/completions', async (ctx: Context) => {
   //
   // 候选链不再裁短之后，「渠道整条限流」这类跳过可以一次性攒几十条，而这个头每请求都发；
   // 头只留给客户端提示最前面那几条（超出折成 `+N`，客户端读到 `+N` 就知道还有隐情）。
-  // 完整清单目前不进这一行的日志，需要看全部时读 `decision.skipped` 的来源：配额预检
-  // 那一段与 `collectCandidates` 的前置剔除。
+  // 空池的那两条拒绝（429/503）另会把同一份前几条写进错误体与请求日志行 —— 客户端
+  // 只转述一句话时，面板上的那一行是唯一能回答「为什么没有候选」的地方。
   if (autoDecision && autoDecision.skipped.length > 0) {
-    const shown = autoDecision.skipped.slice(0, AUTO_SKIPPED_HEADER_LIMIT)
+    const shown = autoDecision.skipped.slice(0, AUTO_SKIPPED_REPORT_LIMIT)
     const hidden = autoDecision.skipped.length - shown.length
     ctx.set('X-ModelPort-Auto-Skipped', toHeaderValue(
       hidden > 0 ? `${shown.join(',')},+${hidden}` : shown.join(',')
@@ -842,13 +833,16 @@ router.post('/completions', async (ctx: Context) => {
     // 这不是「路由没有模型」，等一会儿池子里就重新有人。报 503 会让客户端把它当
     // 配置问题、且不重试；`429 + Retry-After` 才是这件事的形状（客户端据此退避，
     // 退避期间不产生任何上游调用 —— 候选在选号阶段就被剔掉了）。
+    // 这一行的 auto 段与成功行同源（`autoLogRecord`）：`route` + `chainLength: 0` +
+    // `skipped` 一起回答「为什么一个候选都没有」。客户端只会转述一句 503，
+    // 面板上没有这一段就再也查不回来了。
+    const refusalAuto = autoLogRecord(autoDecision, 0, [], null)
     const transient = autoDecision.transientUnavailable
     if (transient) {
-      ctx.set('Retry-After', String(transient.retryAfterSeconds))
-      ctx.status = 429
-      ctx.body = {
+      const message = `All candidates for route '${autoDecision.routeName}' are temporarily unavailable (${describeTransientCause(transient.cause)}); retry in ${transient.retryAfterSeconds}s`
+      const body = {
         error: {
-          message: `All candidates for route '${autoDecision.routeName}' are temporarily unavailable (${describeTransientCause(transient.cause)}); retry in ${transient.retryAfterSeconds}s`,
+          message,
           type: 'rate_limit_error',
           param: null,
           code: 'model_temporarily_unavailable',
@@ -859,19 +853,58 @@ router.post('/completions', async (ctx: Context) => {
           },
         },
       }
+      ctx.set('Retry-After', String(transient.retryAfterSeconds))
+      ctx.status = 429
+      ctx.body = body
+      const refused = {
+        ...selectionRefusalEntry(ctx, {
+          statusCode: 429,
+          code: 'model_temporarily_unavailable',
+          type: 'rate_limit_error',
+          message,
+          body,
+          requestId,
+          client,
+        }),
+        ...(refusalAuto === undefined ? {} : { auto: refusalAuto }),
+      }
+      storeManager.addRequestLog(refused)
+      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
       return
     }
-    ctx.status = 503
-    ctx.body = {
+    // 空池而没有 `missing` 时，跳过清单是唯一线索（整池都在冷却/目录未命中里时
+    // 一个能力名都写不出来）。消息仍保持既有那一句，客户端按它分支。
+    const message = `No available model for route '${autoDecision.routeName}'${autoDecision.profile.needsVision ? ' (vision required)' : ''}`
+    const body = {
       error: {
         // 带上路由名（多条路由都可能报这个错，客户端要能看出是哪条没选出候选）
-        message: `No available model for route '${autoDecision.routeName}'${autoDecision.profile.needsVision ? ' (vision required)' : ''}`,
+        message,
         type: 'service_unavailable_error',
         param: null,
         code: 'no_available_model',
-        details: autoDecision.missing.length > 0 ? { missing: autoDecision.missing } : undefined,
+        details: autoDecision.missing.length > 0
+          ? { missing: autoDecision.missing }
+          : autoDecision.skipped.length > 0
+            ? { skipped: autoDecision.skipped.slice(0, AUTO_SKIPPED_REPORT_LIMIT) }
+            : undefined,
       },
     }
+    ctx.status = 503
+    ctx.body = body
+    const refused = {
+      ...selectionRefusalEntry(ctx, {
+        statusCode: 503,
+        code: 'no_available_model',
+        type: 'service_unavailable_error',
+        message,
+        body,
+        requestId,
+        client,
+      }),
+      ...(refusalAuto === undefined ? {} : { auto: refusalAuto }),
+    }
+    storeManager.addRequestLog(refused)
+    storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
     return
   }
 

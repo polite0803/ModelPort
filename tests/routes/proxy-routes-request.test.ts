@@ -246,6 +246,17 @@ test('A/请求级：池策略把候选剔空 → 503 点名该路由，且带 X-
   assert.equal(response.headers['x-modelport-auto-prefer'], undefined)
   assert.equal(response.headers['x-modelport-auto-reason'], undefined)
   assert.equal(response.headers['x-modelport-auto-attempts'], undefined)
+
+  // 空池这一笔到不了任何供应商，此行若不自己写就一行都没有：客户端只会转述一句话，
+  // 而面板上「这条路由从没失败过」会把排障引向错误的方向。
+  const row = sm.getRequestLogs().find((entry: Record<string, any>) => entry.requestId === response.headers['x-request-id'])
+  assert.ok(row, '空池的 503 必须有请求日志行，且 requestId 与响应头对得上')
+  assert.equal(row.statusCode, 503)
+  assert.equal(row.errorCode, 'no_available_model')
+  assert.equal(row.errorType, 'service_unavailable_error')
+  // `auto` 段与成功行同源：链长 0 才是「池子真的空」的读数，客户端那句 503 有了对照。
+  assert.equal(row.auto.route, 'fast')
+  assert.equal(row.auto.chainLength, 0)
 })
 
 test('A/请求级：同一请求体，把池策略清空后立刻真的转发（代理没重启过）', async () => {

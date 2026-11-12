@@ -1392,6 +1392,18 @@ Three prunes could empty it, and none of them is a configuration fact:
 Config-emptied pools (`pool_strategy`, `manual_filter`) and capability mismatches keep the 503 +
 `details.missing`: those are the two cases where the user really does have to change something.
 
+**A refused selection leaves a row.** Neither empty-pool answer (429 or 503) reaches a provider, and
+until 2026-11-13 neither wrote anything: a client quoting one line of 503 was the whole evidence, and
+the log panel showed no failure at all while the retained window held zero rows for that class. Both
+branches now write a row through `selectionRefusalEntry` (`rejectionLog.ts`) carrying the `requestId`
+the response already sets, `errorCode` / `errorType`, and the **same `auto` block a served row gets**
+(`route`, `chainLength: 0`, `skipped` / `skippedMore`, `modelScope`) - `autoLogRecord` remains the one
+authority for that block, so the refusal row cannot drift from the served row. The 503 body also
+carries `details.skipped` when `missing` is empty: a pool emptied by prunes that name no capability
+has no other explanation, and `X-ModelPort-Auto-Skipped` (capped at `AUTO_SKIPPED_REPORT_LIMIT` = 8,
+now folded identically on the completions entry) is invisible to clients that only quote the message.
+Rows for refusals count in `recordRequestInStats` exactly as the `route_disabled` row already did.
+
 Tests: `tests/proxy/transient-empty-pool.test.ts` (an exhaustion mark's `until` becomes `Retry-After`;
 a daily limit reports `daily_limit` and the account re-enters the pool once its day key rolls over),
 `tests/routes/transient-empty-pool-http.test.ts` (both entries answer 429 + `Retry-After` +

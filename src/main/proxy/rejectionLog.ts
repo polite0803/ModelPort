@@ -55,31 +55,75 @@ export function requestedModelOf(body: unknown): string {
  * refusal shares one format and one stats path. Kept pure (no store import) so
  * `node --test` can exercise it without an Electron runtime.
  */
+/** The slice of a Koa context these rows read; spelled out so tests can pass a literal. */
+export interface RefusalLogContext {
+  method: string
+  path: string
+  state?: { startedAt?: unknown }
+  request?: { body?: unknown }
+  get?: (name: string) => string
+}
+
 export function rejectionEntryFromContext(
-  ctx: {
-    method: string
-    path: string
-    state?: { startedAt?: unknown }
-    request?: { body?: unknown }
-    get?: (name: string) => string
-  },
+  ctx: RefusalLogContext,
   statusCode: number,
   code: string,
   message: string,
+  /** The id this response already carries (`X-Request-Id`); a row without it cannot be joined. */
+  requestId?: string,
 ): Omit<RequestLogEntry, 'id'> {
   const startedAt = typeof ctx.state?.startedAt === 'number' ? ctx.state.startedAt : Date.now()
 
-  return buildRejectionLogEntry({
-    method: ctx.method,
-    path: ctx.path,
-    statusCode,
-    code,
-    message,
-    startedAt,
-    now: Date.now(),
-    model: requestedModelOf(ctx.request?.body),
-    ...(typeof ctx.get === 'function' ? { userAgent: ctx.get('user-agent') } : {}),
-  })
+  return {
+    ...buildRejectionLogEntry({
+      method: ctx.method,
+      path: ctx.path,
+      statusCode,
+      code,
+      message,
+      startedAt,
+      now: Date.now(),
+      model: requestedModelOf(ctx.request?.body),
+      ...(typeof ctx.get === 'function' ? { userAgent: ctx.get('user-agent') } : {}),
+    }),
+    ...(requestId === undefined ? {} : { requestId }),
+  }
+}
+
+/**
+ * The row for a request the **router** refused: the pool produced zero candidates
+ * (503 `no_available_model`) or only candidates that reset on their own (429
+ * `model_temporarily_unavailable`). Both answer before any provider is called, so
+ * nothing downstream writes a row - and the retained log window then holds no
+ * trace of the failure the client quotes back at us. That is how a live
+ * `503 No available model for route 'codex-deepseek'` ended up with zero rows to
+ * explain it: the message named a route, the panel showed nothing.
+ *
+ * The body is stored verbatim so the console can show the same `details` the
+ * client received, instead of making the reader infer the branch from prose.
+ */
+export function selectionRefusalEntry(
+  ctx: RefusalLogContext,
+  input: {
+    statusCode: number
+    code: string
+    /** The `error.type` of the body; the log panel filters on it. */
+    type: string
+    message: string
+    /** Exactly what was written to the client. */
+    body: unknown
+    requestId: string
+    /** `identifyClientByUserAgent`'s record, not the raw UA string. */
+    client: RequestLogEntry['client']
+  },
+): Omit<RequestLogEntry, 'id'> {
+  return {
+    ...rejectionEntryFromContext(ctx, input.statusCode, input.code, input.message, input.requestId),
+    ...(input.client === undefined ? {} : { client: input.client }),
+    errorType: input.type,
+    errorCode: input.code,
+    responseBody: JSON.stringify(input.body),
+  }
 }
 
 /**

@@ -11,12 +11,12 @@ import { requestForwarder } from '../forwarder'
 import { streamHandler } from '../stream'
 import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
-import { autoRouter, describeTransientCause } from '../autoRouter'
+import { autoRouter, AUTO_SKIPPED_REPORT_LIMIT, describeTransientCause } from '../autoRouter'
 import type { AutoCandidate } from '../autoRouter'
 import type { AccountSelection, ForwardResult } from '../types'
 import { storeManager } from '../../store/store'
 import { resolveRouteRequest, routePoolBreakMessage } from '../../store/modelRoutes'
-import { rejectionEntryFromContext } from '../rejectionLog'
+import { rejectionEntryFromContext, selectionRefusalEntry } from '../rejectionLog'
 import { createTextCompletionChunkTransform, toTextCompletion } from '../utils/textCompletion'
 import { routeHeaderValue, toHeaderValue } from '../utils/headerValue'
 import { clientHeaderValue, identifyClientByUserAgent } from '../../../shared/clientProfile'
@@ -161,7 +161,7 @@ router.post('/completions', async (ctx: Context) => {
         code: 'route_disabled',
       },
     }
-    const rejected = rejectionEntryFromContext(ctx, 404, 'route_disabled', disabledMessage)
+    const rejected = rejectionEntryFromContext(ctx, 404, 'route_disabled', disabledMessage, requestId)
     rejected.client = client
     storeManager.addRequestLog(rejected)
     storeManager.recordRequestInStats(false, rejected.latency, rejected.model || undefined)
@@ -180,7 +180,7 @@ router.post('/completions', async (ctx: Context) => {
         code: 'route_reference_broken',
       },
     }
-    const rejected = rejectionEntryFromContext(ctx, 404, 'route_reference_broken', breakMessage)
+    const rejected = rejectionEntryFromContext(ctx, 404, 'route_reference_broken', breakMessage, requestId)
     rejected.client = client
     storeManager.addRequestLog(rejected)
     storeManager.recordRequestInStats(false, rejected.latency, rejected.model || undefined)
@@ -232,9 +232,14 @@ router.post('/completions', async (ctx: Context) => {
 
   const firstCandidate = autoDecision?.candidates[0]
 
-  // 跳过清单透出（与 chat 路由同因）：候选被前置剔除不能静默消失，503 也带得上
+  // 跳过清单透出（与 chat 路由同因同形）：候选被前置剔除不能静默消失，503 也带得上。
+// 条数与折叠规则跟 chat 那条头一致，否则同一个池子在两条入口上读到的解释不一样长。
   if (autoDecision && autoDecision.skipped.length > 0) {
-    ctx.set('X-ModelPort-Auto-Skipped', toHeaderValue(autoDecision.skipped.join(',')))
+    const shown = autoDecision.skipped.slice(0, AUTO_SKIPPED_REPORT_LIMIT)
+    const hidden = autoDecision.skipped.length - shown.length
+    ctx.set('X-ModelPort-Auto-Skipped', toHeaderValue(
+      hidden > 0 ? `${shown.join(',')},+${hidden}` : shown.join(',')
+    ))
   }
 
   // 本轮真实服务者的窗口（判据与 chat 路由同一处：只承诺过了来源闸门的数，没把握就不设头）
@@ -244,13 +249,26 @@ router.post('/completions', async (ctx: Context) => {
 
   if (autoDecision && !firstCandidate) {
     // 判据与 chat 路由同源：瞬时空池报 429 + `Retry-After`，配置筛空才报 503。
+    // 空池行的 `auto` 段也要有：`chainLength: 0` + `skipped` 是「为什么没有候选」的唯一读数，
+    // 而这一笔没有任何上游往返，别处不会替它写。
+    const refusalAuto = {
+      route: autoDecision.routeName,
+      prefer: autoDecision.prefer,
+      reason: autoDecision.reason,
+      attempts: 0,
+      candidates: [],
+      chainLength: 0,
+      ...(autoDecision.skipped.length > 0
+        ? { skipped: autoDecision.skipped.slice(0, AUTO_SKIPPED_REPORT_LIMIT) }
+        : {}),
+      ...(autoDecision.modelScope === undefined ? {} : { modelScope: autoDecision.modelScope }),
+    }
     const transient = autoDecision.transientUnavailable
     if (transient) {
-      ctx.set('Retry-After', String(transient.retryAfterSeconds))
-      ctx.status = 429
-      ctx.body = {
+      const message = `All candidates for route '${autoDecision.routeName}' are temporarily unavailable (${describeTransientCause(transient.cause)}); retry in ${transient.retryAfterSeconds}s`
+      const body = {
         error: {
-          message: `All candidates for route '${autoDecision.routeName}' are temporarily unavailable (${describeTransientCause(transient.cause)}); retry in ${transient.retryAfterSeconds}s`,
+          message,
           type: 'rate_limit_error',
           code: 'model_temporarily_unavailable',
           details: {
@@ -260,17 +278,56 @@ router.post('/completions', async (ctx: Context) => {
           },
         },
       }
+      ctx.set('Retry-After', String(transient.retryAfterSeconds))
+      ctx.status = 429
+      ctx.body = body
+      const refused = {
+        ...selectionRefusalEntry(ctx, {
+          statusCode: 429,
+          code: 'model_temporarily_unavailable',
+          type: 'rate_limit_error',
+          message,
+          body,
+          requestId,
+          client,
+        }),
+        auto: refusalAuto,
+      }
+      storeManager.addRequestLog(refused)
+      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
       return
     }
-    ctx.status = 503
-    ctx.body = {
+    const message = `No available model for route '${autoDecision.routeName}'`
+    const body = {
       error: {
         // 带上路由名：多条路由都可能报这个错，客户端要能看出是哪条没选出候选
-        message: `No available model for route '${autoDecision.routeName}'`,
+        message,
         type: 'service_unavailable_error',
         code: 'no_available_model',
+        // 与 chat 路由同源：没有 `missing` 时跳过清单是唯一线索
+        details: autoDecision.missing.length > 0
+          ? { missing: autoDecision.missing }
+          : autoDecision.skipped.length > 0
+            ? { skipped: autoDecision.skipped.slice(0, AUTO_SKIPPED_REPORT_LIMIT) }
+            : undefined,
       },
     }
+    ctx.status = 503
+    ctx.body = body
+    const refused = {
+      ...selectionRefusalEntry(ctx, {
+        statusCode: 503,
+        code: 'no_available_model',
+        type: 'service_unavailable_error',
+        message,
+        body,
+        requestId,
+        client,
+      }),
+      auto: refusalAuto,
+    }
+    storeManager.addRequestLog(refused)
+    storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
     return
   }
 

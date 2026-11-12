@@ -100,6 +100,18 @@ test('全部账号当日打满：两条入口都 429 + Retry-After，不再报 5
     assert.ok(Number.isInteger(retryAfter) && retryAfter >= 1, `${path} 必须带整数 Retry-After`)
     assert.equal(retryAfter, response.json.error.details.retry_after_seconds, path)
     assert.match(String(response.json.error.message), /temporarily unavailable/, path)
+
+    // 本地拒绝也要留痕：这一笔没有任何上游往返，不写行就等于「面板上没有流量」。
+    const row = sm.getRequestLogs().find(entry => entry.requestId === response.headers['x-request-id'])
+    assert.ok(row, `${path} 的 429 必须有请求日志行`)
+    assert.equal(row.statusCode, 429, path)
+    assert.equal(row.errorCode, 'model_temporarily_unavailable', path)
+    assert.equal(row.errorType, 'rate_limit_error', path)
+    assert.equal(row.auto.chainLength, 0, `${path} 的行要说明池子是空的`)
+    assert.ok(
+      row.auto.skipped.some((marker: string) => marker.endsWith(':daily_limit')),
+      `${path} 的行里要存成因，实际：${JSON.stringify(row.auto.skipped)}`
+    )
   }
 })
 

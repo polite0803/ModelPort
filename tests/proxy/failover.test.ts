@@ -593,11 +593,12 @@ test('chat 路由必须把跳过清单写进 X-ModelPort-Auto-Skipped（源码�
     'rate-limit pre-check drops must record the reset ETA as the skip reason',
   )
   // 头必须在任何 return 之前写（候选被剔光的 503 也带得上解释），并且只透前
-  // `AUTO_SKIPPED_HEADER_LIMIT` 条、其余折成 `+N`：候选链不再裁短之后，一条整渠道
-  // 限流的链能把几十条原因塞进同一个每请求都发的响应头。
+  // `AUTO_SKIPPED_REPORT_LIMIT` 条、其余折成 `+N`：候选链不再裁短之后，一条整渠道
+  // 限流的链能把几十条原因塞进同一个每请求都发的响应头。上限与错误体的
+  // `details.skipped` 共用同一个常量，头与体不会各说各的。
   assert.match(
     chatRouteSource,
-    /const shown = autoDecision\.skipped\.slice\(0, AUTO_SKIPPED_HEADER_LIMIT\)/,
+    /const shown = autoDecision\.skipped\.slice\(0, AUTO_SKIPPED_REPORT_LIMIT\)/,
     'the skipped list must be capped before it goes into a header',
   )
   assert.match(
