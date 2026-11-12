@@ -82,7 +82,28 @@ const declaredIds = readFileSync('src/main/providers/aggregate/registry.ts', 'ut
   .filter(line => /^ {4}"id": "/.test(line))
   .map(line => line.match(/^ {4}"id": "([^"]+)"/)[1])
 
-const missing = declaredIds.filter(id => !rows.has(id))
+/**
+ * 目录里有、但**从未取过额度回执**的条目：它们照常出现在聚合页，额度卡显示"未录入"。
+ *
+ * 不给它们发一条 `quota: {}` 的回执：那会被归一成 `undocumented`，也就是替厂商宣称
+ * "官方没有公布"——而我们根本还没去读过它的额度页。"没查" 和 "查了没有" 是两件事。
+ * 名单里的 id 必须仍在目录里，否则本条失效就等于悄悄放宽了门。
+ */
+const NO_QUOTA_RECEIPT = {
+  ppio: '2026-11-10 只核实了端点与模型清单，额度页未取证',
+  huawei_maas: '2026-11-10 只核实了端点，额度页未取证',
+  infini_ai: '2026-11-10 只核实了端点，额度页未取证',
+  nous_portal: '2026-11-12 只核实了端点与匿名档不可达，额度页未取证',
+}
+
+for (const id of Object.keys(NO_QUOTA_RECEIPT)) {
+  if (!declaredIds.includes(id)) {
+    console.error(`NO_QUOTA_RECEIPT 里的 ${id} 不在目录里，删除该豁免`)
+    process.exit(1)
+  }
+}
+
+const missing = declaredIds.filter(id => !rows.has(id) && !(id in NO_QUOTA_RECEIPT))
 if (missing.length > 0) {
   console.error(`缺 ${missing.length} 家的取证回执：${missing.join(', ')}`)
   process.exit(1)

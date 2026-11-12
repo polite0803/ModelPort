@@ -4,6 +4,7 @@ import {
   BarChart3,
   ChevronDown,
   ChevronRight,
+  CircleAlert,
   Coins,
   KeyRound,
   Loader2,
@@ -35,6 +36,10 @@ import type {
   AggregateCreditSnapshot,
 } from '../../../../shared/aggregateCredit'
 import { CREDIT_SNAPSHOT_TTL_MS, creditSnapshotLive } from '../../../../shared/aggregateCredit'
+import type {
+  AggregateQuotaExhaustionReason,
+  AggregateQuotaExhaustionRecord,
+} from '../../../../shared/aggregateQuotaExhaustion'
 import type {
   AggregateCostClass,
   AggregateCostSignal as AggregateModelCostSignal,
@@ -348,7 +353,9 @@ export function AggregateDetailPanel(props: AggregateDetailProps) {
             hasApiKey={state.hasApiKey}
             usage={quotaUsage}
             credit={detail.credit}
+            exhaustions={detail.quotaExhaustions}
             onRefresh={onRefresh}
+            onApplyDetail={onApplyDetail}
           />
           <ModelsCard
             entry={entry}
@@ -375,8 +382,12 @@ function SetupPanel(props: {
 
   const [baseUrl, setBaseUrl] = useState(entry.baseUrl ?? '')
   const [apiKeys, setApiKeys] = useState('')
+  const [vars, setVars] = useState<Record<string, string>>({})
   const [models, setModels] = useState(entry.models.map(model => model.id).join('\n'))
   const [saving, setSaving] = useState(false)
+
+  const pathVars = entry.pathVars ?? []
+  const varsReady = pathVars.every(variable => Boolean((vars[variable.name] ?? '').trim()))
 
   const handleSave = async () => {
     setSaving(true)
@@ -387,6 +398,7 @@ function SetupPanel(props: {
         .split(/[\n,]/)
         .map(key => key.trim())
         .filter(Boolean),
+      ...(pathVars.length > 0 ? { pathVars: vars } : {}),
       models: models
         .split(/[\n,]/)
         .map(model => model.trim())
@@ -435,6 +447,20 @@ function SetupPanel(props: {
           </div>
         )}
 
+        {pathVars.map(variable => (
+          <div key={variable.name} className="space-y-1.5">
+            <Label htmlFor={`setup-var-${variable.name}`}>{variable.label}</Label>
+            <Input
+              id={`setup-var-${variable.name}`}
+              className="font-mono text-xs"
+              value={vars[variable.name] ?? ''}
+              placeholder={variable.label}
+              onChange={event => setVars(previous => ({ ...previous, [variable.name]: event.target.value }))}
+            />
+            {variable.helpText && <p className="text-xs text-muted-foreground">{variable.helpText}</p>}
+          </div>
+        ))}
+
         <div className="space-y-1.5">
           <Label htmlFor="setup-models">{t('aggregate.dialog.models')}</Label>
           <Textarea
@@ -448,7 +474,7 @@ function SetupPanel(props: {
         </div>
 
         <div className="flex justify-end">
-          <Button onClick={() => void handleSave()} disabled={saving}>
+          <Button onClick={() => void handleSave()} disabled={saving || !varsReady}>
             {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
             {t('aggregate.manage.setup.submit')}
           </Button>
@@ -471,6 +497,7 @@ function KeysCard(props: {
   const { entry, keys, reasonText, onApplyDetail, onRefresh } = props
 
   const [newKey, setNewKey] = useState('')
+  const [newVars, setNewVars] = useState<Record<string, string>>({})
   const [adding, setAdding] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
 
@@ -485,11 +512,14 @@ function KeysCard(props: {
     )
   }
 
+  const pathVars = entry.pathVars ?? []
+  const varsReady = pathVars.every(variable => Boolean((newVars[variable.name] ?? '').trim()))
+
   const handleAdd = async () => {
     const key = newKey.trim()
-    if (!key) return
+    if (!key || !varsReady) return
     setAdding(true)
-    const result = await window.electronAPI.aggregate.addKey(entry.id, key)
+    const result = await window.electronAPI.aggregate.addKey(entry.id, key, newVars)
     setAdding(false)
     if (!result.success) {
       toast({
@@ -500,6 +530,7 @@ function KeysCard(props: {
       return
     }
     setNewKey('')
+    setNewVars({})
     if (result.detail) onApplyDetail(result.detail)
     toast({ title: t('aggregate.manage.keys.added') })
     await onRefresh()
@@ -564,6 +595,18 @@ function KeysCard(props: {
             <div key={key.id} className="flex flex-wrap items-center gap-2 rounded-md border px-3 py-2">
               <KeyRound className="h-4 w-4 shrink-0 text-muted-foreground" />
               <span className="font-mono text-xs">{key.maskedKey}</span>
+              {pathVars.map(variable => {
+                const value = key.pathVars?.[variable.name]
+                return value ? (
+                  <span key={variable.name} className="font-mono text-[11px] text-muted-foreground">
+                    {variable.label}: {value}
+                  </span>
+                ) : (
+                  <span key={variable.name} className="text-[11px] text-destructive">
+                    {t('aggregate.manage.keys.missingVar', { label: variable.label })}
+                  </span>
+                )
+              })}
               <Badge variant={key.status === 'active' ? 'default' : key.status === 'error' ? 'destructive' : 'outline'}>
                 {key.status === 'active'
                   ? t('common.enabled')
@@ -611,6 +654,21 @@ function KeysCard(props: {
         </div>
 
         <div className="space-y-1.5">
+          {pathVars.map(variable => (
+            <div key={variable.name} className="space-y-1">
+              <Input
+                className="font-mono text-xs"
+                placeholder={variable.label}
+                value={newVars[variable.name] ?? ''}
+                disabled={adding}
+                onChange={event =>
+                  setNewVars(previous => ({ ...previous, [variable.name]: event.target.value }))}
+              />
+              {variable.helpText && (
+                <p className="text-xs text-muted-foreground">{variable.helpText}</p>
+              )}
+            </div>
+          ))}
           <div className="flex gap-2">
             <Input
               className="font-mono text-xs"
@@ -626,7 +684,7 @@ function KeysCard(props: {
                 }
               }}
             />
-            <Button onClick={() => void handleAdd()} disabled={adding || !newKey.trim()}>
+            <Button onClick={() => void handleAdd()} disabled={adding || !newKey.trim() || !varsReady}>
               {adding ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Plus className="mr-1.5 h-4 w-4" />}
               {t('aggregate.manage.keys.add')}
             </Button>
@@ -716,6 +774,13 @@ function EndpointCard(props: {
             {entry.wire === 'anthropic-messages' ? '/messages' : '/chat/completions'}
           </span>
         </p>
+        {(entry.pathVars?.length ?? 0) > 0 && (
+          <p className="text-xs text-muted-foreground">
+            {t('aggregate.manage.endpoint.pathVars', {
+              names: (entry.pathVars ?? []).map(variable => `{${variable.name}}`).join(', '),
+            })}
+          </p>
+        )}
       </CardContent>
     </Card>
   )
@@ -782,17 +847,32 @@ function creditTimeOf(asOf: string): string {
   return Number.isNaN(at) ? asOf : new Date(at).toLocaleString()
 }
 
-/** 免费额度卡：官方上限 / 本应用计量 / 官方口径说明，加一行手点出来的实时余额。 */
+/**
+ * 三种原因各有各的用户动作，文案也分开：合并成"额度不足"会让欠费的人去等复位。
+ */
+const EXHAUSTION_REASON_KEY: Record<AggregateQuotaExhaustionReason, string> = {
+  'quota-exhausted': 'quotaExhausted',
+  'balance-insufficient': 'balanceInsufficient',
+  arrears: 'arrears',
+}
+
+/**
+ * 免费额度卡：官方上限 / 本应用计量 / 官方口径说明，加一行手点出来的实时余额，
+ * 再加一行「上游亲口说没额度」的现场记录。三者并列不合并 —— 各自的证据来源不同。
+ */
 function QuotaCard(props: {
   entry: AggregateEntry
   hasApiKey: boolean
   usage?: AggregateQuotaUsage
   credit?: AggregateCreditSnapshot
+  exhaustions?: AggregateQuotaExhaustionRecord[]
   onRefresh: () => Promise<void>
+  onApplyDetail: (detail: AggregateDetail) => void
 }) {
   const { t } = useTranslation()
-  const { entry, hasApiKey, usage, credit, onRefresh } = props
+  const { entry, hasApiKey, usage, credit, exhaustions, onRefresh, onApplyDetail } = props
   const [probing, setProbing] = useState(false)
+  const [clearing, setClearing] = useState(false)
   const [probe, setProbe] = useState<AggregateCreditQueryResult | null>(null)
 
   const view = quotaViewOf(entry, { hasApiKey, usage })
@@ -817,6 +897,18 @@ function QuotaCard(props: {
       await onRefresh()
     } finally {
       setProbing(false)
+    }
+  }
+
+  /** 用户点「清除标识」= 明确裁定"额度已经回来了"。整家清空，不走逐条确认。 */
+  const handleClearExhaustions = async () => {
+    setClearing(true)
+    try {
+      const result = await window.electronAPI.aggregate.clearQuotaExhaustions(entry.id)
+      if (result.detail) onApplyDetail(result.detail)
+      await onRefresh()
+    } finally {
+      setClearing(false)
     }
   }
 
@@ -981,6 +1073,61 @@ function QuotaCard(props: {
               {t('aggregate.manage.credit.endpoint', { path: probeDeclaration.path, doc: probeDeclaration.docUrl })}
               {` ${t('aggregate.quotaSource', { date: probeDeclaration.asOf })}`}
             </p>
+          </div>
+        )}
+
+        {/*
+          第四层：上游亲口拒过的现场记录。它与上面的五态徽章、实时余额**并列不合并**——
+          上面两个是"我们算/我们问"，这里是"上游说的原话"，揉成一个数就是伪造一个
+          双方都没给的结论。逐 `(账号, 模型)` 一行，过期行不会走到这里。
+        */}
+        {exhaustions !== undefined && exhaustions.length > 0 && (
+          <div className="space-y-1.5 border-t pt-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="flex items-center gap-1.5 text-xs font-medium text-destructive">
+                <CircleAlert className="h-3.5 w-3.5" />
+                {t('aggregate.manage.exhaustion.title', { count: exhaustions.length })}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={clearing}
+                onClick={() => void handleClearExhaustions()}
+              >
+                {clearing ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : null}
+                {t('aggregate.manage.exhaustion.clear')}
+              </Button>
+            </div>
+            {exhaustions.map(record => (
+              <div
+                key={`${record.accountId}\u0000${record.modelId}`}
+                className="space-y-0.5 rounded-md border border-destructive/40 bg-destructive/5 px-3 py-1.5 text-xs"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-medium">
+                    {t('aggregate.manage.exhaustion.scope', {
+                      account: record.accountName ?? record.accountId,
+                      model: record.modelId,
+                    })}
+                  </span>
+                  <Badge variant="outline" className="border-destructive/50 text-destructive">
+                    {t(`aggregate.manage.exhaustion.reason.${EXHAUSTION_REASON_KEY[record.reason]}`)}
+                  </Badge>
+                </div>
+                {record.message && (
+                  <p className="break-words text-muted-foreground" title={record.message}>
+                    {t('aggregate.manage.exhaustion.upstreamSays', { message: record.message })}
+                  </p>
+                )}
+                <p className="text-[11px] text-muted-foreground">
+                  {t('aggregate.manage.exhaustion.at', { time: creditTimeOf(record.asOf) })}
+                  {record.until
+                    ? ` · ${t('aggregate.manage.exhaustion.until', { time: creditTimeOf(record.until) })}`
+                    : ''}
+                  {record.status === undefined ? '' : ` · HTTP ${record.status}`}
+                </p>
+              </div>
+            ))}
           </div>
         )}
       </CardContent>

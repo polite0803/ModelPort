@@ -214,5 +214,7 @@ test('the selection-scoped gate context reads the store once and refreshes per s
   // 用户把读数改成 16 分钟前：旧上下文仍是它选号那一刻的读数，新上下文重新读盘。
   harness.storeManager.setAggregateCreditSnapshot('open_router', exhaustedRow(Date.now() - 16 * 60_000))
   assert.equal(gate.aggregateHeadroom('open_router', 'm-gate', context), -1)
-  assert.equal(gate.aggregateHeadroom('open_router', 'm-gate', gate.createQuotaGateContext()), 0.5)
+  // 本条要证的是"新上下文重新读盘"，不是某个数：与旧算法就地重算的值对拍，
+  // 免得写死 0.5 后被分钟桶边界绊倒（rpm 窗口按整分钟取桶，跨桶时这一格会变成 0.8）。
+  assert.equal(gate.aggregateHeadroom('open_router', 'm-gate', gate.createQuotaGateContext()), legacyHeadroom('m-gate'))
 })

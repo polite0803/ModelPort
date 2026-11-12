@@ -31,6 +31,7 @@ import { isAlreadyCompressed } from './ccr/markers.ts'
 import { crushJsonArray, crushJsonDocument } from './compressors/smartCrusher.ts'
 import { compressLog } from './compressors/logCompressor.ts'
 import { compressSearch } from './compressors/searchCompressor.ts'
+import { foldCrossTurnDuplicates } from './fold.ts'
 import {
   pickLiveZone,
   readLiveZoneText,
@@ -71,6 +72,13 @@ export interface ApplyCompressionInput {
    * assertion into "compression refused".
    */
   stash?: StashFunction
+  /**
+   * Fold history messages that repeat an earlier one (`fold.ts`). Callers pass
+   * the gate's verdict, never the raw switch: enabling this rewrites bytes the
+   * prompt cache already holds, so it is only worth it on multi-turn traffic
+   * whose duplication was actually measured.
+   */
+  fold?: boolean
 }
 
 export interface ApplyCompressionOutcome {
@@ -188,6 +196,14 @@ function compressTarget(
   }
 }
 
+/** Index of the newest assistant turn, or -1. Messages before it are history. */
+function lastAssistantIndex(messages: ChatMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === 'assistant') return index
+  }
+  return -1
+}
+
 /**
  * Compress the live zone of one request.
  *
@@ -207,13 +223,31 @@ export function applyCompression(input: ApplyCompressionInput): ApplyCompression
     return skipReport('multiple_choices', messages)
   }
 
-  const targets = pickLiveZone(messages)
-  if (targets.length === 0) return skipReport('no_live_zone', messages)
-
   // Production stashes into the on-disk CCR store; tests inject a fake so a
   // locked-down home directory cannot turn every case into "compression refused".
   const stash: StashFunction =
     input.stash ?? ((original, idLength) => getCcrStore().put(original, idLength))
+
+  // History folding runs first and only before the newest assistant turn: the
+  // messages after it are this turn's input, which live-zone compression owns.
+  let nextMessages = messages
+  let foldedMessages = 0
+  let foldedChars = 0
+  let foldedHashes: string[] = []
+
+  if (input.fold) {
+    const horizon = lastAssistantIndex(messages)
+    if (horizon > 0) {
+      const folded = foldCrossTurnDuplicates(messages, { stash, liveZoneFrom: horizon })
+      nextMessages = folded.messages
+      foldedMessages = folded.foldedMessages
+      foldedChars = folded.foldedChars
+      foldedHashes = folded.hashes
+    }
+  }
+
+  const targets = pickLiveZone(nextMessages)
+  if (targets.length === 0 && foldedMessages === 0) return skipReport('no_live_zone', messages)
 
   const deadline = Date.now() + COMPRESSION_TIMEOUT_MS
   const applied: string[] = []
@@ -221,7 +255,6 @@ export function applyCompression(input: ApplyCompressionInput): ApplyCompression
   const candidates: CompressionCandidate[] = []
   let tokensBefore = 0
   let tokensAfter = 0
-  let nextMessages = messages
   let lastSkip: CompressionSkipReason | undefined
 
   for (const target of targets) {
@@ -269,9 +302,16 @@ export function applyCompression(input: ApplyCompressionInput): ApplyCompression
     tokensAfter += gate.tokensAfter
   }
 
-  if (applied.length === 0) {
+  if (applied.length === 0 && foldedMessages === 0) {
     return skipReport(lastSkip ?? 'no_live_zone', messages, candidates)
   }
+
+  // Folding is a rewrite too, and its markers need the same explanation the
+  // compressed ones get: a fold-only turn reports `applied: ['fold']` so the
+  // forwarder injects the protocol block (the pointer would otherwise arrive
+  // unannounced) and the response header names the change. Its size is in
+  // `folded.chars`, not in the token ledger below.
+  if (foldedMessages > 0) applied.unshift('fold')
 
   const saved = tokensBefore - tokensAfter
   return {
@@ -284,6 +324,9 @@ export function applyCompression(input: ApplyCompressionInput): ApplyCompression
       ratio: tokensBefore > 0 ? saved / tokensBefore : 0,
       ...(hashes.length > 0 ? { ccrHashes: hashes } : {}),
       ...(candidates.length > 0 ? { candidates } : {}),
+      ...(foldedMessages > 0
+        ? { folded: { messages: foldedMessages, chars: foldedChars, hashes: foldedHashes } }
+        : {}),
     },
   }
 }

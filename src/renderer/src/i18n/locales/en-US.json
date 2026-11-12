@@ -720,6 +720,8 @@
     "noRequestData": "No request data",
     "bodiesNotRecorded": "Bodies not recorded",
     "bodiesNotRecordedHint": "Body logging is off under the current log settings. Turn on \"Persist Bodies\" in Settings › Data Management; only requests made after that will show their content here.",
+    "bodyNotSampled": "This request was not sampled",
+    "bodyNotSampledHint": "Bodies are kept for a share of requests, and this one was not picked. Raise \"Body Sample Rate (%)\" under Settings › Data Management to cover more of them.",
     "noUserInput": "No user input",
     "noError": "No error",
     "tabInfo": "Info",
@@ -829,6 +831,10 @@
     "requestLogIncludeBodiesHelp": "Store request and response bodies in request logs",
     "requestLogMaxBodyChars": "Body Character Limit",
     "requestLogMaxBodyCharsHelp": "Maximum characters persisted per request or response body",
+    "requestLogBodySampleRate": "Body Sample Rate (%)",
+    "requestLogBodySampleRateHelp": "Keep bodies for this share of requests while full body logging is off. The pick is a hash of the request id, so a row never flips between writes.",
+    "requestLogBodyRetentionDays": "Body Retention (days)",
+    "requestLogBodyRetentionDaysHelp": "Bodies older than this are stripped from stored logs; the rows stay. Set to 0 to keep them for the life of the row.",
     "requestLogRedactSensitive": "Redact Sensitive Data",
     "requestLogRedactSensitiveHelp": "Mask tokens, cookies, API keys, and similar secrets before persisting",
     "dataManagement": "Interface Preferences",
@@ -1399,6 +1405,15 @@
     "aggressivenessHint": "Stronger settings keep fewer rows. Error rows, statistical outliers and numeric anomalies are never dropped at any strength.",
     "cacheFirst": "Cache first (skip compression for cache-friendly providers)",
     "cacheFirstHint": "A compressed block is discarded by the next turn's original bytes, so on providers whose cached input is much cheaper than fresh input (DeepSeek, Anthropic) compression usually costs more than it saves. This policy skips it unless a per-provider override says otherwise.",
+    "outputContract": "Output verbosity",
+    "outputContractHint": "Nothing is injected by default. On \"Concise\" or \"Minimal\", a fixed system block is placed before requests that carry tools, asking for fewer words. It turns itself off for a target that has produced degraded turns (looping, empty turn, announcing work it never does) — at that point the evidence is that this model does not follow the instruction.",
+    "outputLevel": {
+      "default": "Default",
+      "concise": "Concise",
+      "minimal": "Minimal"
+    },
+    "foldDuplicates": "Fold repeated history (replace a duplicate message with a retrievable pointer)",
+    "foldDuplicatesHint": "When a whole message matches an earlier one line for line, the later copy becomes a pointer and the original stays retrievable locally. Rewriting history costs one prompt-cache miss, so it only runs when the measurement gate passes: at least 20% duplication, a conclusive log window, and at least 2 more turns expected in the conversation.",
     "level": {
       "conservative": "Conservative",
       "moderate": "Moderate",
@@ -1506,6 +1521,7 @@
     "description": "Standard key-based endpoints and key-less free pools. Add a channel to turn it into a provider; models are exposed as provider/model.",
     "allCategories": "All categories",
     "category": {
+      "plan": "Subscription plan",
       "apikey": "API Key",
       "freeTier": "Free Tier",
       "local": "Local"
@@ -1568,6 +1584,7 @@
       "missing_base_url": "Base URL is required",
       "placeholder_base_url": "Base URL still contains placeholders",
       "invalid_base_url": "Base URL must start with http:// or https://",
+      "missing_endpoint_var": "A required variable in the endpoint template is empty (fill it when adding the key)",
       "missing_api_key": "API key is required",
       "invalid_api_key": "Every stored key was rejected by the endpoint",
       "not_configured": "Add the provider first",
@@ -1613,11 +1630,13 @@
         "valid": "Key works",
         "delete": "Delete",
         "statusError": "Check failed",
+        "missingVar": "{{label}} missing (re-add the same key to fill it)",
         "lastUsed": "Last used {{time}}"
       },
       "endpoint": {
         "title": "Endpoint",
         "chatPath": "Chat path",
+        "pathVars": "{{names}} is filled per key and expanded at request time - do not delete it or hard-code a value",
         "save": "Save endpoint",
         "reset": "Reset to default",
         "saved": "Endpoint saved",
@@ -1662,6 +1681,21 @@
           "not-json": "not JSON",
           "unexpected-shape": "unrecognised shape",
           "network": "network error"
+        }
+      },
+      "exhaustion": {
+        "title": "The upstream itself refused for lack of quota ({{count}})",
+        "clear": "Clear marks",
+        "badge": "Quota out",
+        "badgeTitle": "{{count}} upstream refusal(s) recorded for this entry - that (account, model) is skipped until it expires",
+        "scope": "{{account}} · {{model}}",
+        "upstreamSays": "Upstream said: {{message}}",
+        "at": "refused at {{time}}",
+        "until": "unlocks at {{time}}",
+        "reason": {
+          "quotaExhausted": "Quota exhausted",
+          "balanceInsufficient": "Insufficient balance",
+          "arrears": "Account in arrears"
         }
       },
       "models": {
@@ -1947,6 +1981,25 @@
       "keyRequired": "Enter an API key first, or use “Add an anonymous slot”.",
       "failed": "Could not add the account",
       "misconfigured": "This channel declares no add-account method, so the UI cannot add one."
+    },
+    "proxy": {
+      "button": "Egress proxy",
+      "title": "Egress proxy for {{name}}",
+      "hint": "Applies to this account only, not to other accounts or the global egress; malformed addresses are rejected.",
+      "inputLabel": "Proxy address",
+      "placeholder": "http://127.0.0.1:7897 (socks5://host:port also works)",
+      "direct": "Current: direct (shares the host egress with other slots)",
+      "current": "Current: {{proxy}}",
+      "quotaNote": "The anonymous allowance is counted per source IP: slots on the same exit share one allowance. A different exit adds capacity; a different fingerprint does not.",
+      "test": "Test exit",
+      "testOk": "Exit IP {{ip}}, {{latency}} ms",
+      "testFailed": "Test failed",
+      "save": "Save",
+      "clear": "Clear proxy",
+      "saved": "Egress proxy saved",
+      "cleared": "Direct connection restored",
+      "failed": "Could not save",
+      "inputRequired": "Enter a proxy address first (use “Clear proxy” to go direct)."
     }
   },
   "connect": {

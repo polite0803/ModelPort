@@ -27,6 +27,13 @@ export const DEFAULT_MAX_BODY_CHARS = 200_000
 /** 旧版默认值：升级迁移用它识别「用户从未自定义」的存量配置。 */
 const LEGACY_MAX_BODY_CHARS = 8000
 
+/** 默认不采样：落盘请求体是隐私与磁盘决定，不能靠升级替用户打开。 */
+export const DEFAULT_BODY_SAMPLE_RATE = 0
+/** 一周够攒一份语料，也不至于让 ndjson 被几百 KB 的请求体长期撑住。 */
+export const DEFAULT_BODY_RETENTION_DAYS = 7
+/** 保留窗上限：超过一年的「保留」等于不清理，允许它只会拖慢每次扫描。 */
+const MAX_BODY_RETENTION_DAYS = 365
+
 export function normalizeRequestLogConfig(config?: Partial<RequestLogConfig>): RequestLogConfig {
   const normalized = {
     enabled: true,
@@ -34,6 +41,8 @@ export function normalizeRequestLogConfig(config?: Partial<RequestLogConfig>): R
     includeBodies: false,
     maxBodyChars: DEFAULT_MAX_BODY_CHARS,
     redactSensitiveData: true,
+    bodySampleRate: DEFAULT_BODY_SAMPLE_RATE,
+    bodyRetentionDays: DEFAULT_BODY_RETENTION_DAYS,
     ...config,
   }
   // 存量配置里仍停留在旧默认值的 maxBodyChars 视为「从未自定义」，随升级提到
@@ -42,5 +51,16 @@ export function normalizeRequestLogConfig(config?: Partial<RequestLogConfig>): R
   if (normalized.maxBodyChars === LEGACY_MAX_BODY_CHARS) {
     normalized.maxBodyChars = DEFAULT_MAX_BODY_CHARS
   }
+  // 越界值来自手改 data.json 或旧版本回写。钳到合法区间，而不是拒绝整份配置：
+  // 一个 -1 的采样比不该让日志功能整体失效。
+  normalized.bodySampleRate = clampNumber(normalized.bodySampleRate, DEFAULT_BODY_SAMPLE_RATE, 0, 1)
+  normalized.bodyRetentionDays = Math.round(
+    clampNumber(normalized.bodyRetentionDays, DEFAULT_BODY_RETENTION_DAYS, 0, MAX_BODY_RETENTION_DAYS),
+  )
   return normalized
+}
+
+function clampNumber(value: unknown, fallback: number, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+  return Math.min(max, Math.max(min, value))
 }

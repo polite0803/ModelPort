@@ -38,11 +38,16 @@ export interface Caps {
 export type QuotaWindowBlockReason = 'rpm_exhausted' | 'rpd_exhausted' | 'tpm_exhausted' | 'tpd_exhausted' | 'monthly_exhausted'
 
 /**
- * 消费方看到的完整枚举。`no-credit` 不属于上面任何一个窗口：它是"问上游问回来这把 Key
- * 一分钱不剩"，单位是钱不是 token，所以既没有对应的 `QuotaMetric`、也永不参与
- * `evaluateQuota` 的窗口比较（把美元折进 token 比例是被禁止的）。
+ * 消费方看到的完整枚举。`no-credit` 与 `quota-exhausted` 都不属于上面任何一个窗口：
+ *
+ * - `no-credit`：问上游问回来这把 Key 一分钱不剩，单位是钱不是 token；
+ * - `quota-exhausted`：上游亲口拒了这一笔（额度/余额/欠费），是**现场证据**而不是我们
+ *   从任何一张表里推出来的账。它同样没有对应的 `QuotaMetric`，也永不参与
+ *   `evaluateQuota` 的窗口比较。
+ *
+ * 把美元、上游原话和 token 窗口折成同一个比例是被禁止的：三者是互不可比的计数域。
  */
-export type QuotaBlockReason = QuotaWindowBlockReason | 'no-credit'
+export type QuotaBlockReason = QuotaWindowBlockReason | 'no-credit' | 'quota-exhausted'
 
 export interface QuotaDecision {
   allowed: boolean

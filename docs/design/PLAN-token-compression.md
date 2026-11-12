@@ -4,6 +4,7 @@
 
 > 状态：**P0 + P1 + P2 + P3 + P5 已实现并验证，验收区全部回写**（2026-11-03），P1 已补齐嵌套 JSON 形状；P2 只落地日志和搜索，diff 压缩按评审决策整体不做；P3 的 CCR 存储 + 标记 + 管理 API 取回已落 `tests/compression/ccr-store.test.ts`（18 项验收）。
 > **P4 已先落地其观测前提**：跨轮重复度统计（纯观测，不改写任何字节）。P4 的去重本体经真实流量测判定为**不值得实现**（网关 `192.168.85.131` 实测 `ratio=0.57%` < 5% 阈值，`foldWorthBuilding=false`，`conclusive=false`），维持"未实现即正确结论"状态；裁定台账见 §P4 末。
+> 2026-11-12 后补：同轮内重复折叠本体（`fold.ts`）与输出侧「少说」契约（`gatewayText.ts`）已落地，两者都默认关闭并各自带门（`foldGate.ts` 测量门 / `outputContractGuard.ts` 退化熔断）；D 的**前置条件**（语料 + 免模型判据）已落地，见 §D。
 > 归属声明见 `NOTICE-compression.md`。
 > 参考实现：`https://github.com/headroomlabs-ai/headroom`（Apache-2.0）。下文所有 `path:line` 引用均指该仓库 `main` 分支（2026-10-29 快照）。需要复核时按需重新浅克隆，勿把副本留在本仓库内：
 > `git clone --depth 1 https://github.com/headroomlabs-ai/headroom.git <仓库外路径>`
@@ -539,6 +540,41 @@ X-ModelPort-Compression-Ratio: 0.57
 - [x] 同一 level 连续应用 3 次，消息体字节不变。（`outputSteering.test.ts` "applying the block twice changes nothing the second time"——第二次起返回**同一数组引用**，第 3 次由引用同一性传递必然成立；"the block is byte-stable for a given level" 锁文案定长。2026-11-03 回写）
 - [x] 追加位置在所有已有 system 内容之后（不打断已有缓存断点）。（"the block lands at the tail of the system message, not the front"；"the LAST system message is the one extended"；"only the system message is touched" 其余消息对象同一。2026-11-03 回写）
 - [x] 关闭时请求体逐字节不变。（"level 0 removes the block and restores the original prompt exactly" + "level 0 on a prompt that never had the block is a no-op"（返回同一数组引用）。2026-11-03 回写）
+
+### D — 语义改写的前置条件（2026-11-12）
+
+D 指的是**会改写语义**的两类改动：让第二个模型写摘要替换原文，或在上游看到之前整形工具 schema。它们与 P0–P5 的区别是**没有无损性**——压缩器删的是行，"摘要"换的是意思，单元测试对「意思还在不在」没有发言权。
+
+因此 D 不在 P0–P5 的序列里，它开在一个门槛后面。门槛的前两半已经落地：
+
+**1. 语料（`scripts/compression-eval.mjs capture`）**
+
+从请求日志的 `requestBody` 抽真实请求，写 JSONL。三类丢弃各自计数（没有 body / 不是 JSON / 少于两条消息），不会悄悄缩水；同时打印体积分布与**内容类型覆盖**——一个没有 `source_code` / `build_output` 样本的语料只能判简单的一半。
+
+取数入口有两个（2026-11-12 接上采集口径）：
+
+- `--from-logs ~/.modelport/request-logs/request-logs.ndjson`：**行真正存放的位置**。管理器早已把 `data.json.requestLogs` 迁到这里并把那个键清空，所以只读 `data.json` 会在一台跑了几周的网关上报「0 行」。`--from-data` 现在会在这个键为空时自动改读同目录的 ndjson 并打印 source note。
+- body 的三种来源：`requestLogConfig.includeBodies`（全量）、逐请求 `X-ModelPort-Trace: 1`、`requestLogConfig.bodySampleRate`（哈希 `requestId` 采样）。采样比默认 0——落盘请求体是隐私与磁盘决定，升级不能替用户打开。
+
+语料里存的是**客户端原文**：路由在压缩前记录 body，所以重放是真实测量，不是对已被改写文本再压一次。语料自己的选择口径（全量 / 采样比例 / 保留天数）随 `capture` 一起打印，因为 5% 采样与全量支撑的是不同的覆盖结论。
+
+**2. 免模型判据（`src/main/proxy/compression/evalCorpus.ts`）**
+
+`replay` 把语料跑过现行管线，给三个数，全部不花 token：
+
+| 读数 | 含义 | 红的样子 |
+|---|---|---|
+| `markers resolvable` | 每个指针都能被 `/v1/ccr/:hash` 的同一查询取回 | `23 / 24` —— 有指针指空（A 修的就是这个面） |
+| `unrecoverable bytes` | 原文字节 − 留在 prompt 的字节 − 存在标记后面的字节 | `> 0` —— 文本真的丢了 |
+| `tool pairing breaks` | 每条 `tool_calls[].id` 仍有 `tool` 结果，反之亦然 | `> 0` —— 上游会拒请求，freeform 工具曾这样死过一次 |
+
+判据自己也有负控：`tests/compression/evalCorpus.test.ts` 喂一个被删掉 tool 结果的样本，`pairingBreaks` 必须报 1；否则这个数字只是装饰。`replay` 在任一项为红时 `exit 1`，所以能直接放进每次改动的回归环。
+
+**3. 还不具备的条件（在这三条满足前 D 不开工）**
+
+- **语义判据仍然缺**：上面三个数说的是「信息没丢」，不是「意思没变」。摘要类改动必须做开/关 A/B，用现成的 `streamTrace.repetition` / `streamTrace.emptyTurn` 与客户端续轮成功率对拍，样本口径沿用 §P4 的窗口判据（≥128 多轮请求、`truncatedRequests = 0`）。语料重放不能替代 A/B。
+- **语料覆盖必须够**：`capture` 报的 content mix 里，某类型为零就没有资格对该类型下结论；先补该类型的真实流量，再谈改它。
+- **成本要先算**：D 每轮多一次模型调用（摘要）或改变上游可见的 schema，必须先在 `PLAN-prompt-cache.md` 的缓存经济前提下重算 `1 − c/(1+w)` 是否仍成立——摘要本身也要花钱和延迟。
 
 ---
 

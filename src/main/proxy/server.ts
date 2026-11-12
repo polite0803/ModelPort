@@ -374,6 +374,7 @@ export class ProxyServer {
           'POST /v1/responses',
           'POST /v1/messages',
           'POST /v1/messages/count_tokens',
+          'GET /v1/ccr/:hash',
         ],
       }
     })

@@ -9,6 +9,8 @@ const CONFIG: RequestLogConfig = {
   includeBodies: false,
   maxBodyChars: 200_000,
   redactSensitiveData: true,
+  bodySampleRate: 0,
+  bodyRetentionDays: 7,
 }
 
 const BASE = {

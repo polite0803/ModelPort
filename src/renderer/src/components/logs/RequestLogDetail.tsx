@@ -100,6 +100,8 @@ export function RequestLogDetail({ log, onClose }: RequestLogDetailProps) {
   const [activeTab, setActiveTab] = useState('info')
   const [savingBundle, setSavingBundle] = useState(false)
   const includeBodies = useSettingsStore((state) => state.config?.requestLogConfig?.includeBodies)
+  // 采样开着时，「这条没有正文」是抽签结果而不是开关关了。两种缺席不能用同一句话。
+  const bodySampleRate = useSettingsStore((state) => state.config?.requestLogConfig?.bodySampleRate)
   const fetchConfig = useSettingsStore((state) => state.fetchConfig)
 
   useEffect(() => {
@@ -146,6 +148,15 @@ export function RequestLogDetail({ log, onClose }: RequestLogDetailProps) {
     if (!jsonString) {
       // 「没开正文记录」和「这次请求没有正文」是两种缺席，不能都显示成“暂无数据”。
       if (includeBodies === false) {
+        if ((bodySampleRate ?? 0) > 0) {
+          return (
+            <div className="flex flex-col items-center justify-center py-12 text-muted-foreground text-center px-6">
+              <SlidersHorizontal className="h-12 w-12 mb-3 opacity-30" />
+              <p className="text-sm font-medium text-foreground">{t('logs.bodyNotSampled')}</p>
+              <p className="text-xs mt-1.5 max-w-md leading-relaxed">{t('logs.bodyNotSampledHint')}</p>
+            </div>
+          )
+        }
         return (
           <div className="flex flex-col items-center justify-center py-12 text-muted-foreground text-center px-6">
             <SlidersHorizontal className="h-12 w-12 mb-3 opacity-30" />

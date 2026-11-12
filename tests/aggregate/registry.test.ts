@@ -10,7 +10,7 @@ import {
 } from '../../src/main/providers/aggregate/registry.ts'
 
 test('the catalogue carries the entries that can actually be wired', () => {
-  assert.equal(AGGREGATE_REGISTRY.length, 92)
+  assert.equal(AGGREGATE_REGISTRY.length, 102)
   // 473 transcribed, minus 7 retired upstream on 2026-10-29 (3 anthropic + 4 xai),
   // minus the withdrawn mistral_codestral entry (its single model went with it),
   // plus the Agnes CN switch (agnes-2.0-flash -> agnes-3.0-flash + agnes-2.5-flash),
@@ -24,7 +24,14 @@ test('the catalogue carries the entries that can actually be wired', () => {
   // plus 3 entries / 12 models on 2026-11-10: PPIO (12 transcribed from its live
   // /models), Huawei ModelArts Studio and Infini-AI (0 each - empty baselines,
   // ids arrive through modelsUrl once a key is saved).
-  assert.equal(AGGREGATE_REGISTRY.reduce((sum, entry) => sum + entry.models.length, 0), 580)
+  // plus 1 entry / 0 models on 2026-11-12: Nous Research Portal (key-only; its
+  // /v1/models is an OpenRouter proxy list, so the baseline stays empty).
+  // plus 9 entries / 43 models on 2026-11-12: the domestic subscription-plan batch
+  // (Bailian Coding; Tencent Coding and Token; Qianfan Coding and Token; iFlytek
+  // Astron Coding and Token; JD Cloud Coding and Token). Empty or single-"latest"
+  // baselines are deliberate - those vendors publish model ids only in their
+  // console, and inventing slugs would turn "unknown" into a wrong answer.
+  assert.equal(AGGREGATE_REGISTRY.reduce((sum, entry) => sum + entry.models.length, 0), 623)
 
   // Browser-login account channels are retired; the responses-only relay is not wired.
   for (const excluded of ['openai', 'github_copilot', 'fleetrelay_t1']) {
@@ -242,4 +249,23 @@ test('the 2026-11-10 endpoints keep their probed base URLs and empty baselines',
     assert.equal(entry.authKind, 'apiKey')
     assert.ok(entry.authUrl, `${id} must say where to get its key`)
   }
+})
+
+/**
+ * 2026-11-12 收录的 Nous Portal：**只有 Key 能通**，且基线故意为空。
+ *
+ * 免 Key 档在本应用不可达（匿名铸造的两个端点均 403，需要上游部署密钥），
+ * 而 `inference-api.nousresearch.com/v1/models` 是 OpenRouter 代理清单——
+ * 照它取一个 id 发 chat 得到 400 "Unknown model"。把那批 slug 转录进来，
+ * 等于给每个请求准备一个 404。
+ */
+test('Nous Portal stays key-only with an empty baseline', () => {
+  const nous = getAggregateEntry('nous_portal')!
+  assert.equal(nous.authKind, 'apiKey')
+  assert.equal(nous.category, 'apikey')
+  assert.equal(nous.baseUrl, 'https://inference-api.nousresearch.com/v1')
+  assert.equal(nous.modelsUrl, 'https://inference-api.nousresearch.com/v1/models')
+  assert.equal(nous.models.length, 0, 'must not transcribe the proxied OpenRouter list')
+  assert.ok(nous.authUrl, 'a key-only entry must say where to get its key')
+  assert.notEqual(nous.autoProvision, true, 'key-only entries are never auto-provisioned')
 })

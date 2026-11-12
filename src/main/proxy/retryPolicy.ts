@@ -202,6 +202,52 @@ export function planAttemptDeadline(input: {
 export const FIRST_ATTEMPT_CAP_MS = 20_000
 
 /**
+ * 没有换家空间的流式请求，等首块的上限（2026-11-12）。
+ *
+ * 具名 provider 模型不走 `forwardFirstReachable`，没有 `attemptDeadlineMs`：换家循环
+ * 的预算概念不存在，`firstEventMs` 只能落到出厂的 60s。而客户端自己的耐心通常也在
+ * 60s 上下 —— 实测华为云码道 39 笔 codearts 失败全部落在 57.3–61.1s，网关的 60s 与
+ * 客户端的 60s 打平，客户端先走：用户看到「客户端已断开」，网关既没换家（这条模型
+ * 只有一家候选），也没把这次记成渠道故障（`client_abort` 不计分），下一轮原样重演。
+ *
+ * 30s 的依据与 {@link FIRST_ATTEMPT_CAP_MS} 同源：同一窗口里 codearts 成功请求的
+ * 首块 1.9–5.5s（另有三笔 30.8–32.7s 的慢样本）。30s 覆盖正常首帧，超出就该把
+ * 结论交给客户端，而不是陪它一起等到双双超时。
+ */
+export const SINGLE_CANDIDATE_FIRST_EVENT_CAP_MS = 30_000
+
+/** 首块等待被谁截断：超时文案按它归因，不能一律写成「剩余墙钟预算」。 */
+export type FirstEventClamp = 'none' | 'attempt-budget' | 'single-candidate'
+
+export interface FirstEventWaitPlan {
+  /** 实际等待上限（毫秒） */
+  waitMs: number
+  /** 被压短的原因；`none` = 就是出厂 `firstEventMs` */
+  clampedBy: FirstEventClamp
+}
+
+/**
+ * 等首块实际能等多久。
+ *
+ * - 换家链里（`attemptDeadlineMs` 已给）：`min(出厂 firstEventMs, 本次尝试截止)`，
+ *   被压短时归因 `attempt-budget`；
+ * - 不在链里：再叠一道 {@link SINGLE_CANDIDATE_FIRST_EVENT_CAP_MS}，归因 `single-candidate`。
+ */
+export function planFirstEventWait(input: {
+  firstEventMs: number
+  deadlineMs: number
+  attemptDeadlineMs?: number
+}): FirstEventWaitPlan {
+  const ceiling = input.attemptDeadlineMs ?? SINGLE_CANDIDATE_FIRST_EVENT_CAP_MS
+  const waitMs = Math.min(input.firstEventMs, input.deadlineMs, ceiling)
+  if (waitMs >= input.firstEventMs) return { waitMs, clampedBy: 'none' }
+  return {
+    waitMs,
+    clampedBy: input.attemptDeadlineMs === undefined ? 'single-candidate' : 'attempt-budget',
+  }
+}
+
+/**
  * 剩余预算低于这个线就不再新开一次尝试（2026-11-12）。
  *
  * `planAttemptDeadline` 在预算归零时返回**下限**而不是 0，于是换家循环会照常用

@@ -19,6 +19,8 @@ import {
   creditSnapshotExhausted,
   type AggregateCreditSnapshots,
 } from '../../../shared/aggregateCredit.ts'
+import { findExhaustion } from '../../../shared/aggregateQuotaExhaustion.ts'
+import type { AggregateQuotaExhaustionRecord } from '../../../shared/aggregateQuotaExhaustion.ts'
 import type { Account } from '../../store/types'
 import { evaluateQuota, resolveCaps, type QuotaBlockReason } from './limits.ts'
 
@@ -38,11 +40,14 @@ export interface QuotaGateContext {
   snapshots(): AggregateCreditSnapshots
   /** `entryId → 账号`；同一上下文内同一家只查一次 store。 */
   accountsByProvider(entryId: string): Account[]
+  /** `entryId → 上游拒绝记录`；同一上下文内同一家也只读一次。 */
+  exhaustionsByProvider(entryId: string): AggregateQuotaExhaustionRecord[]
 }
 
 export function createQuotaGateContext(): QuotaGateContext {
   let snapshots: AggregateCreditSnapshots | undefined
   const accounts = new Map<string, Account[]>()
+  const exhaustions = new Map<string, AggregateQuotaExhaustionRecord[]>()
 
   return {
     snapshots() {
@@ -62,6 +67,19 @@ export function createQuotaGateContext(): QuotaGateContext {
       const loaded = storeManager.getAccountsByProviderId(entryId)
       accounts.set(entryId, loaded)
       return loaded
+    },
+    exhaustionsByProvider(entryId) {
+      const cached = exhaustions.get(entryId)
+      if (cached !== undefined) return cached
+      try {
+        const loaded = storeManager.getAggregateQuotaExhaustionsOf(entryId)
+        exhaustions.set(entryId, loaded)
+        return loaded
+      } catch (error) {
+        console.error('[QuotaGate] quota exhaustion records unavailable:', error)
+        exhaustions.set(entryId, [])
+        return []
+      }
     },
   }
 }
@@ -87,6 +105,30 @@ function creditExhausted(entryId: string, context?: QuotaGateContext): boolean {
   }
 }
 
+/**
+ * 这个 `(账号, 模型)` 是否被上游亲口拒过且还没过期。
+ *
+ * 与 `creditExhausted` 的区别是证据来源：那条看的是我们问回来的余额（整家、钱的单位），
+ * 这条看的是"刚才这一笔确实被拒"的现场记录（逐账号逐模型、由一次真实调用证伪）。
+ * 读不出来同样放行 —— 一条读盘失败不能变成"这家不能用"。
+ */
+function exhaustionExhausted(
+  entryId: string,
+  accountId: string,
+  actualModel: string,
+  context?: QuotaGateContext
+): boolean {
+  try {
+    const records = context === undefined
+      ? storeManager.getAggregateQuotaExhaustionsOf(entryId)
+      : context.exhaustionsByProvider(entryId)
+    return findExhaustion(records, accountId, actualModel) !== undefined
+  } catch (error) {
+    console.error('[QuotaGate] quota exhaustion records unavailable:', error)
+    return false
+  }
+}
+
 export function quotaBlockReason(
   provider: { id: string; type: string },
   accountId: string,
@@ -97,6 +139,10 @@ export function quotaBlockReason(
 
   // 没钱比"这个窗口打满了"更难恢复：窗口自己会复位，余额要用户去充。所以先说它。
   if (creditExhausted(provider.id, context)) return 'no-credit'
+
+  // 上游刚亲口说没额度：与"窗口打满"同一层语义（跳过这个候选，过期自动放行），
+  // 但只挡这一把 Key 与这一个模型 —— 同家别的 Key/模型不受牵连。
+  if (exhaustionExhausted(provider.id, accountId, actualModel, context)) return 'quota-exhausted'
 
   try {
     const ledger = storeManager.getQuotaLedger()

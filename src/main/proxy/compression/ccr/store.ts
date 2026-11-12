@@ -27,14 +27,29 @@ import {
   readdirSync,
   statSync,
   unlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
 
-const DEFAULT_TTL_MS = 30 * 60 * 1000
-const DEFAULT_MAX_ENTRIES = 500
-const DEFAULT_MAX_BYTES = 64 * 1024 * 1024
+/**
+ * Defaults are sized for a *conversation*, not for a request.
+ *
+ * The marker travels in the conversation, so the pointer must outlive any single
+ * turn: 30 minutes was shorter than a typical agent session, which is how a
+ * marker ended up pointing at bytes that had already been swept. A day covers
+ * the long tail; the byte budget is what actually bounds the disk.
+ */
+export const CCR_DEFAULTS = {
+  ttlMs: 24 * 60 * 60 * 1000,
+  maxEntries: 2000,
+  maxBytes: 256 * 1024 * 1024,
+} as const
+
+const DEFAULT_TTL_MS = CCR_DEFAULTS.ttlMs
+const DEFAULT_MAX_ENTRIES = CCR_DEFAULTS.maxEntries
+const DEFAULT_MAX_BYTES = CCR_DEFAULTS.maxBytes
 /** Never stash a single payload larger than this; refuse instead. */
 const MAX_ENTRY_BYTES = 8 * 1024 * 1024
 /** Sweep at most once per this many writes, in addition to budget triggers. */
@@ -134,7 +149,14 @@ export class CcrStore {
     }
   }
 
-  /** Retrieve the original bytes for `id`, or `undefined` when absent/expired. */
+  /**
+   * Retrieve the original bytes for `id`, or `undefined` when absent/expired.
+   *
+   * A hit refreshes the file's mtime, so TTL and eviction both mean "time since
+   * last *use*". Without that, an entry read on every turn would still be
+   * evicted for being old, and the sweep would keep deleting the pointers that
+   * are actually being followed.
+   */
   get(id: string): string | undefined {
     if (!/^[a-f0-9]{12,64}$/.test(id)) return undefined
     if (!this.ensureDir()) return undefined
@@ -147,8 +169,15 @@ export class CcrStore {
         this.misses += 1
         return undefined
       }
+      const content = readFileSync(path, 'utf8')
+      const now = new Date()
+      try {
+        utimesSync(path, now, now)
+      } catch {
+        // Recency is an optimisation; a read-only entry is still a valid hit.
+      }
       this.hits += 1
-      return readFileSync(path, 'utf8')
+      return content
     } catch {
       this.misses += 1
       return undefined

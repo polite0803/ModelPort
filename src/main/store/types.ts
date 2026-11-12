@@ -32,6 +32,10 @@ import { isRetiredProviderId } from '../providers/providerRetirement.ts'
 import type { DayTokenBucket } from '../../shared/tokenAccounting.ts'
 import type { CatalogAdoption } from '../../shared/modelCatalog.ts'
 import type { AggregateCreditSnapshot, AggregateCreditSnapshots } from '../../shared/aggregateCredit.ts'
+import type {
+  AggregateQuotaExhaustionRecord,
+  AggregateQuotaExhaustions,
+} from '../../shared/aggregateQuotaExhaustion.ts'
 import type { RepetitionGuardSettings } from '../../shared/streamRepetition.ts'
 
 /**
@@ -40,6 +44,7 @@ import type { RepetitionGuardSettings } from '../../shared/streamRepetition.ts'
  * 只在两边都得自己写一遍时才成立；这里走 re-export，避免出现第二个定义）。
  */
 export type { AggregateCreditSnapshot, AggregateCreditSnapshots }
+export type { AggregateQuotaExhaustionRecord, AggregateQuotaExhaustions }
 
 /** Request names the retired DeepSeek integration used; stored mappings using them are dropped. */
 const DEEPSEEK_LEGACY_MODEL_MAPPING_NAMES = [
@@ -558,6 +563,15 @@ export interface RequestLogConfig {
   maxBodyChars: number
   /** Whether obvious sensitive values are redacted */
   redactSensitiveData: boolean
+  /**
+   * Share of requests whose bodies are kept while `includeBodies` is off
+   * (0 = none, 1 = all). Sampled on `requestId` so a row cannot flip between
+   * the insert and the stream-end patch. This is how a compression corpus gets
+   * real traffic without turning body logging on for every request.
+   */
+  bodySampleRate: number
+  /** Days a stored body survives before it is stripped (the row stays). 0 = never. */
+  bodyRetentionDays: number
 }
 
 /**
@@ -738,6 +752,14 @@ export interface StoreSchema {
    * 混进任何一边都会把两个计数域折成一个数。
    */
   aggregateCreditSnapshots: AggregateCreditSnapshots
+  /**
+   * 「上游亲口说这个 `(渠道, 账号, 模型)` 没额度了」的现场记录。
+   *
+   * 与 `aggregateCreditSnapshots`（钱）和额度账本（我们数出来的 token）都不合并：
+   * 这是一次真实调用被上游拒掉之后留下的证词，唯一来源是转发路径的尝试结果。
+   * 读时按 TTL 过滤，所以这里不需要"是否有效"的布尔。
+   */
+  aggregateQuotaExhaustions: AggregateQuotaExhaustions
 }
 
 /**
@@ -788,6 +810,9 @@ export const DEFAULT_REQUEST_LOG_CONFIG: RequestLogConfig = {
   // 成环）；存量配置里停留在旧值 8000 的由 normalizeRequestLogConfig 迁移。
   maxBodyChars: 200_000,
   redactSensitiveData: true,
+  // 默认不采样：落盘请求体是隐私与磁盘决定，不能靠升级替用户打开。
+  bodySampleRate: 0,
+  bodyRetentionDays: 7,
 }
 
 export function createDefaultModelMappings(): Record<string, ModelMapping> {

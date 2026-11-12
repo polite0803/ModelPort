@@ -71,6 +71,15 @@ export const AGGREGATE_PLAN_ENTRIES: Readonly<Record<string, string>> = {
   stepfun_step_plan: '阶跃星辰 Step Plan 订阅端点，按月 Credit 额度扣减',
   'volcengine-ark': '火山方舟 Coding Plan 订阅端点，额度和 Key 与平台按量端点隔离',
   volcengine_ark_agent_plan: '火山方舟 Agent Plan 订阅端点，额度按订阅套餐扣减',
+  bailian_coding_plan: '阿里云百炼 Coding Plan 订阅端点，按请求次数计量（与 Token Plan、按量三条 Key/URL 隔离）',
+  tencent_coding_plan: '腾讯云 Coding Plan 订阅端点，套餐 Key 为 sk-sp-，与预付费/后付费 Key 不互通',
+  tencent_token_plan: '腾讯云 Token Plan 个人版端点（通用 + Hy 共用一把 Key 与 URL），额度按套餐内 token 抵扣',
+  qianfan_coding_plan: '千帆 Coding Plan 专属端点，按请求次数计量，专属 Key 只能用于该 Base URL',
+  qianfan_token_plan: '千帆 Token Plan 个人版专属端点，按套餐积分抵扣',
+  xfyun_astron_coding_plan: '讯飞星辰 Astron Coding Plan 订阅网关（maas-coding-api），按请求次数计量',
+  xfyun_astron_token_plan: '讯飞星辰 Astron Token Plan 独立端点（maas-token-api），按 Credits 计量',
+  jd_coding_plan: '京东云 JoyBuilder Coding Plan 订阅端点，按请求次数计量',
+  jd_token_plan: '京东云 JoyBuilder TokenPlan 订阅端点，按套餐 Credits 抵扣',
 }
 
 export function isPlanEntry(entryId: string): boolean {

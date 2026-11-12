@@ -59,6 +59,8 @@ interface PackAccount {
   refreshable?: boolean
   createdAt?: number
   expiresAt?: number
+  /** Masked egress proxy (opencode); absent = direct connection. */
+  proxyLabel?: string
   /** Set by the pack when upstream said it will not serve this account. */
   serviceStopped?: { at: number; text: string }
 }
@@ -219,6 +221,7 @@ class AccountChannelManager {
         vendor: channel.vendor,
         loginKind: channel.loginKind,
         credentialAdd: channel.credentialAdd,
+        ...(channel.proxyEdit === undefined ? {} : { proxyEdit: channel.proxyEdit }),
         dailyCheckin: channel.dailyCheckin,
         growthTasks: channel.growthTasks,
         description: channel.description,
@@ -236,6 +239,7 @@ class AccountChannelManager {
             createdAt: typeof account.createdAt === 'number' ? account.createdAt : undefined,
             expiresAt: typeof account.expiresAt === 'number' ? account.expiresAt : undefined,
             refreshable: account.refreshable === true,
+            ...(typeof account.proxyLabel === 'string' ? { proxyLabel: account.proxyLabel } : {}),
             serviceStopped: typeof account.serviceStopped?.text === 'string'
               ? {
                   at: typeof account.serviceStopped.at === 'number' ? account.serviceStopped.at : 0,

@@ -89,3 +89,47 @@ export function summarizeDuplication(entries: readonly RequestLogEntry[]): Dupli
     multiBlockRequests,
   }
 }
+
+/**
+ * Share of duplicated characters at which folding repays its cost.
+ *
+ * From the plan's real-traffic verdict (§P4): under ~5% the rewrite cost
+ * dominates; at 20% the repeated bytes are large enough that the prompt-cache
+ * miss the first rewrite causes is paid back by the saves.
+ */
+export const FOLD_WORTH_BUILDING_RATIO = 0.2
+/** Under this share the measurement is not even worth discussing. */
+export const FOLD_NEGLIGIBLE_RATIO = 0.05
+
+export interface DuplicationInterpretation {
+  foldWorthBuilding: boolean
+  negligible: boolean
+  /** The window actually says something about multi-turn traffic. */
+  conclusive: boolean
+  /** `meanRemainingTurns` is usable as a budget input yet. */
+  lifetimeKnown: boolean
+}
+
+/**
+ * The judgement over a window, in one place.
+ *
+ * Both the management endpoint and the folding gate consume this, so "does the
+ * window prove anything" cannot drift between the number a user reads and the
+ * switch the forwarder obeys.
+ */
+export function interpretDuplication(
+  summary: Pick<
+    DuplicationSummary,
+    'sampled' | 'multiBlockRequests' | 'truncatedRequests' | 'ratio'
+  >,
+  survivorship: { meanRemainingTurns: number | null }
+): DuplicationInterpretation {
+  return {
+    foldWorthBuilding: summary.ratio !== null && summary.ratio >= FOLD_WORTH_BUILDING_RATIO,
+    negligible: summary.ratio !== null && summary.ratio < FOLD_NEGLIGIBLE_RATIO,
+    // A window where every request was single-turn proves nothing about
+    // multi-turn traffic, so "no evidence" must not read as "no benefit".
+    conclusive: summary.sampled > 0 && summary.multiBlockRequests > 0 && summary.truncatedRequests === 0,
+    lifetimeKnown: survivorship.meanRemainingTurns !== null,
+  }
+}

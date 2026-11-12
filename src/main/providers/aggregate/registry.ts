@@ -50,6 +50,17 @@ import type { AggregateEntry } from '../../../shared/aggregate'
  * channel, and mixing them either returns 401/403 or silently bills the payg
  * account.
  *
+ * Nine domestic subscription-plan entries were added on 2026-11-12, each with the
+ * base URL read verbatim from the vendor's own page (the receipt is
+ * `docs/data/free-quota-research/g12-cn-plans-2026-11-12.json`): Alibaba Bailian
+ * Coding Plan, Tencent Coding Plan and Token Plan, Baidu Qianfan Coding Plan and
+ * Token Plan, iFlytek Astron Coding Plan and Token Plan, JD Cloud JoyBuilder
+ * Coding Plan and Token Plan. Same rule as above: a plan is its own entry, never
+ * a demo of the pay-as-you-go host. Three of them ship an empty or near-empty
+ * model baseline on purpose - Tencent Token Plan publishes its ids only in the
+ * console, and iFlytek/Tencent ship a single "latest" auto-routing id - because
+ * inventing slugs would turn "unknown" into a wrong answer.
+ *
  * Three endpoints were added on 2026-11-10 after probing them without a key:
  * PPIO (`/openai/chat/completions` answered 403 INVALID_API_KEY and
  * `/openai/models` answered 200 with 67 chat rows, base URL taken verbatim from
@@ -66,7 +77,19 @@ import type { AggregateEntry } from '../../../shared/aggregate'
  * and even an unauthenticated chat POST), so its catalogue could not be
  * transcribed, and its terms restrict the free tier to prototyping anyway.
  *
- * The array now carries 92 entries / 580 models.
+ * Nous Research Portal was added on 2026-11-12 as a **key-only** entry with an
+ * empty baseline. Its anonymous free tier is not reachable from this app: both
+ * `POST portal.nousresearch.com/api/anonymous/{create,token}` answered 403
+ * (the mint endpoints require the upstream deployment secret
+ * `x-anonymous-api-secret`, which only the first-party Hermes binaries carry),
+ * and the welcome-trial host serves a single model (`nous/welcome`) whose
+ * entitlement is claimed by the desktop's own local backend, not by a gateway.
+ * `inference-api.nousresearch.com/v1/models` does answer 200, but it is a proxy
+ * over OpenRouter: a chat POST naming one of its ids returns 400 "Unknown
+ * model", so that list cannot be used as a callable baseline. Slugs therefore
+ * arrive through `modelsUrl` only once a real key is saved.
+ *
+ * The array now carries 93 entries / 580 models.
  */
 export const AGGREGATE_REGISTRY: AggregateEntry[] = [
   {
@@ -2427,6 +2450,13 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     "category": "free-tier",
     "authKind": "apiKey",
     "baseUrl": "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1",
+    "pathVars": [
+      {
+        "name": "account_id",
+        "label": "Account ID",
+        "helpText": "Cloudflare Dashboard → Workers AI 页右侧的 Account ID；API Token 需要 Workers AI 权限。官方 OpenAI 兼容地址就是 .../accounts/<account_id>/ai/v1"
+      }
+    ],
     "wire": "openai-chat",
     "models": [
       {
@@ -2484,7 +2514,7 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     ],
     "authUrl": "https://dash.cloudflare.com/profile/api-tokens",
     "envVar": "CLOUDFLARE_API_TOKEN",
-    "notes": "Account-scoped URL — replace {account_id}; Workers AI has a free allocation and 9router lists it as free-tier. Image ids omitted.",
+    "notes": "Account-scoped URL — the {account_id} segment is filled per key (Account ID field), not by editing the base URL; that is why the URL is written with a placeholder. Workers AI has a free allocation and 9router lists it as free-tier. Image ids omitted.",
     "website": "https://www.cloudflare.com/developer-platform/products/workers-ai/"
   },
   {
@@ -3588,6 +3618,188 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     "modelsUrl": "https://cloud.infini-ai.com/maas/v1/models",
     "notes": "无问芯穹 Infini-AI 的 OpenAI 兼容入口。2026-11-10 无凭据实测 /maas/v1/chat/completions 返回 401「Not login」、/maas/v1/models 返回 code 60000「Wrong Bearer Token or Token is nil」，证明路径存在、只缺 Bearer。基线留空，保存 Key 后由 modelsUrl 同步。注册赠送额度属活动口径。",
     "website": "https://cloud.infini-ai.com/"
+  },
+  {
+    "id": "nous_portal",
+    "name": "Nous Research Portal",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://inference-api.nousresearch.com/v1",
+    "wire": "openai-chat",
+    "models": [],
+    "authUrl": "https://portal.nousresearch.com",
+    "envVar": "NOUS_API_KEY",
+    "modelsUrl": "https://inference-api.nousresearch.com/v1/models",
+    "notes": "Nous Research 的 OpenAI 兼容推理入口。2026-11-12 无凭据实测：/v1/models 返回 200，但那份清单是 OpenRouter 代理来的，照它取一个 id 发 chat 会得到 400「Unknown model」，故不能当可调用基线；基线留空，保存 Key 后由 modelsUrl 同步。匿名免费档在本应用不可达：portal 的 /api/anonymous/create 与 /api/anonymous/token 均返回 403，铸造凭据需要上游部署密钥 x-anonymous-api-secret（只有官方 Hermes 二进制携带）；welcome 试用主机只有一个模型且由客户端本地后端申领，不经网关。",
+    "website": "https://portal.nousresearch.com"
+  },
+  {
+    "id": "bailian_coding_plan",
+    "name": "阿里云百炼 Coding Plan",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "qwen3.7-plus", "name": "Qwen3.7 Plus" },
+      { "id": "qwen3.6-plus", "name": "Qwen3.6 Plus" },
+      { "id": "qwen3.5-plus", "name": "Qwen3.5 Plus" },
+      { "id": "kimi-k2.5", "name": "Kimi K2.5" },
+      { "id": "glm-5", "name": "GLM 5" },
+      { "id": "MiniMax-M2.5", "name": "MiniMax M2.5" }
+    ],
+    "authUrl": "https://bailian.console.aliyun.com/",
+    "envVar": "DASHSCOPE_CODING_PLAN_API_KEY",
+    "notes": "阿里云百炼 Coding Plan 中国站订阅端点。官方 overview 逐字给出 OpenAI 兼容 base https://coding.dashscope.aliyuncs.com/v1 与 Anthropic 兼容 base .../apps/anthropic；目录只登记 OpenAI 兼容线。计量是请求次数不是 token（Pro：5 小时 6000 / 周 45000 / 月 90000，5 小时档滚动恢复）。它与 bailian_token_plan、按量付费是三条计费通路：Coding Plan 与 Token Plan 的 Key 都以 sk-sp- 开头，只能靠 Base URL 区分，混用会 401/403 或走错计费。",
+    "website": "https://help.aliyun.com/zh/model-studio/coding-plan-overview"
+  },
+  {
+    "id": "tencent_coding_plan",
+    "name": "腾讯云 Coding Plan",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://api.lkeap.cloud.tencent.com/coding/v3",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "tc-code-latest", "name": "Tencent Code Latest (Auto)" }
+    ],
+    "authUrl": "https://console.cloud.tencent.com/",
+    "envVar": "TENCENT_CODING_PLAN_API_KEY",
+    "notes": "腾讯云 Coding Plan 订阅端点。官方概述逐字给出 OpenAI 兼容 https://api.lkeap.cloud.tencent.com/coding/v3 与 Anthropic 兼容 .../coding/anthropic，并写明套餐 Key（sk-sp-）与预付费/后付费 Key（sk-）及 Base URL 不互通。套餐模型由控制台动态更新，文档正文只给出 tc-code-latest（Auto，按算法自动选模型），故基线只登记它，不拿第三方列表里的展示名充 id。额度按请求次数：Lite 5 小时 1200 / 周 9000 / 月 18000，Pro 6000 / 45000 / 90000。",
+    "website": "https://cloud.tencent.com/document/product/1823/130092"
+  },
+  {
+    "id": "tencent_token_plan",
+    "name": "腾讯云 Token Plan",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://api.lkeap.cloud.tencent.com/plan/v3",
+    "wire": "openai-chat",
+    "models": [],
+    "authUrl": "https://console.cloud.tencent.com/",
+    "envVar": "TENCENT_TOKEN_PLAN_API_KEY",
+    "notes": "腾讯云 Token Plan 个人版：通用 Token Plan 与 Hy Token Plan 共用同一把 Key 与同一个 Base URL，按传入的 model 自动落到对应套餐抵扣。官方套餐概览给出 OpenAI 兼容 .../plan/v3（完整路径 /plan/v3/chat/completions）与 Anthropic 兼容 .../plan/anthropic。可用模型 id 只公布在控制台模型列表页，文档正文没有逐字清单，故基线留空、不臆造 id。计量是套餐内 token（Lite 3500 万/订阅月）。",
+    "website": "https://cloud.tencent.com/document/product/1823/130060"
+  },
+  {
+    "id": "qianfan_coding_plan",
+    "name": "百度千帆 Coding Plan",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://qianfan.baidubce.com/v2/coding",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "qianfan-code-latest", "name": "Qianfan Code Latest" },
+      { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro" },
+      { "id": "glm-5.1", "name": "GLM 5.1" }
+    ],
+    "authUrl": "https://console.bce.baidu.com/qianfan/",
+    "envVar": "QIANFAN_CODING_PLAN_API_KEY",
+    "notes": "千帆 Coding Plan 专属端点。官方文档写明 OpenAI 兼容 base .../v2/coding（完整路径 /v2/coding/chat/completions）、Anthropic 兼容 .../anthropic/coding，并注明 Coding Plan 专属 Key 只能用于该专属接口。model 可固定填 qianfan-code-latest，由订阅管理页选择实际模型（约一分钟生效）；也可直接指定文档列出的具体 id。这是与 baidu（qianfan.baidubce.com/v2 按量）不同的一条计费通路。",
+    "website": "https://cloud.baidu.com/doc/qianfan/s/imlg0beiu"
+  },
+  {
+    "id": "qianfan_token_plan",
+    "name": "百度千帆 Token Plan 个人版",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://qianfan.baidubce.com/v2/tokenplan/personal",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "qianfan-code-latest", "name": "Qianfan Code Latest" },
+      { "id": "ernie-5.5-flash-preview", "name": "ERNIE 5.5 Flash Preview" },
+      { "id": "ernie-light-dt-1.0", "name": "ERNIE Light DT 1.0" },
+      { "id": "deepseek-v4.1-flash-1017", "name": "DeepSeek V4.1 Flash 1017" },
+      { "id": "deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash" },
+      { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro" },
+      { "id": "glm-5.3", "name": "GLM 5.3" },
+      { "id": "glm-5.3-flash", "name": "GLM 5.3 Flash" }
+    ],
+    "authUrl": "https://console.bce.baidu.com/qianfan/",
+    "envVar": "QIANFAN_TOKEN_PLAN_API_KEY",
+    "notes": "千帆 Token Plan 个人版专属端点。官方文档给出 OpenAI 兼容 .../v2/tokenplan/personal 与 Anthropic 兼容 .../anthropic/tokenplan/personal；误用通用千帆 Key 会返回 token_plan_person_api_key_required（Token Plan Person requires a dedicated API key）。基线取自文档模型表，标注「即将下线」的 deepseek-v4-pro-0813 / deepseek-v4-flash-0731 / glm-5.2 / glm-5.1 不登记。",
+    "website": "https://cloud.baidu.com/doc/qianfan/s/Dmrabu8b6"
+  },
+  {
+    "id": "xfyun_astron_coding_plan",
+    "name": "讯飞星辰 Astron Coding Plan",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://maas-coding-api.cn-huabei-1.xf-yun.com/v2",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "astron-code-latest", "name": "Astron Code Latest" }
+    ],
+    "authUrl": "https://maas.xfyun.cn/",
+    "envVar": "XFYUN_ASTRON_CODING_PLAN_API_KEY",
+    "notes": "讯飞星辰 MaaS 的 Astron Coding Plan 订阅网关。官方 CodingPlan 文档给出 OpenAI 协议 .../v2 与 Anthropic 协议 .../anthropic；maas-coding-api 与常规推理 maas-api 是两条通路，Key 不通用。统一 model id 为 astron-code-latest，实际底层模型在控制台切换（1–3 分钟生效），文档另列的 xop* 内部 id 不作为基线。额度按请求次数（5 小时 / 周 / 订阅月三层）。",
+    "website": "https://www.xfyun.cn/doc/spark/CodingPlan.html"
+  },
+  {
+    "id": "xfyun_astron_token_plan",
+    "name": "讯飞星辰 Astron Token Plan",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://maas-token-api.cn-huabei-1.xf-yun.com/v2",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "spark-x2.5", "name": "Spark X2.5" },
+      { "id": "xsparkx2flash", "name": "Spark X2 Flash" },
+      { "id": "xopglm52", "name": "GLM 5.2" },
+      { "id": "xopglm51", "name": "GLM 5.1" },
+      { "id": "xopglm5", "name": "GLM 5" },
+      { "id": "xopdeepseekv4pro", "name": "DeepSeek V4 Pro" },
+      { "id": "xopdeepseekv4flash", "name": "DeepSeek V4 Flash" },
+      { "id": "xopdeepseekv32", "name": "DeepSeek V3.2" },
+      { "id": "xopkimik26", "name": "Kimi K2.6" },
+      { "id": "xopkimik25", "name": "Kimi K2.5" },
+      { "id": "xminimaxm25", "name": "MiniMax M2.5" },
+      { "id": "xopqwen35397b", "name": "Qwen3.5 397B" },
+      { "id": "xopqwen36v35b", "name": "Qwen3.6 35B" },
+      { "id": "xopqwen35v35b", "name": "Qwen3.5 35B" },
+      { "id": "xop3qwencodernext", "name": "Qwen3 Coder Next" },
+      { "id": "xopglmv47flash", "name": "GLM 4.7 Flash" }
+    ],
+    "authUrl": "https://maas.xfyun.cn/",
+    "envVar": "XFYUN_ASTRON_TOKEN_PLAN_API_KEY",
+    "notes": "讯飞星辰 Astron Token Plan 独立端点：官方 TokenPlan 文档明写 maas-token-api 与常规推理 maas-api 不同、不可混用，并给出 OpenAI 协议 .../v2 与 Anthropic 协议 .../anthropic。模型 id 逐字取自该文档；已下线的 xsparkx2agent / xsparkx2 不登记。额度以积分（Credits）计量，按输入/缓存/输出/思考四类 token 折积分再乘时段系数。",
+    "website": "https://www.xfyun.cn/doc/spark/TokenPlan.html"
+  },
+  {
+    "id": "jd_coding_plan",
+    "name": "京东云 JoyBuilder Coding Plan",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://modelservice.jdcloud.com/coding/openai/v1",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "DeepSeek-V3.2", "name": "DeepSeek V3.2" },
+      { "id": "GLM-5", "name": "GLM 5" },
+      { "id": "GLM-4.7", "name": "GLM 4.7" },
+      { "id": "MiniMax-M2.5", "name": "MiniMax M2.5" },
+      { "id": "Kimi-K2.5", "name": "Kimi K2.5" },
+      { "id": "Kimi-K2-Turbo", "name": "Kimi K2 Turbo" },
+      { "id": "Qwen3-Coder", "name": "Qwen3 Coder" }
+    ],
+    "authUrl": "https://console.jdcloud.com/",
+    "envVar": "JD_CODING_PLAN_API_KEY",
+    "notes": "京东云 JoyBuilder Coding Plan 订阅端点。官方快速开始给出 OpenAI 兼容 https://modelservice.jdcloud.com/coding/openai/v1 与 Anthropic 兼容 .../coding/anthropic，并明确警告 https://modelservice.jdcloud.com/v1 是按量计费地址、填它会报错。模型以「Model Name」形式在工具配置里指定，故此处按名登记（区分大小写）。它与 jd_token_plan 的 Key、Base URL、额度三者均不共享。",
+    "website": "https://docs.jdcloud.com/cn/jdaip/Quickstart"
+  },
+  {
+    "id": "jd_token_plan",
+    "name": "京东云 JoyBuilder Token Plan",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://modelservice.jdcloud.com/tokenPlan/openai/v1",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "maas-token-latest", "name": "MAAS Token Latest" }
+    ],
+    "authUrl": "https://console.jdcloud.com/",
+    "envVar": "JD_TOKEN_PLAN_API_KEY",
+    "notes": "京东云 JoyBuilder TokenPlan 订阅端点。官方工具配置指南逐字给出 OpenAI https://modelservice.jdcloud.com/tokenPlan/openai/v1 与 Anthropic .../tokenPlan/anthropic（路径里的 P 是大写）。与按量付费的 API Key 不通用；官方明写 TokenPlan 兼容 OpenAI/Anthropic 协议且无工具限制，可接入 LangChain 等框架。计量是套餐内 Credits。",
+    "website": "https://docs.jdcloud.com/cn/jdaip/tool-setup"
   },
 ]
 

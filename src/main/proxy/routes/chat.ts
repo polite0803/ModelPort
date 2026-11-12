@@ -53,6 +53,7 @@ import { readOrEstimateUsage, usageInputText, type UsageReading } from '../quota
 import { aggregateCostUsdOf } from '../../../shared/aggregateCost.ts'
 import { getAggregateEntry } from '../../providers/aggregate/registry.ts'
 import { learnFromErrorBody, learnFromHeaders } from '../quota/observations'
+import { applyQuotaExhaustions } from '../quota/exhaustionMarks.ts'
 import { rejectionEntryFromContext } from '../rejectionLog'
 import { clientHeaderValue, identifyClientByUserAgent } from '../../../shared/clientProfile'
 import { takeCompressionReport, type CompressionReport } from '../compression'
@@ -953,6 +954,16 @@ router.post('/completions', async (ctx: Context) => {
 
     const latency = Date.now() - startTime
 
+    // 配额不足标记的唯一落点：三条分支（auto / 跨家链 / 单发+同家换 Key）都汇到
+    // `attemptTrace` 上，所以记录与清除都在这里发生一次，不散进各分支。
+    // 解禁时刻优先用客户端最终读到的那一发 Retry-After（上游给了就用它，没给退回 TTL）。
+    const finalRetryAfterSeconds = parseRetryAfterSeconds(result.retryAfter)
+      ?? parseRetryAfterSeconds(retryAfterHeader(result.headers as Record<string, unknown> | undefined))
+    applyQuotaExhaustions(
+      attemptTrace,
+      finalRetryAfterSeconds === undefined ? undefined : finalRetryAfterSeconds * 1000
+    )
+
     // 上下文超限的实测来源有两个：最终失败结果、换家循环里被跳过的候选。
     // 后者也必须算进来 —— 「A 家装不下、B 家承接了」正是这条读数要留下来的事实,
     // 只看最终结果会把它误记成 fits。
@@ -1000,10 +1011,7 @@ router.post('/completions', async (ctx: Context) => {
             autoDecision.routeName,
             result.error,
             autoAttempts,
-            parseRetryAfterSeconds(result.retryAfter)
-              ?? parseRetryAfterSeconds(
-                retryAfterHeader(result.headers as Record<string, unknown> | undefined),
-              ),
+            finalRetryAfterSeconds,
           )
         : null
       const mapped = exhausted

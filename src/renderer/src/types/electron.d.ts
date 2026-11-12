@@ -357,7 +357,8 @@ interface AggregateAPI {
   test: (id: string) => Promise<AggregateOperationResult>
   syncModels: (id: string) => Promise<AggregateOperationResult>
   detail: (id: string) => Promise<AggregateDetail | null>
-  addKey: (id: string, apiKey: string) => Promise<AggregateMutationResult>
+  clearQuotaExhaustions: (id: string) => Promise<AggregateMutationResult>
+  addKey: (id: string, apiKey: string, vars?: Record<string, string>) => Promise<AggregateMutationResult>
   removeKey: (accountId: string) => Promise<AggregateMutationResult>
   setKeyEnabled: (accountId: string, enabled: boolean) => Promise<AggregateMutationResult>
   validateKey: (id: string, accountId: string) => Promise<AggregateMutationResult>

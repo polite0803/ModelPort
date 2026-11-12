@@ -11,6 +11,7 @@ import {
   KeyRound,
   ListChecks,
   Loader2,
+  Network,
   Plus,
   RefreshCw,
   Tags,
@@ -169,6 +170,23 @@ interface CredentialAddState {
 }
 
 /**
+ * 账号出口代理对话框。
+ *
+ * 只对目录声明了 `proxyEdit` 的渠道开放；方法名取自声明，界面不写死渠道名。
+ * `current` 是掩码后的现有代理（`undefined` = 直连）——明文口令不会回传到这里。
+ */
+interface ProxyEditState {
+  channel: ChannelView
+  accountId: string
+  accountName: string
+  current: string | undefined
+  proxy: string
+  busy: boolean
+  error?: string
+  testResult?: string
+}
+
+/**
  * TRAE 账号的设备号编辑对话框。
  *
  * 上游只认官方客户端登记过的 16 位号，自己生成的号 claim 恒回 9074
@@ -255,6 +273,7 @@ export function Channels() {
   const [systemProxy, setSystemProxy] = useState<Record<string, boolean> | null>(null)
   const [login, setLogin] = useState<LoginState | null>(null)
   const [credentialAdd, setCredentialAdd] = useState<CredentialAddState | null>(null)
+  const [proxyEdit, setProxyEdit] = useState<ProxyEditState | null>(null)
   const [traeDevice, setTraeDevice] = useState<TraeDeviceState | null>(null)
   /**
    * 标注对话框的目标行。存 `(channel, model)` 而不是算好的 displayName：
@@ -644,6 +663,80 @@ export function Channels() {
       title: t(mode === 'key' ? 'channels.credential.addedKey' : 'channels.credential.addedAnonymous'),
     })
     void refresh()
+  }
+
+  const openProxyEdit = (channel: ChannelView, account: ChannelAccountView) => {
+    setProxyEdit({
+      channel,
+      accountId: account.id,
+      accountName: account.nickname,
+      current: account.proxyLabel,
+      proxy: '',
+      busy: false,
+    })
+  }
+
+  /**
+   * 保存或清除某账号的出口代理。
+   *
+   * 空串在渠道包语义里是「清除代理」，因此「保存」必须拒绝空输入 —— 用空输入
+   * 冒充清除会让用户点错按钮就悄悄回到直连。清除是独立按钮。
+   */
+  const submitProxyEdit = async (mode: 'save' | 'clear') => {
+    const current = proxyEdit
+    if (current === null || current.busy) return
+    const method = current.channel.proxyEdit?.set
+    if (method === undefined) return
+    const proxy = mode === 'clear' ? '' : current.proxy.trim()
+    if (mode === 'save' && proxy.length === 0) {
+      setProxyEdit({ ...current, error: t('channels.proxy.inputRequired') })
+      return
+    }
+    setProxyEdit({ ...current, busy: true, error: undefined, testResult: undefined })
+    const result = await window.electronAPI.channels.rpc(method, { accountId: current.accountId, proxy })
+    if (!result.ok) {
+      setProxyEdit(prev => prev === null ? null : {
+        ...prev,
+        busy: false,
+        error: result.error?.message ?? t('channels.proxy.failed'),
+      })
+      return
+    }
+    setProxyEdit(null)
+    toast({ title: mode === 'clear' ? t('channels.proxy.cleared') : t('channels.proxy.saved') })
+    // setProxy 不广播 changed：视图里的掩码标签要靠这次主动刷新拿回来。
+    void refresh()
+  }
+
+  /** 代理实测：经代理打出口 IP 查询，失败照实报错，不把「没验证」显示成「可用」。 */
+  const testProxyEdit = async () => {
+    const current = proxyEdit
+    if (current === null || current.busy) return
+    const method = current.channel.proxyEdit?.test
+    if (method === undefined) return
+    const proxy = current.proxy.trim()
+    if (proxy.length === 0) {
+      setProxyEdit({ ...current, error: t('channels.proxy.inputRequired') })
+      return
+    }
+    setProxyEdit({ ...current, busy: true, error: undefined, testResult: undefined })
+    const result = await window.electronAPI.channels.rpc(method, { proxy })
+    if (!result.ok) {
+      setProxyEdit(prev => prev === null ? null : {
+        ...prev,
+        busy: false,
+        error: result.error?.message ?? t('channels.proxy.testFailed'),
+      })
+      return
+    }
+    const value = result.value as { exitIp?: string; latencyMs?: number } | undefined
+    const exitIp = typeof value?.exitIp === 'string' ? value.exitIp : '—'
+    const latency = typeof value?.latencyMs === 'number' ? String(value.latencyMs) : '—'
+    setProxyEdit(prev => prev === null ? null : {
+      ...prev,
+      busy: false,
+      testResult: t('channels.proxy.testOk', { ip: exitIp, latency }),
+    })
   }
 
   const toggleAutoCheckin = async (enabled: boolean) => {
@@ -1800,6 +1893,14 @@ export function Channels() {
                     {channel.accounts.list.map((account, index) => (
                       <li key={account.id} className="flex items-center gap-2 rounded border px-2 py-1 text-sm">
                         <span className="min-w-0 flex-1 truncate">{account.nickname}</span>
+                        {account.proxyLabel !== undefined && (
+                          <span
+                            className="max-w-[10rem] shrink-0 truncate text-xs text-muted-foreground"
+                            title={t('channels.proxy.current', { proxy: account.proxyLabel })}
+                          >
+                            {account.proxyLabel}
+                          </span>
+                        )}
                         {account.serviceStopped !== undefined && (
                           <span
                             className="shrink-0 text-xs text-destructive"
@@ -1843,6 +1944,18 @@ export function Channels() {
                         >
                           <RefreshCw className="h-3.5 w-3.5" />
                         </Button>
+                        {channel.proxyEdit !== undefined && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="px-1"
+                            disabled={busy}
+                            title={t('channels.proxy.button')}
+                            onClick={() => openProxyEdit(channel, account)}
+                          >
+                            <Network className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
                         {channel.id === 'trae' && (
                           <Button
                             variant="ghost"
@@ -2077,6 +2190,80 @@ export function Channels() {
             >
               {credentialAdd?.busy === true && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               {t('channels.credential.addKey')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={proxyEdit !== null}
+        onOpenChange={open => { if (!open && proxyEdit?.busy !== true) setProxyEdit(null) }}
+      >
+        <DialogContent className="sm:max-w-[460px]">
+          <DialogHeader>
+            <DialogTitle>{t('channels.proxy.title', { name: proxyEdit?.accountName })}</DialogTitle>
+            <DialogDescription>{t('channels.proxy.hint')}</DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3 text-sm">
+            <p className="break-all text-xs text-muted-foreground">
+              {proxyEdit?.current === undefined
+                ? t('channels.proxy.direct')
+                : t('channels.proxy.current', { proxy: proxyEdit.current })}
+            </p>
+            <div className="space-y-1">
+              <label className="text-xs text-muted-foreground" htmlFor="channel-proxy-input">
+                {t('channels.proxy.inputLabel')}
+              </label>
+              <Input
+                id="channel-proxy-input"
+                autoComplete="off"
+                spellCheck={false}
+                disabled={proxyEdit?.busy === true}
+                value={proxyEdit?.proxy ?? ''}
+                placeholder={t('channels.proxy.placeholder')}
+                onChange={event => setProxyEdit(current => current === null
+                  ? null
+                  : { ...current, proxy: event.target.value, error: undefined })}
+              />
+            </div>
+            {proxyEdit?.error !== undefined && (
+              <p className="text-destructive">{proxyEdit.error}</p>
+            )}
+            {proxyEdit?.testResult !== undefined && (
+              <p className="text-muted-foreground">{proxyEdit.testResult}</p>
+            )}
+            <p className="text-xs text-muted-foreground">{t('channels.proxy.quotaNote')}</p>
+          </div>
+
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              disabled={proxyEdit?.busy === true}
+              onClick={() => setProxyEdit(null)}
+            >
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="secondary"
+              disabled={proxyEdit?.busy === true}
+              onClick={() => void testProxyEdit()}
+            >
+              {t('channels.proxy.test')}
+            </Button>
+            <Button
+              variant="outline"
+              disabled={proxyEdit?.busy === true}
+              onClick={() => void submitProxyEdit('clear')}
+            >
+              {t('channels.proxy.clear')}
+            </Button>
+            <Button
+              disabled={proxyEdit?.busy === true}
+              onClick={() => void submitProxyEdit('save')}
+            >
+              {proxyEdit?.busy === true && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              {t('channels.proxy.save')}
             </Button>
           </DialogFooter>
         </DialogContent>

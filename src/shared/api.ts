@@ -915,8 +915,12 @@ const aggregateAPI = {
   detail: (id: string): Promise<AggregateDetail | null> =>
     wire.invoke(IpcChannels.AGGREGATE_DETAIL, id),
 
-  addKey: (id: string, apiKey: string): Promise<AggregateMutationResult> =>
-    wire.invoke(IpcChannels.AGGREGATE_ADD_KEY, id, apiKey),
+  // 手动清除上游「配额不足」标识：整家清空，返回刷新后的面板。
+  clearQuotaExhaustions: (id: string): Promise<AggregateMutationResult> =>
+    wire.invoke(IpcChannels.AGGREGATE_CLEAR_QUOTA_EXHAUSTIONS, id),
+
+  addKey: (id: string, apiKey: string, vars?: Record<string, string>): Promise<AggregateMutationResult> =>
+    wire.invoke(IpcChannels.AGGREGATE_ADD_KEY, id, apiKey, vars),
 
   removeKey: (accountId: string): Promise<AggregateMutationResult> =>
     wire.invoke(IpcChannels.AGGREGATE_REMOVE_KEY, accountId),

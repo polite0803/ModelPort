@@ -1,0 +1,139 @@
+[
+  {
+    "entryId": "bailian_coding_plan",
+    "providerName": "阿里云百炼 Coding Plan",
+    "docUrl": "https://help.aliyun.com/zh/model-studio/coding-plan-overview",
+    "asOf": "2026-11-12",
+    "scope": "subscription-plan",
+    "quota": {},
+    "evidence": {
+      "baseUrls": "OpenAI 兼容：https://coding.dashscope.aliyuncs.com/v1；Anthropic 兼容：https://coding.dashscope.aliyuncs.com/apps/anthropic",
+      "apiKey": "获取 Coding Plan API Key（格式为 sk-sp-xxxxx）",
+      "isolation": "Coding Plan 的 API Key 和 Base URL 与百炼按量计费的 API Key（sk-xxxxx）和 Base URL（https://dashscope.aliyuncs.com/xxxxxx）不互通，请勿混用。",
+      "models": "qwen3.7-plus、qwen3.6-plus、qwen3.5-plus、kimi-k2.5、glm-5、MiniMax-M2.5",
+      "terms": "严禁 API 调用：仅限在编程工具（如 Claude Code、Qoder、OpenClaw 等）中使用，禁止以 API 调用的形式用于自动化脚本、自定义应用程序后端或任何非交互式批量调用场景。"
+    },
+    "notes": "按请求次数计量，不是 token：Pro 每 5 小时 6000 次、每周 45000 次、每月 90000 次。5 小时档为滚动恢复（每分钟释放 5 小时前消耗的额度），周额度每周一 00:00（UTC+08:00）重置，月额度在下一个订阅日 00:00 重置。本次未取得任何 token 口径上限，故 quota 留空、由面板显示本备注。"
+  },
+  {
+    "entryId": "tencent_coding_plan",
+    "providerName": "腾讯云 Coding Plan",
+    "docUrl": "https://cloud.tencent.com/document/product/1823/130092",
+    "asOf": "2026-11-12",
+    "scope": "subscription-plan",
+    "quota": {},
+    "evidence": {
+      "baseUrls": "OpenAI 兼容：https://api.lkeap.cloud.tencent.com/coding/v3；Anthropic 兼容：https://api.lkeap.cloud.tencent.com/coding/anthropic",
+      "apiKey": "在 Coding Plan 页面，获取 Coding Plan 专属 API Key（格式为 sk-sp-xxxx）。",
+      "isolation": "Coding Plan 专属的 API Key 和 Base URL 与腾讯云预付费及后付费的 API Key（sk-xxxx）和 Base URL（https://api.lkeap.cloud.tencent.com/xxxxx/）不互通，请勿混用。",
+      "models": "文档正文只给出 tc-code-latest（Auto，按算法自动匹配模型），并声明套餐模型动态更新、以购买页/控制台/公告为准。",
+      "terms": "严禁 API 调用：仅限在编程工具（例如：Claude Code、CodeBuddy Code、OpenClaw 等）中使用，禁止以 API 调用的形式用于自动化脚本、自定义应用程序后端或任何非交互式批量调用场景。"
+    },
+    "notes": "按请求次数计量：Lite 每 5 小时约 1200 次、每周约 9000 次、每订阅月约 18000 次；Pro 约 6000 / 45000 / 90000 次。一次用户提问通常触发多次模型调用，每次调用消耗 1 次额度。另有一条账号规范：为订阅人专享使用，严禁账号共享。"
+  },
+  {
+    "entryId": "tencent_token_plan",
+    "providerName": "腾讯云 Token Plan（个人版）",
+    "docUrl": "https://cloud.tencent.com/document/product/1823/130060",
+    "asOf": "2026-11-12",
+    "scope": "subscription-plan",
+    "quota": {},
+    "evidence": {
+      "baseUrls": "OpenAI 接口协议工具：https://api.lkeap.cloud.tencent.com/plan/v3（完整路径 /plan/v3/chat/completions）；Anthropic 接口协议工具：https://api.lkeap.cloud.tencent.com/plan/anthropic",
+      "apiKey": "通用 Token Plan 与 Hy Token Plan 共用同一个 API Key，仅支持生成一个。",
+      "isolation": "系统将根据您调用时指定的 Model ID，自动从支持该 Model ID 的对应套餐包中抵扣 Token 量。",
+      "models": "文档正文没有逐字模型清单，只指向控制台模型列表页；故目录基线留空。"
+    },
+    "notes": "按套餐内 token 抵扣，缓存命中/未命中的输入与输出都从同一套餐包扣减：体验套餐（Lite）每订阅月 3500 万 Tokens。模型 id 只公布在控制台，本次取不到逐字清单，不臆造。"
+  },
+  {
+    "entryId": "qianfan_coding_plan",
+    "providerName": "百度千帆 Coding Plan",
+    "docUrl": "https://cloud.baidu.com/doc/qianfan/s/imlg0beiu",
+    "asOf": "2026-11-12",
+    "scope": "subscription-plan",
+    "quota": {},
+    "evidence": {
+      "baseUrls": "兼容 OpenAI 接口协议的 Base URL：https://qianfan.baidubce.com/v2/coding（完整路径 /v2/coding/chat/completions）；兼容 Anthropic 接口协议的 Base URL：https://qianfan.baidubce.com/anthropic/coding",
+      "apiKey": "Coding Plan 会生成专属 API Key，这个 API Key 只可以用于 Coding Plan 专属接口。",
+      "models": "可指定 deepseek-v4-pro、glm-5.1，或将模型设为 qianfan-code-latest 后在控制台「系统配置-订阅管理」调整，约一分钟生效。",
+      "terms": "套餐额度仅可在编程工具（如 Claude Code、Qwen Code 等）中使用；禁止以 API 调用的形式用于自动化脚本、自定义应用程序后端或任何非交互式批量调用场景。"
+    },
+    "notes": "Coding Plan 有专属服务接口，与常规 MaaS 服务接口不同。本次未取得按 token 或按次的可登记上限，故 quota 留空、只登记专属端点事实。"
+  },
+  {
+    "entryId": "qianfan_token_plan",
+    "providerName": "百度千帆 Token Plan 个人版",
+    "docUrl": "https://cloud.baidu.com/doc/qianfan/s/Dmrabu8b6",
+    "asOf": "2026-11-12",
+    "scope": "subscription-plan",
+    "quota": {},
+    "evidence": {
+      "baseUrls": "OpenAI 兼容：https://qianfan.baidubce.com/v2/tokenplan/personal（完整路径 /v2/tokenplan/personal/chat/completions）；Anthropic 兼容：https://qianfan.baidubce.com/anthropic/tokenplan/personal",
+      "apiKey": "Token Plan 个人版采用专属API-KEY，仅限在 Token Plan 个人版使用；误用通用 Key 返回 token_plan_person_api_key_required。",
+      "models": "ernie-5.5-flash-preview、ernie-light-dt-1.0、deepseek-v4.1-flash-1017、deepseek-v4.1-flash、deepseek-v4-pro、glm-5.3、glm-5.3-flash，或统一填 qianfan-code-latest。",
+      "terms": "仅限在兼容的AI编程和智能体工具中交互式使用，不可用于自动化脚本或应用后端。"
+    },
+    "notes": "以套餐积分（Credits）抵扣；额度用完后等待下一个周期自动恢复，不会消耗其他资源包或账户余额。文档另有标注「即将下线」的四条模型（deepseek-v4-pro-0813、deepseek-v4-flash-0731、glm-5.2、glm-5.1），本次不登记。"
+  },
+  {
+    "entryId": "xfyun_astron_coding_plan",
+    "providerName": "讯飞星辰 Astron Coding Plan",
+    "docUrl": "https://www.xfyun.cn/doc/spark/CodingPlan.html",
+    "asOf": "2026-11-12",
+    "scope": "subscription-plan",
+    "quota": {},
+    "evidence": {
+      "baseUrls": "OpenAI 协议：https://maas-coding-api.cn-huabei-1.xf-yun.com/v2；Anthropic 协议：https://maas-coding-api.cn-huabei-1.xf-yun.com/anthropic",
+      "apiKey": "每个套餐对应一个独立 API Key，仅用于 Coding Plan 接口。",
+      "models": "统一使用 astron-code-latest；底层模型在控制台「配置模型」切换（1–3 分钟生效），文档另列 xopglm52 / xopdeepseekv4pro 等内部 id。",
+      "terms": "额度仅用于编程工具的交互式编码场景；禁止自动化脚本、批量任务、自建应用后端或服务端，以及任何非交互式、非编程工具场景的调用。"
+    },
+    "notes": "按请求次数流控而非按 token：5 小时（滑动刷新）、每周、每订阅月三层；高效版示例为 5 小时约 6000 次、每周约 45000 次、每月约 90000 次。不同模型有 1–5 倍抵扣系数，波谷时段系数 0.8。"
+  },
+  {
+    "entryId": "xfyun_astron_token_plan",
+    "providerName": "讯飞星辰 Astron Token Plan",
+    "docUrl": "https://www.xfyun.cn/doc/spark/TokenPlan.html",
+    "asOf": "2026-11-12",
+    "scope": "subscription-plan",
+    "quota": {},
+    "evidence": {
+      "baseUrls": "OpenAI 协议：https://maas-token-api.cn-huabei-1.xf-yun.com/v2；Anthropic 协议：https://maas-token-api.cn-huabei-1.xf-yun.com/anthropic",
+      "apiKey": "每个套餐对应一个独立 API Key，仅用于 Token Plan 接口；Token Plan 使用独立 Base URL（maas-token-api），与常规推理服务（maas-api）不同，请勿混用。",
+      "models": "spark-x2.5、xsparkx2flash、xopglm52、xopglm51、xopglm5、xopdeepseekv4pro、xopdeepseekv4flash、xopdeepseekv32、xopkimik26、xopkimik25、xminimaxm25、xopqwen35397b、xopqwen36v35b、xopqwen35v35b、xop3qwencodernext、xopglmv47flash",
+      "retired": "已下线、不登记：xsparkx2agent、xsparkx2"
+    },
+    "notes": "以积分（Credits）计量：按成员分配固定月额度（标准 20000、高级 60000、尊享 200000 积分/月），消耗按输入、缓存命中、输出、思考四类 token 分别乘积分单价，再乘时段系数（高峰 1.0，错峰 0.8）。"
+  },
+  {
+    "entryId": "jd_coding_plan",
+    "providerName": "京东云 JoyBuilder Coding Plan",
+    "docUrl": "https://docs.jdcloud.com/cn/jdaip/Quickstart",
+    "asOf": "2026-11-12",
+    "scope": "subscription-plan",
+    "quota": {},
+    "evidence": {
+      "baseUrls": "兼容 Anthropic 接口协议工具：https://modelservice.jdcloud.com/coding/anthropic；兼容 OpenAI 接口协议工具：https://modelservice.jdcloud.com/coding/openai/v1",
+      "isolation": "请勿使用 https://modelservice.jdcloud.com/v1 —— 该 Base URL 为 API 调用按用量计费，如使用该 URL 将报错。",
+      "models": "DeepSeek-V3.2、GLM-5、GLM-4.7、MiniMax-M2.5、Kimi-K2.5、Kimi-K2-Turbo、Qwen3-Coder（以 Model Name 在工具配置文件中指定，可实时切换）",
+      "terms": "仅支持在指定 AI 编程工具中使用，包括 Claude Code、OpenCode、OpenClaw、Roo Code、Cursor。若在非编程工具中使用 Coding Plan 的 BaseURL 与 API Key，将无法消耗额度，且可能被识别为滥用。"
+    },
+    "notes": "按请求次数计费的 AI 编程订阅服务（Coding Plan Lite / Pro）。与 TokenPlan 完全独立：各自的 API Key、BaseURL、额度均不共享，额度也无法互相换算。"
+  },
+  {
+    "entryId": "jd_token_plan",
+    "providerName": "京东云 JoyBuilder TokenPlan",
+    "docUrl": "https://docs.jdcloud.com/cn/jdaip/tool-setup",
+    "asOf": "2026-11-12",
+    "scope": "subscription-plan",
+    "quota": {},
+    "evidence": {
+      "baseUrls": "OpenAI：https://modelservice.jdcloud.com/tokenPlan/openai/v1；Anthropic：https://modelservice.jdcloud.com/tokenPlan/anthropic",
+      "apiKey": "按量付费和 TokenPlan 的 apikey 不通用。在使用 TokenPlan 时请严格按照控制台上的模型调用值进行使用",
+      "models": "官方示例 model 用 maas-token-latest",
+      "terms": "TokenPlan 兼容 OpenAI 与 Anthropic 协议，无工具限制；除编程工具外，还可接入 LangChain 等 AI 开发框架、自研应用、Agent 系统。"
+    },
+    "notes": "订阅制：购买套餐后获得 Credits 额度，一个 Key 通用多个模型，额度用完即止、无超额账单。个人版同时只能持有一个生效订阅；企业版为白名单邀请制。"
+  }
+]

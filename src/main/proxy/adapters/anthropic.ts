@@ -11,6 +11,7 @@
 import { PassThrough } from 'node:stream'
 import axios from 'axios'
 import type { Account, Provider } from '../../store/types'
+import { resolveAggregateEndpoint, aggregateEndpointMissingMessage } from '../../providers/aggregate/endpoint.ts'
 import {
   type PromptCacheCapability,
   type PromptCachingConfig,
@@ -95,7 +96,10 @@ export class AnthropicAdapter {
   }
 
   private buildUrl(): string {
-    const base = (this.provider.apiEndpoint || '').replace(/\/+$/, '')
+    // 聚合端点的路径里可能带账号（`{account_id}`），按这把 Key 的凭据展开。
+    const endpoint = resolveAggregateEndpoint(this.provider, this.account.credentials)
+    if (endpoint.missing.length > 0) throw new Error(aggregateEndpointMissingMessage(endpoint.missing))
+    const base = (endpoint.url || '').replace(/\/+$/, '')
     const path = this.provider.chatPath || '/messages'
     return `${base}${path.startsWith('/') ? '' : '/'}${path}`
   }

@@ -15,11 +15,15 @@ import {
   sanitizeRequestLogUpdates,
   trimRequestLogsToMaxEntries,
 } from './sanitizer.ts'
+import { isBodySampleSelected } from './sampling.ts'
 
 interface RequestLogManagerOptions {
   storageDir: string
   config?: Partial<RequestLogConfig>
 }
+
+/** 保留窗按「这次请求顺手扫一遍」执行，最多十分钟一次；不给它单独开定时器。 */
+const BODY_SWEEP_INTERVAL_MS = 10 * 60 * 1000
 
 export class RequestLogManager {
   private readonly logFile: string
@@ -32,6 +36,7 @@ export class RequestLogManager {
   private persistInFlight = false
   private persistGeneration = 0
   private readonly persistDelayMs = 2000
+  private lastBodySweepAt = 0
 
   constructor(options: RequestLogManagerOptions) {
     this.storageDir = options.storageDir
@@ -44,12 +49,19 @@ export class RequestLogManager {
 
     mkdirSync(this.storageDir, { recursive: true })
     this.requestLogs = this.loadRequestLogs()
+    // 关掉的进程不会自己老化：不在这里扫一遍，跨过保留窗的请求体会一直躺在盘上
+    // 直到下一次有流量把它挤出去。
+    if (this.stripExpiredBodies()) {
+      this.schedulePersist()
+    }
     this.initialized = true
   }
 
   setConfig(config: Partial<RequestLogConfig>): void {
     this.config = normalizeRequestLogConfig(config)
     this.requestLogs = trimRequestLogsToMaxEntries(this.requestLogs, this.config)
+    // 调小保留窗应当当场生效，而不是等下一个十分钟。
+    this.stripExpiredBodies()
     this.schedulePersist()
   }
 
@@ -77,8 +89,12 @@ export class RequestLogManager {
   addRequestLog(entry: Omit<RequestLogEntry, 'id'>): RequestLogEntry {
     this.ensureInitialized()
 
+    // 采样决定写在行上（`captureBodies`），因为落 body 的是插入，而裁剪 body 的
+    // sanitizer 只看这个标记 —— 两条判据必须是同一个。
+    const sampled = entry.captureBodies !== true
+      && isBodySampleSelected(entry.requestId, this.config.bodySampleRate)
     const logEntry: RequestLogEntry = {
-      ...sanitizeRequestLogEntry(entry, this.config),
+      ...sanitizeRequestLogEntry(sampled ? { ...entry, captureBodies: true } : entry, this.config),
       id: generateId(),
     }
 
@@ -88,6 +104,7 @@ export class RequestLogManager {
 
     this.requestLogs.push(logEntry)
     this.requestLogs = trimRequestLogsToMaxEntries(this.requestLogs, this.config)
+    this.sweepBodiesIfDue()
     this.schedulePersist()
 
     return logEntry
@@ -203,6 +220,47 @@ export class RequestLogManager {
     if (!this.initialized) {
       throw new Error('RequestLogManager is not initialized')
     }
+  }
+
+  private sweepBodiesIfDue(nowMs: number = Date.now()): void {
+    if (this.config.bodyRetentionDays <= 0) return
+    if (nowMs - this.lastBodySweepAt < BODY_SWEEP_INTERVAL_MS) return
+    this.stripExpiredBodies(nowMs)
+  }
+
+  /**
+   * Drop the bodies, keep the row.
+   *
+   * The body is the part worth keeping for compression work and the only part
+   * that costs hundreds of kilobytes; the row itself is what the dashboards,
+   * the Bandit and the detail dialog read. Deleting the row to age out its body
+   * would throw away the reading the body was collected for. `captureBodies`
+   * goes with it so the dialog says "not captured" instead of rendering an
+   * empty body.
+   */
+  private stripExpiredBodies(nowMs: number = Date.now()): boolean {
+    this.lastBodySweepAt = nowMs
+    const days = this.config.bodyRetentionDays
+    if (days <= 0) return false
+    const cutoff = nowMs - days * 24 * 60 * 60 * 1000
+    let changed = false
+
+    this.requestLogs = this.requestLogs.map((entry) => {
+      if (entry.timestamp >= cutoff) return entry
+      if (entry.requestBody === undefined && entry.responseBody === undefined && entry.captureBodies !== true) {
+        return entry
+      }
+      changed = true
+      const {
+        requestBody: _requestBody,
+        responseBody: _responseBody,
+        captureBodies: _captureBodies,
+        ...rest
+      } = entry
+      return rest
+    })
+
+    return changed
   }
 
   private loadRequestLogs(): RequestLogEntry[] {

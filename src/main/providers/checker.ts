@@ -1,6 +1,8 @@
 import axios, { AxiosError } from 'axios'
 import { getBuiltinProvider } from './builtin/index.ts'
 import { channelRuntimeState } from './accountChannels/runtimeState.ts'
+import AccountManager from '../store/accounts'
+import { resolveAggregateEndpoint, aggregateEndpointMissingMessage } from './aggregate/endpoint.ts'
 import type { Provider, ProviderCheckResult, ProviderStatus, Account } from '../../shared/types'
 import type { BuiltinProviderConfig } from '../store/types'
 
@@ -158,6 +160,24 @@ export class ProviderChecker {
         return this.probeAccount(provider)
       }
 
+      // 聚合端点的地址可能带账号占位符（Cloudflare 的 `{account_id}`）：巡检不是
+      // 请求路径，拿不到"这把 Key"的语境，就用已存的第一把的凭据展开。缺值时报
+      // `unknown` 加可读原因，而不是让 axios 对带花括号的地址回一句 Invalid URL。
+      if (provider.type === 'aggregate') {
+        const account = AccountManager.getByProviderId(provider.id, true)[0]
+        const endpoint = resolveAggregateEndpoint(provider, account?.credentials)
+        if (endpoint.missing.length > 0) {
+          return {
+            providerId: provider.id,
+            status: 'unknown',
+            latency: 0,
+            reason: 'missing_endpoint_var',
+            error: aggregateEndpointMissingMessage(endpoint.missing),
+          }
+        }
+        return await this.checkCustomProvider(provider, endpoint.url)
+      }
+
       return await this.checkCustomProvider(provider)
     } catch (error) {
       return {
@@ -218,13 +238,13 @@ export class ProviderChecker {
     }
   }
 
-  private static async checkCustomProvider(provider: Provider): Promise<ProviderCheckResult> {
+  private static async checkCustomProvider(provider: Provider, endpoint?: string): Promise<ProviderCheckResult> {
     const startTime = Date.now()
     
     try {
       const response = await axios({
         method: 'GET',
-        url: `${provider.apiEndpoint}/models`,
+        url: `${endpoint ?? provider.apiEndpoint}/models`,
         headers: provider.headers,
         timeout: CHECK_TIMEOUT,
         validateStatus: () => true,

@@ -7,8 +7,8 @@
  * 不得当作 0、不得当作无限、也不得参与额度预检。
  * 单位不是 token 的官方上限保留在 officialNote 里，只供面板显示，不参与预检。
  *
- * 生成于 2026-11-03；16 家有数字，
- * 73 家官方未公布，89 家带口径备注。
+ * 生成于 2026-11-12；16 家有数字，
+ * 82 家官方未公布，98 家带口径备注。
  */
 
 export interface AggregateModelQuota {
@@ -88,6 +88,12 @@ export const AGGREGATE_QUOTA: Record<string, AggregateEntryQuota> = {
     docUrl: 'https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope',
     asOf: '2026-11-03',
     officialNote: "主体确认：中国站百炼的 OpenAI 兼容线；目录 baseUrl 用官方长期保留的 https://dashscope.aliyuncs.com/compatible-mode/v1，控制台若给 WorkspaceId 专属域名可用 baseUrl 覆盖。官方限流/额度在控制台按账号与模型档位展示，本次可读文档页没有逐模型 RPM/TPM 数字，故 quota 全 null。与 alibaba_cloud（新加坡国际站）是两个计费域，Key 不可混用。模型 id 取自百炼模型列表与 Token Plan 支持表，按量与套餐的可用集合以控制台为准。",
+  },
+  'bailian_coding_plan': {
+    source: 'undocumented',
+    docUrl: 'https://help.aliyun.com/zh/model-studio/coding-plan-overview',
+    asOf: '2026-11-12',
+    officialNote: "按请求次数计量，不是 token：Pro 每 5 小时 6000 次、每周 45000 次、每月 90000 次。5 小时档为滚动恢复（每分钟释放 5 小时前消耗的额度），周额度每周一 00:00（UTC+08:00）重置，月额度在下一个订阅日 00:00 重置。本次未取得任何 token 口径上限，故 quota 留空、由面板显示本备注。",
   },
   'bailian_token_plan': {
     source: 'undocumented',
@@ -228,6 +234,18 @@ export const AGGREGATE_QUOTA: Record<string, AggregateEntryQuota> = {
     docUrl: 'https://hyperbolic.xyz/pricing',
     asOf: '2026-10-29',
     officialNote: "官方仅有按 token 的价目与注册试用 credits 说明，未公布 RPM/RPD/TPM/TPD 数字。试抓 https://hyperbolic.xyz/pricing（301 跳到 www.hyperbolic.ai/pricing）返回 404，读不到正文；检索到的 '$25 free trial credits'、'200 req/m' 等来自第三方聚合仓库/博客，非官方正文，未采信。全 null、undocumented。",
+  },
+  'jd_coding_plan': {
+    source: 'undocumented',
+    docUrl: 'https://docs.jdcloud.com/cn/jdaip/Quickstart',
+    asOf: '2026-11-12',
+    officialNote: "按请求次数计费的 AI 编程订阅服务（Coding Plan Lite / Pro）。与 TokenPlan 完全独立：各自的 API Key、BaseURL、额度均不共享，额度也无法互相换算。",
+  },
+  'jd_token_plan': {
+    source: 'undocumented',
+    docUrl: 'https://docs.jdcloud.com/cn/jdaip/tool-setup',
+    asOf: '2026-11-12',
+    officialNote: "订阅制：购买套餐后获得 Credits 额度，一个 Key 通用多个模型，额度用完即止、无超额账单。个人版同时只能持有一个生效订阅；企业版为白名单邀请制。",
   },
   'kilo': {
     source: 'undocumented',
@@ -415,6 +433,18 @@ export const AGGREGATE_QUOTA: Record<string, AggregateEntryQuota> = {
     asOf: '2026-10-29',
     officialNote: "有页面但无数字：docs.poolside.ai 正文可完整抓取（首页 338KB、llms.txt 索引 17KB、llms-full.txt 全量 674KB 都取到了），索引里没有任何 rate limit / quota / pricing 页面；在 llms-full.txt 全文里 grep \"requests per minute\"、\"tokens per minute\"、\"rate limit\"、\"429\" 只命中第三方网关 Bifrost 的自建部署文档（\"Use Bifrost as an OpenAI-compatible gateway in front of Poolside model inference when you need centralized routing, virtual keys, budgets, rate limits...\" 与 Virtual Keys 页面可 \"Optionally set token and request limits with reset periods\" —— 那是用户自己给虚拟 Key 设的帽，不是 Poolside 对账户公布的帽），\"429\" 出现 0 次。结论：官方文档未公布 poolside/laguna-s-2.1、poolside/laguna-xs-2.1 的速率或月度额度，全部 null。",
   },
+  'qianfan_coding_plan': {
+    source: 'undocumented',
+    docUrl: 'https://cloud.baidu.com/doc/qianfan/s/imlg0beiu',
+    asOf: '2026-11-12',
+    officialNote: "Coding Plan 有专属服务接口，与常规 MaaS 服务接口不同。本次未取得按 token 或按次的可登记上限，故 quota 留空、只登记专属端点事实。",
+  },
+  'qianfan_token_plan': {
+    source: 'undocumented',
+    docUrl: 'https://cloud.baidu.com/doc/qianfan/s/Dmrabu8b6',
+    asOf: '2026-11-12',
+    officialNote: "以套餐积分（Credits）抵扣；额度用完后等待下一个周期自动恢复，不会消耗其他资源包或账户余额。文档另有标注「即将下线」的四条模型（deepseek-v4-pro-0813、deepseek-v4-flash-0731、glm-5.2、glm-5.1），本次不登记。",
+  },
   'qiniu': {
     source: 'documented',
     tpd: 100000000,
@@ -501,6 +531,18 @@ export const AGGREGATE_QUOTA: Record<string, AggregateEntryQuota> = {
     asOf: '2026-10-29',
     officialNote: "主体确认：baseUrl https://api.hunyuan.cloud.tencent.com/v1 = 腾讯云混元生文 OpenAI 兼容端点（website cloud.tencent.com/product/hunyuan）。一个数字都进不了 quota：官方唯一可读的请求类限制是**并发数 5 路**（https://cloud.tencent.com/document/product/1729/105701 对话接口正文），既不是 RPM 也不是 RPD，字段表里没有对应列，只在此记录；官方没有任何 RPM/RPD/TPM/TPD 正文数字（限流类页面 https://cloud.tencent.com/document/product/1729/105526 已被重定向到无关的 WeData 文档，读不到混元限速内容）。免费池存在但不覆盖本目录：「混元生文计费概述」的一次性免费资源包清单是 Hunyuan-a13b / Hunyuan-role-latest / Hunyuan-translation / Hunyuan-translation-lite / Tencent HY Vision 1.5 Instruct / Hunyuan-turbos-vision / Hunyuan-t1-vision / Hunyuan-turbos-vision-video / Hunyuan-embedding，**不含 hunyuan-turbos-latest 与 hunyuan-t1-latest**，所以 freeModelIds 空、monthlyTokens 空（且它是 1 年有效期的一次性包，不是月度额）。警示（官方原话）：「为进一步提升大模型服务体验，腾讯混元大模型相关功能将逐步迁移至 TokenHub。迁移后，原平台将不再新增模型能力，并停止支持新购模型服务。」——本目录这两条模型属于正在被迁走的旧平台，新接入应改走 TokenHub（product/1823）。另：免费/付费资源包耗尽后**不会**自动转后付费，未开通后付费会出现计费异常提示。",
   },
+  'tencent_coding_plan': {
+    source: 'undocumented',
+    docUrl: 'https://cloud.tencent.com/document/product/1823/130092',
+    asOf: '2026-11-12',
+    officialNote: "按请求次数计量：Lite 每 5 小时约 1200 次、每周约 9000 次、每订阅月约 18000 次；Pro 约 6000 / 45000 / 90000 次。一次用户提问通常触发多次模型调用，每次调用消耗 1 次额度。另有一条账号规范：为订阅人专享使用，严禁账号共享。",
+  },
+  'tencent_token_plan': {
+    source: 'undocumented',
+    docUrl: 'https://cloud.tencent.com/document/product/1823/130060',
+    asOf: '2026-11-12',
+    officialNote: "按套餐内 token 抵扣，缓存命中/未命中的输入与输出都从同一套餐包扣减：体验套餐（Lite）每订阅月 3500 万 Tokens。模型 id 只公布在控制台，本次取不到逐字清单，不臆造。",
+  },
   'together': {
     source: 'undocumented',
     docUrl: 'https://docs.together.ai/docs/serverless/rate-limits.md',
@@ -575,6 +617,18 @@ export const AGGREGATE_QUOTA: Record<string, AggregateEntryQuota> = {
     asOf: '2026-10-29',
     perModel: [{ modelId: 'grok-4.6', tpm: 50000000, contextWindow: 500000 }, { modelId: 'grok-4.5', tpm: 50000000, contextWindow: 500000 }],
     officialNote: "上一轮只看到搜索摘要、数值表被截断，这次取全了：docs.x.ai 带代理 200，先取 https://docs.x.ai/llms.txt（26,271 字节）定位到官方 markdown 原文 https://docs.x.ai/developers/rate-limits.md（6,153 字节，完整含全部数值表），再取 https://docs.x.ai/developers/models.md（4,843 字节，含 Context 列）。docs.x.ai/docs/overview 那页本身是 507,680 字节的 JS 外壳、剥标签后仅 6,749 字符且只有导航文字，所以数字不在 overview 里，而在 .md 原文里。 单位口径（务必按此解读，别当成 RPM）：官方只给 **RPS 和 TPM** 两个维度，没有 RPM/RPD/TPD/月度 token。rpm 留 null 的原因是我抓到的正文里没有逐字的 RPM 数字，只有一句换算线索 \"Your per-second limit is derived from your per-minute request budget (RPM / 48, with a minimum of 2)\" —— 据此反推 grok-4.6/4.5 的 T0 约为 150×48=7200 RPM，但这是推导值而非原文数字，按铁律不写进 rpm 字段，只在此说明，RPS 原值 150(T0)/172/208/312/500 已附在 perModel.evidence。 tpm=50000000 取的是 **Tier 0（$0，默认档）** 的 50M，官方原文 \"| Tier 0 | $0 (default) |\" 说明任何未花钱的 key 都在 T0，所以这一档才是本项目关心的「裸 key」上限；T1..T4 的 53M/60M/74M/100M 一并记在 evidence。 perModel 只收了官方限速表中真实存在的两个 id。其余四个我们目录里的 id 都不在现行表里，按规则不写进 perModel/freeModelIds，改为在此列出官方核对结果： 1) `grok-4-fast-reasoning`、`grok-code-fast-1`、`grok-3` 已于 2026-05-15 退役，但官方说 slug 仍可解析并被重定向：\"After **May 15, 2026 at 12:00 PM PT**, requests to the retired model slugs above will automatically redirect to `grok-4.3`. The slugs themselves continue to resolve, so you do not need to change your code to avoid breakage.\" 重定向表逐行：`grok-4-fast-reasoning` → `grok-4.3` with `low` reasoning effort；`grok-3` → `grok-4.3` with `none` reasoning effort；`grok-code-fast-1` → `grok-build-0.1`。故它们的实际上限是 `grok-4.3` 行（T0: 37 RPS / T0: 10M TPM，上下文 1M）和 `grok-build-0.1` 行（T0: 37 RPS / T0: 10M TPM，上下文 256k）。没有把这些数字直接登记到退役 slug 上，是因为那是经由重定向链路间接生效的第二层推导，请上层裁定是否采用。 2) 裸 `grok-4` 在本次抓到的三份官方正文（rate-limits.md、models.md、may-15-retirement.md）里 **0 次命中**（grep 命中的 `/grok-4` 都是 `/grok-4.7` 的前缀），即官方从未记载这个 slug。 3) 计费口径要留意：\"If you continue sending requests to a deprecated slug after May 15, please be aware that you will be billed at `grok-4.3` pricing of **$1.25 per 1M input tokens and $2.50 per 1M output tokens** rather than the rates of the original model.\" 官方现行表里的完整 id 名单（我们目录缺的都在这里）：grok-4.7、grok-4.6、grok-4.5、grok-4.3、grok-4.20-0309-reasoning、grok-4.20-0309-non-reasoning、grok-build-0.1、grok-4.20-multi-agent-0309，以及 Imagine 图像/视频与 Voice & Audio 各组。限速适用范围官方写明：\"Rate limit tiers apply to text, embedding, and voice models. For increases to Imagine API limits, contact sales@x.ai.\" 免费额度：没有任何免费模型或免费 token，T0 只是「$0 累计消费」的默认档，仍需充值才能用；提额途径是 \"Spend more\" / \"Request an increase\"（Console 提交）/ \"Contact sales\"。禁代理/禁转售/仅评估条款：rate-limits.md、models.md、overview 三份正文里 grep resell|prohibit|not permitted|evaluation 0 命中。",
+  },
+  'xfyun_astron_coding_plan': {
+    source: 'undocumented',
+    docUrl: 'https://www.xfyun.cn/doc/spark/CodingPlan.html',
+    asOf: '2026-11-12',
+    officialNote: "按请求次数流控而非按 token：5 小时（滑动刷新）、每周、每订阅月三层；高效版示例为 5 小时约 6000 次、每周约 45000 次、每月约 90000 次。不同模型有 1–5 倍抵扣系数，波谷时段系数 0.8。",
+  },
+  'xfyun_astron_token_plan': {
+    source: 'undocumented',
+    docUrl: 'https://www.xfyun.cn/doc/spark/TokenPlan.html',
+    asOf: '2026-11-12',
+    officialNote: "以积分（Credits）计量：按成员分配固定月额度（标准 20000、高级 60000、尊享 200000 积分/月），消耗按输入、缓存命中、输出、思考四类 token 分别乘积分单价，再乘时段系数（高峰 1.0，错峰 0.8）。",
   },
   'xiaomi-tokenplan': {
     source: 'undocumented',

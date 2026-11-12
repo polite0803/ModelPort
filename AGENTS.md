@@ -128,21 +128,30 @@ store entirely and need `NODE_EXTRA_CA_CERTS` - the same PEM a remote machine ca
 attempt list, so read `TlsStatus.handshakeRejections` (`GET /v1/management/tls/status`) before
 concluding the gateway saw nothing. Details in `docs/AGENTS-full.md` §HTTPS Listener and Certificate
 Trust.
-* **The gateway authors no prompt text** (裁定 2026-11-03「本网关不注入任何提示词」). Nothing ModelPort
-writes may add a system/user turn, append to the client's system prompt, or replace message content with
-prose. Retired in that batch: the managed tool-call prompt subsystem (`proxy/toolCalling/`,
-`shared/toolCalling.ts`, `config.toolCallingConfig`, `ToolCallingPanel`, `/v1/management/tool-calling/*`),
-the synthetic trailing user turn (`proxy/trailingUserGuard.ts`, `config.trailingUserGuard`), output
-verbosity steering (`config.outputSteering`) and the context Summary strategy
-(`contextManagement.strategies.summary`). Tools travel natively; "this candidate has no tools" is a
-**routing** fact (`autoRouting::buildRequestProfile.needsTools` → `hardFilterFailure` → `missing:['tools']`),
-not something to paper over with instructions. Shape transforms stay allowed - message/tool structure
-mapping, deletion-only trimming, aggregate parameter stripping. The two surviving text sites are
-`ccr-sentinel` (a self-describing retrieval pointer inside a compressed tool result) and `liveness-ping`
-(a probe that never enters a conversation), each tagged `GATEWAY-TEXT: <id>` and reconciled two-way with
-`docs/AGENTS-full.md` §Gateway-Authored Text by `tests/proxy/gateway-authored-text.test.ts`, which pins
-the exact live set. Retired config keys are stripped in `store.ts::normalizeConfig` so the management API
-can never report a switch nobody reads.
+* **The gateway authors no prompt text** (裁定 2026-11-03「本网关不注入任何提示词」, amended
+2026-11-12). Nothing ModelPort writes may add a system/user turn, append to the client's system prompt,
+or replace message content with prose. The 2026-11-12 amendment lifts the ruling for exactly two
+*protocol* blocks - `ccr-protocol` (what a `<<ccr:hash>>` marker means and how to fetch the original at
+`GET /v1/ccr/<hash>`) and `say-less-contract` (an opt-in output level) - each injected as its own
+leading `system` message, byte-identical on every turn, off unless the conversation has been compressed
+or the user selected a level. "Off unless" is a *conversation* fact, not a per-turn one: the block sits
+at the head of the prompt, so a block that appeared on compressing turns and vanished on the others
+would drop the whole cached prefix every time it flipped. `gatewayProtocolMemory.ts` remembers the
+conversation once it is introduced. Everything else stays retired. Retired in the 2026-11-03 batch: the managed
+tool-call prompt subsystem (`proxy/toolCalling/`, `shared/toolCalling.ts`, `config.toolCallingConfig`,
+`ToolCallingPanel`, `/v1/management/tool-calling/*`), the synthetic trailing user turn
+(`proxy/trailingUserGuard.ts`, `config.trailingUserGuard`), output verbosity steering in its old form
+(`config.outputSteering`; the goal returned as `say-less-contract`, the retired key did not) and the
+context Summary strategy (`contextManagement.strategies.summary`). Tools travel natively; "this
+candidate has no tools" is a **routing** fact (`autoRouting::buildRequestProfile.needsTools` →
+`hardFilterFailure` → `missing:['tools']`), not something to paper over with instructions. Shape
+transforms stay allowed - message/tool structure mapping, deletion-only trimming, aggregate parameter
+stripping, duplicate-message folding. The live text sites are `ccr-sentinel` (a self-describing
+retrieval pointer inside a compressed tool result), `liveness-ping` (a probe that never enters a
+conversation), the three capability probes, and the two amended blocks above - each tagged
+`GATEWAY-TEXT: <id>` and reconciled two-way with `docs/AGENTS-full.md` §Gateway-Authored Text by
+`tests/proxy/gateway-authored-text.test.ts`, which pins the exact live set. Retired config keys are
+stripped in `store.ts::normalizeConfig` so the management API can never report a switch nobody reads.
 * **Failover status policy**: 400 is terminal (capability-mismatch 400s are explicit exceptions);
 401-407, **404**, 409-499, 5xx and network errors switch to the next candidate; 408/504/524 may switch
 but are never retried against the same target. A 404 means "this channel does not supply that model",
@@ -245,6 +254,16 @@ Logging / diagnostics:
   logging is off; the Logs detail dialog can export a diagnostic bundle (row + related app logs +
   sanitized config/version snapshot). Process-level `uncaughtException`/`unhandledRejection` go to the
   app log and to `~/.modelport/logs/crash-fallback.ndjson` before the store is ready.
+* **Bodies are governed by three knobs, and only three.** `requestLogConfig.includeBodies` (every
+  request), a per-request `X-ModelPort-Trace: 1`, or `requestLogConfig.bodySampleRate` - a *hash of
+  `requestId`*, never a fresh coin flip, because a row is written at request start and patched as the
+  stream ends while the patch carries no body: the sanitizer keeps what is on the row by reading
+  `captureBodies`, which a random draw would flip under its own body. `bodyRetentionDays` (default 7)
+  then strips the body and that flag, keeping the row - dashboards, Bandit and the detail dialog read
+  rows, and deleting a row to age out its body loses the reading the body was collected for. Sampling
+  defaults to 0: storing bodies is a privacy and disk decision that an upgrade must not make for the
+  user. This is the corpus source for `scripts/compression-eval.mjs` (`--from-logs`, since `data.json`
+  no longer holds the rows).
 * Timed log persistence is async and atomic (unique temp + rename); `flushSync()` remains the quit path
   and invalidates stale in-flight snapshots. Worker logs carry `providerId`/`requestId` when available.
 * `console.error`/`console.warn` are mirrored to a durable surface by `src/shared/logging/consoleBridge.ts`,
@@ -325,6 +344,15 @@ CNY balance and this app's token ledger are three incomparable count domains - t
 `QuotaWindowBlockReason | 'no-credit'` split makes converting one into a token ratio a type error. One click on
 the aggregate panel sends one GET per stored key (capped, remainder stated); nothing is polled and opening a
 page never asks by itself.
+* **A refusal witnessed by a real call is a fourth, non-comparable quota layer** (`shared/aggregateQuotaExhaustion.ts`).
+`quotaBlockReason` marks a `(entry, account, model)` when the upstream itself said quota/balance/arrears, then
+skips exactly that pair until it expires (`until` from the client-facing `Retry-After`, else
+`QUOTA_EXHAUSTION_TTL_MS` = 30 min); the first success clears it, and the detail page has a manual clear. It is
+never folded into the documented caps (a static cap), the local ledger (our count), or the money snapshot (a
+balance) - this one is a witness, and the UI shows it beside the five-state badge, never merged into it. Rate
+limits are deliberately **not** marked (bare 429, `rate limit`, `频率超限`, the local AIMD 429): a mis-mark costs
+the pair half an hour. Written once at the three-branch convergence in `routes/chat.ts` via
+`proxy/quota/exhaustionMarks.ts`; both directions pinned by `tests/proxy/aggregate-quota-exhaustion.test.ts`.
 * Stickiness is a **hard priority by default** (`ModelRoute.stickyHardPin`, absent = enabled, read as
 `!== false` so records predating the field keep it). Turning it off per route leaves only the `+0.12` / `+0.06`
 score bonus - and because the promotion happens in `autoRouter::select`, an assertion over `rankCandidates`

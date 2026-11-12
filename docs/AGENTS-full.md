@@ -1466,6 +1466,27 @@ left below is the residue that survives that ruling because it is not a claim ab
 a self-describing compression marker and probes that never enter a conversation. Anything else must be
 retired, not documented.
 
+**Amendment (2026-11-12, 用户拍板)**: the ruling is lifted for exactly two blocks, `ccr-protocol` and
+`say-less-contract`. Both are *protocol* text, not task text: the first describes what this gateway's
+own markers mean, the second states an output shape the user selected in settings. Three conditions
+are enforced in `src/main/proxy/gatewayText.ts` rather than promised here:
+
+* the block arrives as its **own leading `system` message** - the client's system prompt is never
+  edited, appended to, or replaced. The 2026-11-03 `trailing-user-guard` wrote a `user` turn and the
+  model echoed it back as its own opening line in 36 of 267 reasoning blocks; a `system` block cannot
+  be mistaken for the user's words in the same way, and it is the shape a client can visibly see;
+* the text is **byte-identical on every turn of a conversation**, so the prefix cache sees the same
+  bytes again. Both blocks are pure functions of their inputs;
+* neither block is ever on by default for traffic that does not need it. `ccr-protocol` is present from
+  the first turn a conversation is compressed and remembered for the rest of it
+  (`gatewayProtocolMemory.ts`), because the block is prepended: if it appeared only on compressing turns
+  and vanished on the others, its presence would rewrite the first bytes of the prompt and drop the
+  entire cached prefix on every flip. A conversation that never compresses pays zero. `say-less-contract`
+  needs an explicit level, only applies to requests that carry `tools`, and is circuit-broken per
+  `(provider, model)` by `outputContractGuard.ts` when the target is already producing degraded turns.
+
+Anything beyond these two is still retired by the 2026-11-03 ruling.
+
 Anything the gateway writes into an outbound request is a claim on the user's behalf, and it is
 also text the model can echo back into the conversation. Every such site carries a
 `GATEWAY-TEXT: <id>` tag at the point of injection, and `tests/proxy/gateway-authored-text.test.ts`
@@ -1479,6 +1500,8 @@ fails if a tagged site is missing from this table or a table row has no tag. Pro
 | `probe-context` | `buildContextProbePrompt()`: repeats `probe ` to push the input to a target token tier | `2026-11-04` 探测阶梯 | context-window ladder probe; carries `probe: true`, so it never enters a client conversation, never counts toward AIMD/Bandit, and is excluded from success statistics. |
 | `probe-output` | `Write the word "ok" repeated on a single line until you are stopped. Do not stop on your own.` | `2026-11-04` 探测阶梯 | output-cap ladder probe: asks the model to keep going so `max_tokens` is the only stop reason; same `probe: true` isolation. |
 | `probe-capability` | `Reply with the single word ok.` (tools) / `What color is this pixel? One word.` (vision) | `2026-11-04` 探测阶梯 | capability probe for `tools` / image input acceptance; same `probe: true` isolation. A one-pixel PNG rides the vision request, but the only authored text is the two short prompts above. |
+| `ccr-protocol` | a leading `system` block naming `<<ccr:hash>>` / `Retrieve more: hash=` and the retrieval endpoint `GET /v1/ccr/<hash>` | `2026-11-12` 裁定放开 | without it the marker is a pointer the model cannot follow: retrieval used to sit behind the management secret (off by default) and the original bytes were swept after 30 minutes. Injected only when the conversation carries a marker, and again byte-identically on every later turn. |
+| `say-less-contract` | a leading `system` block asking for a shorter answer (`concise` / `minimal`) | `2026-11-12` 裁定放开 | output tokens are the expensive side. Default off, opt-in per level, only on requests that carry `tools`, and withdrawn per `(provider, model)` once two degraded turns appear in the newest eight (`outputContractGuard.ts`). |
 
 ### Retired, with the evidence that retired it
 
@@ -1539,7 +1562,11 @@ live `GATEWAY-TEXT:` tags — so the provenance survives without pretending the 
   (`compression`, live-zone only); what it could not avoid is being a sentence the gateway wrote on the
   user's behalf, in every system prompt, cache-pinned for every install. Whole surface gone:
   `proxy/compression/outputSteering.ts`, `store/outputSteeringConfig.ts`, `config.outputSteering`,
-  `OutputSteeringSettings` and its i18n block.
+  `OutputSteeringSettings` and its i18n block. The **goal** returned under the 2026-11-12 amendment as
+  `say-less-contract`, in a different shape: a leading system block, default off, `tools`-only, and
+  circuit-broken by the degradation window. Do not resurrect `output-steering` itself (no
+  `outputSteering` config key, no settings panel re-export) - a renamed return of the retired shape is
+  the failure this ledger exists to prevent.
 * **`context-summary-prompt`** and **`context-summary-marker`** — retired 2026-11-03 as one feature (the
   Summary Compression strategy). Provenance: `8e744ec` 2026-03-31 (upstream). The prompt was the system
   turn of a **second, gateway-initiated model call** on the user's own history; the marker was

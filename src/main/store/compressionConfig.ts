@@ -12,6 +12,7 @@ import { getAggregateEntry } from '../providers/aggregate/registry.ts'
 import {
   COMPRESSION_AGGRESSIVENESS,
   DEFAULT_COMPRESSION_CONFIG,
+  OUTPUT_CONTRACT_LEVELS,
 } from '../../shared/types.ts'
 
 export function normalizeCompressionConfig(
@@ -26,6 +27,14 @@ export function normalizeCompressionConfig(
     if (key.length > 0 && typeof value === 'boolean') overrides[key] = value
   }
 
+  // 输出契约只在显式给到合法档位时存在。未知档位落回「不注入」，而不是猜一个：
+  // 一个拼错的 `minmal` 不该悄悄把模型改成极简模式。
+  const requestedLevel = input.outputContract?.level
+  const outputContract =
+    requestedLevel !== undefined && OUTPUT_CONTRACT_LEVELS.includes(requestedLevel)
+      ? { level: requestedLevel }
+      : undefined
+
   return {
     // Only an explicit `true` enables it; an explicit `false` keeps it off even
     // though the shipped default is on. A stray non-boolean also lands on off.
@@ -38,6 +47,8 @@ export function normalizeCompressionConfig(
     // Absent inherits the shipped default; only an explicit `false` turns the
     // cache-first policy off.
     cacheFirst: input.cacheFirst === undefined ? DEFAULT_COMPRESSION_CONFIG.cacheFirst : input.cacheFirst === true,
+    ...(outputContract === undefined ? {} : { outputContract }),
+    ...(input.foldDuplicates === true ? { foldDuplicates: true } : {}),
     ...(Object.keys(overrides).length > 0 ? { providerOverrides: overrides } : {}),
   }
 }

@@ -86,18 +86,22 @@ test('the scanner has power: both inventories are populated and disjoint', () =>
 })
 
 /**
- * 退役批落地后，活着的注入点只剩「不是替用户说话」的例外：
- * `ccr-sentinel`（压缩自身的取回指针）、`liveness-ping`（不进任何对话的探针）
- * 与三条能力探测提示词（`probe-context` / `probe-output` / `probe-capability`）。
- * 这一格是**精确集合**判据，不是下界：把退役的东西接回来、或者新加第四条，都要在这里红。
+ * 退役批落地后，活着的注入点 =「不是替用户说话」的例外 + 2026-11-12 裁定放开的两块：
+ * `ccr-sentinel`（压缩自身的取回指针）、`liveness-ping`（不进任何对话的探针）与三条
+ * 能力探测提示词（`probe-context` / `probe-output` / `probe-capability`）；放开的两块是
+ * `ccr-protocol`（标记协议）与 `say-less-contract`（输出档位），两者都是前导 system 块、
+ * 逐轮字节相同、默认不注入。这一格是**精确集合**判据，不是下界：把退役的东西接回来、
+ * 或者新加第三条，都要在这里红。
  */
 test('only the ruled exceptions still write gateway text', () => {
   const expected = [
+    'ccr-protocol',
     'ccr-sentinel',
     'liveness-ping',
     'probe-capability',
     'probe-context',
     'probe-output',
+    'say-less-contract',
   ]
   assert.deepEqual([...tags].sort(), expected)
   assert.deepEqual([...documented].sort(), expected)

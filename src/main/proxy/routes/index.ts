@@ -9,6 +9,7 @@ import modelsRouter from './models'
 import completionsRouter from './completions'
 import messagesRouter from './messages'
 import responsesRouter from './responses'
+import ccrRouter from './ccr'
 
 export {
   chatRouter,
@@ -17,6 +18,7 @@ export {
   completionsRouter,
   messagesRouter,
   responsesRouter,
+  ccrRouter,
 }
 
 export default [
@@ -26,4 +28,5 @@ export default [
   completionsRouter,
   messagesRouter,
   responsesRouter,
+  ccrRouter,
 ]

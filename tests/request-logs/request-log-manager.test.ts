@@ -15,6 +15,8 @@ function createConfig(overrides: Partial<RequestLogConfig> = {}): RequestLogConf
     includeBodies: false,
     maxBodyChars: 0,
     redactSensitiveData: true,
+    bodySampleRate: 0,
+    bodyRetentionDays: 7,
     ...overrides,
   }
 }

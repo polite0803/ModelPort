@@ -720,6 +720,8 @@
     "noRequestData": "暂无请求数据",
     "bodiesNotRecorded": "未保存请求体与响应体",
     "bodiesNotRecordedHint": "当前日志设置未开启正文记录。可在「设置 › 数据管理」中打开「保存请求体与响应体」，开启后的新请求才会在此显示内容。",
+    "bodyNotSampled": "本次请求未被采样",
+    "bodyNotSampledHint": "请求体按比例抽样保留，这条请求没有被抽中。要覆盖更多请求，可在「设置 › 数据管理」里调高「请求体采样比例（%）」。",
     "noUserInput": "暂无用户输入",
     "noError": "暂无错误",
     "tabInfo": "信息",
@@ -829,6 +831,10 @@
     "requestLogIncludeBodiesHelp": "在请求日志中记录请求体和响应体内容",
     "requestLogMaxBodyChars": "请求体字符上限",
     "requestLogMaxBodyCharsHelp": "每条请求体或响应体最多持久化的字符数",
+    "requestLogBodySampleRate": "请求体采样比例（%）",
+    "requestLogBodySampleRateHelp": "未开启全量保存请求体时，按此比例保留请求体的请求。抽签按请求 id 哈希，同一条日志不会在两次写入之间翻转。",
+    "requestLogBodyRetentionDays": "请求体保留天数",
+    "requestLogBodyRetentionDaysHelp": "超过天数的请求体会被剥离，日志行本身保留。设为 0 表示随该行一直保留。",
     "requestLogRedactSensitive": "敏感信息脱敏",
     "requestLogRedactSensitiveHelp": "在持久化前隐藏 token、cookie、API key 等敏感字段",
     "dataManagement": "界面偏好同步",
@@ -1399,6 +1405,15 @@
     "aggressivenessHint": "力度越高保留的行越少。错误行、统计离群行与数值异常行在任何力度下都不会被丢弃。",
     "cacheFirst": "缓存优先（对支持前缀缓存的供应商跳过压缩）",
     "cacheFirstHint": "压缩后的最新块会被下一轮的原文覆盖，所以在上游缓存读远便宜于新输入的家（DeepSeek、Anthropic）上，压缩往往省得没有丢掉的缓存折扣多。开启后这些家默认不压缩，除非按供应商显式覆盖。",
+    "outputContract": "输出简洁度",
+    "outputContractHint": "默认不注入。选「简洁」或「极简」后，网关会在带工具的请求前面加一段固定的 system 说明，要求少说废话。它在同一家模型连续出现退化回合（复读、空回合、只说不做）时会自动停用，因为那时代码已经证明这一家不听劝。",
+    "outputLevel": {
+      "default": "默认",
+      "concise": "简洁",
+      "minimal": "极简"
+    },
+    "foldDuplicates": "跨轮重复折叠（把重复的历史消息换成可检索指针）",
+    "foldDuplicatesHint": "整条消息与更早一条逐行相同时，把后来的那条换成一条指针，原文留在本地可取回。改写历史会打掉一次前缀缓存，所以只有测量门通过时才会真正生效：重复占比 ≥20%、日志窗口的结论可用、且会话预计还能继续 ≥2 轮。",
     "level": {
       "conservative": "保守",
       "moderate": "中等",
@@ -1506,6 +1521,7 @@
     "description": "标准 Key 端点与免密免费池。添加后即成为一个供应商；模型以 供应商/模型 的名字对外暴露。",
     "allCategories": "全部类别",
     "category": {
+      "plan": "订阅套餐",
       "apikey": "自带 Key",
       "freeTier": "免费池",
       "local": "本地"
@@ -1568,6 +1584,7 @@
       "missing_base_url": "必须填写 Base URL",
       "placeholder_base_url": "Base URL 仍包含占位符",
       "invalid_base_url": "Base URL 必须以 http:// 或 https:// 开头",
+      "missing_endpoint_var": "地址模板里有必需的变量没填（添加 Key 时填写）",
       "missing_api_key": "必须填写 API Key",
       "invalid_api_key": "所有已存 Key 都被端点拒绝",
       "not_configured": "请先添加该供应商",
@@ -1613,11 +1630,13 @@
         "valid": "Key 可用",
         "delete": "删除",
         "statusError": "校验失败",
+        "missingVar": "缺少 {{label}}（重新添加同一把 Key 可补上）",
         "lastUsed": "最近使用 {{time}}"
       },
       "endpoint": {
         "title": "接口地址",
         "chatPath": "调用路径",
+        "pathVars": "{{names}} 按每把 Key 填写，请求时展开 —— 不要把它们删掉或写死",
         "save": "保存地址",
         "reset": "恢复默认",
         "saved": "地址已保存",
@@ -1662,6 +1681,21 @@
           "not-json": "不是 JSON",
           "unexpected-shape": "形状不认识",
           "network": "网络错误"
+        }
+      },
+      "exhaustion": {
+        "title": "上游亲口说没额度（{{count}} 条）",
+        "clear": "清除标识",
+        "badge": "配额不足",
+        "badgeTitle": "这家记录了 {{count}} 条上游拒绝：该（账号, 模型）会被跳过直到过期",
+        "scope": "{{account}} · {{model}}",
+        "upstreamSays": "上游原文：{{message}}",
+        "at": "被拒时间 {{time}}",
+        "until": "解禁时刻 {{time}}",
+        "reason": {
+          "quotaExhausted": "额度用尽",
+          "balanceInsufficient": "余额不足",
+          "arrears": "账号欠费"
         }
       },
       "models": {
@@ -1947,6 +1981,25 @@
       "keyRequired": "请先填入 API key，或者改点「加一条匿名槽」。",
       "failed": "添加失败",
       "misconfigured": "这个渠道没有声明加账号的方法，无法从界面添加。"
+    },
+    "proxy": {
+      "button": "出口代理",
+      "title": "{{name}} 的出口代理",
+      "hint": "只作用于这一个账号，不影响其它账号或全局出口；地址格式不对会被拒绝。",
+      "inputLabel": "代理地址",
+      "placeholder": "http://127.0.0.1:7897（也支持 socks5://host:port）",
+      "direct": "当前：直连（与其它无代理账号共享本机出口）",
+      "current": "当前：{{proxy}}",
+      "quotaNote": "匿名额度按出口 IP 计：同一出口的多条槽共享一份额度，换出口才是扩容，换指纹不是。",
+      "test": "测试出口",
+      "testOk": "出口 IP {{ip}}，耗时 {{latency}} ms",
+      "testFailed": "测试失败",
+      "save": "保存",
+      "clear": "清除代理",
+      "saved": "出口代理已保存",
+      "cleared": "已恢复直连",
+      "failed": "保存失败",
+      "inputRequired": "请先填入代理地址（要恢复直连请点「清除代理」）。"
     }
   },
   "connect": {

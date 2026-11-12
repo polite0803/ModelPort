@@ -124,6 +124,8 @@ export const IpcChannels = {
   AGGREGATE_TEST_MODEL: 'aggregate:testModel',
   // 用户在详情页点一次才发一次：没有周期轮询，也没有开页自动查。
   AGGREGATE_QUERY_CREDITS: 'aggregate:queryCredits',
+  // 用户此刻确认"额度回来了"：只清这一家的上游拒绝记录，成功清除仍由路由自己完成。
+  AGGREGATE_CLEAR_QUOTA_EXHAUSTIONS: 'aggregate:clearQuotaExhaustions',
 
   CHANNELS_LIST: 'channels:list',
   CHANNELS_ACCOUNT_COUNTS: 'channels:accountCounts',

@@ -37,7 +37,13 @@ import type {
   AggregateQuotaUsage,
   AggregateSaveInput,
 } from '../../../shared/aggregate'
-import { normalizeAggregateKeys, normalizeAggregateModelParams, mergeAggregateModelIds } from '../../../shared/aggregate'
+import {
+  aggregatePathVarNames,
+  mergeAggregateModelIds,
+  normalizeAggregateKeys,
+  normalizeAggregateModelParams,
+} from '../../../shared/aggregate'
+import { resolveAggregateEndpoint, aggregateEndpointMissingMessage } from './endpoint'
 import type { AggregateQuotaProbe } from '../../../shared/aggregate'
 import type {
   AggregateCreditKeyRow,
@@ -46,6 +52,7 @@ import type {
   AggregateCreditReading,
 } from '../../../shared/aggregateCredit'
 import { CREDIT_QUERY_KEY_CAP } from '../../../shared/aggregateCredit'
+import { exhaustionSummaries, liveExhaustions } from '../../../shared/aggregateQuotaExhaustion.ts'
 import { buildCreditSnapshot, creditUnitOfReader, parseQuotaProbe } from './quotaProbe'
 
 const PROBE_TIMEOUT_MS = 20000
@@ -105,7 +112,6 @@ function trimmed(value: string | null | undefined): string {
 
 function isUsableBaseUrl(baseUrl: string): boolean {
   if (!baseUrl) return false
-  if (baseUrl.includes('{')) return false
   return /^https?:\/\//i.test(baseUrl)
 }
 
@@ -119,7 +125,10 @@ class AggregateProviderManager {
       const usage = this.usageOf(entry.id)
       if (usage) quotaUsage[entry.id] = usage
     }
-    return { entries: AGGREGATE_REGISTRY, states, quotaUsage }
+    // 折叠一次整表（所有家共用同一个 `now`），只把条数与最近一条带过去：
+    // 列表页不需要每条目录项都拖着整张记录表。
+    const quotaExhaustions = exhaustionSummaries(storeManager.getAggregateQuotaExhaustions())
+    return { entries: AGGREGATE_REGISTRY, states, quotaUsage, quotaExhaustions }
   }
 
   /**
@@ -207,7 +216,12 @@ class AggregateProviderManager {
 
     const baseUrl = trimmed(input.baseUrl ?? entry.baseUrl)
     if (!baseUrl) throw new Error('missing_base_url')
-    if (baseUrl.includes('{')) throw new Error('placeholder_base_url')
+    // 目录声明的 `{name}` 是**留给每个账号填**的（见 `endpoint.ts`）：模板原样落盘，
+    // 请求时用该账号的凭据展开。除此之外的占位符一定是手改地址留下的残渣，直接拒，
+    // 免得把带花括号的地址发出去换回一句 Invalid URL。
+    const declaredVars = new Set((entry.pathVars ?? []).map(variable => variable.name))
+    const unknownVars = aggregatePathVarNames(baseUrl).filter(name => !declaredVars.has(name))
+    if (unknownVars.length > 0) throw new Error('placeholder_base_url')
     if (!isUsableBaseUrl(baseUrl)) throw new Error('invalid_base_url')
 
     const existing = storeManager.getProviderById(entry.id)
@@ -215,6 +229,16 @@ class AggregateProviderManager {
     const keyList = normalizeAggregateKeys(input)
     if (entry.authKind === 'apiKey' && (keyList === undefined || keyList.length === 0) && !this.hasStoredKey(entry.id)) {
       throw new Error('missing_api_key')
+    }
+    // 这批新 Key 要跟着路径变量一起落库：模板条目（Cloudflare 的 `{account_id}`）
+    // 少了值就写不出能发出去的地址，宁可现在拒绝，也不要在第一轮对话里才报错。
+    const pathVarValues: Record<string, string> = {}
+    for (const variable of entry.pathVars ?? []) {
+      pathVarValues[variable.name] = (input.pathVars?.[variable.name] ?? '').trim()
+    }
+    const missingPathVars = resolveAggregateEndpoint({ apiEndpoint: baseUrl }, pathVarValues).missing
+    if (missingPathVars.length > 0 && (keyList?.length ?? 0) > 0) {
+      throw new Error('missing_endpoint_var')
     }
 
     const rawModels = (input.models && input.models.length > 0 ? input.models : entry.models.map(model => model.id))
@@ -257,16 +281,28 @@ class AggregateProviderManager {
       description: entry.notes,
       supportedModels,
       modelMappings,
-      credentialFields: entry.authKind === 'apiKey'
-        ? [{
-            name: 'apiKey',
-            label: 'API Key',
-            type: 'password',
-            required: true,
-            placeholder: entry.envVar || 'Enter API Key',
-            helpText: entry.authUrl,
-          }]
-        : [],
+      // 目录声明的路径变量随 Key 一起填（Cloudflare 的 Account ID 等），所以它们
+      // 也是凭据字段：界面按这里渲染输入框，值落在 `account.credentials[<name>]`。
+      credentialFields: [
+        ...(entry.authKind === 'apiKey'
+          ? [{
+              name: 'apiKey',
+              label: 'API Key',
+              type: 'password' as const,
+              required: true,
+              placeholder: entry.envVar || 'Enter API Key',
+              helpText: entry.authUrl,
+            }]
+          : []),
+        ...(entry.pathVars ?? []).map(variable => ({
+          name: variable.name,
+          label: variable.label,
+          type: 'text' as const,
+          required: true,
+          placeholder: variable.label,
+          ...(variable.helpText ? { helpText: variable.helpText } : {}),
+        })),
+      ],
       // 聚合条目都能在线同步：目录给了 modelsUrl 就用它，没给就按通用约定请求
       // `<baseUrl>/models`（见 probe）。
       supportsModelFetch: true,
@@ -286,7 +322,7 @@ class AggregateProviderManager {
     if (entry.authKind === 'none') {
       this.ensureLocalAccount(entry.id, entry.name)
     } else if (keyList && keyList.length > 0) {
-      this.writeKeys(entry.id, entry.name, keyList)
+      this.writeKeys(entry.id, entry.name, keyList, pathVarValues)
     }
 
     // 接线只落在供应商记录的 `modelMappings` 账本上：全局别名表是用户的东西，
@@ -469,6 +505,8 @@ class AggregateProviderManager {
     const provider = storeManager.getProviderById(id)
     // 上一次手点出来的余额读数（可能已过期）。它只是"带过去显示"，不参与五态徽章的判定。
     const credit = storeManager.getAggregateCreditSnapshot(id)
+    // 上游拒绝记录：只带还活着的行过去，过期的既不算条数也不展示。
+    const quotaExhaustions = liveExhaustions(storeManager.getAggregateQuotaExhaustionsOf(id))
     if (!provider || provider.type !== 'aggregate') {
       return {
         entryId: id,
@@ -477,6 +515,7 @@ class AggregateProviderManager {
         models: [],
         ...(quotaUsage ? { quotaUsage } : {}),
         ...(credit ? { credit } : {}),
+        ...(quotaExhaustions.length === 0 ? {} : { quotaExhaustions }),
       }
     }
 
@@ -504,14 +543,28 @@ class AggregateProviderManager {
       models,
       ...(quotaUsage ? { quotaUsage } : {}),
       ...(credit ? { credit } : {}),
+      ...(quotaExhaustions.length === 0 ? {} : { quotaExhaustions }),
     }
+  }
+
+  /**
+   * 详情页的「清除标识」：整家清空上游拒绝记录，返回刷新后的面板数据。
+   *
+   * 清空是用户的明确裁定（"我充值了/刚复位"），所以不逐条确认；路由上的自动清除
+   * 仍按 `(账号, 模型)` 粒度由成功的那一笔完成，两条通路互不替代。
+   */
+  clearQuotaExhaustions(id: string): AggregateMutationResult {
+    const entry = getAggregateEntry(id)
+    if (!entry) return { success: false, reason: 'unknown_entry' }
+    storeManager.clearAggregateQuotaExhaustionsOf(id)
+    return { success: true, detail: this.detail(id) ?? undefined }
   }
 
   /**
    * 新增一把 Key。先带着这把 Key 探测一次模型清单：端点拒绝就不落库，
    * 免得用户在列表里看到一把永远 401 的 Key。重复的 Key 直接视为成功。
    */
-  async addKey(id: string, apiKey: string): Promise<AggregateMutationResult> {
+  async addKey(id: string, apiKey: string, vars: Record<string, string> = {}): Promise<AggregateMutationResult> {
     const entry = getAggregateEntry(id)
     if (!entry) return { success: false, reason: 'unknown_entry' }
     if (entry.authKind !== 'apiKey') return { success: false, reason: 'keyless_entry' }
@@ -522,15 +575,42 @@ class AggregateProviderManager {
     const key = apiKey.trim()
     if (!key) return { success: false, reason: 'missing_api_key' }
 
-    const stored = AccountManager.getByProviderId(id, true).find(account => account.credentials.apiKey === key)
+    // 目录要求的路径变量（Cloudflare 的 Account ID）必须随 Key 一起给：缺了就展开不了
+    // 地址，落库只会多出一把永远发不出去的 Key，而错误要等到第一次对话才暴露。
+    const values: Record<string, string> = {}
+    for (const variable of entry.pathVars ?? []) {
+      values[variable.name] = (vars[variable.name] ?? '').trim()
+    }
+    const endpoint = resolveAggregateEndpoint(provider, values)
+    if (endpoint.missing.length > 0) {
+      return {
+        success: false,
+        reason: 'missing_endpoint_var',
+        message: aggregateEndpointMissingMessage(endpoint.missing),
+      }
+    }
+    const credentials = { apiKey: key, ...values }
+
+    // 一把 Key 只对应一行：同一个 Key 再用新变量保存一次 = 纠正它的地址变量
+    // （Cloudflare 换了 Account ID 就是换了账号），而不是多插一行互相矛盾的。
+    const stored = AccountManager.getByProviderId(id, true).find(
+      account => account.credentials.apiKey === key
+    )
     if (stored) {
-      if (stored.status !== 'active') {
-        AccountManager.update(stored.id, { status: 'active', errorMessage: undefined })
+      const staleVars = (entry.pathVars ?? []).some(
+        variable => (stored.credentials[variable.name] ?? '') !== values[variable.name]
+      )
+      if (stored.status !== 'active' || staleVars) {
+        AccountManager.update(stored.id, {
+          status: 'active',
+          errorMessage: undefined,
+          ...(staleVars ? { credentials: { ...stored.credentials, ...values } } : {}),
+        })
       }
       return { success: true, detail: this.detail(id) ?? undefined }
     }
 
-    const probe = await this.probeKey(entry, provider, key)
+    const probe = await this.probeKey(entry, provider, credentials)
     if (probe.kind === 'auth') {
       return { success: false, reason: 'invalid_api_key', message: probe.detail }
     }
@@ -539,7 +619,7 @@ class AggregateProviderManager {
     AccountManager.create({
       providerId: id,
       name: `${entry.name} key ${keyCount + 1}`,
-      credentials: { apiKey: key },
+      credentials,
     })
     return { success: true, detail: this.detail(id) ?? undefined }
   }
@@ -578,7 +658,7 @@ class AggregateProviderManager {
     const key = account.credentials.apiKey
     if (!key) return { success: false, reason: 'missing_api_key' }
 
-    const probe = await this.probeKey(entry, provider, key)
+    const probe = await this.probeKey(entry, provider, account.credentials)
     if (probe.kind === 'ok' || probe.kind === 'http') {
       AccountManager.update(accountId, { status: 'active', errorMessage: undefined, lastStatusCheck: Date.now() })
       return { success: true, detail: this.detail(id) ?? undefined }
@@ -709,11 +789,20 @@ class AggregateProviderManager {
     }
     const candidates: (Account | undefined)[] = entry.authKind === 'apiKey' ? accounts : [undefined]
 
-    const url = `${trimmed(provider.apiEndpoint)}${aggregateChatPath(entry)}`
     let lastFailure: AggregateModelTestResult | null = null
 
     for (const account of candidates) {
       const startedAt = Date.now()
+      // 地址按这把 Key 的凭据展开：路径里带账号的上游，换 Key 就是换账号。
+      const endpoint = resolveAggregateEndpoint(provider, account?.credentials)
+      if (endpoint.missing.length > 0) {
+        return {
+          success: false,
+          reason: 'missing_endpoint_var',
+          detail: aggregateEndpointMissingMessage(endpoint.missing),
+        }
+      }
+      const url = `${trimmed(endpoint.url)}${aggregateChatPath(entry)}`
       try {
         const headers = this.buildChatHeaders(entry, provider, account)
         // GATEWAY-TEXT: liveness-ping — 目录存活探测，不进任何用户对话（`ddc566a` 2026-10-30）。
@@ -798,16 +887,20 @@ class AggregateProviderManager {
     const attempts = accounts.slice(0, CREDIT_QUERY_KEY_CAP)
     const skipped = accounts.length - attempts.length
     const path = probe.path.startsWith('/') ? probe.path : `/${probe.path}`
-    const url = `${trimmed(provider.apiEndpoint)}${path}`
 
     const rows: AggregateCreditKeyRow[] = []
     for (const account of attempts) {
       const key = account.credentials.apiKey
+      // 额度查询跟着聊天走同一个 host 与同一段账号路径，否则问的就不是同一家。
+      const endpoint = resolveAggregateEndpoint(provider, account.credentials)
+      const reading: AggregateCreditReading = endpoint.missing.length > 0
+        ? { ok: false, reason: 'network', detail: aggregateEndpointMissingMessage(endpoint.missing) }
+        : await this.readCreditAt(`${trimmed(endpoint.url)}${path}`, entry, provider, probe, key)
       rows.push({
         keyId: account.id,
         keyName: account.name,
         maskedKey: maskKey(key),
-        reading: await this.readCreditAt(url, entry, provider, probe, key),
+        reading,
       })
     }
 
@@ -901,7 +994,12 @@ class AggregateProviderManager {
    * survive keep their account (and its usage counters); removed keys lose
    * their account; new keys get fresh ones.
    */
-  private writeKeys(providerId: string, providerName: string, keyList: string[]): void {
+  private writeKeys(
+    providerId: string,
+    providerName: string,
+    keyList: string[],
+    vars: Record<string, string> = {},
+  ): void {
     const existing = AccountManager.getByProviderId(providerId, true)
     const matched = new Set<string>()
 
@@ -909,15 +1007,19 @@ class AggregateProviderManager {
       const hit = existing.find(account => account.credentials.apiKey === apiKey)
       if (hit) {
         matched.add(hit.id)
-        if (hit.status !== 'active') {
-          AccountManager.update(hit.id, { status: 'active', errorMessage: undefined })
-        }
+        // 同一把 Key 重新保存时路径变量也以本次为准：换了 Account ID 就是在换账号，
+        // 旧值留着只会把请求发到上一家去。
+        AccountManager.update(hit.id, {
+          status: 'active',
+          errorMessage: undefined,
+          credentials: { ...hit.credentials, ...vars },
+        })
         return
       }
       AccountManager.create({
         providerId,
         name: `${providerName} key ${index + 1}`,
-        credentials: { apiKey },
+        credentials: { apiKey, ...vars },
       })
     })
 
@@ -963,17 +1065,26 @@ class AggregateProviderManager {
 
   /** 已存 Key 的展示列表：密钥只以掩码出现，状态与最近使用时间照实给出。 */
   private listKeys(providerId: string): AggregateKeyInfo[] {
+    const declared = getAggregateEntry(providerId)?.pathVars ?? []
     return AccountManager.getByProviderId(providerId, true)
       .filter(account => Boolean(account.credentials.apiKey))
-      .map(account => ({
-        id: account.id,
-        name: account.name,
-        maskedKey: maskKey(account.credentials.apiKey),
-        status: account.status,
-        createdAt: account.createdAt,
-        ...(account.lastUsed ? { lastUsed: account.lastUsed } : {}),
-        ...(account.errorMessage ? { errorMessage: account.errorMessage } : {}),
-      }))
+      .map(account => {
+        const pathVars: Record<string, string> = {}
+        for (const variable of declared) {
+          const value = account.credentials[variable.name]
+          if (value) pathVars[variable.name] = value
+        }
+        return {
+          id: account.id,
+          name: account.name,
+          maskedKey: maskKey(account.credentials.apiKey),
+          status: account.status,
+          createdAt: account.createdAt,
+          ...(account.lastUsed ? { lastUsed: account.lastUsed } : {}),
+          ...(account.errorMessage ? { errorMessage: account.errorMessage } : {}),
+          ...(Object.keys(pathVars).length > 0 ? { pathVars } : {}),
+        }
+      })
   }
 
   /**
@@ -983,7 +1094,7 @@ class AggregateProviderManager {
   private async probeKey(
     entry: AggregateEntry,
     provider: Provider,
-    apiKey: string,
+    credentials: Record<string, string>,
   ): Promise<
     | { kind: 'ok' }
     | { kind: 'auth'; detail: string }
@@ -991,12 +1102,16 @@ class AggregateProviderManager {
     | { kind: 'unreachable'; detail: string }
   > {
     const modelsPath = entry.modelsUrl ?? '/models'
+    const endpoint = resolveAggregateEndpoint(provider, credentials)
+    if (endpoint.missing.length > 0) {
+      return { kind: 'unreachable', detail: aggregateEndpointMissingMessage(endpoint.missing) }
+    }
     const url = /^https?:\/\//i.test(modelsPath)
       ? modelsPath
-      : `${trimmed(provider.apiEndpoint)}${modelsPath.startsWith('/') ? '' : '/'}${modelsPath}`
+      : `${trimmed(endpoint.url)}${modelsPath.startsWith('/') ? '' : '/'}${modelsPath}`
     try {
       const response = await axios.get(url, {
-        headers: this.buildProbeHeaders(entry, provider, apiKey),
+        headers: this.buildProbeHeaders(entry, provider, credentials.apiKey),
         timeout: PROBE_TIMEOUT_MS,
         validateStatus: () => true,
       })
@@ -1037,9 +1152,6 @@ class AggregateProviderManager {
     provider: Provider,
   ): Promise<{ ok: true; models: { displayName: string; actualModelId: string }[] } | { ok: false; result: AggregateOperationResult }> {
     const modelsPath = entry.modelsUrl ?? '/models'
-    const url = /^https?:\/\//i.test(modelsPath)
-      ? modelsPath
-      : `${trimmed(provider.apiEndpoint)}${modelsPath.startsWith('/') ? '' : '/'}${modelsPath}`
 
     const keyedAccounts = entry.authKind === 'apiKey'
       ? AccountManager.getByProviderId(entry.id, true).filter(account => Boolean(account.credentials.apiKey))
@@ -1053,6 +1165,21 @@ class AggregateProviderManager {
     let lastFailure: AggregateOperationResult | null = null
 
     for (const account of candidates) {
+      // 地址按这把 Key 的凭据展开：路径里带账号的上游，换 Key 就是换账号。
+      const endpoint = resolveAggregateEndpoint(provider, account?.credentials)
+      if (endpoint.missing.length > 0) {
+        return {
+          ok: false,
+          result: {
+            success: false,
+            reason: 'missing_endpoint_var',
+            detail: aggregateEndpointMissingMessage(endpoint.missing),
+          },
+        }
+      }
+      const url = /^https?:\/\//i.test(modelsPath)
+        ? modelsPath
+        : `${trimmed(endpoint.url)}${modelsPath.startsWith('/') ? '' : '/'}${modelsPath}`
       try {
         const response = await axios.get(url, {
           headers: this.buildProbeHeaders(entry, provider, account?.credentials.apiKey),

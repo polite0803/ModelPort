@@ -143,6 +143,8 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
     // 这一家不跳浏览器：要么加一条匿名槽（免费车道，无需凭据），要么粘贴 API key。
     loginKind: 'api-key',
     credentialAdd: { withKey: 'opencode.addAccount', anonymous: 'opencode.addAnonymous' },
+    // 匿名额度按出口 IP 计：一条槽一条出口才是扩容手段（同 IP 的多槽共享一份额度）。
+    proxyEdit: { set: 'opencode.setProxy', test: 'opencode.testProxy' },
     // Zen 后端既没有签到端点、也没有余额查询端点（实测 15 个候选路径全 404）：
     // 免费车道按出口 IP 限流，额度只能在官网控制台看。
     dailyCheckin: false,

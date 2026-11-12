@@ -21,8 +21,15 @@ import {
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { useToast } from '@/hooks/use-toast'
+import { isPlanEntry } from '../../../shared/aggregateCost'
+import type { AggregateQuotaExhaustionSummary } from '../../../shared/aggregateQuotaExhaustion'
 
-type CategoryFilter = 'all' | AggregateEntry['category']
+/**
+ * `plan` 不是目录里的 `AggregateCategory`，而是叠加在目录之上的一个视图：
+ * 「这家是不是订阅套餐端点」由 `AGGREGATE_PLAN_ENTRIES` 判定，与计费类别无关。
+ * 把它塞进枚举会逼着每条目录项都改数据，而这条信息本来就有单一出处。
+ */
+type CategoryFilter = 'all' | 'plan' | AggregateEntry['category']
 
 const EMPTY_STATE = (entry: AggregateEntry): AggregateEntryState => ({
   configured: false,
@@ -45,6 +52,7 @@ export function Aggregate() {
   const [entries, setEntries] = useState<AggregateEntry[]>([])
   const [states, setStates] = useState<Record<string, AggregateEntryState>>({})
   const [quotaUsage, setQuotaUsage] = useState<Record<string, AggregateQuotaUsage>>({})
+  const [quotaExhaustions, setQuotaExhaustions] = useState<Record<string, AggregateQuotaExhaustionSummary>>({})
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [category, setCategory] = useState<CategoryFilter>('all')
@@ -63,6 +71,7 @@ export function Aggregate() {
     setEntries(result.entries)
     setStates(result.states)
     setQuotaUsage(result.quotaUsage ?? {})
+    setQuotaExhaustions(result.quotaExhaustions ?? {})
     setLoading(false)
 
     const id = selectedRef.current
@@ -117,7 +126,8 @@ export function Aggregate() {
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase()
     return entries.filter(entry => {
-      if (category !== 'all' && entry.category !== category) return false
+      if (category === 'plan' && !isPlanEntry(entry.id)) return false
+      if (category !== 'all' && category !== 'plan' && entry.category !== category) return false
       if (!needle) return true
       if (entry.id.toLowerCase().includes(needle)) return true
       if (entry.name.toLowerCase().includes(needle)) return true
@@ -199,6 +209,7 @@ export function Aggregate() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">{t('aggregate.allCategories')}</SelectItem>
+                  <SelectItem value="plan">{t('aggregate.category.plan')}</SelectItem>
                   <SelectItem value="apikey">{t('aggregate.category.apikey')}</SelectItem>
                   <SelectItem value="free-tier">{t('aggregate.category.freeTier')}</SelectItem>
                   <SelectItem value="local">{t('aggregate.category.local')}</SelectItem>
@@ -256,6 +267,16 @@ export function Aggregate() {
                                       state.enabled ? 'bg-emerald-500' : 'bg-muted-foreground/40'
                                     }`}
                                   />
+                                )}
+                                {quotaExhaustions[entry.id] !== undefined && (
+                                  <span
+                                    className="shrink-0 rounded bg-destructive px-1.5 py-0.5 text-[10px] font-medium leading-none text-destructive-foreground"
+                                    title={t('aggregate.manage.exhaustion.badgeTitle', {
+                                      count: quotaExhaustions[entry.id].count,
+                                    })}
+                                  >
+                                    {t('aggregate.manage.exhaustion.badge')}
+                                  </span>
                                 )}
                               </div>
                               <p className="truncate text-[11px] text-muted-foreground">

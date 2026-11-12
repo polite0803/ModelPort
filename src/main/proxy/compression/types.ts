@@ -98,7 +98,13 @@ export type CompressionSkipReason =
 
 /** Observability record, attached to the request log row. */
 export interface CompressionReport {
-  /** Compressors that actually rewrote something, e.g. ['json']. */
+  /**
+   * Compressors that actually rewrote something, e.g. ['json'].
+   *
+   * `'fold'` appears here when history deduplication ran (`fold.ts`): it is a
+   * rewrite too, and its size belongs to `folded.chars` rather than to the
+   * token ledger below.
+   */
   applied: string[]
   tokensBefore: number
   tokensAfter: number
@@ -116,6 +122,30 @@ export interface CompressionReport {
    * `docs/plan/PLAN-prompt-cache.md` §P3.
    */
   candidates?: CompressionCandidate[]
+  /**
+   * 跨轮重复折叠的读数（`fold.ts`）。与 `saved` 分开记：`saved` 是 live-zone 估算
+   * 省下的 token，这里折掉的是**历史字节**，两者单位相同但作用面不同，合在一起
+   * 会让「改写了多少历史」这个事实看不见。
+   */
+  folded?: {
+    /** 被替换成指针的消息条数。 */
+    messages: number
+    /** 这些消息原本的字符数。 */
+    chars: number
+    /** 每条消息原文的 CCR 哈希。 */
+    hashes: string[]
+  }
+  /**
+   * 本轮注入了哪几块网关自有文本（`gatewayText.ts`）。
+   *
+   * 记在压缩报告里是因为这三格回答的是同一个问题：「这一轮为了让模型看懂
+   * 压缩结果，网关自己多说了什么」。`suspended` 说明用户开了输出契约，但这一家
+   * 的退化窗口已经熔断。
+   */
+  gatewayText?: {
+    protocol: boolean
+    outputContract: 'default' | 'injected' | 'suspended'
+  }
 }
 
 /** One live-zone candidate as the accept gate saw it. */

@@ -153,6 +153,7 @@ import { exportBackup, importBackup } from './backup.js'
 import { handleOpencodeRpc } from './opencode-rpc.js'
 import { clearDeadModels, deadModelIdsFor } from './dead-model-store.js'
 import { OPENCODE } from './opencode-product.js'
+import { normalizeProxy } from './opencode.js'
 import type {
   ProviderAccountEntry,
   RpcBackupExportResponse,
@@ -1810,7 +1811,18 @@ function registerChannelPackEndpoints(
       case 'account.list': {
         const req = payload as RpcListAccountsRequest
         const accounts = await pool.listAccounts(req.provider)
-        return { ok: true, value: { accounts: await enrichAccountIdentity(accounts, req.provider) } }
+        const enriched = await enrichAccountIdentity(accounts, req.provider)
+        // opencode 的出口代理按账号存，值里可能带 `user:pass@`：面板只需要形状，
+        // 回传前统一掩码，与 `opencode.setProxy` 的响应共用同一份 label 规则。
+        const listed = req.provider !== OPENCODE.id
+          ? enriched
+          : enriched.map(account => {
+              const raw = account.opencodeProxy
+              if (raw === undefined || raw.trim().length === 0) return account
+              const normalized = normalizeProxy(raw)
+              return { ...account, proxyLabel: normalized.ok ? normalized.proxy.label : '（无效地址）' }
+            })
+        return { ok: true, value: { accounts: listed } }
       }
 
       case 'account.create': {

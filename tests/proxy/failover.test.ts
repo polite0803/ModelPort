@@ -1181,8 +1181,12 @@ test('首块超时的文案不许承诺一个不会执行的换家（2026-11-12 
   // 池里还有 10 个候选却一个没试。无条件写「已中止并换下一家」会让人一直等。
   assert.doesNotMatch(forwarderSource, /疑似假死），已中止并换下一家/,
     'the timeout message must not promise a switch unconditionally')
-  assert.match(forwarderSource, /budgetClamped/,
+  // 两种截断各有归因（`planFirstEventWait`）：`attempt-budget` 是链内剩余预算，
+  // `single-candidate` 是「这条模型没有下家」。文案按它分叉，不能一律写成预算。
+  assert.match(forwarderSource, /clampedBy === 'attempt-budget'/,
     'the message must say when the printed timeout is the remaining budget, not the factory cap')
+  assert.match(forwarderSource, /clampedBy === 'single-candidate'/,
+    'a single-candidate model must not be described as budget-clamped')
 })
 
 test('kind 必须与换家分支一致：新接入的两类 400 不能只改一侧', () => {

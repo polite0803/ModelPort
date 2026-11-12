@@ -84,7 +84,7 @@ export interface FailoverBudget {
 import { attemptTraceOf } from './attemptTrace.ts'
 import { accountRuntime } from './accountRuntime'
 import { dispatchLedger } from './dispatchLedger.ts'
-import { FIRST_ATTEMPT_CAP_MS, MIN_REMAINING_FOR_NEXT_ATTEMPT_MS, planAttemptDeadline, planForwardRetries, planRecoveryWaitMs, sleep } from './retryPolicy'
+import { FIRST_ATTEMPT_CAP_MS, MIN_REMAINING_FOR_NEXT_ATTEMPT_MS, planAttemptDeadline, planFirstEventWait, planForwardRetries, planRecoveryWaitMs, sleep } from './retryPolicy'
 import { stripUnsupportedForBuiltin } from './parameterPolicy'
 import { ensureAnthropicOutputCap, outputCapFallbackOf } from './utils/outputCap.ts'
 import { opencodeAffinityHeaders } from './utils/opencodeAffinity.ts'
@@ -92,6 +92,7 @@ import { createContextManagementService, trimAppliesToProvider } from './service
 import { accountChannelManager } from '../providers/accountChannels/manager'
 import { sanitizeChatToolDefinitions } from '../channelPack/toolCallValidation'
 import { getAggregateEntry } from '../providers/aggregate/registry'
+import { resolveAggregateEndpoint, aggregateEndpointMissingMessage } from '../providers/aggregate/endpoint'
 import { applyAggregateDropParams } from './aggregateParams'
 import {
   chatToResponsesRequest,
@@ -103,7 +104,21 @@ import { applyCompression, recordCompressionReport } from './compression'
 import { resolveCompressionConfig } from '../store/compressionConfig.ts'
 import { cacheEconomicsOf, promptCacheOf } from '../../shared/promptCache.ts'
 import { measureCrossTurnDuplication, recordDuplication } from './compression/duplication.ts'
-import { recordConversationTurn, recordConversationTurnForRequest } from './compression/survivorship.ts'
+import { recordConversationTurn, recordConversationTurnForRequest, readSurvivorshipStats } from './compression/survivorship.ts'
+import { summarizeDuplication } from './compression/duplicationSummary.ts'
+import { readFoldDecision } from './compression/foldGate.ts'
+import {
+  applyGatewayText,
+  ccrProtocolText,
+  conversationHasCompressionMarker,
+  outputContractText,
+} from './gatewayText'
+import { readDegradationWindow } from './outputContractGuard'
+import {
+  conversationHasProtocolBlock,
+  rememberProtocolBlock,
+} from './gatewayProtocolMemory.ts'
+import { conversationKey } from './autoRouting.ts'
 
 // 换家判据与流首事件等待：本体与测试在 failover.ts（forwarder 背着 electron
 // 依赖，node --test 拉不动，见该模块头注释）。isFailoverEligibleStatus 从这里
@@ -359,21 +374,87 @@ export class RequestForwarder {
         : undefined
     )
     const cachePolicy = cacheEconomicsOf(promptCacheCapability, config.promptCaching?.anthropicTtl)
+
+    // 跨轮重复折叠：配置只是开关的一半。另一半是测量门（重复占比 + 会话还能活多久），
+    // 决策按 5 分钟缓存 —— 它的输入是整份请求日志窗口，不该每个请求重算一遍。
+    const foldDecision =
+      config.compression.foldDuplicates === true
+        ? readFoldDecision(() => ({
+            optIn: true,
+            summary: summarizeDuplication(storeManager.getRequestLogs()),
+            survivorship: readSurvivorshipStats(),
+          }))
+        : undefined
+
     const compression = applyCompression({
       messages: request.messages,
       n: request.n,
       config: compressionConfig,
       ...(cachePolicy === undefined ? {} : { cachePolicy }),
+      ...(foldDecision?.fold === true ? { fold: true } : {}),
     })
+    // Taken before the rewrite: routing keys stickiness and survivorship off the
+    // client's own messages, so the memory has to use the same basis or one
+    // conversation would look like two.
+    const conversationId = conversationKey(request)
     if (compression.messages && compression.messages !== request.messages) {
       request = { ...request, messages: compression.messages }
     }
-    if (compression.report && request.requestId) {
-      recordCompressionReport(request.requestId, compression.report)
+
+    // 网关自有文本（2026-11-12 裁定放开的两处，见 `gatewayText.ts`）。
+    //
+    // 压缩协议块的「存在与否」就是提示词前缀的第一个字节：只在压缩发生的回合出现、
+    // 下一回合又消失，等于每翻一次就作废整段前缀缓存。所以它按**会话**记（键取
+    // `conversationKey`，客户端自己的系统提示+首条用户消息，跨轮稳定）：第一次真正
+    // 压缩的回合引入它，之后这个会话每轮都在。没压缩过的会话一分不付。
+    //
+    // 输出契约要用户显式选档，且只在带工具的请求上生效：纯聊天里「少说」不是收益，
+    // 是替用户改变表达。同时受退化窗口熔断（`outputContractGuard.ts`）。
+    const contractLevel = config.compression.outputContract?.level ?? 'default'
+    const blocks: string[] = []
+    const hasMarker = conversationHasCompressionMarker(request.messages)
+    const compressedThisTurn = (compression.report?.applied.length ?? 0) > 0
+    const protocolInjected =
+      hasMarker || compressedThisTurn || conversationHasProtocolBlock(conversationId)
+    if (protocolInjected) {
+      blocks.push(ccrProtocolText())
+      // Only the turn that introduced the block (or that carries markers the
+      // client echoed back) starts the memory; a merely remembered conversation
+      // must not extend its own TTL.
+      if (hasMarker || compressedThisTurn) rememberProtocolBlock(conversationId)
     }
 
-    // 输出侧的 verbosity 提示（往 system 尾部追加一段定长风格指令）已于 2026-11-03 退役：
-    // 网关不替用户写提示词。省 completion token 的手段回到「少发过去」那一侧（压缩）。
+    let contractState: 'default' | 'injected' | 'suspended' = 'default'
+    if (contractLevel !== 'default' && (request.tools?.length ?? 0) > 0) {
+      const window = readDegradationWindow({
+        entries: storeManager.getRequestLogs(),
+        providerId: provider.id,
+        model: actualModel,
+      })
+      const contract = window.suspended ? null : outputContractText(contractLevel)
+      if (contract) {
+        blocks.push(contract)
+        contractState = 'injected'
+      } else {
+        contractState = 'suspended'
+      }
+    }
+
+    const withGatewayText = applyGatewayText(request.messages, blocks)
+    if (withGatewayText !== request.messages) {
+      request = { ...request, messages: withGatewayText }
+    }
+
+    if (compression.report && request.requestId) {
+      recordCompressionReport(request.requestId, {
+        ...compression.report,
+        gatewayText: { protocol: protocolInjected, outputContract: contractState },
+      })
+    }
+
+    // 输出侧：2026-11-03 退役的是「追加到用户 system 尾部」的那一版。2026-11-12
+    // 换形态回来了 —— 独立的前导 system 块、默认关闭、带工具才生效、受退化窗口熔断，
+    // 见 `gatewayText.ts` 与 `outputContractGuard.ts`。
 
     let lastError: string | undefined
     let lastStatus: number | undefined
@@ -940,8 +1021,12 @@ export class RequestForwarder {
       // （用户报障 2026-10-30：auto 命中 cline 的 Vercel 网关 tools ≤ 128）。
       // 这里等首个事件：有首块才算成功（首块原样补发），首错转成普通
       // ForwardResult 失败，交给既有的换家 / 错误映射逻辑。
-      const firstEventMs = Math.min(requestDeadlines().firstEventMs, deadlineMs)
-      const first = await firstStreamEvent(upstream, firstEventMs)
+      const firstEventPlan = planFirstEventWait({
+        firstEventMs: requestDeadlines().firstEventMs,
+        deadlineMs,
+        attemptDeadlineMs: request.attemptDeadlineMs,
+      })
+      const first = await firstStreamEvent(upstream, firstEventPlan.waitMs)
       if (first.kind === 'timeout') {
         // 等首事件超时：渠道假死（HTTP 200 但零字节，无首块也无首错 —— 实测
         // qoder 挂过 165s/285s/625s）。墙钟预算只在尝试之间检查，单次悬挂时
@@ -955,12 +1040,18 @@ export class RequestForwarder {
         // 说明预算在第一次尝试之前就被吃光了，换家根本无从发生。
         // 承诺一个不会执行的下一步，比报一个错更难查 —— 用户据此判断「网关会自己换」
         // 而一直等下去。
+        //
+        // 两处截断的归因必须分开（`planFirstEventWait`）：`attempt-budget` 是链内
+        // 剩余预算，`single-candidate` 是「这条模型没有下家」（码道 2026-11-12：
+        // 39 笔失败全在客户端自己的 60s 超时处收尾，网关 60s 预算白等）。
         const factoryFirstEventMs = requestDeadlines().firstEventMs
-        const budgetClamped = firstEventMs < factoryFirstEventMs
-        const timeoutMessage = `渠道 ${Math.round(firstEventMs / 1000)}s 内未产出任何首块（疑似假死），已中止`
-          + (budgetClamped
-            ? `；${Math.round(firstEventMs / 1000)}s 是剩余墙钟预算（出厂上限 ${Math.round(factoryFirstEventMs / 1000)}s），预算耗尽时不再换家`
-            : '')
+        const waitedSec = Math.round(firstEventPlan.waitMs / 1000)
+        const explained = firstEventPlan.clampedBy === 'attempt-budget'
+          ? `；${waitedSec}s 是剩余墙钟预算（出厂上限 ${Math.round(factoryFirstEventMs / 1000)}s），预算耗尽时不再换家`
+          : firstEventPlan.clampedBy === 'single-candidate'
+            ? '；该模型没有可换的下家，等更久只会被客户端自己的超时截断'
+            : ''
+        const timeoutMessage = `渠道 ${waitedSec}s 内未产出任何首块（疑似假死），已中止${explained}`
         return {
           success: false,
           status: 504,
@@ -1199,7 +1290,7 @@ export class RequestForwarder {
 
     try {
       const chatPath = provider.chatPath || '/chat/completions'
-      const url = this.buildUrl(provider, chatPath)
+      const url = this.buildUrl(provider, chatPath, account)
       const headers = this.buildHeaders(provider, account, request)
       // 工具三件套原生透传，`buildRequestBody` 自己按 `request.tools` 组装。
       // 托管层（把工具描述写进 system、再把回复文本解析回 tool_calls）已于 2026-11-03
@@ -1338,7 +1429,7 @@ export class RequestForwarder {
     startTime: number
   ): Promise<ForwardResult> {
     try {
-      const url = this.buildUrl(provider, provider.chatPath || '/responses')
+      const url = this.buildUrl(provider, provider.chatPath || '/responses', account)
       const headers = this.buildHeaders(provider, account, request)
       const body = chatToResponsesRequest(request, actualModel)
 
@@ -1500,8 +1591,16 @@ export class RequestForwarder {
   /**
    * Build URL
    */
-  private buildUrl(provider: Provider, path: string): string {
+  private buildUrl(provider: Provider, path: string, account?: Account): string {
     let baseUrl = provider.apiEndpoint
+
+    // 聚合端点的路径里可能带账号（Cloudflare 的 `{account_id}`）：模板落盘、按这把
+    // Key 的凭据在请求前展开。缺值时不发一个带花括号的地址，直接给出缺哪个字段。
+    if (provider.type === 'aggregate') {
+      const endpoint = resolveAggregateEndpoint(provider, account?.credentials)
+      if (endpoint.missing.length > 0) throw new Error(aggregateEndpointMissingMessage(endpoint.missing))
+      baseUrl = endpoint.url
+    }
 
     if (baseUrl.endsWith('/')) {
       baseUrl = baseUrl.slice(0, -1)

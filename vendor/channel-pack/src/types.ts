@@ -49,6 +49,14 @@ export interface ProviderAccountEntry {
    */
   opencodeProxy?: string
   /**
+   * 掩码后的出口代理，`account.list` 返回前现算、**不落盘**。
+   *
+   * 池里存的是原始 URL（可能带 `user:pass@`），面板只需要看到形状；掩码统一走
+   * `normalizeProxy().label`，与 `opencode.setProxy` 的响应同源，不另写截断规则。
+   * 缺省 = 该账号没有配置代理（直连）。
+   */
+  proxyLabel?: string
+  /**
    * Upstream has stopped serving this account and said so in the response body.
    *
    * Set by the LobsterAI adapter when a response classifies as `service-stopped`

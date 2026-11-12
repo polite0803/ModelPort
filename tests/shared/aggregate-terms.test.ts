@@ -28,8 +28,17 @@ test('every terms warning is a real entry with a verbatim source', () => {
 test('only the entries whose clause was actually read are warned about', () => {
   assert.deepEqual(
     AGGREGATE_TERMS_WARNINGS.map(warning => warning.entryId).sort(),
-    ['glm-cn', 'opencode_zen', 'qwencloud_coding'],
-    'adding a warning needs a verified clause; zai and alibaba_cloud have none yet'
+    [
+      'bailian_coding_plan',
+      'glm-cn',
+      'jd_coding_plan',
+      'opencode_zen',
+      'qianfan_coding_plan',
+      'qianfan_token_plan',
+      'qwencloud_coding',
+      'tencent_coding_plan',
+    ],
+    'adding a warning needs a verified clause; zai, alibaba_cloud and the iFlytek/Token-Plan pages have none yet'
   )
 
   // 同厂商但不是套餐端点的条目不得被连带警告：alibaba_cloud 是按量 compatible-mode，zai_api 是 PAYG。

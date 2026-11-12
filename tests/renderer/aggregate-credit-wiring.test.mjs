@@ -69,7 +69,11 @@ test('the channel name is one string across the declaration, the handler and the
 test('the fetch reuses the stored credential path and the configured base, never a transcribed host', () => {
   const body = manager.slice(manager.indexOf('async queryCredits('), manager.indexOf('private async readCreditAt('))
   assert.ok(body.length > 100, 'queryCredits exists')
-  assert.match(body, /trimmed\(provider\.apiEndpoint\)\}\$\{path\}/, 'URL = provider record + declared path')
+  // 基址仍只来自记录本身；路径里带账号的上游按这一把 Key 的凭据展开（`endpoint.ts`），
+  // 换的是路径段，不是 host。
+  assert.match(body, /resolveAggregateEndpoint\(provider, account\.credentials\)/,
+    'the base comes from the provider record, expanded with this key\'s credentials')
+  assert.match(body, /trimmed\(endpoint\.url\)\}\$\{path\}/, 'URL = provider record + declared path')
   assert.match(manager, /axios\.get\(url, \{\s*headers: this\.buildProbeHeaders\(entry, provider, apiKey\)/)
   assert.doesNotMatch(manager, /openrouter\.ai|siliconflow\.(com|cn)/, 'no vendor host is hardcoded in the fetch layer')
   assert.doesNotMatch(body, /console\.(log|warn|error)\([^)]*apiKey/, 'the key is never logged')

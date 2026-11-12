@@ -39,6 +39,13 @@ export interface ChannelDefinition {
    */
   credentialAdd?: { withKey: string; anonymous?: string }
   /**
+   * 账号维度出口代理的渠道方法名；只有声明了这一项的渠道，界面才渲染「出口」入口。
+   *
+   * opencode 的匿名额度按**出口 IP** 计，所以「一条槽一条出口」才是真正的扩容手段；
+   * 方法名照 {@link credentialAdd} 的先例由目录声明，界面不写死渠道名。
+   */
+  proxyEdit?: { set: string; test: string }
+  /**
    * 该渠道上游**是否有每日签到（领取积分）接口**。
    *
    * 必填，不是可选：可选字段会被新渠道按「不写 = 有」填进去，于是界面照常渲染
@@ -111,6 +118,11 @@ export interface ChannelAccountView {
   expiresAt?: number
   refreshable: boolean
   /**
+   * 该账号的出口代理，**已掩码**（`user:pass@` 不回传明文）。
+   * 缺省 = 没有配置代理，与其它无代理账号共享本机出口。
+   */
+  proxyLabel?: string
+  /**
    * Upstream stopped serving this account and said so; the pack parked it
    * (`enabled: false`) in the same write. `text` is the upstream wording, kept
    * verbatim so the row can say which of the three kinds of grey it is.
@@ -125,6 +137,8 @@ export interface ChannelView {
   vendor: string
   loginKind: ChannelLoginKind
   credentialAdd?: { withKey: string; anonymous?: string }
+  /** 来自 {@link ChannelDefinition.proxyEdit} —— 缺省表示该渠道没有账号级出口可配。 */
+  proxyEdit?: { set: string; test: string }
   /** 来自 {@link ChannelDefinition.dailyCheckin} —— 界面按它决定渲染不渲染「领取积分」。 */
   dailyCheckin: boolean
   /** 来自 {@link ChannelDefinition.growthTasks} —— 决定渲染不渲染「领取任务积分」。 */

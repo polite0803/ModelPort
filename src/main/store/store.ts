@@ -39,6 +39,11 @@ import {
   normalizeModelMappingsWithDefaults,
 } from './types'
 import type { AggregateCreditSnapshot, AggregateCreditSnapshots } from './types'
+import type { AggregateQuotaExhaustionRecord, AggregateQuotaExhaustions } from './types'
+import {
+  removeExhaustion,
+  upsertExhaustion,
+} from '../../shared/aggregateQuotaExhaustion.ts'
 import {
   sanitizeCatalogAdoptionLedger,
   sanitizeCatalogMirrorUrl,
@@ -516,6 +521,8 @@ class StoreManager {
       catalogAdoptions: DEFAULT_CATALOG_ADOPTIONS,
       // 实时额度快照从空开始：一次升级安装没有"上次问过谁"，闸门随之不参与（fail-open）。
       aggregateCreditSnapshots: {},
+      // 配额不足标记同理从空开始：升级安装没有"上次被上游拒在哪个模型上"的历史。
+      aggregateQuotaExhaustions: {},
     }
   }
 
@@ -2679,6 +2686,70 @@ class StoreManager {
     const next: AggregateCreditSnapshots = { ...current }
     delete next[entryId]
     this.store!.set('aggregateCreditSnapshots', next)
+    return next
+  }
+
+  /**
+   * 全部条目的「上游说没额度」标记。
+   *
+   * 与余额快照同一套纪律：读不出来就当没有证据（闸门放行），绝不把读盘失败当成"没有额度"。
+   */
+  getAggregateQuotaExhaustions(): AggregateQuotaExhaustions {
+    this.ensureInitialized()
+    const raw = this.store!.get('aggregateQuotaExhaustions')
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {}
+    return { ...(raw as AggregateQuotaExhaustions) }
+  }
+
+  getAggregateQuotaExhaustionsOf(entryId: string): AggregateQuotaExhaustionRecord[] {
+    return this.getAggregateQuotaExhaustions()[entryId] ?? []
+  }
+
+  /**
+   * 记一条：同一 `(账号, 模型)` 覆盖写，顺手剔除过期行。由转发路径在每次失败的尝试之后调用，
+   * 所以这里只做纯数据变换 + 一次整表写盘。
+   */
+  recordAggregateQuotaExhaustion(
+    entryId: string,
+    record: AggregateQuotaExhaustionRecord
+  ): AggregateQuotaExhaustions {
+    this.ensureInitialized()
+    const current = this.getAggregateQuotaExhaustions()
+    const next: AggregateQuotaExhaustions = {
+      ...current,
+      [entryId]: upsertExhaustion(current[entryId], record),
+    }
+    this.store!.set('aggregateQuotaExhaustions', next)
+    return next
+  }
+
+  /** 成功即清：只清这一个 `(账号, 模型)`。没有命中就不写盘。 */
+  clearAggregateQuotaExhaustion(
+    entryId: string,
+    accountId: string,
+    modelId: string
+  ): AggregateQuotaExhaustions {
+    this.ensureInitialized()
+    const current = this.getAggregateQuotaExhaustions()
+    const records = current[entryId]
+    if (!records || records.length === 0) return current
+    const remaining = removeExhaustion(records, accountId, modelId)
+    if (remaining.length === records.length) return current
+    const next: AggregateQuotaExhaustions = { ...current }
+    if (remaining.length === 0) delete next[entryId]
+    else next[entryId] = remaining
+    this.store!.set('aggregateQuotaExhaustions', next)
+    return next
+  }
+
+  /** 详情页那个「清除标识」按钮：整家清空。 */
+  clearAggregateQuotaExhaustionsOf(entryId: string): AggregateQuotaExhaustions {
+    this.ensureInitialized()
+    const current = this.getAggregateQuotaExhaustions()
+    if (!(entryId in current)) return current
+    const next: AggregateQuotaExhaustions = { ...current }
+    delete next[entryId]
+    this.store!.set('aggregateQuotaExhaustions', next)
     return next
   }
 

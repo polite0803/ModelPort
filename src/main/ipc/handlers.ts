@@ -1280,9 +1280,9 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
     }
   })
 
-  registerMainHandler(IpcChannels.AGGREGATE_ADD_KEY, async (_, id: string, apiKey: string) => {
+  registerMainHandler(IpcChannels.AGGREGATE_ADD_KEY, async (_, id: string, apiKey: string, vars?: Record<string, string>) => {
     try {
-      return await aggregateProviderManager.addKey(id, apiKey)
+      return await aggregateProviderManager.addKey(id, apiKey, vars)
     } catch (error) {
       return { success: false, reason: 'save_failed', message: error instanceof Error ? error.message : String(error) }
     }
@@ -1368,6 +1368,16 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
         accounts: 0,
         skipped: 0,
       }
+    }
+  })
+
+  // 手动清除：只清这一家的标记。自动路径不受影响 —— 同一 `(账号, 模型)`
+  // 下一次成功仍会自己清掉，这里只是给用户一个"我刚充值了，别等过期"的出口。
+  registerMainHandler(IpcChannels.AGGREGATE_CLEAR_QUOTA_EXHAUSTIONS, async (_, id: string) => {
+    try {
+      return aggregateProviderManager.clearQuotaExhaustions(id)
+    } catch (error) {
+      return { success: false, reason: 'save_failed', message: error instanceof Error ? error.message : String(error) }
     }
   })
 

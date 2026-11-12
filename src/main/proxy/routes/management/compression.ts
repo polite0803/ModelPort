@@ -13,7 +13,7 @@ import ConfigManager from '../../../store/config'
 import { storeManager } from '../../../store/store'
 import { managementAuthMiddleware } from '../../middleware/managementAuth'
 import { getCcrStore } from '../../compression/ccr/store'
-import { summarizeDuplication } from '../../compression/duplicationSummary.ts'
+import { summarizeDuplication, interpretDuplication } from '../../compression/duplicationSummary.ts'
 import { readSurvivorshipStats } from '../../compression/survivorship.ts'
 import { COMPRESSION_AGGRESSIVENESS, type ManagementApiResponse } from '../../../../shared/types'
 
@@ -125,17 +125,10 @@ router.get('/duplication', async (ctx: Context) => {
        */
       survivorship,
       // Reading the number: below ~5% the rewrite cost dominates; above ~20%
-      // with real multi-turn traffic, folding is worth building.
-      interpretation: {
-        foldWorthBuilding: summary.ratio !== null && summary.ratio >= 0.2,
-        negligible: summary.ratio !== null && summary.ratio < 0.05,
-        // A window where every request was single-turn proves nothing about
-        // multi-turn traffic, so "no evidence" must not read as "no benefit".
-        conclusive:
-          summary.sampled > 0 && summary.multiBlockRequests > 0 && summary.truncatedRequests === 0,
-        /** Whether `meanRemainingTurns` is usable as a budget input yet. */
-        lifetimeKnown: survivorship.meanRemainingTurns !== null,
-      },
+      // with real multi-turn traffic, folding is worth building. The judgement
+      // itself lives in `duplicationSummary.ts` because the folding gate obeys
+      // the same one - a second copy here would be a second answer.
+      interpretation: interpretDuplication(summary, survivorship),
     },
   } as ManagementApiResponse
 })

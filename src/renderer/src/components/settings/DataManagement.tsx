@@ -51,6 +51,8 @@ export function DataManagement() {
     includeBodies: false,
     maxBodyChars: 200_000,
     redactSensitiveData: true,
+    bodySampleRate: 0,
+    bodyRetentionDays: 7,
   }
 
   const updateRequestLogConfig = async (
@@ -316,6 +318,41 @@ export function DataManagement() {
                       }}
                     />
                     <p className="text-xs text-muted-foreground">{t('settings.requestLogMaxBodyCharsHelp')}</p>
+                  </div>
+                ) : null}
+
+                {!requestLogConfig.includeBodies ? (
+                  <div className="space-y-2 rounded-xl border border-[var(--glass-border)] bg-[var(--glass-bg)] p-3">
+                    <Label htmlFor="request-log-body-sample">{t('settings.requestLogBodySampleRate')}</Label>
+                    <Input
+                      id="request-log-body-sample"
+                      type="number"
+                      min={0}
+                      max={100}
+                      value={Math.round(requestLogConfig.bodySampleRate * 100)}
+                      onChange={(e) => {
+                        const percent = Math.min(100, Math.max(0, parseInt(e.target.value, 10) || 0))
+                        void updateRequestLogConfig({ bodySampleRate: percent / 100 })
+                      }}
+                    />
+                    <p className="text-xs text-muted-foreground">{t('settings.requestLogBodySampleRateHelp')}</p>
+                  </div>
+                ) : null}
+
+                {requestLogConfig.includeBodies || requestLogConfig.bodySampleRate > 0 ? (
+                  <div className="space-y-2 rounded-xl border border-[var(--glass-border)] bg-[var(--glass-bg)] p-3">
+                    <Label htmlFor="request-log-body-retention">{t('settings.requestLogBodyRetentionDays')}</Label>
+                    <Input
+                      id="request-log-body-retention"
+                      type="number"
+                      min={0}
+                      max={365}
+                      value={requestLogConfig.bodyRetentionDays}
+                      onChange={(e) => {
+                        void updateRequestLogConfig({ bodyRetentionDays: parseInt(e.target.value, 10) || 0 })
+                      }}
+                    />
+                    <p className="text-xs text-muted-foreground">{t('settings.requestLogBodyRetentionDaysHelp')}</p>
                   </div>
                 ) : null}
               </div>

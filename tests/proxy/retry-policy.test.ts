@@ -17,9 +17,11 @@ import {
   FIRST_ATTEMPT_CAP_MS,
   MIN_REMAINING_FOR_NEXT_ATTEMPT_MS,
   planAttemptDeadline,
+  planFirstEventWait,
   planRecoveryWaitMs,
   planForwardRetries,
   planRequestDeadlines,
+  SINGLE_CANDIDATE_FIRST_EVENT_CAP_MS,
 } from '../../src/main/proxy/retryPolicy.ts'
 
 test('账号渠道只额外试一次，且用短退避', () => {
@@ -152,6 +154,36 @@ test('首轮切片上限只压低、不抬高（2026-11-12 用户裁定：不提
   // 出厂首事件等待是 60s，首轮压到 20s 才是「降低第一轮」
   assert.ok(FIRST_ATTEMPT_CAP_MS < DEFAULT_FIRST_EVENT_TIMEOUT_MS)
   assert.equal(FIRST_ATTEMPT_CAP_MS, 20_000)
+})
+
+test('没有换家空间的流式请求：首块等待压到 30s，并归因 single-candidate', () => {
+  // 具名 provider 模型不走换家链（没有 attemptDeadlineMs）。客户端自己的耐心
+  // 就是 60s（码道 2026-11-12：39 笔 codearts 失败全落在 57.3–61.1s），网关陪等
+  // 60s 只会双双超时，用户拿到的是「客户端已断开」而不是渠道结论。
+  assert.equal(SINGLE_CANDIDATE_FIRST_EVENT_CAP_MS, 30_000)
+  assert.deepEqual(
+    planFirstEventWait({ firstEventMs: DEFAULT_FIRST_EVENT_TIMEOUT_MS, deadlineMs: 120_000 }),
+    { waitMs: 30_000, clampedBy: 'single-candidate' },
+  )
+  // 旋钮本来就更短时（请求超时 20s）不再加归因：那是用户设的值，不是这条上限
+  assert.deepEqual(
+    planFirstEventWait({ firstEventMs: 20_000, deadlineMs: 120_000 }),
+    { waitMs: 20_000, clampedBy: 'none' },
+  )
+})
+
+test('换家链里的首块等待沿用尝试截止，不叠 30s 上限', () => {
+  // 首轮切片 20s 来自 planAttemptDeadline：归因必须是 attempt-budget，
+  // 文案才能继续写「剩余墙钟预算」
+  assert.deepEqual(
+    planFirstEventWait({ firstEventMs: 60_000, deadlineMs: 120_000, attemptDeadlineMs: 20_000 }),
+    { waitMs: 20_000, clampedBy: 'attempt-budget' },
+  )
+  // 非首轮拿到的是出厂 60s，不该被 30s 截断 —— 链里由墙钟预算收口
+  assert.deepEqual(
+    planFirstEventWait({ firstEventMs: 60_000, deadlineMs: 70_000, attemptDeadlineMs: 70_000 }),
+    { waitMs: 60_000, clampedBy: 'none' },
+  )
 })
 
 test('恢复轮的等待计划：只用剩余墙钟，受上限与解禁时刻夹住', () => {

@@ -9,6 +9,10 @@
 
 import type { AggregateCostSignal } from './aggregateCost.ts'
 import type { AggregateCreditSnapshot } from './aggregateCredit.ts'
+import type {
+  AggregateQuotaExhaustionRecord,
+  AggregateQuotaExhaustionSummary,
+} from './aggregateQuotaExhaustion.ts'
 import type { PromptCacheCapability } from './promptCache.ts'
 
 export type AggregateCategory = 'apikey' | 'free-tier' | 'local'
@@ -64,6 +68,21 @@ export interface AggregateQuotaProbe {
   asOf: string
 }
 
+/**
+ * 端点路径里的账号级占位符。
+ *
+ * 有些上游把账号写进 URL 本身（Cloudflare Workers AI 的
+ * `.../accounts/{account_id}/ai/v1`，Vertex 的 `{project_id}/{location}`），
+ * 目录没法凭空填。声明成 `pathVars` 之后，值随**每把 Key**存在
+ * `account.credentials[<name>]`，请求时展开 —— 换账号换 Key 时地址自然跟着换。
+ */
+export interface AggregatePathVar {
+  /** 与 baseUrl 里的 `{name}` 同名，也是 credentials 里的键 */
+  name: string
+  label: string
+  helpText?: string
+}
+
 export interface AggregateEntry {
   id: string
   name: string
@@ -75,6 +94,8 @@ export interface AggregateEntry {
   envVar?: string
   /** Default endpoint; null means the user has to supply one */
   baseUrl: string | null
+  /** `{name}` placeholders this baseUrl needs; each value is stored per account. */
+  pathVars?: readonly AggregatePathVar[]
   /** Documents which baseUrl variable the user may override */
   baseUrlOverrideEnv?: string
   wire: AggregateWire
@@ -146,6 +167,11 @@ export interface AggregateKeyInfo {
   createdAt: number
   lastUsed?: number
   errorMessage?: string
+  /**
+   * 这把 Key 携带的端点路径变量（Cloudflare 的 Account ID）。它们决定请求发去
+   * 谁的账号，所以在 Key 行上如实显示：只有占位符、看不到值的界面没法让人核对。
+   */
+  pathVars?: Record<string, string>
 }
 
 /**
@@ -178,6 +204,11 @@ export interface AggregateDetail {
    * 它与五态徽章无关，也绝不参与 `quotaViewOf` 的判定。
    */
   credit?: AggregateCreditSnapshot
+  /**
+   * 「上游亲口说没额度」的现场记录，逐 `(账号, 模型)` 一行，已剔除过期行。
+   * 与 `credit` 并列不合并：那条是钱的余额，这条是一次真实调用被拒的证词。
+   */
+  quotaExhaustions?: AggregateQuotaExhaustionRecord[]
 }
 
 /** Key / 模型变更的结果；`detail` 是变更后重新读取的面板数据。 */
@@ -213,6 +244,11 @@ export interface AggregateListResult {
    * 因此它回答的是"至少有一把 Key 到了这个数"，不是"所有 Key 合计"。
    */
   quotaUsage?: Record<string, AggregateQuotaUsage>
+  /**
+   * 各家的「上游说没额度」折叠（条数 + 最近一条），只含还活着的记录。
+   * 与 `quotaUsage` 并列不合并：那个是我们自己数的量，这个是上游亲口拒的原话。
+   */
+  quotaExhaustions?: Record<string, AggregateQuotaExhaustionSummary>
 }
 
 /**
@@ -277,6 +313,11 @@ export interface AggregateSaveInput {
   apiKey?: string
   /** Overrides the registry baseUrl (required when the registry has none or a placeholder) */
   baseUrl?: string
+  /**
+   * 端点模板里 `{name}` 的值，随这批 Key 一起落库到 `account.credentials[name]`。
+   * 只为 `pathVars` 声明的条目使用；有 Key 却没给全时整个保存被拒。
+   */
+  pathVars?: Record<string, string>
   /** Overrides which registry model ids are exposed, as raw upstream ids */
   models?: string[]
   enabled?: boolean
@@ -352,4 +393,35 @@ export interface AggregateOperationResult {
    * so "上游没答" never looks like a successful upstream sync.
    */
   modelSource?: 'upstream' | 'models.dev'
+}
+
+const AGGREGATE_PATH_VAR = /\{([a-zA-Z0-9_]+)\}/g
+
+/** 端点地址里出现的占位符名（去重，按出现顺序）。 */
+export function aggregatePathVarNames(baseUrl: string | null | undefined): string[] {
+  if (!baseUrl) return []
+  const names: string[] = []
+  for (const match of baseUrl.matchAll(AGGREGATE_PATH_VAR)) {
+    if (!names.includes(match[1])) names.push(match[1])
+  }
+  return names
+}
+
+/** 按记录里的凭据展开端点地址；没有值的占位符原样保留，由调用方判定缺失。 */
+export function expandAggregatePathVars(
+  baseUrl: string,
+  values: Record<string, string | undefined>
+): string {
+  return baseUrl.replace(AGGREGATE_PATH_VAR, (whole, name: string) => {
+    const value = (values[name] ?? '').trim()
+    return value ? encodeURIComponent(value) : whole
+  })
+}
+
+/** 展开之后仍然缺值的占位符名；空数组 = 地址可以直接发出去。 */
+export function missingAggregatePathVars(
+  baseUrl: string,
+  values: Record<string, string | undefined>
+): string[] {
+  return aggregatePathVarNames(baseUrl).filter(name => !(values[name] ?? '').trim())
 }
