@@ -75,3 +75,12 @@ Flash`、别名 `daily`），用量桶记的是上游真实模型名（如 `loom
 `totalRequests` 继续增长，证明运行中的进程没有把内存里那份被清空的统计盖回去。
 
 请求日志行按用户要求**没有**找回（`request-logs.ndjson` 仍是清空后的 200 行）。
+
+## 重建日的延迟：记为未记录，不参与平均
+
+重建只抬高了 `totalRequests` / `successRequests`，`totalLatency` 仍是清空前的已记段。按原来的
+算法（`totalLatency / successRequests`）相除，11-12 的平均延迟读成 116ms，而完好的相邻日是
+1.2–7.3s——半截分子除以抬高后的分母，得到一个比「未记录」更假的确数。因此带
+`totalRequestsSource: 'tokenLedger'` 的天在两处都跳过延迟：趋势图 `dailyTrendPoints` 给 `null`
+（线断开），窗口聚合 `windowDayTotals` 的分子分母同时排除该天；窗口里只剩这类天时读 `null`。
+请求数、成功数、失败数照常计入。
