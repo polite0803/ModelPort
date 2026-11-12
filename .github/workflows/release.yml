@@ -168,7 +168,19 @@ jobs:
           file=$(ls dist/modelport-daemon-*-${{ matrix.arch }}.tar.gz | head -n 1)
           test -n "$file"
           (cd dist && sha256sum "$(basename "$file")" > "$(basename "$file").sha256")
-          gh release upload "${{ github.ref_name }}" "$file" "$file.sha256" --clobber
+          # uploads.github.com 会瞬时 500（1.8.9 首发两个 ubuntu 行同时撞上，Release 里
+          # 只剩 Windows/macOS 资产，控制台的「检查更新」当场报「缺少安装资源或校验文件」）。
+          # 资产名按架构唯一，`--clobber` 幂等，所以重试是安全的。
+          for attempt in 1 2 3; do
+            if gh release upload "${{ github.ref_name }}" "$file" "$file.sha256" --clobber; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::uploading $file failed after 3 attempts"
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -196,9 +208,59 @@ jobs:
             upload+=("$f")
           done
           test ${#upload[@]} -gt 0
+          checksums=()
           for f in "${upload[@]}"; do
             (cd "$(dirname "$f")" && sha256sum "$(basename "$f")" > "$(basename "$f").sha256")
+            checksums+=("$f.sha256")
           done
-          gh release upload "${{ github.ref_name }}" "${upload[@]}" $(for f in "${upload[@]}"; do echo "$f.sha256"; done) --clobber
+          # 与 daemon 那一步同样的瞬时 500：整批重传是幂等的（`--clobber`），重试三次。
+          for attempt in 1 2 3; do
+            if gh release upload "${{ github.ref_name }}" "${upload[@]}" "${checksums[@]}" --clobber; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::installer upload failed after 3 attempts"
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 上传步骤只能证明「我发出去了」，证明不了「它真的在 Release 里」。1.8.9 首发就是
+  # 两个 ubuntu 行在上传处 500：Windows/macOS 资产齐了，Linux 与 daemon 全缺，而 Release
+  # 本身已经是公开状态，控制台按 `/releases/latest` 取数时只会说「缺少安装资源或校验文件」。
+  # 这里按控制台**真正消费**的那几对资产收口（升级路径：控制台安装包 + 两个架构的 daemon，
+  # 每对都必须带 `.sha256`），缺一个就把这次运行标红并列出缺的名字。
+  verify:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Every asset the console consumes is published
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.ref_name }}"
+          ver="${tag#v}"
+          names="$(gh release view "$tag" --json assets -q '.assets[].name')"
+          missing=()
+          for name in \
+            "ModelPort-$ver-x64-setup.exe" \
+            "modelport-daemon-$ver-x64.tar.gz" \
+            "modelport-daemon-$ver-arm64.tar.gz"; do
+            for suffix in "" ".sha256"; do
+              if ! grep -qxF -- "$name$suffix" <<< "$names"; then
+                missing+=("$name$suffix")
+              fi
+            done
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::release $tag is missing: ${missing[*]}"
+            exit 1
+          fi
+          echo "every updater asset is present on $tag"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
