@@ -14,7 +14,9 @@ import type { ChatCompletionRequest } from '../types'
  * 优先级与 worker、请求日志同口径：别名优先，两把都给时用别名的值。
  * 只改拼法，不校验、不补默认值 —— 客户端没给上限就不发明一个。
  */
-export function normalizeOutputCap<T extends ChatCompletionRequest>(request: T): T {
+export function normalizeOutputCap<T extends { max_tokens?: number; max_completion_tokens?: number }>(
+  request: T,
+): T {
   if (request.max_completion_tokens === undefined) return request
 
   const { max_completion_tokens: alias, ...rest } = request

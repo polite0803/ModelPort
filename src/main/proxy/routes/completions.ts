@@ -23,6 +23,7 @@ import { clientHeaderValue, identifyClientByUserAgent } from '../../../shared/cl
 import { mapForwardFailure, retryAfterHeader, withRequestId } from '../errorMapping'
 import { autoExhaustedResponse, parseRetryAfterSeconds } from '../failover'
 import { startSseHeartbeat } from '../utils/sseHeartbeat'
+import { normalizeOutputCap } from '../utils/outputCap'
 import { createReasoningEchoObserver, reasoningEchoApplies } from '../reasoningEcho.ts'
 
 const router = new Router({ prefix: '/v1' })
@@ -31,6 +32,8 @@ interface CompletionRequest {
   model: string
   prompt: string | string[]
   max_tokens?: number
+  /** 现名写法：与 chat 入口同一把折叠（`normalizeOutputCap`），否则上限被静默丢弃。 */
+  max_completion_tokens?: number
   temperature?: number
   top_p?: number
   n?: number
@@ -87,6 +90,10 @@ router.post('/completions', async (ctx: Context) => {
     }
     return
   }
+
+  // 折叠排在所有读取之前：`chatRequest.max_tokens` 是这条路由唯一的出口，
+  // 不折的话 `max_completion_tokens` 到不了上游，上限被静默丢弃（与 chat 入口同口径）。
+  request = normalizeOutputCap(request)
 
   if (!request.model) {
     ctx.status = 400
