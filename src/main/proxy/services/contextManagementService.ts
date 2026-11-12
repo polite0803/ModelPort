@@ -193,6 +193,13 @@ function getMessageContent(message: ChatMessage): string {
  * 2. **Lost task statement** — when the window no longer covers the first
  *    non-system `user` message, keep it at the front. Trimming should cost old
  *    tool output, never "what the user actually asked for".
+ * 3. **Lost current turn** — the first `user` message is not always the task. Codex
+ *    injects `AGENTS.md` as the first user turn, so a mid-turn window that kept only
+ *    tool traffic rescued the rulebook and dropped the instruction: the model answered
+ *    "AGENTS.md instructions loaded … what would you like me to work on?", the turn
+ *    closed, and the client read it as "stopped without doing anything" (2026-11-13,
+ *    `codex-deepseek` served by the trimmed `trae` lane). Keep the newest user turn
+ *    before the window as well whenever the window itself carries none.
  *
  * `kept` must be a contiguous suffix of `nonSystem` (both strategies build it
  * that way); the index math below relies on it.
@@ -211,14 +218,22 @@ function keepToolGroupAndTask(nonSystem: ChatMessage[], kept: ChatMessage[]): Ch
   }
 
   const withGroup = nonSystem.slice(groupStart)
-  const task = nonSystem.find(message => message.role === 'user')
-  if (task !== undefined && !withGroup.includes(task)) return [task, ...withGroup]
-  return withGroup
+  const prefix: ChatMessage[] = []
+  const first = nonSystem.find(message => message.role === 'user')
+  if (first !== undefined && !withGroup.includes(first)) prefix.push(first)
+  if (!withGroup.some(message => message.role === 'user')) {
+    const current = lastUserBefore(nonSystem, groupStart)
+    if (current !== undefined && current !== first) prefix.push(current)
+  }
+  return prefix.length === 0 ? withGroup : [...prefix, ...withGroup]
 }
 
-/** The first user turn — the request the whole conversation exists for. */
-function firstUserMessage(nonSystem: ChatMessage[]): ChatMessage | undefined {
-  return nonSystem.find(message => message.role === 'user')
+/** The newest user turn before `before` — the instruction that governs the kept window. */
+function lastUserBefore(nonSystem: ChatMessage[], before: number): ChatMessage | undefined {
+  for (let i = before - 1; i >= 0; i--) {
+    if (nonSystem[i]?.role === 'user') return nonSystem[i]
+  }
+  return undefined
 }
 
 /**
@@ -295,10 +310,15 @@ export class TokenLimitStrategy {
    * `maxTokens`; the newest message is always kept anyway, so it is not reserved.
    */
   private taskReserve(nonSystemMessages: ChatMessage[]): number {
-    const task = firstUserMessage(nonSystemMessages)
     const newest = nonSystemMessages[nonSystemMessages.length - 1]
-    if (task === undefined || task === newest) return 0
-    return estimateTokens(task.content)
+    const first = nonSystemMessages.find(message => message.role === 'user')
+    const current = lastUserBefore(nonSystemMessages, nonSystemMessages.length)
+    let reserve = 0
+    if (first !== undefined && first !== newest) reserve += estimateTokens(first.content)
+    if (current !== undefined && current !== first && current !== newest) {
+      reserve += estimateTokens(current.content)
+    }
+    return reserve
   }
 
   execute(messages: ChatMessage[]): StrategyResult {

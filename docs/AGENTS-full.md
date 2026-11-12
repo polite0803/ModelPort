@@ -1619,6 +1619,17 @@ would flush the log list.
   messages" rather than "your message was too long" (reproduced live 2026-11-01 at `maxTokens: 8000`:
   24 000 chars 200, 26 000 chars 400). `estimateTokens` here is `ceil(length / 3)`, deliberately not
   the CJK-aware estimator the router uses.
+- **The first user turn is not necessarily the task.** `keepToolGroupAndTask` used to rescue the
+  first non-system `user` message when the window stopped covering it, which is the question in a
+  chat client but is `AGENTS.md` in Codex: the app injects the rulebook as the first user turn, so a
+  mid-turn window made of tool traffic got `AGENTS.md` prepended and the current instruction dropped -
+  the model answered "AGENTS.md instructions loaded … what would you like me to work on?", the turn
+  closed, and the client showed a completed turn that had done nothing (2026-11-13, `codex-deepseek`
+  on the only trimmed lane, `trae`; three occurrences in one session). Trimming is also
+  message-counted, so ~20 tool calls fill a 40-message window. The repair now keeps the first user
+  turn **and**, when the window itself carries no user message, the newest user turn before it;
+  `TokenLimitStrategy.taskReserve` reserves for both. `channelIds` still decides who may be trimmed -
+  turning trimming off for a provider remains the blunt alternative, not the fix.
 - Built-in providers silently drop `response_format`, `stream_options`, `logit_bias`, `seed`,
   `max_tokens`, `top_p`, `stop`, `frequency_penalty` and `presence_penalty` in
   `proxy/parameterPolicy.ts`, because OpenAI-compatible clients send them by default and a `400`
