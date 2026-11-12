@@ -1035,14 +1035,28 @@ function buildTrayMenu(): void {
       ]
     : []
 
-  const items: MenuItemConstructorOptions[] = [
+  // 顶层只留一格网关入口：选网关、启停安装卸载、增删改、重连全部收进子菜单，
+  // 腾出的顶层位置留给模型切换这类常用动作。子菜单内按用途分块，顺序是
+  // 「当前 → 选择 → 生命周期 → 增删改 → 连接」，与原来的平铺顺序一致。
+  const gatewayMenu: MenuItemConstructorOptions[] = [
+    {
+      label: active
+        ? `当前：${active.name}（${kindLabel(active.kind)}）`
+        : '当前：未选择网关',
+      enabled: false,
+    },
+    { type: 'separator' },
     ...(gatewayItems.length > 0
       ? gatewayItems
-      : [{ label: '还没有配置的网关', enabled: false }]),
+      : [{ label: '还没有配置的网关', enabled: false } as MenuItemConstructorOptions]),
+    ...(localItems.length > 0
+      ? [{ type: 'separator' } as MenuItemConstructorOptions, ...localItems]
+      : []),
+    ...(wslItems.length > 0
+      ? [{ type: 'separator' } as MenuItemConstructorOptions, ...wslItems]
+      : []),
     { type: 'separator' },
     trayAction('网关管理…', () => showGatewayManager()),
-    ...(localItems.length > 0 ? [...localItems, { type: 'separator' } as MenuItemConstructorOptions] : []),
-    ...(wslItems.length > 0 ? [...wslItems, { type: 'separator' } as MenuItemConstructorOptions] : []),
     trayAction('添加网关…', () => void addGateway()),
     ...(active ? [trayAction('编辑当前网关…', () => void editGateway(active))] : []),
     ...(active
@@ -1053,11 +1067,15 @@ function buildTrayMenu(): void {
         })]
       : []),
     { type: 'separator' },
-    trayAction('检查更新（控制台 + 可管理的网关）…', () => void checkForUpdatesFromTray()),
     trayAction('重新连接', () => void loadActive()),
     trayAction('在浏览器中打开', () => {
       if (active) void shell.openExternal(uiUrl(active))
     }),
+  ]
+
+  const items: MenuItemConstructorOptions[] = [
+    { label: '网关', submenu: gatewayMenu },
+    trayAction('检查更新（控制台 + 可管理的网关）…', () => void checkForUpdatesFromTray()),
     { type: 'separator' },
     trayAction('退出', () => {
       app.isQuitting = true
