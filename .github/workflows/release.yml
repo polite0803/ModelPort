@@ -86,10 +86,12 @@ jobs:
           # the one GitHub kept cancelling, leaving every release run "failed".
           - os: macos-latest
             arch: x64
+          # Same union applies on Windows: build.win.target lists x64+arm64, so a second
+          # windows row re-built the same five files and both rows raced to upload the
+          # same asset names (`--clobber` deletes then posts; the loser died with 422
+          # `already exists`, reddening 1.8.6's run while every asset had landed).
           - os: windows-latest
             arch: x64
-          - os: windows-latest
-            arch: arm64
           - os: ubuntu-latest
             arch: x64
           - os: ubuntu-latest
@@ -130,14 +132,13 @@ jobs:
       - name: Package the console (Windows)
         if: matrix.os == 'windows-latest'
         run: |
+          # `--win --x64` still emits the arm64 installers too (see the matrix comment), so
+          # this single row produces every Windows asset.
           npx electron-builder --win --${{ matrix.arch }} --publish=never
           # <=1.7.5 shells look for `ModelPort-Shell-<ver>-<arch>-setup.exe`. Their updater
           # cannot be changed remotely, so ship an identical alias until those clients are
           # gone; the upload sweep below picks it up and writes its `.sha256`.
-          # The alias names the x64 installer, so only the x64 row emits it: the arm64 row
-          # has no x64 exe to copy and must skip instead of throwing.
           # TODO: drop this once no 1.7.5 shell is left (it doubles the Windows asset size).
-          if ("${{ matrix.arch }}" -ne "x64") { exit 0 }
           $exe = Get-ChildItem dist/ModelPort-*-x64-setup.exe | Select-Object -First 1
           if (-not $exe) { throw 'windows installer not found' }
           $alias = Join-Path $exe.DirectoryName ($exe.Name -replace '^ModelPort-', 'ModelPort-Shell-')
