@@ -417,7 +417,7 @@
     "autoRoutingStickyHardPin": "Hard-pin the sticky model (route it first regardless of score)",
     "autoRoutingStickyHardPinHelp": "On: the model this conversation last succeeded on is moved to the front of the candidate list, so an agent session does not change model mid-task. Off: stickiness is only a score bonus (+0.12, or +0.06 for another account of the same model), and a clearly better candidate wins it.",
     "autoRoutingStickyHardPinIdle": "Stickiness is already off (the window above is 0), so this setting does nothing right now.",
-    "autoRoutingFairness": "Share rotation lead (dispatches)",
+        "autoRoutingFairness": "Share rotation lead (dispatches)",
     "autoRoutingFairnessHelp": "How far a model may run ahead of the least-dispatched model in this route's pool before it moves behind every model that has served less. 0 rotates strictly; 2 (the default) lets one model serve three dispatches in a row; 20 is effectively score-only. Conversation stickiness still keeps one session on one model. Every candidate in the pool is now ranked - nothing is capped to one model per provider - so this is what decides whether the tail of the pool ever gets a turn.",
     "autoRoutingPrefer": "Routing preference",
     "autoRoutingPreferHelp": "Balanced picks a tier from the request complexity, Fast prefers quick models, Strong prefers capable ones, Cheap prefers free or low-multiplier models. The X-Auto-Prefer header overrides it per request",

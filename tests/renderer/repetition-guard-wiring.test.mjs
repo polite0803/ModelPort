@@ -37,15 +37,23 @@ function checkMainProcess(chatSource, routerSource, policySource) {
     problems.push('the stream trace does not carry the repetition reading')
   }
   // 三个结算点：流错误（含首块后超时）、直通路径正常结束、转换路径正常结束。
-  const settleCalls = (chatSource.match(/settleSticky\(trace\)/g) ?? []).length
+  const settleCalls = (chatSource.match(/settleSticky\(trace, /g) ?? []).length
   if (settleCalls !== 3) {
     problems.push(`all three stream settle paths must settle stickiness, saw ${settleCalls}`)
   }
-  if (!/shouldRevokeStickyAfterStream\(trace\)/.test(chatSource)) {
+  // 第三个实参是 2026-11-12 新增的池内首字门槛（第六类退化）。摘掉它 ⇒ 慢回合
+  // 不再撤锚点，这条接线要红。
+  if (!/shouldRevokeStickyAfterStream\(trace, truncated, autoDecision\?\.latencyGateMs\)/.test(chatSource)) {
     problems.push('settleSticky does not delegate to the shared policy')
+  }
+  if (!/isSlowTurnAfterStream\(trace, latencyGateMs\)/.test(policySource)) {
+    problems.push('the policy does not revoke on a slow first token')
   }
   if (!/endReason === 'timeout' \|\| trace\.endReason === 'error'/.test(policySource)) {
     problems.push('the policy does not revoke on timeout or upstream error')
+  }
+  if (!/if \(truncated\) return true/.test(policySource)) {
+    problems.push('the policy does not revoke on an upstream output-cap truncation')
   }
   if (!/trace\.repetition\?\.degraded === true/.test(policySource)) {
     problems.push('the policy is not gated on the degraded verdict')
@@ -103,8 +111,12 @@ test('each check fails on the mutation it is meant to catch', () => {
   )
 
   // 只在一个结算点撤粘性（另一个分支漏了）⇒ 也是红，而且是计数那条。
-  const oneRevoke = chat.replace('settleSticky(trace)\n          reportStreamOutcome(\n            endReason,\n            elapsed,\n            (delivered', 'reportStreamOutcome(\n            endReason,\n            elapsed,\n            (delivered')
+  const oneRevoke = chat.replace('settleSticky(trace, truncated)\n          reportStreamOutcome(\n            endReason,\n            elapsed,\n            truncated', 'reportStreamOutcome(\n            endReason,\n            elapsed,\n            truncated')
   assert.match(checkMainProcess(oneRevoke, router, policy).join('\n'), /saw 2/)
+
+  // 摘掉「截断撤锚点」那条判据 ⇒ 红，而且点名的正是它。
+  const noTruncation = policy.replace('if (truncated) return true', '')
+  assert.match(checkMainProcess(chat, router, noTruncation).join('\n'), /output-cap truncation/)
 
   // 阈值写死成常量（不再读配置）⇒ 红。
   const hardcoded = chat.replace('storeManager.getConfig().streamRepetitionGuard ?? DEFAULT_REPETITION_GUARD', 'DEFAULT_REPETITION_GUARD')

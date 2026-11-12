@@ -96,6 +96,110 @@ test('function_call_output 的 output 也接受分片数组', () => {
   assert.deepEqual(request.messages, [{ role: 'tool', tool_call_id: 'c', content: 'x' }])
 })
 
+/**
+ * 并行调用必须落在**同一条** assistant 上（2026-11-12 现网 400）：
+ * `invalid params, tool call result does not follow tool call (2013)`。
+ * Responses 的 input 是一次调用一个 item，逐 item 落成多条 assistant 会让结果
+ * 与自己的调用之间隔着另一条 assistant，严格上游当场拒收整轮。
+ */
+test('并行 function_call 并进同一条 assistant，结果紧随其后', () => {
+  const request = responsesToChatRequest(
+    {
+      input: [
+        { role: 'user', content: 'run both' },
+        { type: 'function_call', call_id: 'call_a', name: 'exec_command', arguments: '{"cmd":"ls"}' },
+        { type: 'function_call', call_id: 'call_b', name: 'exec_command', arguments: '{"cmd":"pwd"}' },
+        { type: 'function_call_output', call_id: 'call_a', output: 'a' },
+        { type: 'function_call_output', call_id: 'call_b', output: 'b' },
+      ],
+    },
+    { model: 'auto', stream: false },
+  )
+
+  assert.deepEqual(request.messages, [
+    { role: 'user', content: 'run both' },
+    {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        { id: 'call_a', type: 'function', function: { name: 'exec_command', arguments: '{"cmd":"ls"}' } },
+        { id: 'call_b', type: 'function', function: { name: 'exec_command', arguments: '{"cmd":"pwd"}' } },
+      ],
+    },
+    { role: 'tool', tool_call_id: 'call_a', content: 'a' },
+    { role: 'tool', tool_call_id: 'call_b', content: 'b' },
+  ])
+})
+
+test('调用之间的思考项挂到那条 assistant 上，不插一条新的', () => {
+  const request = responsesToChatRequest(
+    {
+      input: [
+        { type: 'function_call', call_id: 'call_a', name: 'exec_command', arguments: '{}' },
+        { type: 'reasoning', summary: [{ type: 'summary_text', text: 'think' }] },
+        { type: 'function_call', call_id: 'call_b', name: 'exec_command', arguments: '{}' },
+        { type: 'function_call_output', call_id: 'call_a', output: 'a' },
+        { type: 'function_call_output', call_id: 'call_b', output: 'b' },
+      ],
+    },
+    { model: 'auto', stream: false },
+  )
+
+  const messages = request.messages as Payload[]
+  assert.equal(messages.length, 3)
+  assert.deepEqual(messages[0], {
+    role: 'assistant',
+    content: null,
+    reasoning_content: 'think',
+    tool_calls: [
+      { id: 'call_a', type: 'function', function: { name: 'exec_command', arguments: '{}' } },
+      { id: 'call_b', type: 'function', function: { name: 'exec_command', arguments: '{}' } },
+    ],
+  })
+  assert.deepEqual(messages[1], { role: 'tool', tool_call_id: 'call_a', content: 'a' })
+  assert.deepEqual(messages[2], { role: 'tool', tool_call_id: 'call_b', content: 'b' })
+})
+
+test('调用与结果之间的思考项不制造额外的 assistant', () => {
+  const request = responsesToChatRequest(
+    {
+      input: [
+        { type: 'function_call', call_id: 'call_a', name: 'exec_command', arguments: '{}' },
+        { type: 'reasoning', summary: [{ type: 'summary_text', text: 'think' }] },
+        { type: 'function_call_output', call_id: 'call_a', output: 'a' },
+      ],
+    },
+    { model: 'auto', stream: false },
+  )
+
+  const messages = request.messages as Payload[]
+  assert.equal(messages.length, 2)
+  assert.equal(messages[0].role, 'assistant')
+  assert.equal(messages[0].reasoning_content, 'think')
+  assert.deepEqual(messages[1], { role: 'tool', tool_call_id: 'call_a', content: 'a' })
+})
+
+test('自由文本调用与普通调用同批时也并进一条 assistant', () => {
+  const request = responsesToChatRequest(
+    {
+      input: [
+        { type: 'custom_tool_call', call_id: 'call_p', name: 'apply_patch', input: 'PATCH' },
+        { type: 'function_call', call_id: 'call_e', name: 'exec_command', arguments: '{}' },
+        { type: 'custom_tool_call_output', call_id: 'call_p', output: 'ok' },
+        { type: 'function_call_output', call_id: 'call_e', output: 'ok' },
+      ],
+    },
+    { model: 'auto', stream: false },
+  )
+
+  const messages = request.messages as Payload[]
+  assert.equal(messages.length, 3)
+  assert.deepEqual(messages[0].tool_calls, [
+    { id: 'call_p', type: 'function', function: { name: 'apply_patch', arguments: '{"input":"PATCH"}' } },
+    { id: 'call_e', type: 'function', function: { name: 'exec_command', arguments: '{}' } },
+  ])
+})
+
 test('input_image 折成 chat 的 image_url 分片，文本与图片混排时保留两样', () => {
   const request = responsesToChatRequest(
     {
@@ -642,4 +746,63 @@ test('流式：函数工具仍然逐段发 arguments.delta（自由文本的收�
   const item = decode(out).find(e => e.type === 'response.output_item.done') as Payload
   assert.equal(item.item.type, 'function_call')
   assert.deepEqual(JSON.parse(item.item.arguments), { cmd: 'ls' })
+})
+
+// 生产形状（2026-11-12 15:0x，chatcmpl-mwd75zvj-mhshw0）：上游把两个并行调用的
+// arguments 分片**交错**下发。当时翻译器只有一个 open 槽，每换一次 index 就关掉
+// 上一项、再开一个只有 index、没有 id/name 的新项；客户端把它当历史回放后，下一轮
+// 直接 400 —— `assistant.tool_calls contains an invalid function call:
+// messages[10].tool_calls[0].id must be a non-empty string`。
+test('交错下发的两个调用各续在自己那一项上，不产生空 call_id 的项', () => {
+  const t = createResponsesStreamTranslator({ model: 'codex', fallbackId: 'r6' })
+  const frame = (payload: Payload): string => 'data: ' + JSON.stringify(payload) + '\n\n'
+  let out = ''
+  out += t.push(frame({ choices: [{ index: 0, delta: { tool_calls: [
+    { index: 1, id: 'call_a', function: { name: 'exec_command', arguments: '{"cmd":"cd /home' } },
+    { index: 2, id: 'call_b', function: { name: 'exec_command', arguments: '{"cmd":"ls' } },
+  ] } }] }))
+  out += t.push(frame({ choices: [{ index: 0, delta: { tool_calls: [
+    { index: 1, function: { arguments: '/polit"}' } },
+    { index: 2, function: { arguments: ' /tmp"}' } },
+  ] } }] }))
+  out += t.push(frame({ choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] }))
+  out += t.end()
+
+  const events = decode(out)
+  assert.equal(
+    frames(out).filter(n => n === 'response.output_item.added').length,
+    2,
+    '两个调用只开两项：同 index 的续片不能另起一项',
+  )
+  const done = events.filter(e => e.type === 'response.output_item.done').map(e => e.item as Payload)
+  assert.deepEqual(done.map(i => [i.call_id, i.name as string]), [
+    ['call_a', 'exec_command'],
+    ['call_b', 'exec_command'],
+  ])
+  assert.equal(done[0]?.call_id, 'call_a', 'call_id 不能是空串')
+  assert.deepEqual(JSON.parse(String(done[0]?.arguments)), { cmd: 'cd /home/polit' })
+  assert.deepEqual(JSON.parse(String(done[1]?.arguments)), { cmd: 'ls /tmp' })
+})
+
+// 非流式同一条铁律：`call_id` 为空串的历史回放给上游就是 400。上游没给 id 时按位置
+// 造一个稳定 id；连名字都没有的调用客户端无从分派，直接丢弃而不是留一条空名字。
+test('非流式：缺 call_id 时造稳定 id，空名字的调用丢弃', () => {
+  const body = chatResponseToResponseBody({
+    choices: [{
+      message: {
+        content: null,
+        tool_calls: [
+          { function: { name: 'get_weather', arguments: '{"city":"SF"}' } },
+          { id: 'call_ok', function: { name: '', arguments: '{}' } },
+        ],
+      },
+      finish_reason: 'tool_calls',
+    }],
+  }, { model: 'auto', fallbackId: 'rr' }) as Payload
+
+  const output = body.output as Payload[]
+  assert.equal(output.length, 1)
+  assert.equal(output[0]?.call_id, 'call_rr_0')
+  assert.equal(output[0]?.name, 'get_weather')
+  assert.equal(output[0]?.id, 'fc_rr_0')
 })

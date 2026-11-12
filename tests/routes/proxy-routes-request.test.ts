@@ -171,6 +171,50 @@ test('A/请求级：createRoute 之后同一个代理实例（未重启）的下
     '池被剔空时省略键，而不是借用别家路由的窗口')
 })
 
+// --------------------------------- 中途换实现的可诊断性（头 + 日志）
+
+test('请求级：服务者与上一轮锚点不同 → 响应头 X-ModelPort-Switch 与日志 auto.switchedFrom', async () => {
+  // 锚点用真写入通道造：`rememberRoute` 就是成功路径在 `chat.ts` 里调的那个函数。
+  const decision = autoRouter.select({ model: 'auto', messages: [{ role: 'user', content: 'ping' }] })
+  assert.ok(decision.conversationKey)
+  const anchor = decision.candidates.find(candidate => candidate.provider.id === 'rp1')
+  assert.ok(anchor)
+  autoRouter.rememberRoute(decision.conversationKey, anchor, undefined)
+
+  // 锚点那家停服 → 池里只剩 rp2，这一轮必然换实现
+  sm.setModelsServed('rp1', ['Test-A'], false)
+  try {
+    const response = await postChat('auto')
+    assert.equal(response.headers['x-modelport-switch'], 'rp1/Test-A -> rp2/Test-B')
+
+    const row = sm.getRequestLogs().find((entry: Record<string, any>) => entry.requestId === response.headers['x-request-id'])
+    assert.ok(row, '换家也要有请求日志行')
+    assert.equal(row.auto.switchedFrom, 'rp1/Test-A', '日志记换走的那个实现，与响应头同源')
+  } finally {
+    sm.setModelsServed('rp1', ['Test-A'], true)
+  }
+})
+
+test('请求级：服务者就是锚点时没有 X-ModelPort-Switch（负控）', async () => {
+  const decision = autoRouter.select({ model: 'auto', messages: [{ role: 'user', content: 'ping' }] })
+  const anchor = decision.candidates.find(candidate => candidate.provider.id === 'rp1')
+  assert.ok(anchor)
+  autoRouter.rememberRoute(decision.conversationKey, anchor, undefined)
+
+  // 另一家停服 → 服务者就是锚点本身
+  sm.setModelsServed('rp2', ['Test-B'], false)
+  try {
+    const response = await postChat('auto')
+    assert.equal(response.headers['x-modelport-switch'], undefined, '同一实现复用不是换家')
+
+    const row = sm.getRequestLogs().find((entry: Record<string, any>) => entry.requestId === response.headers['x-request-id'])
+    assert.ok(row)
+    assert.equal(row.auto.switchedFrom, undefined)
+  } finally {
+    sm.setModelsServed('rp2', ['Test-B'], true)
+  }
+})
+
 // --------------------------------- A：池策略 / prefer / 名字解析都逐请求现读
 
 test('A/请求级：池策略把候选剔空 → 503 点名该路由，且带 X-ModelPort-Route-Name', async () => {

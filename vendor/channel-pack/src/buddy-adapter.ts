@@ -498,20 +498,32 @@ const BUDDY_POLICY_BLOCK_COOLDOWN_MS = 30 * 60_000
  * （`EMPTY_RESPONSE / RATE_LIMIT / SERVER / TIMEOUT / TRANSPORT`）里：
  * 「这个账号被策略拦了」是确定性结论，交给 harness 白退避 5 次毫无意义 ——
  * 出路是换号（由本适配器的换号循环负责），不是重试同一个账号。
+ *
+ * ## 拦截范围决定文案指向哪种动作
+ *
+ * - `rotated`：池里还有账号，逐个换完仍全被拦 → 换/加账号；
+ * - `single`：池里**没有第二个**可换的账号（或本轮根本没换过号）→ 加账号；
+ * - `stream`：HTTP 200 的流内错误帧，本条路径刻意不重发。
+ *
+ * 早期只有布尔 `rotated`，而 400 形态的 11140 分支把它写死成 `true`：单账号池
+ * 明明一次都没换号，却报「已逐个换号重试」，用户按「换号」去排查——而真正该做
+ * 的是加账号（实测 2026-11-12 `chatcmpl-mwdbgrd9-b5944z`）。
  */
+type ContentRejectionScope = 'rotated' | 'single' | 'stream'
+
 function contentRejectionError(
   productId: string,
   status: number,
   body: string,
-  rotated: boolean,
+  scope: ContentRejectionScope,
 ): LlmError {
-  // 两条通道的如实描述不同：HTTP 路径试完了全部候选，流内路径只撞到当前账号
-  // （那里不重发，避免「已吐了一半再重放」的重复计费与重复执行工具风险）。
-  const scope = rotated
+  const summary = scope === 'rotated'
     ? `全部账号均被服务端安全策略拦截（HTTP ${status}，已逐个换号重试）`
-    : `当前账号被服务端安全策略拦截（HTTP ${status}，流内错误帧下发）`
+    : scope === 'single'
+      ? `当前账号被服务端安全策略拦截（HTTP ${status}，没有其它可用账号可换）`
+      : `当前账号被服务端安全策略拦截（HTTP ${status}，流内错误帧下发）`
   return new LlmError(
-    `${productId}: ${scope}。该拦截按账号生效（同一请求在其他账号可正常返回），`
+    `${productId}: ${summary}。该拦截按账号生效（同一请求在其他账号可正常返回），`
     + `请在 Channel Pack 停用或更换被拦账号：${errorDetail(body)}`,
     'PERMISSION_DENIED',
     { status },
@@ -1550,7 +1562,7 @@ export class BuddyAdapter extends LlmAdapter {
           this.product.id,
           rejectionStatus === 0 ? authStatus : rejectionStatus,
           rejectionBody.length === 0 ? rejectedBody : rejectionBody,
-          true,
+          rotated ? 'rotated' : 'single',
         )
       }
       // 刷新既没产出凭据、也没换到别的账号：保留原有的可诊断报错。
@@ -1566,7 +1578,8 @@ export class BuddyAdapter extends LlmAdapter {
             this.product.id,
             rejectionStatus === 0 ? authStatus : rejectionStatus,
             rejectionBody.length === 0 ? rejectedBody : rejectionBody,
-            true,
+            // 本分支的前提就是 `!rotated`：一个号都没换过。
+            'single',
           )
         }
         throw new LlmError(`${this.product.id}: credential expired and refresh failed`, 'AUTH', { status: authStatus })
@@ -1588,7 +1601,7 @@ export class BuddyAdapter extends LlmAdapter {
             this.product.id,
             rejectionStatus === 0 ? authStatus : rejectionStatus,
             rejectionBody.length === 0 ? detail : rejectionBody,
-            true,
+            rotated ? 'rotated' : 'single',
           )
         }
         throw new LlmError(
@@ -1783,7 +1796,7 @@ export class BuddyAdapter extends LlmAdapter {
         // 全部候选试完：若途中撞过安全策略拦截，报专门的提示（指向账号而非内容）。
         if (sawContentRejection) {
           throw contentRejectionError(
-            this.product.id, contentRejectionStatus || 403, contentRejectionBody, true,
+            this.product.id, contentRejectionStatus || 403, contentRejectionBody, 'rotated',
           )
         }
         throw new LlmError(`${this.product.id}: 模型 ${options.model} 所有账号均受限，请稍后再试`, 'QUOTA_EXCEEDED')
@@ -2030,7 +2043,7 @@ export class BuddyAdapter extends LlmAdapter {
             await markPolicyBlockedAccount(
               this.options.accountPool, this.product.id, policyBlockedAccountId, options.model,
             )
-            throw contentRejectionError(this.product.id, 200, payload, false)
+            throw contentRejectionError(this.product.id, 200, payload, 'stream')
           }
           if (data.error !== undefined) {
             throw new LlmError(`${this.product.id}: ${data.error.message ?? 'unknown error'}`, 'SERVER')

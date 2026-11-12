@@ -1368,3 +1368,32 @@ export function rankCandidates(
 
   return ranked
 }
+
+/** 分位数至少要这么多读数才有意义：两个读数算出来的 p75 就是较大的那个。 */
+const LATENCY_GATE_MIN_SAMPLES = 4
+
+/**
+ * 池内首字延迟门（第 2 条「延迟从罚分升为门」，2026-11-12）。
+ *
+ * 为什么是**池内 p75** 而不是一个绝对毫秒数：不同上游的首字量级差一个数量级
+ * （现网实测直连 p50 1.9s、走路由 p50 15.3s），任何绝对值都会在某一边永远不触发
+ * 或天天误伤。p75 只回答一件事 ——「在这一池候选里，它是不是最慢的那一批」，
+ * 池子换了、上游变了，门槛自己跟着动。
+ *
+ * 读数不足 4 个时返回 `undefined`（不判）：缺数据不是罪，两三个读数算出来的
+ * 分位数只是噪声，拿它当门会把新账号挡在首选之外。
+ *
+ * 消费点只有两处，判据同一格：`autoRouter::select` 决定硬粘性还提不提前，
+ * `chat.ts` 在流结束用它判「这一轮首字是不是慢到该撤锚点」。
+ */
+export function poolLatencyGateMs(
+  candidates: ReadonlyArray<{ ewmaFirstTokenMs?: number }>,
+): number | undefined {
+  const readings = candidates
+    .map(candidate => candidate.ewmaFirstTokenMs)
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0)
+    .sort((a, b) => a - b)
+  if (readings.length < LATENCY_GATE_MIN_SAMPLES) return undefined
+  const index = Math.max(0, Math.ceil(readings.length * 0.75) - 1)
+  return readings[index]
+}

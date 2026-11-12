@@ -23,6 +23,7 @@ import { clientHeaderValue, identifyClientByUserAgent } from '../../../shared/cl
 import { mapForwardFailure, retryAfterHeader, withRequestId } from '../errorMapping'
 import { autoExhaustedResponse, parseRetryAfterSeconds } from '../failover'
 import { startSseHeartbeat } from '../utils/sseHeartbeat'
+import { createReasoningEchoObserver, reasoningEchoApplies } from '../reasoningEcho.ts'
 
 const router = new Router({ prefix: '/v1' })
 
@@ -441,6 +442,17 @@ router.post('/completions', async (ctx: Context) => {
       ctx.set('X-Accel-Buffering', 'no')
 
       const textTransform = createTextCompletionChunkTransform()
+      // 思考观测点：这条路由的 SSE 与 chat 路由同源（账号渠道直通 / 聚合原始帧），
+      // 共用 `proxy/reasoningEcho.ts` 里那份主线程缓存。
+      const reasoningEcho = reasoningEchoApplies(provider)
+        ? createReasoningEchoObserver()
+        : undefined
+      if (reasoningEcho !== undefined) {
+        result.stream.on('data', (chunk: Buffer | string) => reasoningEcho.push(chunk))
+        result.stream.once('end', () => reasoningEcho.finish())
+        result.stream.once('error', () => reasoningEcho.finish())
+        ctx.res.once('close', () => reasoningEcho.finish())
+      }
       if (result.skipTransform) {
         result.stream.pipe(textTransform)
       } else {

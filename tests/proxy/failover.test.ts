@@ -57,6 +57,7 @@ import {
   isContextOverflowError,
   isReasoningEffortUnsupportedError,
   isToolOverflowError,
+  isToolCallOrderingError,
   isUpstreamCatalogMissError,
   parseRetryAfterSeconds,
   probeSseHead,
@@ -85,6 +86,21 @@ test('工具数超限识别：命中用户报障的上游原文', () => {
   // 大小写不敏感 + 变体措辞
   assert.ok(isToolOverflowError('Too many tools provided: 150 > 128'))
   assert.ok(isToolOverflowError('tools: too many items'))
+})
+
+test('工具调用顺序识别：命中 MiniMax 2013 原文，窄口径不误判', () => {
+  // 现网原文（2026-11-12 16:39 `codex-deepseek` → minimax/MiniMax-M3.1-Flash）
+  assert.ok(isToolCallOrderingError(
+    'invalid params, tool call result does not follow tool call (2013)',
+  ))
+  // 大小写与多个空格不敏感
+  assert.ok(isToolCallOrderingError('Tool Call Result does not follow  tool call'))
+  assert.equal(isToolCallOrderingError(undefined), false)
+  assert.equal(isToolCallOrderingError(''), false)
+  // 只说「工具调用参数非法」不在此列：那是另一种 400，换家没有依据
+  assert.equal(isToolCallOrderingError('invalid params, tool call arguments must be an object'), false)
+  // 普通业务错误不算
+  assert.equal(isToolCallOrderingError('model not found'), false)
 })
 
 test('工具数超限识别：窄口径，无关 400 不得误判', () => {
@@ -367,7 +383,7 @@ test('forwarder 的换家判据必须接上：超限 400 参与换家，普通 4
   // + 窗口装不下 + 不接受 reasoning_effort）
   assert.match(
     forwarderSource,
-    /const capabilityMismatch = isToolOverflowError\(result\.error\)\s*\r?\n\s*\|\| isMissingReasoningHistoryError\(result\.error\)\s*\r?\n\s*\|\| isChannelModelUnavailableError\(result\.error\)/,
+    /const capabilityMismatch = isToolOverflowError\(result\.error\)\s*\r?\n\s*\|\| isMissingReasoningHistoryError\(result\.error\)\s*\r?\n\s*\|\| isToolCallOrderingError\(result\.error\)\s*\r?\n\s*\|\| isChannelModelUnavailableError\(result\.error\)/,
     'forwardFirstReachable must consult the switch-to-next-candidate classes before rejecting failover',
   )
   // probe 错误帧映射：能力不匹配类 400 保持 400（换取「不计账号失败」的换家语义）。
@@ -380,6 +396,7 @@ test('forwarder 的换家判据必须接上：超限 400 参与换家，普通 4
     for (const predicate of [
       'isToolOverflowError',
       'isMissingReasoningHistoryError',
+      'isToolCallOrderingError',
       'isContextOverflowError',
       'isReasoningEffortUnsupportedError',
       'isUpstreamCatalogMissError',

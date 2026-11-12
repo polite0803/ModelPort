@@ -7,6 +7,7 @@ import {
   contractNeeds,
   conversationKey,
   explainMissing,
+  poolLatencyGateMs,
   profileRequest,
   providerMeetsContract,
   rankCandidates,
@@ -435,6 +436,39 @@ test('rankCandidates 层：粘性是加分（硬钉发生在 select 层，见 ro
     sticky: { providerId: 'qwen', displayName: 'Qwen3.6', accountId: 'sticky-cooling' },
   })
   assert.deepEqual(ranked.map(item => item.accountId), ['healthy'])
+})
+
+test('池内首字门槛：候选 EWMA 的 p75，读数不足 4 个时不判', () => {
+  // 读数不足：三个读数算出来的 p75 只是噪声（新账号会被无缘无故挡在首选之外）。
+  assert.equal(poolLatencyGateMs([{ ewmaFirstTokenMs: 1000 }, { ewmaFirstTokenMs: 2000 }, { ewmaFirstTokenMs: 30_000 }]), undefined)
+  assert.equal(poolLatencyGateMs([]), undefined)
+
+  // 四个读数：nearest-rank p75 = 排序后第 ceil(4*0.75)-1 = 第 3 个（0 基），即 5000。
+  assert.equal(
+    poolLatencyGateMs([
+      { ewmaFirstTokenMs: 5000 },
+      { ewmaFirstTokenMs: 1000 },
+      { ewmaFirstTokenMs: 30_000 },
+      { ewmaFirstTokenMs: 2000 },
+    ]),
+    5000,
+    '现网量级：直连 p50 1.9s、路由 p50 15.3s，门槛要夹在两者之间',
+  )
+
+  // 未知/非法读数不参与分位：缺数据不是罪，也不许把 0 或 NaN 拉低门槛。
+  assert.equal(
+    poolLatencyGateMs([
+      { ewmaFirstTokenMs: 1000 }, {}, { ewmaFirstTokenMs: 2000 },
+      { ewmaFirstTokenMs: Number.NaN }, { ewmaFirstTokenMs: 0 }, { ewmaFirstTokenMs: 9000 },
+    ]),
+    undefined,
+    'NaN 与 0 不算读数（只剩 1000/2000/9000 三个有效值）→ 仍不判',
+  )
+  assert.equal(
+    poolLatencyGateMs([{ ewmaFirstTokenMs: 1000 }, { ewmaFirstTokenMs: 2000 }, { ewmaFirstTokenMs: 3000 }, { ewmaFirstTokenMs: 9000 }]),
+    3000,
+    '有效读数 4 个时 p75 取第 3 个',
+  )
 })
 
 test('explainMissing names the capability that emptied the pool', () => {

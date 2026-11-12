@@ -166,18 +166,49 @@ test('the sticky hard-pin switch is rendered, persisted and read by the router',
     'normalisation must persist only an explicit off',
   )
 
-  // 读取侧只有这一处，且判据是「显式 false 才不硬钉」。
+  // 读取侧只有这一处，且判据是「显式 false 才不硬钉」——外加 2026-11-12 的延迟门
+  // （`stickyGated`）也不能被顺手绕掉：关掉硬钉与慢于池内 p75 是两条独立的让位理由。
   const router = readFileSync(join(root, 'src/main/proxy/autoRouter.ts'), 'utf8')
   assert.match(
     router,
-    /route\?\.stickyHardPin === false \? ranked : promoteSticky/,
-    'autoRouter must skip the queue-head promotion only when the route opted out',
+    /route\?\.stickyHardPin === false \|\| stickyGated\s*\? ranked/,
+    'autoRouter must skip the queue-head promotion only when the route opted out or the latency gate fired',
   )
   assert.equal(
     (router.match(/promoteSticky\(ranked, sticky\)/g) ?? []).length,
     1,
     'one promotion call site: a second place deciding the head would split the semantics',
   )
+})
+
+// 跨模型换家开关已退役（2026-11-12 策略改：`auto` 是池，不是泳道）。
+//
+// 反向门比正向门更重要：留一半比全留更糟 —— 界面还能勾、盘上还归一、路由却不再读，
+// 用户会以为自己在控制换家。四处（控件 / 归一化 / 路由读取 / 两个 locale 的文案）
+// 必须同时消失，循环本身也不许再把候选按模型截断。
+test('the cross-model failover switch is retired everywhere', () => {
+  const fields = readRoutePanel('src/renderer/src/components/proxy/ModelRouteFields.tsx')
+  assert.doesNotMatch(fields, /crossModelFailover|auto-cross-model/, 'the control must be gone')
+
+  const modelRoutes = readFileSync(join(root, 'src/main/store/modelRoutes.ts'), 'utf8')
+  assert.doesNotMatch(modelRoutes, /crossModelFailover/, 'normalisation must not persist a switch nobody reads')
+
+  const router = readFileSync(join(root, 'src/main/proxy/autoRouter.ts'), 'utf8')
+  assert.doesNotMatch(router, /crossModelFailover/, 'the router no longer carries the switch')
+
+  const forwarder = readFileSync(join(root, 'src/main/proxy/forwarder.ts'), 'utf8')
+  assert.doesNotMatch(forwarder, /crossModelFailover/, 'the pool loop has no model fence')
+  assert.doesNotMatch(forwarder, /laneModel|laneExhausted|candidate\.displayName !== laneModel/,
+    'a model fence left in the loop would keep the pool untried')
+
+  for (const locale of ['zh-CN', 'en-US']) {
+    const messages = JSON.parse(
+      readFileSync(join(root, 'src/renderer/src/i18n/locales', `${locale}.json`), 'utf8'),
+    )
+    for (const key of ['autoRoutingCrossModel', 'autoRoutingCrossModelHelp']) {
+      assert.equal(messages.proxy?.[key], undefined, `${locale} still carries proxy.${key}`)
+    }
+  }
 })
 
 test('both locales explain what turning the hard pin off means', () => {

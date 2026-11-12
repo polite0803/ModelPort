@@ -1,7 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { isEmptyTurnAfterStream, isAnnouncedStopAfterStream, shouldRevokeStickyAfterStream } from '../../src/main/proxy/streamOutcomePolicy.ts'
+import {
+  isEmptyTurnAfterStream,
+  isAnnouncedStopAfterStream,
+  isSlowTurnAfterStream,
+  shouldRevokeStickyAfterStream,
+} from '../../src/main/proxy/streamOutcomePolicy.ts'
 
 test('内容重复退化：正常收尾也要撤锚点', () => {
   assert.equal(
@@ -94,5 +99,40 @@ test('正常答复不撤（正文非冒号收尾）', () => {
       emptyTurn: { contentChars: 200, toolCallDeltas: 0, toolsOffered: true, empty: false, lastChar: '。', announcedStop: false } as never,
     }),
     false,
+  )
+})
+
+test('客户端没点上限、上游按自己默认值截断：撤锚点（Codex 读到 response.incomplete 就地结束任务）', () => {
+  const clean = { contentChars: 77, toolCallDeltas: 0, toolsOffered: true, empty: false, lastChar: '。', announcedStop: false }
+  assert.equal(shouldRevokeStickyAfterStream({ endReason: 'done', emptyTurn: clean as never }, true), true)
+  // 反证：同一份健康读数、没有截断信号时不能撤 —— 判据是截断，不是这一行正文。
+  assert.equal(shouldRevokeStickyAfterStream({ endReason: 'done', emptyTurn: clean as never }, false), false)
+})
+
+test('首字慢于池内 p75：撤锚点（用户反馈「走路由慢一个数量级」的那条通路）', () => {
+  assert.equal(
+    shouldRevokeStickyAfterStream({ endReason: 'done', firstTokenMs: 15_300 }, false, 3_000),
+    true,
+    '现网实测路由 p50 15.3s vs 直连 1.9s —— 完成流但首字慢于池内门槛，不该继续钉住这一家',
+  )
+})
+
+test('首字慢只在 done 上判：主动断开/被掐断的流不因等待时长降权', () => {
+  for (const endReason of ['eof', 'client_gone'] as const) {
+    assert.equal(isSlowTurnAfterStream({ endReason, firstTokenMs: 60_000 }, 3_000), false, endReason)
+  }
+})
+
+test('首字判据的三种缺席：没有门槛、没有读数、刚好等于门槛都不撤', () => {
+  assert.equal(isSlowTurnAfterStream({ endReason: 'done', firstTokenMs: 60_000 }, undefined), false,
+    '池内读数不足时算不出门槛，不拿绝对毫秒数替它')
+  assert.equal(isSlowTurnAfterStream({ endReason: 'done' }, 3_000), false,
+    '非流式没有首字读数')
+  assert.equal(isSlowTurnAfterStream({ endReason: 'done', firstTokenMs: 3_000 }, 3_000), false,
+    '判据是「慢于」，不是「不早于」')
+  assert.equal(
+    shouldRevokeStickyAfterStream({ endReason: 'done', firstTokenMs: 2_000 }, false, 3_000),
+    false,
+    '正常速度的完成流不撤锚点',
   )
 })

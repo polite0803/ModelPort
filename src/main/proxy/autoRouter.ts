@@ -54,6 +54,7 @@ import {
   hashString,
   hardFilterFailure,
   mergedHintOf,
+  poolLatencyGateMs,
   profileRequest,
   providerMeetsContract,
   rankCandidates,
@@ -106,6 +107,19 @@ export interface AutoCandidate {
   actualModel: string
 }
 
+/**
+ * 跨供应商同名模型的分组键：去掉 `<供应商前缀> / `，大小写与空白无关。
+ *
+ * 用于换家链尾的排序（同名排在异名之前），不参与池筛选、也不改「谁先被派发」——
+ * 同名的两家仍按分数排队。日期/版本后缀（`-1017`）刻意不归一：把两个版本当成
+ * 同一个模型，是替上游宣布兼容。
+ */
+export function modelFamilyKey(displayName: string): string {
+  const slash = displayName.lastIndexOf('/')
+  const body = slash >= 0 ? displayName.slice(slash + 1) : displayName
+  return body.trim().toLowerCase().replace(/\s+/g, '')
+}
+
 export interface AutoRouteDecision {
   profile: RequestProfile
   candidates: AutoCandidate[]
@@ -120,6 +134,14 @@ export interface AutoRouteDecision {
    * 有用，写进响应头会让客户端按一个可能偏大的上界安排压缩时机。
    */
   advertisedContextWindow?: number
+  /**
+   * 本轮决策之前这条会话的锚点（上一轮成功的模型/账号）。
+   *
+   * 只用于**事后对照**：服务者若与它不同，这一轮就是一次中途换家 —— 响应头
+   * `X-ModelPort-Switch` 与请求日志 `auto.switchedFrom` 都从这一格派生。没有它，
+   * 「客户端为什么崩」只能靠人工比对相邻两行的 `actualModel`。
+   */
+  previousHint?: StickyHint
   /** 会话指纹，成功后可交给 rememberRoute 固化本次选择 */
   conversationKey?: string
   /**
@@ -160,6 +182,17 @@ export interface AutoRouteDecision {
   prefer: AutoPreference
   /** 胜负原因：只有一个候选 / 命中会话粘性 / 综合分 */
   reason: 'only' | 'sticky' | 'cache-affinity' | 'score'
+  /**
+   * 本轮「首字太慢」的池内门槛（毫秒，候选 EWMA 的 p75）；读数不足 4 个时不出现。
+   * 两个消费点同源：选路时它决定硬粘性还提不提前（`stickyGated`），流结束时
+   * `shouldRevokeStickyAfterStream` 用它判「这一轮慢到该撤锚点」。
+   */
+  latencyGateMs?: number
+  /**
+   * 硬粘性这一轮因为上面的门槛被跳过：上一轮的模型慢于池内 p75，没有提到队首。
+   * 与 `reason` 分开写 —— `reason: 'score'` 说明不了「本来是粘性命中」。
+   */
+  stickyGated?: true
 }
 
 // 预览的 DTO 定义在 shared/types.ts：渲染进程要用同一份形状，而 renderer 不能
@@ -261,6 +294,29 @@ function promoteSticky<
   const sameModel = matches.filter(candidate => candidate.accountId !== sticky.accountId)
   const others = ranked.filter(candidate => !matches.includes(candidate))
   return [...exact, ...sameModel, ...others]
+}
+
+/**
+ * 硬粘性这一轮要不要让位（第 2 条「延迟从罚分升为门」，2026-11-12）。
+ *
+ * 现状是硬粘性无条件把上一轮的模型提到队首，而首字延迟在打分里只是封顶 0.2 的
+ * 罚分（`autoRouting.ts::scoreCandidate`）—— 实测一个首字 9.7–35.1s 的模型被
+ * 锁了半小时，每一轮都先把整个等待付完。这里把「慢于池内 p75」升为门：达到就
+ * 不提前，退回打分顺序（粘性的 +0.12 仍在，它够便宜/够合适时照样能赢）。
+ *
+ * 只看**会被提前的那个候选**（精确账号优先，其次同模型其他账号）的读数：
+ * 拿同模型另一个快账号的读数替它开脱，等于让慢账号继续吃派发。
+ */
+function stickyLatencyExceeded<
+  T extends { providerId: string; accountId: string; displayName: string; ewmaFirstTokenMs?: number },
+>(ranked: readonly T[], sticky: StickyHint | undefined, gateMs: number | undefined): boolean {
+  if (sticky === undefined || gateMs === undefined) return false
+  const matches = ranked.filter(candidate =>
+    candidate.providerId === sticky.providerId && candidate.displayName === sticky.displayName
+  )
+  const promoted = matches.find(candidate => candidate.accountId === sticky.accountId) ?? matches[0]
+  const ewma = promoted?.ewmaFirstTokenMs
+  return ewma !== undefined && ewma > gateMs
 }
 
 /** 没传路由时（legacy 路径）在粘性表与响应头里使用的名字：就是那个虚拟模型名。 */
@@ -757,10 +813,40 @@ class AutoRouter {
     // 停服/冷却，候选池里自然没有它，仍然自动让位。
     // 关掉这一格就退回路由 v2 计划 §1.4 的纯加分语义：首位由打分决定，粘性只提供
     // +0.12 / +0.06，差距过大时会让位给更合适的候选。
-    const ordered = route?.stickyHardPin === false ? ranked : promoteSticky(ranked, sticky)
+    //
+    // 第 2 条（2026-11-12）：硬粘性也不是无条件的 —— 被提前的那个候选慢于池内
+    // 首字延迟 p75 时不让位，退回同一套加分语义。判据与流结束撤销锚点共用
+    // `latencyGateMs` 这一格，避免「选路觉得它慢、收尾觉得它不慢」两头不一致。
+    const latencyGateMs = poolLatencyGateMs(ranked)
+    const stickyGated = route?.stickyHardPin !== false
+      && stickyLatencyExceeded(ranked, sticky, latencyGateMs)
+    const ordered = route?.stickyHardPin === false || stickyGated
+      ? ranked
+      : promoteSticky(ranked, sticky)
+
+    // 池内顺序（2026-11-12 策略改：池，不是泳道）。
+    //
+    // 同模型必须聚在一起：同模型的多个账号是同一份实现，换账号不改变客户端的上下文
+    // 与工具协议；顺序若按分数交错（甲家账号A、乙模型、甲家账号B），第一个账号失败就会
+    // 先撞到一个完全不同的模型。这里是**稳定分区**，两侧各自保持原打分顺序。
+    //
+    // 分区只是**顺序**，不是栅栏：队首模型的账号全部失败后，链继续走到尾部 ——
+    // 跨供应商同名优先（同一份实现，行为漂移最小），异名其次 —— 直到有候选答上来
+    // 或墙钟预算耗尽。原先「默认停在队首模型」的开关与对应的日志字段已随那道栅栏
+    // 一起退役（用户实测：客户端一上来就中断）。
+    const headModel = ordered[0]?.displayName
+    const headTail = ordered.filter(input => input.displayName !== headModel)
+    const familyKey = headModel === undefined ? undefined : modelFamilyKey(headModel)
+    const sequenced = headModel === undefined
+      ? ordered
+      : [
+          ...ordered.filter(input => input.displayName === headModel),
+          ...headTail.filter(input => modelFamilyKey(input.displayName) === familyKey),
+          ...headTail.filter(input => modelFamilyKey(input.displayName) !== familyKey),
+        ]
 
     const candidates: AutoCandidate[] = []
-    for (const input of ordered) {
+    for (const input of sequenced) {
       const candidate = candidatesByKey.get(
         candidateKey(input.providerId, input.accountId, input.displayName)
       )
@@ -802,6 +888,9 @@ class AutoRouter {
       // 这里不再裁剪家数 —— 裁到 `maxAttempts + 3` 就等于在选号阶段替供应商做了
       // 「这条路由只准用这几个模型」的决定，而池子里其余模型连被派一次的机会都没有。
       candidates,
+      ...(sticky === undefined ? {} : { previousHint: sticky }),
+      ...(latencyGateMs === undefined ? {} : { latencyGateMs }),
+      ...(stickyGated ? { stickyGated: true as const } : {}),
       conversationKey: key,
       stickyKeySource,
       degraded,

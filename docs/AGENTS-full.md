@@ -359,6 +359,18 @@ translates it onto the chat request, `buildRequestBody` passes it to the upstrea
 undeclared-field list next to `response_format` / `stream_options` / `seed`), and the outbound
 responses wire folds it back in - dropping it is silent, and all the operator sees is a slower
 upstream.
+
+**One assistant message per batch of parallel calls.** Responses' `input` is one `function_call` item
+per call, and the chat lane (and every Anthropic-shaped upstream behind the channel pack) requires the
+whole batch on a single assistant message with the results immediately after it. Projecting each item
+into its own assistant message produced `assistant(A) / assistant(B) / tool(A) / tool(B)`; MiniMax
+rejected exactly that on 2026-11-12 16:39 (`invalid params, tool call result does not follow tool call
+(2013)`) and the route's other 31 candidates were never tried. `pushToolCall` in the inbound codec now
+merges consecutive call items into the batch's assistant, appends a reasoning item to that same
+message rather than inserting a standalone assistant, and closes the batch as soon as a result (or any
+text/user message) arrives. The predicate `isToolCallOrderingError` keeps a still-bad legacy history
+from ending the chain on its first candidate; it is a capability mismatch, never an account fault.
+
 Tests split by layer: `tests/shared/anthropic-wire.test.ts` and
 `tests/shared/responses-inbound.test.ts` for the codecs, `tests/routes/anthropic-inbound.test.ts`
 and `tests/routes/responses-inbound.test.ts` for the entries end to end (real `ProxyServer` looping
@@ -1194,6 +1206,55 @@ re-anchoring the conversation to it.
   threshold-is-a-real-knob), `tests/proxy/bandit-repetition.test.ts` (streak + no regression on the
   length rule), `tests/renderer/repetition-guard-wiring.test.mjs` (wiring, with six in-memory
   mutations as negative controls).
+
+### Pool failover, and latency as a gate (2026-11-12)
+
+The user reported two defects with routing as shipped: it "feels an order of magnitude slower than one
+direct model", and switching between models mid-conversation produces unexplainable client errors. The
+five-part plan (lane split, latency gate, reasoning replay unification, `X-ModelPort-Switch`, compatibility
+grouping) was approved in that order; this section records the two routing-layer pieces.
+
+**The lane, and why it was retired the same day.** The first model put a per-model fence in the failover
+loop: `autoRouter::select` pinned the head candidate's `displayName` as the lane, `forwardFirstReachable`
+broke at the first candidate of another model unless `crossModelFailover === true` and the previous failure
+was a `capabilityMismatch`, and one exception (`laneExhausted`) advanced past the fence when every account
+of the lane model had failed with `isChannelHumanRequiredFailure`. The user's verdict after using it was
+that the client aborts on the very first turn and "这种路由模式是死路一条". Live rows agree: `chainLength`
+37-116 against `attempts` 1-2, every row carrying `lane.crossModel: false` - an OpenCode 404, a modelscope
+`limit_burst_rate` 429 and a workbuddy risk-control 400 all ended the chain at the head model while dozens
+of live candidates were never called. A hard failure of one model says nothing about the next one; that is
+the premise the fence got wrong.
+
+**The pool.** `autoRouter::select` still does a **stable partition** - one model's accounts contiguous, the
+head model's `modelFamilyKey` family next, different names last - but it is **order only**. The loop carries
+no fence, no per-model accounting and no lane field: any failure the status policy allows advances to the
+next candidate, structurally including the next model, until a candidate answers or the 90 s wall clock /
+`baseCap` (account faults: 5xx, network) stops it. `ModelRoute.crossModelFailover`,
+`AutoRouteDecision.lane`, `anchorLaneToCandidates` and `RequestLogEntry.auto.lane` are retired; the
+pre-dispatch prechecks (channel rate limit, pack service list) no longer need to re-anchor anything, because
+there is no anchor to keep. Plain 400 is the one class the pool treats differently from the named-model
+chain: on `auto` a bare 400 (not a client abort, not a `capabilityMismatch`) switches the candidate without
+an account penalty, capped at `MAX_REJECTED_REQUEST_SWITCHES` = 2 in `forwarder.ts` - one provider refusing a
+request body does not condemn the pool, two in a row more likely mean the request itself is malformed, and
+`describeAttemptFailure` records such an attempt as `failover` because that is the branch actually taken.
+A client abort is still terminal: it surfaces as 400 with `request.signal.aborted`.
+
+**The latency gate.** `ewmaFirstTokenMs` used to be only a capped 0.2 penalty in `scoreCandidate`, which the
+hard pin overrode - so a model measured at 9.7-35.1 s first token held the conversation for the whole sticky
+window (routing p50 15.3 s / p75 90.2 s against direct p50 1.9 s over the same period; the 8x headline number
+is not fully attributable - the routed sample was 17 rows against 281 direct ones - but the pinning mechanism
+is). `autoRouting.ts::poolLatencyGateMs` computes the pool's p75 EWMA (needs 4 readable samples, ignores
+missing/NaN/zero), `select` skips the hard-pin promotion when the would-be-promoted candidate exceeds it
+(`stickyGated`), and the same figure is handed to `shouldRevokeStickyAfterStream` at the settle sites so a
+completed-but-slow turn revokes the anchor. Bounded reading: this changes *who goes first*, not what the
+pool contains; the sticky bonus (+0.12 / +0.06) still applies, so a slow-but-cheap model can still win on
+score.
+
+Header note: `X-ModelPort-Switch`, stickiness and the latency gate all still assume a session is happiest on
+one model, so the pool spends its order on that preference first (head model's accounts, then its family).
+What it no longer does is let the preference become a cliff: a conversation can move on to another model
+inside the same request when the ones ahead of it fail, and the 503 + `Retry-After` collection at the chain
+head is reserved for "the whole pool was tried and nothing answered".
 
 ### OpenCode: three lanes, one shipped
 

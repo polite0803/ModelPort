@@ -159,6 +159,51 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
       pendingReasoning = ''
     }
 
+    /**
+     * 最近一批**还没有结果**的 assistant(tool_calls) 在 `messages` 里的下标。
+     *
+     * Responses 的 `input` 是一次调用一个 `function_call` item，而 chat（以及
+     * Anthropic 形状的上游）要求同批并行调用落在**同一条** assistant 上，随后紧跟
+     * 它们的 tool 结果。逐 item 各落一条 assistant 会产出
+     * `assistant(A) / assistant(B) / tool(A) / tool(B)`，严格上游把 A 的结果判成
+     * 「不紧跟它的调用」并 400 —— MiniMax 实测 `invalid params, tool call result
+     * does not follow tool call (2013)`，整轮会话当场报废（2026-11-12 现网）。
+     */
+    let openCallBatch: number | undefined
+    /**
+     * 落在「调用」与「结果」之间的思考项**挂回那条 assistant**，绝不独立成一条 ——
+     * 插一条新的会把「结果紧跟调用」拆断（同一条 2013）。上一条不是 assistant 时
+     * 没有可挂的轮次，丢掉比造一条错位消息安全（它不影响下一轮的调用/结果配对）。
+     */
+    const absorbReasoningIntoLastAssistant = (): void => {
+      if (pendingReasoning === '') return
+      const index = messages.length - 1
+      const last = messages[index]
+      if (last !== undefined && last.role === 'assistant') {
+        const existing = typeof last.reasoning_content === 'string' ? last.reasoning_content : ''
+        messages[index] = { ...last, reasoning_content: existing + pendingReasoning }
+      }
+      pendingReasoning = ''
+    }
+    const pushToolCall = (call: Payload): void => {
+      if (openCallBatch === undefined) {
+        messages.push({
+          role: 'assistant',
+          // 只有调用时 content 必须是 null：给 '' 会让部分上游把这条算成空回复。
+          content: null,
+          ...(pendingReasoning !== '' ? { reasoning_content: pendingReasoning } : {}),
+          tool_calls: [call],
+        })
+        openCallBatch = messages.length - 1
+      } else {
+        absorbReasoningIntoLastAssistant()
+        const batch = messages[openCallBatch]
+        const calls = Array.isArray(batch?.tool_calls) ? batch.tool_calls as Payload[] : []
+        messages[openCallBatch] = { ...batch, tool_calls: [...calls, call] }
+      }
+      pendingReasoning = ''
+    }
+
     for (const raw of input) {
       const item = asRecord(raw)
       if (!item) continue
@@ -170,29 +215,21 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
       }
 
       if (type === 'function_call') {
-        messages.push({
-          role: 'assistant',
-          // 只有调用时 content 必须是 null：给 '' 会让部分上游把这条算成空回复。
-          content: null,
-          ...(pendingReasoning !== '' ? { reasoning_content: pendingReasoning } : {}),
-          tool_calls: [
-            {
-              id: stringOf(item.call_id),
-              type: 'function',
-              function: {
-                name: stringOf(item.name),
-                arguments: typeof item.arguments === 'string' ? item.arguments : '{}',
-              },
-            },
-          ],
+        pushToolCall({
+          id: stringOf(item.call_id),
+          type: 'function',
+          function: {
+            name: stringOf(item.name),
+            arguments: typeof item.arguments === 'string' ? item.arguments : '{}',
+          },
         })
-        pendingReasoning = ''
         continue
       }
 
       if (type === 'function_call_output') {
-        // 思考项出现在工具结果之前（少见）：先落成 assistant，避免丢。
-        flushReasoning()
+        // 这一批调用已经有结果了：后面的调用项不许再并进那条 assistant。
+        openCallBatch = undefined
+        absorbReasoningIntoLastAssistant()
         messages.push({
           role: 'tool',
           tool_call_id: stringOf(item.call_id),
@@ -207,27 +244,20 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
       // 一段会话连续 4 轮的请求体里都查不到 `Begin Patch`），模型看不到自己已经试过写盘，
       // 只能一轮一轮重新宣布「我现在直接落盘」——用户读到的就是「总说完成，文件没变」。
       if (type === 'custom_tool_call') {
-        messages.push({
-          role: 'assistant',
-          content: null,
-          ...(pendingReasoning !== '' ? { reasoning_content: pendingReasoning } : {}),
-          tool_calls: [
-            {
-              id: stringOf(item.call_id),
-              type: 'function',
-              function: {
-                name: stringOf(item.name),
-                arguments: JSON.stringify({ input: typeof item.input === 'string' ? item.input : '' }),
-              },
-            },
-          ],
+        pushToolCall({
+          id: stringOf(item.call_id),
+          type: 'function',
+          function: {
+            name: stringOf(item.name),
+            arguments: JSON.stringify({ input: typeof item.input === 'string' ? item.input : '' }),
+          },
         })
-        pendingReasoning = ''
         continue
       }
 
       if (type === 'custom_tool_call_output') {
-        flushReasoning()
+        openCallBatch = undefined
+        absorbReasoningIntoLastAssistant()
         messages.push({
           role: 'tool',
           tool_call_id: stringOf(item.call_id),
@@ -247,6 +277,7 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
       const text = textOfParts(content)
 
       if (normalizedRole === 'system') {
+        openCallBatch = undefined
         flushReasoning()
         if (text.trim() !== '') messages.push({ role: 'system', content: text })
         continue
@@ -267,6 +298,9 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
         continue
       }
       if (normalizedRole !== 'assistant') flushReasoning()
+      // 任何非调用正文都关上当前这一批：紧随其后的调用不能并进隔了一条消息的
+      // assistant（那会让结果与调用之间夹着正文）。
+      openCallBatch = undefined
       messages.push({
         role: normalizedRole,
         // 单段纯文本用字符串：老上游对数组形态的兼容性参差，有图片才必须用数组。
@@ -489,10 +523,15 @@ export function chatResponseToResponseBody(payload: unknown, options: ChatToResp
     const call = asRecord(raw)
     if (!call) return
     const fn = asRecord(call.function) ?? {}
-    const callId = stringOf(call.id)
     const toolName = stringOf(fn.name)
+    // 没有名字的调用客户端无从分派，留着只会变成一条空名字的历史；没有 `call_id`
+    // 时按位置造一个稳定 id —— 空串回放给上游就是 `tool_calls[0].id must be a
+    // non-empty string` 那条 400。
+    if (toolName === '') return
+    const rawCallId = stringOf(call.id)
+    const callId = rawCallId !== '' ? rawCallId : `call_${idTail(responseId, String(position))}`
     const rawArguments = typeof fn.arguments === 'string' ? fn.arguments : '{}'
-    const itemId = callId !== '' ? `fc_${callId.replace(/^call_/, '')}` : `fc_${position}`
+    const itemId = `fc_${callId.replace(/^call_/, '')}`
     if (options.freeformTools?.includes(toolName) === true) {
       output.push({
         id: itemId,
@@ -556,8 +595,6 @@ interface OpenItem {
   kind: 'message' | 'function_call' | 'custom_tool_call'
   itemId: string
   outputIndex: number
-  /** chat 流里一次调用按 `index` 分片，同 index 必须落进同一个 responses 项。 */
-  toolIndex: number
   partType?: 'output_text' | 'refusal'
   callId?: string
   name?: string
@@ -579,7 +616,18 @@ export function createResponsesStreamTranslator(options: ChatToResponsesOptions)
   let created = false
   let terminal = false
   let nextOutputIndex = 0
-  let open: OpenItem | null = null
+  /**
+   * 同时在开的项可以不止一个。上游会把并行工具调用的参数分片**交错**下发
+   * （2026-11-12 实测 TRAE：index 1 与 index 2 的 arguments 一片一片交替到达）。
+   * 原先只有一个 `open` 槽，每换一次 index 就关掉上一项、再开一个只有 index、
+   * 没有 id/name 的「孤儿项」；客户端把那串 `call_id:""` / `name:""` 的
+   * function_call 当历史回放，上游下一轮直接 400
+   * （`tool_calls[0].id must be a non-empty string`）打死整轮。
+   *
+   * 消息项与调用项分开记：文本 delta 不该关掉还开着的调用项。
+   */
+  let openText: OpenItem | null = null
+  const openCalls = new Map<number, OpenItem>()
   let finishReason: string | null = null
   const items: Payload[] = []
   let inputTokens: number | null = null
@@ -649,10 +697,7 @@ export function createResponsesStreamTranslator(options: ChatToResponsesOptions)
     }
   }
 
-  function closeItem(): string {
-    const item = open
-    if (item === null) return ''
-    open = null
+  function closeItem(item: OpenItem): string {
     const out: string[] = []
 
     if (item.kind === 'message') {
@@ -695,10 +740,19 @@ export function createResponsesStreamTranslator(options: ChatToResponsesOptions)
     return out.join('')
   }
 
+  /** 关掉所有还开着的项，按 output_index 递增 —— 客户端按这个顺序累积 output。 */
+  function closeAllItems(): string {
+    const all = [...(openText === null ? [] : [openText]), ...openCalls.values()]
+      .sort((a, b) => a.outputIndex - b.outputIndex)
+    openText = null
+    openCalls.clear()
+    return all.map(closeItem).join('')
+  }
+
   function openMessage(partType: 'output_text' | 'refusal'): string {
     const itemId = `msg_${idTail(responseId, String(nextOutputIndex))}`
     const outputIndex = nextOutputIndex++
-    open = { kind: 'message', itemId, outputIndex, partType, toolIndex: -1, text: '' }
+    openText = { kind: 'message', itemId, outputIndex, partType, text: '' }
     const part: Payload = partType === 'refusal'
       ? { type: 'refusal', refusal: '' }
       : { type: 'output_text', text: '', annotations: [] }
@@ -717,16 +771,16 @@ export function createResponsesStreamTranslator(options: ChatToResponsesOptions)
   const isFreeformTool = (name: string): boolean => options.freeformTools?.includes(name) === true
 
   function openTool(toolIndex: number, callId: string, name: string): string {
-    const itemId = callId !== '' ? `fc_${callId.replace(/^call_/, '')}` : `fc_${idTail(responseId, String(toolIndex))}`
+    const itemId = `fc_${callId.replace(/^call_/, '')}`
     const outputIndex = nextOutputIndex++
     if (isFreeformTool(name)) {
-      open = { kind: 'custom_tool_call', itemId, outputIndex, callId, name, toolIndex, text: '' }
+      openCalls.set(toolIndex, { kind: 'custom_tool_call', itemId, outputIndex, callId, name, text: '' })
       return event('response.output_item.added', {
         output_index: outputIndex,
         item: { id: itemId, type: 'custom_tool_call', status: 'in_progress', call_id: callId, name, input: '' },
       })
     }
-    open = { kind: 'function_call', itemId, outputIndex, callId, name, toolIndex, text: '' }
+    openCalls.set(toolIndex, { kind: 'function_call', itemId, outputIndex, callId, name, text: '' })
     return event('response.output_item.added', {
       output_index: outputIndex,
       item: { id: itemId, type: 'function_call', status: 'in_progress', call_id: callId, name, arguments: '' },
@@ -734,8 +788,10 @@ export function createResponsesStreamTranslator(options: ChatToResponsesOptions)
   }
 
   function useMessagePart(partType: 'output_text' | 'refusal'): string {
-    if (open !== null && open.kind === 'message' && open.partType === partType) return ''
-    return closeItem() + openMessage(partType)
+    if (openText !== null && openText.partType === partType) return ''
+    const closing = openText === null ? '' : closeItem(openText)
+    openText = null
+    return closing + openMessage(partType)
   }
 
   /**
@@ -744,8 +800,12 @@ export function createResponsesStreamTranslator(options: ChatToResponsesOptions)
    * 「逐段渲染」退化成「最后一次性出现」。
    */
   function useTool(toolIndex: number, callId: string, name: string): string {
-    if (open !== null && open.kind !== 'message' && open.toolIndex === toolIndex) return ''
-    return closeItem() + openTool(toolIndex, callId, name)
+    if (openCalls.has(toolIndex)) return ''
+    // 续片（不带 id/name）落在一个从没宣布过的 index 上：造一个空 call_id / 空 name
+    // 的项正是上面那条 400 的成因。宁可不显示这次调用，也不能污染下一轮历史。
+    if (name === '') return ''
+    const resolved = callId !== '' ? callId : `call_${idTail(responseId, String(toolIndex))}`
+    return openTool(toolIndex, resolved, name)
   }
 
   function handleChunk(payload: Payload): string {
@@ -774,7 +834,7 @@ export function createResponsesStreamTranslator(options: ChatToResponsesOptions)
     if (text !== '') {
       out.push(startResponse())
       out.push(useMessagePart('output_text'))
-      const item = open as OpenItem
+      const item = openText as OpenItem
       item.text += text
       out.push(event('response.output_text.delta', {
         item_id: item.itemId,
@@ -788,7 +848,7 @@ export function createResponsesStreamTranslator(options: ChatToResponsesOptions)
     if (refusal !== '') {
       out.push(startResponse())
       out.push(useMessagePart('refusal'))
-      const item = open as OpenItem
+      const item = openText as OpenItem
       item.text += refusal
       out.push(event('response.refusal.delta', {
         item_id: item.itemId,
@@ -803,9 +863,11 @@ export function createResponsesStreamTranslator(options: ChatToResponsesOptions)
       const call = asRecord(rawCall)
       if (!call) continue
       const fn = asRecord(call.function) ?? {}
+      const toolIndex = typeof call.index === 'number' ? call.index : 0
       out.push(startResponse())
-      out.push(useTool(typeof call.index === 'number' ? call.index : 0, stringOf(call.id), stringOf(fn.name)))
-      const item = open as OpenItem
+      out.push(useTool(toolIndex, stringOf(call.id), stringOf(fn.name)))
+      const item = openCalls.get(toolIndex)
+      if (item === undefined) continue
       const args = stringOf(fn.arguments)
       if (args !== '') {
         item.text += args
@@ -864,7 +926,7 @@ export function createResponsesStreamTranslator(options: ChatToResponsesOptions)
     if (terminal) return ''
     const out: string[] = []
     out.push(startResponse())
-    out.push(closeItem())
+    out.push(closeAllItems())
 
     const { status, incompleteReason } = statusOf(finishReason ?? 'stop')
     const response = snapshot(status, true)

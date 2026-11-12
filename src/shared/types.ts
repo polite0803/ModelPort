@@ -1407,6 +1407,23 @@ export interface RequestLogEntry {
      */
     sessionKeySource?: 'client-session' | 'content-hash'
     /**
+     * 本轮服务者与这条会话上一轮的锚点不同时，记录**换走的那个**（`providerId/model`）。
+     *
+     * 中途换家是「客户端看起来莫名其妙崩掉」最常见的原因（工具协议、思考历史、
+     * 参数接受度都随实现变），而日志里相邻两行的 `actualModel` 不同这件事没有任何
+     * 一处显式说出口。这一格把它变成可直接检索的事实；响应头 `X-ModelPort-Switch`
+     * 是同一个判断的客户端可见形态。首轮或同锚点复用时这一格不出现。
+     */
+    switchedFrom?: string
+    /**
+     * 「首字太慢」的池内门槛（毫秒，候选 EWMA 的 p75）；候选读数不足 4 个时不写。
+     * 选路时它决定硬粘性还提不提前，流结束时同一格用来撤销锚点 —— 两处同源，
+     * 客户端问「为什么这一轮换了模型/为什么又粘回慢模型」都要靠它。
+     */
+    latencyGateMs?: number
+    /** 这一轮硬粘性因上面那个门槛被跳过：上一轮的模型慢于池内 p75，没提到队首。 */
+    stickyGated?: true
+    /**
      * Why each skipped candidate was skipped, in attempt order. The chain logs the
      * winner only, so without this a candidate that fails every time (a dead
      * channel, a catalogue that rejects the model) is invisible: `attempts: 4` says

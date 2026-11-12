@@ -1440,6 +1440,22 @@ export function apply(ctx: Context, config: {
           reportLedgerAccount(product.id, available.entry.id)
           return available.credential as BuddyCredential
         }
+        // ⚠️ 账号池里有这个产品的账号、但该模型上全部在冷却（限流 / 11140）时，
+        // **不能**回落到默认单凭据 ref：池化安装根本不存在 `WORKBUDDY_ACCESS_TOKEN`
+        // 这一项，回落只会换来「no usable credential; log in from the Channel Pack
+        // panel first」—— 把「冷却中」说成「没登录」。2026-11-12 实测
+        // `chatcmpl-mwdccvlc-bfc2c8`：刚写下 30 分钟策略冷却，下一笔就报这句假话。
+        // 如实报可恢复的冷却（文案里带宿主的「账号池中的账号当前均不可用」判据），
+        // 交给宿主的换家与恢复轮，而不是让用户去重新登录。
+        if (pool.listAccountsByProvider(product.id).some(a => a.enabled)) {
+          throw new LlmError(
+            `${product.displayName}：账号池中的账号当前均不可用`
+            + `（全部启用账号在 ${modelId ?? '该模型'} 上处于限流或安全策略拦截冷却中，`
+            + '无需重新登录；到期自动恢复，可在 Channel Pack 渠道页查看或重置）。',
+            'QUOTA_EXCEEDED',
+          )
+        }
+        // 池里一个账号都没有（未迁移的老数据）：才是单凭据路径。
         return resolveBuddyCredentialByRef(product.defaultCredentialRef)
       },
       refresh: createPoolRefresh(pool, product.id, auth),
@@ -1448,6 +1464,12 @@ export function apply(ctx: Context, config: {
       // ⚠️ 必须注入宿主的 channelFetch（绑定渠道身份）：默认的全局 fetch 会绕过
       // 应用内代理设置，未绑定身份的那条又读不到本渠道的系统代理开关。
       fetchImpl: fetchFor(product.id),
+      // ⚠️ 必须注入账号池 —— 缺了它，适配器里整套「按账号」机制都是死代码：
+      // `currentAccountId` 恒为空（日志打成 `账号 (current)`）、限流与 11140
+      // 冷却写不进池、换号循环整段被 `accountPool !== undefined` 跳过，而错误
+      // 文案仍声称「已逐个换号重试」。实测 2026-11-12 `chatcmpl-mwdbgrd9-b5944z`：
+      // WorkBuddy 账号被 11140 拦下后池里没有任何冷却记录，下一轮仍撞同一个账号。
+      accountPool: pool,
       readImage: makeReadImage(ctx),
       readImageRequest: makeReadImageRequest(ctx),
     })

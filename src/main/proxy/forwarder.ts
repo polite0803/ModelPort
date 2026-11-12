@@ -63,6 +63,15 @@ export interface ForwardChainOutcome<T extends ChainCandidate> {
 const MAX_LOGGED_ATTEMPT_FAILURES = 20
 
 /**
+ * 池语义下，「这一家拒收这次请求」（裸 400）最多换几次家。
+ *
+ * 一次 400 可能是某一家的接入怪癖（另一家就接受同样的请求体），接连两家都拒收
+ * 则更可能是请求本身写坏了 —— 再换下去只是把同一次拒绝在池里重演一遍，还先把
+ * 客户端的时间耗光。
+ */
+const MAX_REJECTED_REQUEST_SWITCHES = 2
+
+/**
  * axios 流在提交响应头之前的首帧探测窗口。
  *
  * 只等这么久：首帧（包括上游的流内错误帧）通常随响应头一起到达；窗口内没数据
@@ -80,6 +89,13 @@ const STREAM_HEAD_PROBE_MS = 200
  */
 export interface FailoverBudget {
   baseCap: number
+  /**
+   * 池语义：这一家**拒收这次请求**（裸 400，既不是能力不符也不是账号故障）也算换家
+   * 理由。auto 路由是一整池候选，一家不认这个请求体不等于整条路由不可用 —— 换一家
+   * 可能当场就成。裸名链不开：客户端点名的那个名字就在这几家之间，400 说明请求本身
+   * 有问题，继续换只是把同一次拒绝重演。
+   */
+  switchOnRejectedRequest?: boolean
 }
 import { attemptTraceOf } from './attemptTrace.ts'
 import { accountRuntime } from './accountRuntime'
@@ -142,6 +158,7 @@ import {
   isRecoverableChannelFailure,
   isSameTargetRetryableStatus,
   isToolOverflowError,
+  isToolCallOrderingError,
   isUpstreamCatalogMissError,
   parseRetryAfterSeconds,
   probeSseHead,
@@ -686,7 +703,12 @@ export class RequestForwarder {
   }
 
   /**
-   * Auto 路由执行：按候选顺序尝试，在流式首包之前失败时切换到下一个账号/供应商。
+   * Auto 路由执行：按候选**排序**依次尝试，失败就换下一家 —— 包括下一个模型。
+   *
+   * 这里是一个池，不是泳道（2026-11-12 策略改）：排序决定先试谁（同名账号相邻、
+   * 首模型的家族紧随其后），但一个候选失败不再意味着「这条路由到此为止」。原先
+   * 「默认停在队首模型」的栅栏让客户端在第一发硬故障后当场中断，而池里还有几十个
+   * 候选从未被试。
    *
    * 每次尝试把 request.model 替换为候选的显示名，与普通映射请求的上下文一致：
    * forwarder 之后会以 actualModel 作为上游模型、显示名作为 originalModel 传给 adapter。
@@ -702,11 +724,14 @@ export class RequestForwarder {
     context: ProxyContext,
     budget: FailoverBudget
   ): Promise<ForwardChainOutcome<AutoCandidate> | null> {
-    return this.forwardFirstReachable(request, candidates, context, budget)
+    return this.forwardFirstReachable(request, candidates, context, {
+      ...budget,
+      switchOnRejectedRequest: true,
+    })
   }
 
   /**
-   * 裸模型名的跨家候选：同名换到下一家继续尝试，判据与 auto 完全一致（429/5xx/无状态码才换）。
+   * 裸模型名的跨家候选：同名换到下一家继续尝试，判据是状态码策略（429/5xx/404 等才换）。
    * 两条路径共用一个循环，避免"auto 会换、具名不会换"这种口径分裂。
    */
   async forwardChainCompletion(
@@ -756,6 +781,14 @@ export class RequestForwarder {
     // 账号故障类的尝试上限：由调用方随本次决策传入（auto 走命中的那条路由，
     // 无路由的裸名链走出厂默认），见 forwardAutoCompletion 的注释。
     const baseCap = budget.baseCap
+    // 池内换家：候选顺序由 `autoRouter.select` 排好（同名账号相邻、首模型家族紧随），
+    // 循环本身只有一个条件 —— 还有预算就发下一发。没有任何模型栅栏。
+    //
+    // 裸 400 只在池语义下换家（`switchOnRejectedRequest`）：一家不认这个请求体不等于
+    // 整池都不认。但那种拒绝几乎瞬时返回，若真是客户端把请求写坏了，换下去只会把同一
+    // 次拒绝重演一遍 —— 所以最多换两次就收口。
+    const switchOnRejectedRequest = budget.switchOnRejectedRequest === true
+    let rejectedRequestFailures = 0
     // 循环的每个出口都带上失败清单（`failures` 是同一数组引用，退出时的内容
     // 就是「被跳过的家」，成功那轮从不进入）。
     const finish = (): ForwardChainOutcome<T> | null =>
@@ -839,8 +872,14 @@ export class RequestForwarder {
       // 这个模型、这一家的上下文窗口装不下这次请求）：请求在生成之前就被拒，账号
       // 本身是健康的，既不该记冷却也不该计账号失败 —— 小工具请求/无思考历史的会话/
       // 一次目录漂移/一份超长上下文都不该连坐整个账号。
+      // 其中 `isToolCallOrderingError`：这一家要求 tool 结果紧跟产生它的那条
+      // assistant，而历史里的顺序不满足（MiniMax 实测
+      // `tool call result does not follow tool call (2013)`）。入向翻译已把并行调用
+      // 并成同一条 assistant（`shared/responsesInbound.ts`），判据保留是为了让仍然
+      // 拼坏历史的老客户端不至于在第一家就打死整轮。
       const capabilityMismatch = isToolOverflowError(result.error)
         || isMissingReasoningHistoryError(result.error)
+        || isToolCallOrderingError(result.error)
         || isChannelModelUnavailableError(result.error)
         // 上游目录里没有这个模型（ModelScope `has no provider supported` /
         // BazaarLink `Unknown model: … not in our catalog`）：静态目录是编译期
@@ -873,6 +912,18 @@ export class RequestForwarder {
         result.error,
         candidate.provider.type,
       )
+      // 「要人工介入」类失败（风控按账号生效、凭据失效）：换下一家。池语义下这
+      // 可以是下一个账号，也可以是下一个模型 —— 风控按账号生效，换一个模型可能
+      // 当场就成；留在原地只是重演同一次失败。
+      const humanRequiredFailure = isChannelHumanRequiredFailure(result.error)
+      // 客户端自己按了取消：上游的 400 只是沿路映回来的取消（见
+      // `forwardChatCompletion` 的 aborted 分支），不是这一家的意见。
+      const clientAborted = result.status === 400 && request.signal?.aborted === true
+      // 「这一家拒收这次请求」：池语义下换下一家，裸名链不换（见 FailoverBudget）。
+      const rejectedRequest = result.status === 400
+        && !clientAborted
+        && !capabilityMismatch
+        && switchOnRejectedRequest
       // 无论后面走哪个分支，这次尝试都已经发生且没有成功 —— 先记账（含 fatal：
       // 它同时是客户端拿到的错误，日志里两处都能看到，宁重不漏）。
       failures.push(describeAttemptFailure({
@@ -880,13 +931,14 @@ export class RequestForwarder {
         error: result.error,
         status: result.status,
         providerType: candidate.provider.type,
+        rejectableRequest: rejectedRequest,
         // 预算读数原样落到日志：没有它们，「为什么只试了一家就收口」永远只能猜。
         budgetElapsedMs,
         attemptDeadlineMs,
       }))
       // 本地并发准入拒绝不是上游故障：换下一家，但不给账号记冷却/失败。
       if (result.localAdmissionRejected) continue
-      if (isChannelHumanRequiredFailure(result.error)) {
+      if (humanRequiredFailure) {
         // 「这一家当前供不了，且要人或时间恢复」：凭据失效（`no usable credential`
         // /`凭据未配置`/`没有可用通道`）与上游风控（`request illegal`）。
         // 两类都不能让整条链停手 —— 风控落的是 400，不在 failover 的状态码里，
@@ -896,6 +948,14 @@ export class RequestForwarder {
         // 与排队等待（同一家单次实测 214s–245s）。
         autoRouter.markCredentialCooldown(candidate.account.id)
         loadBalancer.markAccountFailed(candidate.account.id)
+        continue
+      }
+
+      if (rejectedRequest) {
+        // 不记账号冷却/故障：账号是健康的，是「这家不认这份请求体」。但换两次之后
+        // 就该承认这多半是请求本身的问题 —— 再换下去只是把同一次拒绝在池里重演。
+        rejectedRequestFailures += 1
+        if (rejectedRequestFailures >= MAX_REJECTED_REQUEST_SWITCHES) return finish()
         continue
       }
 
@@ -979,13 +1039,19 @@ export class RequestForwarder {
     const channelModel = qualifyChannelModel(providerId, actualModel)
     // 单次等待的截止：换家循环会按剩余墙钟预算给一个更紧的值，没有则用出厂计划。
     const deadlineMs = request.attemptDeadlineMs ?? requestDeadlines().completeMs
+    // 思考回灌：与聚合线路共用主线程同一份缓存。渠道包跑在独立 worker 线程里，
+    // 看不见这份 Map，所以补回只能在这里做（观测点在下行 SSE，见 chat 路由）。
+    const echoReasoning = reasoningEchoApplies({ type: 'account' })
+    const inbound = echoReasoning
+      ? this.withReplayedReasoning(request, { id: providerId })
+      : request
     const {
       requestId: _internalRequestId,
       signal: _signal,
       originalModel: _originalModel,
       attemptDeadlineMs: _internalDeadline,
       ...rest
-    } = request
+    } = inbound
     const openAi = { ...rest, model: channelModel } as Record<string, unknown>
     // Codex 的延迟工具发现会发 `function.name: ''` 的占位定义；chat 上游会整条
     // 拒绝（Raccoon 实测 `tools[14].function.name is invalid or missing`）。
@@ -997,6 +1063,8 @@ export class RequestForwarder {
     try {
       if (request.stream !== true) {
         const body = await accountChannelManager.complete({ requestId, model: channelModel, openAi }, deadlineMs)
+        // 非流式：响应体里的 `message.tool_calls`/`reasoning_content` 就是下一轮要的成对内容。
+        if (echoReasoning) recordReasoningEchoCompletion(body)
         return {
           success: true,
           status: 200,
@@ -1109,6 +1177,7 @@ export class RequestForwarder {
           status: probe.details?.status
             ?? (isToolOverflowError(probe.message)
             || isMissingReasoningHistoryError(probe.message)
+            || isToolCallOrderingError(probe.message)
             || isContextOverflowError(probe.message)
             || isReasoningEffortUnsupportedError(probe.message)
             || isUpstreamCatalogMissError(probe.message)
@@ -1205,6 +1274,7 @@ export class RequestForwarder {
       const message = probe.details?.message ?? probe.message
       const status = probe.details?.status
         ?? (isToolOverflowError(message) || isMissingReasoningHistoryError(message)
+          || isToolCallOrderingError(message)
           || isContextOverflowError(message) || isReasoningEffortUnsupportedError(message)
           || isUpstreamCatalogMissError(message) ? 400 : 502)
       const details: UpstreamErrorDetails = probe.details
@@ -1670,18 +1740,19 @@ export class RequestForwarder {
   }
 
   /**
-   * 把缓存的思考补进入站历史（只有 DeepSeek 官方端点会走到这里）。
+   * 把缓存的思考补进入站历史（DeepSeek 官方端点与全部账号渠道）。
    *
    * 只补「客户端没回传」的轮次：已带回的一字节不动，没有可信思考的轮次宁可留空
-   * 也不编造（判据与有界性都在 `channelPack/reasoningReplay.ts`）。
+   * 也不编造（判据与有界性都在 `channelPack/reasoningReplay.ts`）。两条泳道共用
+   * 主线程这份缓存，所以上一轮无论落在哪条线，这一轮都补得回来。
    */
   private withReplayedReasoning(
     request: ChatCompletionRequest,
-    provider: Provider
+    provider: { id: string }
   ): ChatCompletionRequest {
     const { request: recovered, injected } = injectReasoningEcho(request)
     if (injected === 0) return request
-    storeManager.addLog('info', `聚合线路补回 reasoning_content：${injected} 轮客户端未回传`, {
+    storeManager.addLog('info', `补回 reasoning_content：${injected} 轮客户端未回传`, {
       requestId: request.requestId,
       providerId: provider.id,
       data: { injected },

@@ -121,6 +121,15 @@ inbound gives it a required string `input` schema (chat has no other contract sl
 must answer with `custom_tool_call` + that text - the client dispatches on item `type`, so a
 `function_call` there means the write silently never happens. Those items must also be read back out of
 history, or the model cannot see its own attempts and re-declares the write every turn.
+* **Parallel tool calls collapse into ONE assistant message on the way to chat.** Responses' `input`
+carries one `function_call` item per call, and projecting each item into its own assistant message puts
+a second assistant between a call and its result. Strict upstreams reject that shape outright -
+MiniMax answered `invalid params, tool call result does not follow tool call (2013)` on 2026-11-12 and
+the whole request died with the other 31 candidates untried. `responsesInbound.pushToolCall` merges
+consecutive call items into the batch's assistant, keeps a reasoning item on that same message instead
+of inserting a standalone one, and closes the batch once a result arrives (a call after a text/user
+message must not join it). `forwarder` classifies the surviving 2013 as a capability mismatch
+(`isToolCallOrderingError`) so a badly-shaped legacy history fails over instead of ending the chain.
 * **System-store trust is not "the client can connect".** `installCertificateTrust()` only satisfies
 Chromium/Schannel clients; Node-based clients (Codex CLI, the WorkBuddy/CodeBuddy agent) ignore that
 store entirely and need `NODE_EXTRA_CA_CERTS` - the same PEM a remote machine can fetch from
@@ -315,6 +324,21 @@ degraded, same as the other two. Measured 2026-11-12 05:24 (`chatcmpl-mwcmniyx-7
 tokens, zero calls) after every strong candidate in the `codex` route went unpayable - without this
 class the anchor never lifts, so the session stays pinned to the model that only talks. The action is
 still only "re-rank next turn": no account failure is recorded and no candidate is removed.
+* **An upstream output-cap truncation is the fifth degraded class**, and it revokes the anchor too.
+`finish_reason=length` when the client sent no `max_tokens`/`max_completion_tokens` already counted as
+degraded for AIMD/Bandit, but it did not reach `shouldRevokeStickyAfterStream` - so the session stayed
+pinned to the model that truncated. Codex turns that into `response.incomplete (max_output_tokens)`
+and ends the task on the spot, so "always the same error" was the anchor, not one bad model. Measured
+2026-11-12: Codex sends no cap at all (103/103 rows `maxTokens` null) and the window's only `length`
+row is `raccoon/sn-sensenova-6-8-flash-lite`, cut at 3769 completion tokens. The predicate is computed
+once at each of the two stream settle sites in `routes/chat.ts` and passed to both the AIMD reading and
+`settleSticky`, so the two judgements cannot drift; a cap the client did send stays an explicit
+truncation (no revoke, no penalty).
+* **A slow first token is the sixth degraded class** (2026-11-12, `isSlowTurnAfterStream`): the stream
+completed (`done`) but its `firstTokenMs` was above the pool's p75, computed at selection time and carried
+as `AutoRouteDecision.latencyGateMs`. It does not touch the account - it only lifts the anchor so the next
+turn re-ranks. This is the turn-level half of the same threshold that stops the hard pin from promoting a
+slow model; both read one derivation (see the latency-gate invariant below the stickiness bullet).
 * **A degraded reading must reach the Bandit table, or it is decoration.** `autoBandit` aggregates the
 request-log rows, and those rows carry `repetition`/`emptyTurn` **nested under `streamTrace`**;
 reading only the top-level field (as it did until 2026-11-12) means classes ②③④ never entered the
@@ -357,6 +381,30 @@ the pair half an hour. Written once at the three-branch convergence in `routes/c
 `!== false` so records predating the field keep it). Turning it off per route leaves only the `+0.12` / `+0.06`
 score bonus - and because the promotion happens in `autoRouter::select`, an assertion over `rankCandidates`
 alone cannot catch a regression in it; the two settings must be tested as a pair (same pool, opposite winners).
+* **Latency is a gate, not only a penalty** (2026-11-12, the user's "routing feels an order of magnitude
+slower" report). The hard pin is skipped when the candidate that would be promoted is slower than the pool's
+**p75 `ewmaFirstTokenMs`** (`autoRouting.ts::poolLatencyGateMs`, no reading = no judgement, fewer than 4
+readings = no judgement); the same figure rides on `AutoRouteDecision.latencyGateMs` and the stream settle
+paths pass it to `shouldRevokeStickyAfterStream`, so "this completed turn's first token was slower than three
+quarters of the pool" revokes the anchor too (sixth degraded class). One derivation, two consumers - never
+recompute it in the route file. A pool-relative threshold, not an absolute millisecond constant: measured
+direct p50 was 1.9s and routed p50 15.3s, so any fixed number breaks on one side.
+* **`auto` is a pool, not a lane** (2026-11-12 strategy change, after the lane model was reported as a dead
+end: "客户端一上来就中断了"). `autoRouter::select` partitions the ranked list so one model's accounts are
+contiguous and the head model's family comes next, but that partition is **order only**: `forwardFirstReachable`
+advances to the next candidate on any failure the status policy allows - including the next **model** - until a
+candidate answers or the wall clock (90 s) / `baseCap` (account-fault failures: 5xx, network) runs out. The
+retired pieces are `ModelRoute.crossModelFailover`, `AutoRouteDecision.lane`, `anchorLaneToCandidates` and
+`RequestLogEntry.auto.lane`; nothing may re-introduce a per-model fence, because the fence is exactly what made
+a first-turn failure terminal while dozens of live candidates sat untried (2026-11-12 readings: `chainLength`
+37-116, `attempts` 1-2, e.g. an OpenCode 404 and a modelscope `limit_burst_rate` 429). Plain 400 is the one
+class the pool treats differently from the named-model chain: on `auto` a bare 400 (not client-aborted, not a
+`capabilityMismatch`) switches candidates without an account penalty, capped at
+`MAX_REJECTED_REQUEST_SWITCHES` = 2 - one provider refusing a request body does not condemn the pool, but two
+refusals in a row more likely mean the request itself is malformed. A client abort is still terminal (it
+surfaces as 400 with `request.signal.aborted`). `tests/routes/{proxy-routes-catalog-404,
+context-overflow-failover}.test.ts` and `tests/renderer/auto-routing-settings.test.mjs` (retirement negative
+controls) are the readable form.
 * **Cache-first compression**: `CompressionConfig.cacheFirst` (default on) makes a provider with a documented
 prefix cache and a cheap cache read (DeepSeek ≈0.02x, Anthropic 0.1x) skip live-zone compression, because the
 next turn resends the original bytes; the saving must beat the cache discount (`1 - c/(1+w)`). A per-provider

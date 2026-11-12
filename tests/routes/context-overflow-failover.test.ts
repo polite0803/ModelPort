@@ -7,7 +7,8 @@
  * 三条用例的顺序有讲究：
  * 1. 先把候选顺序**测出来**（`cheap` 下免费的 Bad 排第一），后两条才谈得上「试了几家」；
  * 2. overflow 与 generic400 的状态码完全相同（都是 400），只有文案不同 ——
- *    这条文件同时钉住「判据窄」：无关的 400 照旧终止，不因为新增例外而变宽。
+ *    这条文件同时钉住「判据窄」：无关的 400 不算窗口不够（不写 `contextFit`、
+ *    不记能力不符），只是按池语义换下一家。
  * 3. 换家之后再来一发：Bad 没被记冷却，仍然排在第一位 —— 证明窗口不够不算账号故障。
  *
  * 不在本层证明：判据的字符串口径（`tests/proxy/failover.test.ts`）、
@@ -82,6 +83,8 @@ const harness = await bootstrapStore({
   },
 })
 const sm = harness.storeManager
+// 2026-11-12 起 `auto` 是池：这家装不下/不认这个参数就换下一家（可以是下一个
+// 模型），不再需要任何开关。
 const upstreamBase = `http://127.0.0.1:${UPSTREAM_PORT}/v1`
 
 function providerFixture(id: string, displayName: string, capabilities: Record<string, unknown> = {}) {
@@ -171,15 +174,22 @@ test('上下文超限的 400：换成下一家并成功，日志记下这条实�
     '本次服务的候选没公布窗口，就不写猜测值')
 })
 
-test('无关的 400 照旧终止：新增例外没有把判据放宽（窄口径负控）', async () => {
+test('无关的 400 不算「窗口不够」：只按池语义换下一家，读数不写成 overflow', async () => {
+  // 窄口径负控（2026-11-12 池化后重写）：这条 400 与 overflow 状态码相同，只有文案
+  // 不同。它仍然**不**被当成能力不符 —— 不记目录缺失冷却、不写 `contextFit`。
+  // 但池语义允许它试下一家：另一家完全可能认这个参数，这正是策略改的目的。
   mode = 'generic400'
 
   const response = await postAuto()
 
-  assert.equal(response.status, 400)
-  assert.equal(response.headers['x-modelport-auto-attempts'], '1',
-    '不是上下文问题就不该换家 —— 否则任何 400 都会被当成窗口不够')
-  assert.deepEqual(seenModels, ['badp-upstream'])
+  assert.equal(response.status, 200, '另一家接受同一份请求体')
+  assert.equal(response.headers['x-modelport-auto-attempts'], '2')
+  assert.deepEqual(seenModels, ['badp-upstream', 'goodp-upstream'])
+
+  const row = rowOf(response.headers['x-request-id'])
+  assert.notEqual(row?.contextFit, 'overflow', '不相干的 400 不许被当成窗口不够')
+  assert.equal(row?.auto?.failures?.[0]?.kind, 'failover',
+    '日志记「换下去了」；记成 capability 就说明判据被放宽了')
 })
 
 test('窗口不够不记账号故障：下一轮同一家仍然排第一并成功', async () => {

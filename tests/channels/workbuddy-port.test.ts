@@ -80,6 +80,24 @@ test('WorkBuddy is wired into the pack (store prefix, auth, adapter, login, chec
   assert.match(index, /pickBuddyAccount\(/)
   assert.match(index, /pool\.permanentLocked\(options\.product\.id\)/)
 
+  // 账号池必须注入 createBuddyAdapter：缺了它，适配器的换号、账号归属与 11140
+  // 冷却全是死代码（日志打成 `账号 (current)`，池里零冷却记录），而报错仍声称
+  // 「已逐个换号重试」。只认 createBuddyAdapter 自己那一段，别的适配器也有这行。
+  const factoryStart = index.indexOf('const createBuddyAdapter')
+  assert.ok(factoryStart > 0, 'createBuddyAdapter not found in index.ts')
+  const factory = index.slice(factoryStart, index.indexOf('const buddyAdapter =', factoryStart))
+  assert.match(factory, /accountPool: pool,/)
+
+  // 报错范围必须从「本轮是否真换了号」推出来，不能写死：400 形态的 11140 分支
+  // 曾被写成 `true`，单账号池一次都没换号却报「已逐个换号重试」。
+  const buddy = readFileSync(join(VENDOR_SRC, 'buddy-adapter.ts'), 'utf8')
+  assert.doesNotMatch(buddy, /contentRejectionError\([^)]*?,\s*(true|false)\s*[,)]/)
+
+  // 池化安装里没有 `*_ACCESS_TOKEN` 那个默认 ref：账号全在冷却时回落到它只会报
+  // 「no usable credential; log in from the Channel Pack panel first」。文案必须带
+  // 宿主 `isRecoverableChannelFailure` 认的这句，否则会按账号故障吃上限。
+  assert.match(factory, /账号池中的账号当前均不可用/)
+
   const rpc = readFileSync(join(VENDOR_SRC, 'channel-pack-rpc.ts'), 'utf8')
   assert.match(rpc, /runBuddyLoginFlow\(/)
   assert.match(rpc, /buddy\.refreshAccountCredential\(entry\.credentialRef, pool, entry\.id\)/)

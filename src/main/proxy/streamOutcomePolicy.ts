@@ -20,14 +20,49 @@ import type { RequestStreamTrace } from '../../shared/types'
  * 正常收尾、正文与工具调用皆空（1108 个 output token 全是思考）。客户端把这一轮
  * 当「已完成」就地结束，界面停在上一句「先确认当前 shell 位置」的承诺上，而日志
  * 记的是 `success` —— 锚点不撤、Bandit 记胜，下一轮继续派给同一台空转机。
+ *
+ * 2026-11-12 第 2 条再补第六类：**首字慢于池内 p75 的完成流**。用户的第一条
+ * 反馈就是「走路由比直连慢一个数量级」，而当时的机制恰好让慢模型永远不让位
+ * （首字延迟只是封顶 0.2 的罚分，硬粘性无条件提前）。门槛由选路阶段算好
+ * 传进来（`AutoRouteDecision.latencyGateMs`），两条判据同源，不各算一遍。
  */
 export function shouldRevokeStickyAfterStream(
-  trace: Pick<RequestStreamTrace, 'endReason' | 'repetition' | 'emptyTurn'>,
+  trace: Pick<RequestStreamTrace, 'endReason' | 'repetition' | 'emptyTurn' | 'firstTokenMs'>,
+  truncated = false,
+  latencyGateMs?: number,
 ): boolean {
+  // 第五类：被上游输出上限截断（`finish_reason=length`）且客户端没给上限。
+  // Codex 把这一轮读成 `response.incomplete (max_output_tokens)` 并**就地结束
+  // 任务**；锚点不撤的话，下一轮又把同一个会话送回同一家，用户每轮都读到同一句
+  // Incomplete（2026-11-12 现网：103 条 Codex 记录的 `maxTokens` 全为空；日志里
+  // 唯一一条 `length` 是 `raccoon/sn-sensenova-6-8-flash-lite`，completion 3769
+  // 时被掐断）。
+  //
+  // 判据与 `recordStreamOutcome` 里那条 degraded 完全同源，由调用方算好传进来：
+  // 「客户端自己点了上限」是显式截断，不撤、不罚。
+  if (truncated) return true
   if (trace.endReason === 'timeout' || trace.endReason === 'error') return true
   return trace.repetition?.degraded === true
     || isEmptyTurnAfterStream(trace)
     || isAnnouncedStopAfterStream(trace)
+    || isSlowTurnAfterStream(trace, latencyGateMs)
+}
+
+/**
+ * 第六类退化：「协议完成，但这第一字等得太久」。
+ *
+ * 只在 `done` 上判，与空回合/宣布即停止同一口径：`client_gone` 是客户端主动走
+ * （既不加分也不扣分），`timeout` / `error` 上面已经撤了。门槛是选路阶段算的
+ * 池内 p75 —— 绝对毫秒数没法跨上游通用（直连 p50 1.9s、路由 p50 15.3s），
+ * 而 p75 的含义是「慢于这一池四分之三的候选」。
+ */
+export function isSlowTurnAfterStream(
+  trace: Pick<RequestStreamTrace, 'endReason' | 'firstTokenMs'>,
+  latencyGateMs: number | undefined,
+): boolean {
+  if (latencyGateMs === undefined) return false
+  if (trace.endReason !== 'done') return false
+  return trace.firstTokenMs !== undefined && trace.firstTokenMs > latencyGateMs
 }
 
 /**

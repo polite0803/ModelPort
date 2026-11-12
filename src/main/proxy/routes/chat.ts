@@ -112,13 +112,35 @@ function contextReadingFor(
   })
 }
 
+/**
+ * 这一轮是否与上一轮落在同一个实现上。返回 `from -> to` 的主动换走那一侧；
+ * 首轮（没有锚点）或锚点复用（同一 provider 同一模型）返回 `undefined`。
+ *
+ * 判据只比 `providerId` 与 `displayName`，不比账号：换账号是设计内的可用性动作，
+ * 契约不变；换实现才是「客户端看起来莫名其妙崩掉」的来源。
+ */
+function autoSwitchOf(
+  decision: AutoRouteDecision | null,
+  served: { provider: { id: string }; displayName: string } | null
+): { from: string; to: string } | null {
+  const previous = decision?.previousHint
+  if (previous === undefined || served === null) return null
+  if (previous.providerId === served.provider.id && previous.displayName === served.displayName) return null
+  return {
+    from: `${previous.providerId}/${previous.displayName}`,
+    to: `${served.provider.id}/${served.displayName}`,
+  }
+}
+
 /** 请求日志里的 auto 决策记录；非 auto 请求返回 undefined（字段直接不出现） */
 function autoLogRecord(
   decision: AutoRouteDecision | null,
   attempts: number,
-  failures: AutoAttemptFailure[]
+  failures: AutoAttemptFailure[],
+  served: { provider: { id: string }; displayName: string } | null = null
 ): RequestLogEntry['auto'] | undefined {
   if (!decision) return undefined
+  const switched = autoSwitchOf(decision, served)
   return {
     // 路由名（legacy 路径为 `auto`）：日志与仪表盘要能区分「哪条路由跑的」，
     // 光看 prefer/reason 分不出来。字段是新增的可选键，老日志没有它照旧渲染。
@@ -143,6 +165,13 @@ function autoLogRecord(
       : {}),
     // 粘性键来自客户端会话标识还是内容指纹：中途换家的两种解释靠这一格分开
     sessionKeySource: decision.stickyKeySource,
+    ...(switched === null ? {} : { switchedFrom: switched.from }),
+    // 「池里几百个模型为什么只试了这几家」由这一格回答：每一次被跳过的候选
+    // 都带原因（见下面的 `failures`），泳道栅栏退役后不再有「默认停在队首」。
+    // 第 2 条：「这一轮为什么没粘回上一家」的答案。`latencyGateMs` 是池内 p75，
+    // 流结束时同一格用来判「慢到该撤锚点」；`stickyGated` 说明这一轮硬粘性被跳过。
+    ...(decision.latencyGateMs === undefined ? {} : { latencyGateMs: decision.latencyGateMs }),
+    ...(decision.stickyGated === true ? { stickyGated: true as const } : {}),
     ...(decision.degraded.length > 0 ? { degraded: decision.degraded } : {}),
     // 第一家就命中时数组为空 —— 空数组不写，日志里没成功的请求不会出现空字段。
     ...(failures.length > 0 ? { failures } : {}),
@@ -851,7 +880,8 @@ router.post('/completions', async (ctx: Context) => {
         autoDecision.candidates,
         context,
         // 换家预算随 decision 走：这条路由的 maxAttempts，而不是转发层自己去读
-        // 全局 legacy `autoRouting.maxAttempts`。
+        // 全局 legacy `autoRouting.maxAttempts`。池语义（换下一家含下一个模型）由
+        // `forwardAutoCompletion` 自己打开，调用方不再传栅栏。
         { baseCap: autoDecision.baseCap }
       )
 
@@ -881,6 +911,12 @@ router.post('/completions', async (ctx: Context) => {
       // 直接写进头值会让 Node 抛 ERR_INVALID_CHAR、把一次成功的路由变成 500，
       // 所以动态部分一律过 toHeaderValue（非 ASCII 按 UTF-8 百分号编码）。
       ctx.set('X-ModelPort-Route', routeHeaderValue(actualModel, provider.name))
+      // 中途换实现的客户端可见形态：只在这一轮服务者与上一轮锚点不同时出现。
+      // 「模型名不变、行为变了」是客户端最难自查的一类故障，这个头把它变成可观察事实。
+      const switched = autoSwitchOf(autoDecision, chosenCandidate)
+      if (switched !== null) {
+        ctx.set('X-ModelPort-Switch', toHeaderValue(`${switched.from} -> ${switched.to}`))
+      }
     } else if (chainCandidates.length > 1) {
       const outcome = await requestForwarder.forwardChainCompletion(
         request,
@@ -1076,7 +1112,7 @@ router.post('/completions', async (ctx: Context) => {
         requestBody: JSON.stringify(request),
         userInput,
         client,
-        auto: autoLogRecord(autoDecision, autoAttempts, autoFailures),
+        auto: autoLogRecord(autoDecision, autoAttempts, autoFailures, chosenCandidate),
         ...contextReadingFor(autoDecision, contextMeasuredOverflow),
         attempts: attemptTrace,
         upstreamRequestId: result.upstreamRequestId,
@@ -1171,7 +1207,7 @@ router.post('/completions', async (ctx: Context) => {
         requestBody: JSON.stringify(request),
         userInput,
         client,
-        auto: autoLogRecord(autoDecision, autoAttempts, autoFailures),
+        auto: autoLogRecord(autoDecision, autoAttempts, autoFailures, chosenCandidate),
         ...contextReadingFor(autoDecision, contextMeasuredOverflow),
         attempts: attemptTrace,
         upstreamRequestId: result.upstreamRequestId,
@@ -1208,7 +1244,7 @@ router.post('/completions', async (ctx: Context) => {
         requestBody: JSON.stringify(request),
         userInput,
         client,
-        auto: autoLogRecord(autoDecision, autoAttempts, autoFailures),
+        auto: autoLogRecord(autoDecision, autoAttempts, autoFailures, chosenCandidate),
         ...contextReadingFor(autoDecision, contextMeasuredOverflow),
         attempts: attemptTrace,
         upstreamRequestId: result.upstreamRequestId,
@@ -1287,8 +1323,9 @@ router.post('/completions', async (ctx: Context) => {
       let streamOutcomeReported = false
       wrapperStream.on('error', () => {})
 
-      // 聚合 DeepSeek 端点：观测我们下行发出的思考，按 tool_call.id 缓存，下一轮由
-      // 转发器回灌（`proxy/reasoningEcho.ts`）。渠道包直通路径由 worker.ts 自己观测。
+      // 观测我们下行发出的思考，按 tool_call.id 缓存，下一轮由转发器回灌
+      // （`proxy/reasoningEcho.ts`）。两条泳道共用这一份：账号渠道的 SSE 也在这里
+      // 过手（worker 线程那份已退役，跨泳道切换时它看不见主线程的缓存）。
       const reasoningEcho = reasoningEchoApplies(provider)
         ? createReasoningEchoObserver()
         : undefined
@@ -1341,8 +1378,10 @@ router.post('/completions', async (ctx: Context) => {
        * 把会话钉住 —— 2026-11-03 的重复退化会话与 2026-11-06 qodercn 的三连
        * 停摆都是这个形状。
        */
-      const settleSticky = (trace: RequestStreamTrace): void => {
-        if (!shouldRevokeStickyAfterStream(trace)) return
+      const settleSticky = (trace: RequestStreamTrace, truncated: boolean): void => {
+        // 第六类（第 2 条）：这一轮首字慢于池内 p75。门槛是选路阶段算好的同一格，
+        // 与硬粘性「要不要提前」同源；读数缺失（非流式/首块没打点）时不判。
+        if (!shouldRevokeStickyAfterStream(trace, truncated, autoDecision?.latencyGateMs)) return
         if (!autoDecision || !chosenCandidate) return
         autoRouter.revokeSticky(autoDecision.conversationKey, autoDecision.route)
       }
@@ -1359,7 +1398,7 @@ router.post('/completions', async (ctx: Context) => {
         }
         reportStreamOutcome(endReason, Date.now() - startTime)
         const trace = streamTraceOf(endReason, Date.now() - startTime)
-        settleSticky(trace)
+        settleSticky(trace, false)
 
         // 流失败必须回写请求日志：日志条目是在响应头阶段按 success 建的，
         // 不翻成 error 的话这条请求在日志里永远显示成功（且耗时为响应头时间）。
@@ -1428,6 +1467,8 @@ router.post('/completions', async (ctx: Context) => {
           if (firstTokenAt === undefined) firstTokenAt = Date.now()
           bytesOut += Buffer.byteLength(text)
           collectedContent += text
+          // 账号渠道的思考观测点：worker 线程不再自己攒，全部落到主线程这份缓存。
+          reasoningEcho?.push(chunk)
           for (const event of errorScanner.parse(text)) {
             const data = event.data.trim()
             if (data === '[DONE]') {
@@ -1449,6 +1490,8 @@ router.post('/completions', async (ctx: Context) => {
         // When source stream ends normally, update log and end wrapper
         result.stream.once('end', () => {
           streamSettled = true
+          // 流正常收尾：把本轮攒到的思考提交进缓存（与转换路径同一口径）。
+          reasoningEcho?.finish()
           const elapsed = Date.now() - startTime
           // 这条流的输出就是上游 SSE 本身，结束原因与「有没有结束原因」直接从它读。
           const outcome = readStreamOutcome(collectedContent)
@@ -1463,11 +1506,13 @@ router.post('/completions', async (ctx: Context) => {
             wrapperStream.write('data: [DONE]\n\n')
           }
           const trace = streamTraceOf(endReason, elapsed)
-          settleSticky(trace)
+          // 客户端没给上限、上游却按自己的默认值截断：这一轮末尾是断的，锚点必须撤。
+          const truncated = outcome.finishReason === 'length' && requestedMaxTokens === undefined
+          settleSticky(trace, truncated)
           reportStreamOutcome(
             endReason,
             elapsed,
-            (outcome.finishReason === 'length' && requestedMaxTokens === undefined)
+            truncated
             || isEmptyTurnAfterStream(trace)
             || isAnnouncedStopAfterStream(trace),
           )
@@ -1585,11 +1630,13 @@ router.post('/completions', async (ctx: Context) => {
             wrapperStream.write('data: [DONE]\n\n')
           }
           const trace = streamTraceOf(endReason, elapsed)
-          settleSticky(trace)
+          // 与直通路径同口径：客户端没点上限而上游截断，锚点必须撤。
+          const truncated = delivered.finishReason === 'length' && requestedMaxTokens === undefined
+          settleSticky(trace, truncated)
           reportStreamOutcome(
             endReason,
             elapsed,
-            (delivered.finishReason === 'length' && requestedMaxTokens === undefined)
+            truncated
             || isEmptyTurnAfterStream(trace)
             || isAnnouncedStopAfterStream(trace),
           )
@@ -1759,7 +1806,7 @@ router.post('/completions', async (ctx: Context) => {
       accountName: account.name,
       requestBody: JSON.stringify(request),
       userInput,
-      auto: autoLogRecord(autoDecision, autoAttempts, autoFailures),
+      auto: autoLogRecord(autoDecision, autoAttempts, autoFailures, chosenCandidate),
       attempts: attemptTrace,
       captureBodies: traceRequested,
       webSearch: request.web_search,

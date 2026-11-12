@@ -417,7 +417,7 @@
     "autoRoutingStickyHardPin": "粘性模型硬优先（无条件排到候选队首）",
     "autoRoutingStickyHardPinHelp": "开：把这段对话上次成功的模型提到候选队首，agent 会话不会中途换模型。关：粘性只作为打分加分（+0.12，同模型的另一个账号 +0.06），明显更合适的候选可以赢过它",
     "autoRoutingStickyHardPinIdle": "上面的粘性时长是 0，粘性本身已关闭，这一格暂时不起作用。",
-    "autoRoutingFairness": "份额轮转领先档（次）",
+        "autoRoutingFairness": "份额轮转领先档（次）",
     "autoRoutingFairnessHelp": "这条路由的池里，一个模型最多可以领先「派得最少的模型」几次，超过就退到所有派得更少的模型之后。0 = 严格轮流；2 = 出厂默认，允许连派 3 次；20 基本等于只看分数。会话粘性仍然把同一段对话钉在同一个模型上。候选池现在整池参与打分（不再每家只派一个模型），这一格决定池子尾部能不能轮到。",
     "autoRoutingPrefer": "路由偏好",
     "autoRoutingPreferHelp": "均衡按请求复杂度挑档位，速度优先选快模型，能力优先选强模型，免费优先选不计费或低倍率的模型。请求头 X-Auto-Prefer 可按次覆盖",

@@ -26,7 +26,6 @@ import {
 } from 'virtual:channel-pack-messages'
 import { collectOpenAiCompletion, toOpenAiSse } from 'virtual:channel-pack-stream'
 import { assertValidToolCalls, countToolCallShapes, formatToolCallPairing, repairToolCallPairing } from './toolCallValidation'
-import { ReasoningReplay, reasoningReplayEnabled } from './reasoningReplay'
 import { appendOutboundDump, resolveDumpTarget, summarizeOutbound } from './outboundDump'
 
 type Adapter = {
@@ -163,15 +162,14 @@ const traeUsageDumpPath = resolveDumpTarget(process.env.MODELPORT_TRAE_USAGE_DUM
 if (traeUsageDumpPath !== null) process.env.MODELPORT_TRAE_USAGE_DUMP = traeUsageDumpPath
 
 /**
- * 跨请求的思考回放缓存（按 `tool_call.id`、有界）。
+ * 思考回灌不在这里做（2026-11-12 起）。
  *
- * ⚠️ 必须是**进程级单例**：一次请求发出的思考要在**下一次**请求里补回去，所以
- * 不能按请求重建。容量上限见 `REPLAY_MAX_IDS`（默认 4096 个 id）。
- *
- * 可用 `DSH_REASONING_REPLAY=0` 关闭（见 {@link reasoningReplayEnabled}）。
+ * 这个 Worker 有自己的线程与堆，和主线程的 `proxy/reasoningEcho.ts` 各持一份
+ * Map；客户端在同一会话里从聚合线路换到账号渠道（或反向）时，上一轮的思考在
+ * 对方那份缓存里，找不到就是整段 400。观测与补回因此统一到主线程：
+ * 观测在 chat / completions 路由（下行 SSE 的唯一出口），补回在
+ * `forwarder.ts::forwardAccountChannel`（派发给本 Worker 之前）。
  */
-const reasoningReplay = new ReasoningReplay()
-const reasoningReplayOn = reasoningReplayEnabled()
 
 /** 渠道包看到的 `ctx.llm`（形状由 `openai-gateway/models.ts` 的采集器决定）。 */
 interface LlmRuntime {
@@ -292,19 +290,7 @@ async function complete(request: CompleteRequest, jobId: string, signal: AbortSi
   const requestedMax = body.max_completion_tokens ?? body.max_tokens
   const maxTokens = typeof requestedMax === 'number' ? normalizeMaxTokens(requestedMax, provider, model) : undefined
 
-  // ── 补回客户端丢弃的思考 ──────────────────────────────────────────
-  // DeepSeek 系上游要求「带 tool_calls 的 assistant 轮 reasoning_content 成对回传」，
-  // 而实测客户端 92% 不回传（trae/deepseek 274 轮缺 253 轮），后果是整段对话被判
-  // `invalid function call`。我们手里有那份思考（是本进程自己发出去的），按
-  // `tool_call.id` 补回去 —— 详见 `reasoningReplay.ts`。客户端已带回的一字节不动。
-  const recovered = reasoningReplayOn
-    ? reasoningReplay.recover(body.messages)
-    : { messages: body.messages, injected: 0 }
-  if (recovered.injected > 0) {
-    body.messages = recovered.messages
-    logger.info(`${request.model} 补回 reasoning_content：${recovered.injected} 轮客户端未回传`)
-  }
-
+  // 补回客户端丢弃的思考由主线程在派发前完成（见文件头部说明）。
   // 先按网关的同一套判据校验入站 tool_calls：网关那句「invalid function call」
   // 不带坐标，客户端无从知道是哪条消息、哪个调用、哪个字段不对。
   assertValidToolCalls(body.messages)
@@ -355,23 +341,14 @@ async function complete(request: CompleteRequest, jobId: string, signal: AbortSi
   }
 
   const stream = ctx.llm.stream(markGatewayChannel(options))
-  // 观测**我们下行发出的**思考（两种上游形态在这里已合并成 reasoning_content）。
-  reasoningReplay.begin()
-  try {
-    if (request.stream) {
-      for await (const chunk of toOpenAiSse(stream, request.requestId, request.model)) {
-        if (reasoningReplayOn) reasoningReplay.observeSseChunk(chunk)
-        send({ type: 'sse', id: jobId, text: chunk })
-      }
-      return
+  if (request.stream) {
+    for await (const chunk of toOpenAiSse(stream, request.requestId, request.model)) {
+      send({ type: 'sse', id: jobId, text: chunk })
     }
-    const completion = await collectOpenAiCompletion(stream, request.requestId, request.model)
-    if (reasoningReplayOn) reasoningReplay.observeCompletion(completion)
-    send({ type: 'completion', id: jobId, value: completion })
-  } finally {
-    // 无论成功、失败还是被取消都要收尾：失败时也把已产出的思考提交（下一轮同样要补）。
-    if (reasoningReplayOn) reasoningReplay.commit()
+    return
   }
+  const completion = await collectOpenAiCompletion(stream, request.requestId, request.model)
+  send({ type: 'completion', id: jobId, value: completion })
 }
 
 /* ------------------------------------------------------------------ 消息 */

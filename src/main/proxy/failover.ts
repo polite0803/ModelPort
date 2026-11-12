@@ -106,6 +106,32 @@ export function isMissingReasoningHistoryError(message: string | undefined): boo
 }
 
 /**
+ * 「这一家不接受这段历史的工具调用顺序」类 400 的识别（2026-11-12 16:39 现网
+ * `codex-deepseek` 路由实测，MiniMax）。
+ *
+ * 上游原文：`invalid params, tool call result does not follow tool call (2013)`。
+ * 它说的是**消息序列里 tool 结果没有紧跟产生它的那条 assistant(tool_calls)**。
+ * 根因在入向翻译：Responses 的 `input` 是一次调用一个 item，原先逐 item 各落一条
+ * assistant，并行调用就变成 `assistant(A) / assistant(B) / tool(A) / tool(B)`
+ * —— A 的结果前面隔着 B。已在 `shared/responsesInbound.ts::pushToolCall` 修成
+ * 「同批并进一条 assistant」。
+ *
+ * 判据保留的意义有两层：① 修不全的其它来路（老客户端自己拼坏了历史）不该让整条
+ * 链在第一家就 `fatal`；② 同一账号重发同样形状只会原样再撞一次，这不是账号故障，
+ * 不该记冷却/计账号失败。
+ *
+ * 单模型路径仍按原样把 400 交回客户端：用户点名了这一家，换家等于替他改需求。
+ *
+ * ⚠️ 识别口径必须**窄**：要求同时出现 `tool call result` 与
+ * `does not follow tool call` 两段，正常正文不会这么写。
+ */
+export function isToolCallOrderingError(message: string | undefined): boolean {
+  if (!message) return false
+  return /tool\s*call\s*result/i.test(message)
+    && /does\s+not\s+follow\s+(?:its\s+)?tool\s*call/i.test(message)
+}
+
+/**
  * 「渠道目录里没有这个模型」类 404 的识别（用户报障 2026-11-01，`auto` 命中
  * `opencode/qwen3.8-max` 后整场 404）。
  *
@@ -649,6 +675,11 @@ export function describeAttemptFailure(input: {
   status?: number
   /** 只有聚合条目会把「不透明 400」当可换家；缺省按账号渠道处理 */
   providerType?: string
+  /**
+   * 换家循环把这一发裸 400 当作「这家拒收这次请求」并继续往下试了（池语义，
+   * 见 `FailoverBudget.switchOnRejectedRequest`）。缺省 false：裸名链的 400 是终局。
+   */
+  rejectableRequest?: boolean
   /** 预算读数，原样落到日志（见 `AutoAttemptFailure` 的注释）。 */
   budgetElapsedMs?: number
   attemptDeadlineMs?: number
@@ -680,9 +711,13 @@ export function describeAttemptFailure(input: {
       ? 'failover'
       : isOpaqueAggregateBadRequest(input.status, input.error, input.providerType)
         ? 'failover'
-        : isFailoverEligibleStatus(input.status)
+        // 池语义的裸 400 同样是「换下一家试过了」：按状态码它会落进 fatal，
+        // 而日志与实际分支必须一致（见 `rejectableRequest`）。
+        : input.rejectableRequest === true
           ? 'failover'
-          : 'fatal'
+          : isFailoverEligibleStatus(input.status)
+            ? 'failover'
+            : 'fatal'
   return {
     candidate: input.candidate,
     kind,

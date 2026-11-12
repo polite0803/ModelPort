@@ -370,6 +370,31 @@ test('E：路由层粘性是硬优先 —— 自然分更低的上一轮模型�
   assert.equal(again.reason, 'sticky')
 })
 
+test('E：`previousHint` 如实给出上一轮锚点，且让位后仍保留（换家判定的输入）', () => {
+  const route = makeRoute()
+  const fresh = select(route)
+  assert.equal(fresh.previousHint, undefined, '首轮没有锚点，不能凭空造一个')
+
+  const beta = fresh.candidates.find(candidate => candidate.displayName === 'Beta-Lite')
+  assert.ok(beta)
+  autoRouter.rememberRoute(fresh.conversationKey, beta, route)
+
+  const again = select(route)
+  assert.deepEqual(again.previousHint, {
+    providerId: beta.provider.id,
+    displayName: beta.displayName,
+    accountId: beta.account.id,
+  }, '锚点是「上一轮真实成功的那个实现」，不是本轮的排序结果')
+
+  // 锚点停服 → 本轮让位给别家。上一轮的锚点必须**仍然在 decision 里**，
+  // 否则「这一轮换实现了」这件事在响应头与日志里都无从判断。
+  sm.setModelsServed('pb', ['Beta-Lite'], false)
+  const yielded = select(route)
+  assert.equal(yielded.candidates[0].displayName, 'Alpha-Flash')
+  assert.equal(yielded.previousHint?.displayName, 'Beta-Lite', '让位不擦锚点：擦了就分不清「换了」和「首轮」')
+  sm.setModelsServed('pb', ['Beta-Lite'], true)
+})
+
 test('E：粘性只是加分不是硬钉 —— 被钉住的模型停服后自然让位，恢复后又回来', () => {
   const route = makeRoute()
   const fresh = select(route)
