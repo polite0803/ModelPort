@@ -119,6 +119,12 @@ export const AUTO_SINGLE_SCOPE_BUDGET_MS = 40_000
 export const ROUTE_MENU_MODELS_DEFAULT = 8
 
 /**
+ * 一页最多带几个模型：控制台路由页要「全部」，但不是无上限 —— 这个快照是逐请求
+ * 现算的 IPC 载荷，真正的大池也就几百个，超过这个数说明调用方传错了。
+ */
+export const ROUTE_MENU_MODELS_MAX = 2_000
+
+/**
  * Whether this candidate's upstream has a documented cache behaviour.
  *
  * Only aggregate entries carry the capability table; builtin/custom endpoints
@@ -523,6 +529,15 @@ const TRANSIENT_SKIP_REASONS = new Set<string>([
 
 /** 算不出解禁时刻时的重试间隔（秒）：窗口类原因最短的复位粒度就是分钟级。 */
 const DEFAULT_TRANSIENT_RETRY_AFTER_SECONDS = 60
+
+/**
+ * 一条「被谁筛掉」的清单一次最多报几条。
+ *
+ * 候选链不再裁短之后，「渠道整条限流」这类跳过一次能攒几十条，而这条清单要走两个地方：
+ * `X-ModelPort-Auto-Skipped` 响应头（超长头会让客户端或中间代理把整条响应判坏）与空池
+ * 错误体的 `details.skipped`。两处共用这一个上限，免得头与体的说法不一致。
+ */
+export const AUTO_SKIPPED_REPORT_LIMIT = 8
 
 function skippedAreAllTransient(skipped: ReadonlySet<string>): boolean {
   if (skipped.size === 0) return false

@@ -37,6 +37,7 @@ import type {
   RoutePreviewResult,
   RoutePreviewSample,
   RouteMenuResult,
+  RouteMenuRequest,
   RouteSwitchRequest,
   RouteSwitchResult,
   TlsStatus,
@@ -521,8 +522,11 @@ interface RoutesAPI {
   /**
    * 快捷切换模型的菜单快照（架构 A）。托盘通过 shell 桥转给这个页面，因为管理
    * 密钥只在这里；主进程不持有它。只读：打开菜单不改变任何路由行为。
+   *
+   * `request` 只限定范围：托盘不带参数（每条路由的默认上限），控制台路由页带
+   * `{ route, limit }` 要一条路由的全部可切换模型（它自带搜索）。
    */
-  menu: () => Promise<RouteMenuResult>
+  menu: (request?: RouteMenuRequest) => Promise<RouteMenuResult>
   /** 点名/换下一个：写一颗内存软钉（默认 30 分钟），不落盘。 */
   switchModel: (request: RouteSwitchRequest) => Promise<RouteSwitchResult>
   /** 恢复自动排序：清软钉并清掉持久 `preferredModel`。 */

@@ -42,7 +42,7 @@ test('三个通道各有一条字符串定义，主进程与页面都只引用�
     assert.ok(api.includes(`IpcChannels.${channel}`), `api.ts 少了 ${channel}`)
   }
   // 页面只认命名方法：这三件事不能以「通用 invoke + 字符串」的形式再开放一次。
-  assert.match(api, /menu: \(\): Promise<RouteMenuResult> =>\s*\n\s*wire\.invoke\(IpcChannels\.ROUTES_MENU\)/)
+  assert.match(api, /menu: \(request\?: RouteMenuRequest\): Promise<RouteMenuResult> =>\s*\n\s*wire\.invoke\(IpcChannels\.ROUTES_MENU, request\)/)
   assert.match(api, /unpin: \(route: string\): Promise<RouteSwitchResult> =>\s*\n\s*wire\.invoke\(IpcChannels\.ROUTES_UNPIN, route\)/)
 })
 
@@ -51,8 +51,24 @@ test('菜单读失败带回原因：托盘才能把「读不到」与「没有�
   assert.match(block, /catch \(error\)/, '存储没起来必须走这一支')
   assert.match(block, /routes: \[\], generatedAt, error: routeStorageError\(error\)\.message/,
     '空表 + error 才是「读取失败」；空表不带 error 会被读成「配置被清了」')
-  assert.match(block, /storeManager\.listModelRoutes\(\)\.map\(route => autoRouter\.routeMenu\(route\)\)/,
-    '菜单内容来自选路器同一份快照，不是处理器自己算一遍')
+  assert.match(block, /storeManager\.listModelRoutes\(\)/, '菜单内容来自存储里的路由')
+  assert.match(block, /\.map\(route => autoRouter\.routeMenu\(route, /,
+    '每条路由的模型都来自选路器同一份快照，不是处理器自己算一遍')
+})
+
+/**
+ * 托盘只画得下前几个模型，剩下的必须能在控制台里点 —— 那条通路就是同一个通道的
+ * 范围参数（`{ route, limit }`）。它只能**收窄**取数，不许长出第二套取数逻辑：
+ * 一旦过滤器自己算模型列表，托盘与页面就会长期显示不同的事实。
+ */
+test('范围参数只收窄取数：一条路由 + 钳过的条数，仍走同一个 routeMenu', () => {
+  const block = handlerBlock('ROUTES_MENU')
+  assert.match(block, /\.filter\(route => only === undefined \|\| route\.name === only\)/,
+    '按名字过滤只发生在路由这一层，模型列表不重算')
+  assert.match(block, /Math\.min\(ROUTE_MENU_MODELS_MAX, Math\.max\(1, Math\.trunc\(request\.limit\)\)\)/,
+    '条数要同时有上下限：0/负数会让页面变空，无上限则把整池塞进一次 IPC')
+  assert.match(block, /limit \?\? ROUTE_MENU_MODELS_DEFAULT/,
+    '不传条数 = 托盘默认；页面要「全部」就自己传满，不再写第二个默认值')
 })
 
 test('切换请求先验形状：缺路由名直接给可读原因', () => {

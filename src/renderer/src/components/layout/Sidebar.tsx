@@ -14,6 +14,7 @@ import {
   Boxes,
   KeyRound,
   Network,
+  Waypoints,
 } from 'lucide-react'
 import type { ShellBridge } from '@shared/shellBridge'
 import { cn } from '@/lib/utils'
@@ -42,6 +43,7 @@ const navItems: NavItem[] = [
   { titleKey: 'nav.channels', href: '/channels', icon: KeyRound },
   { titleKey: 'nav.proxy', href: '/proxy', icon: Settings2 },
   { titleKey: 'nav.models', href: '/models', icon: Cpu },
+  { titleKey: 'nav.routes', href: '/routes', icon: Waypoints },
   { titleKey: 'nav.logs', href: '/logs', icon: FileText },
   { titleKey: 'nav.settings', href: '/settings', icon: Settings },
 ]

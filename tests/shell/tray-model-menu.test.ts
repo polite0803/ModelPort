@@ -85,8 +85,21 @@ test('三种缺席各说一句：还没读到 / 读失败 / 没有启用的路�
     '读失败要带原因，不能显示成「没有路由」')
   assert.match(main, /routes\.length === 0[\s\S]*?'没有启用的路由'/,
     '确实没有启用的路由是第三种情况')
-  assert.match(main, /另有 \$\{entry\.totalModels - entry\.models\.length\} 个模型在控制台/,
+  assert.match(main, /另有 \$\{entry\.totalModels - entry\.models\.length\} 个模型（在控制台搜索并切换）/,
     '截断要如实说还有几个，不能让人以为池子就这么大')
+})
+
+/**
+ * 「另有 N 个」曾经只是一行灰字：托盘画不下、点不动，控制台又没有能选它们的地方 ——
+ * 于是池子中间的模型两头都选不到。溢出那行与「在控制台管理路由…」都必须落到同一个
+ * 带路由名的深链上，页面据此直接打开该路由的全量模型列表。
+ */
+test('溢出那一行与「在控制台管理路由」都点得动，且带着路由名过去', () => {
+  assert.match(main, /label: `…另有 \$\{entry\.totalModels - entry\.models\.length\} 个模型（在控制台搜索并切换）`,\s*\n\s*click: \(\) => openRouteManager\(entry\.route\)/,
+    '说明「在控制台」却不给入口，等于还是选不到')
+  assert.match(main, /trayAction\('在控制台管理路由…', \(\) => openRouteManager\(entry\.route\)\)/)
+  assert.match(main, /webContents\.send\('shell:navigate', `\/routes\?\$\{new URLSearchParams\(\{ route \}\)\.toString\(\)\}`\)/,
+    '不带路由名的深链只会落在第一页，用户还得自己再找一遍')
 })
 
 test('快照是坏的就不换菜单：形状不合整份丢弃', () => {

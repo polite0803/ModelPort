@@ -533,6 +533,21 @@ export interface RouteMenuResult {
   error?: string
 }
 
+/**
+ * 菜单快照的**范围**参数。缺省 = 全部路由、每条只带前 `ROUTE_MENU_MODELS_DEFAULT` 个
+ * 模型（托盘要的形态：原生菜单塞不下几百行，也搜不了）。
+ *
+ * 控制台的路由页要的是另一件事：一条路由的**全部可切换模型**，因为它有搜索框。两者
+ * 读的是同一份快照（`routeMenu`），这里只是把上限与筛路由的旋钮交出去 —— 页面自己
+ * 再算一份池，菜单与真实选路就会长期不一致。
+ */
+export interface RouteMenuRequest {
+  /** 只返回这一条路由；缺省 = 全部。 */
+  route?: string
+  /** 每条路由最多带几个模型；缺省 = 托盘上限，主进程会夹到安全范围。 */
+  limit?: number
+}
+
 /** 一次切换请求。`model` 缺省 = 「换下一个」：取当前模型在菜单顺序里的下一项。 */
 export interface RouteSwitchRequest {
   route: string

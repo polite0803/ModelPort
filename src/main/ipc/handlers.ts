@@ -55,7 +55,7 @@ import {
   uninstallCertificateTrust,
   type TlsMaterial,
 } from '../proxy/tls'
-import { autoRouter } from '../proxy/autoRouter'
+import { autoRouter, ROUTE_MENU_MODELS_DEFAULT, ROUTE_MENU_MODELS_MAX } from '../proxy/autoRouter'
 import type { RoutePreviewResult, RoutePreviewSample } from '../proxy/autoRouter'
 import { proxyStatusManager } from '../proxy/status'
 import { ConfigManager } from '../store/config'
@@ -66,7 +66,7 @@ import type { RouteListResult, RouteMutationResult, RouteRemovalResult, RoutePoo
 import type { ManagementApiConfig, AppConfig } from '../store/types'
 import { DEFAULT_CONTEXT_MANAGEMENT_CONFIG } from '../store/types'
 import type { TlsStatus, TlsTrustResult } from '../../shared/types'
-import type { RouteMenuResult, RouteSwitchRequest, RouteSwitchResult } from '../../shared/types'
+import type { RouteMenuRequest, RouteMenuResult, RouteSwitchRequest, RouteSwitchResult } from '../../shared/types'
 import type { ProviderType } from '../oauth/types'
 import type { ModelsFetchFailure } from '../store/types'
 
@@ -467,20 +467,34 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
    *
    * 只读、不置钉：打开菜单不该改变任何行为。逐路由调用 `autoRouter.routeMenu`，
    * 池来自与生产请求同一条预览管线，所以「菜单里看到的」与「真的会路由到的」是同一份。
+   *
+   * `request` 只是范围：托盘不带参数（全部路由、每条的默认上限），控制台的路由页带
+   * `{ route, limit }` 要一条路由的全部可切换模型 —— 它有搜索框，能翻完那几百行。
+   * 上限在这里夹死（见 `ROUTE_MENU_MODELS_MAX`）：IPC 载荷是逐请求现算的，一个
+   * 手滑的四位数不该变成一次长 GC。
    */
-  registerMainHandler(IpcChannels.ROUTES_MENU, async (): Promise<RouteMenuResult> => {
-    const generatedAt = Date.now()
-    try {
-      return {
-        routes: storeManager.listModelRoutes().map(route => autoRouter.routeMenu(route)),
-        generatedAt,
+  registerMainHandler(
+    IpcChannels.ROUTES_MENU,
+    async (_, request?: RouteMenuRequest): Promise<RouteMenuResult> => {
+      const generatedAt = Date.now()
+      const only = typeof request?.route === 'string' && request.route.trim().length > 0
+        ? request.route.trim()
+        : undefined
+      const limit = typeof request?.limit === 'number' && Number.isFinite(request.limit)
+        ? Math.min(ROUTE_MENU_MODELS_MAX, Math.max(1, Math.trunc(request.limit)))
+        : undefined
+      try {
+        const routes = storeManager.listModelRoutes()
+          .filter(route => only === undefined || route.name === only)
+          .map(route => autoRouter.routeMenu(route, limit ?? ROUTE_MENU_MODELS_DEFAULT))
+        return { routes, generatedAt }
+      } catch (error) {
+        // 存储没起来时菜单必须是「读不到」而不是「没有路由」：后者会让用户以为自己的
+        // 配置被清了。托盘把 error 原样画成一行灰字。
+        return { routes: [], generatedAt, error: routeStorageError(error).message }
       }
-    } catch (error) {
-      // 存储没起来时菜单必须是「读不到」而不是「没有路由」：后者会让用户以为自己的
-      // 配置被清了。托盘把 error 原样画成一行灰字。
-      return { routes: [], generatedAt, error: routeStorageError(error).message }
     }
-  })
+  )
 
   /**
    * 切换模型（点名或「换下一个」）。写的是内存软钉，不落盘 —— 一次显式选择不该

@@ -1324,6 +1324,37 @@ gate, the four label markers, three absences), `tests/ipc/routes-menu-wire.test.
 `error` shape, unpin clearing both the pin and `preferredModel`). The older pool tests declare
 `modelScope: 'pool'` explicitly, which is what they actually prove.
 
+### The console side of the same menu (2026-11-13)
+
+Reported with a screenshot of the tray submenu: `…另有 48 个模型在控制台` was a dead line, and
+`在控制台管理路由…` landed on the **models** page, which is neither per route nor able to switch. A
+native menu cannot scroll through hundreds of rows and has no search box, so truncation there is
+correct - but the truncated models were unreachable from every surface: the route editor changes
+`includeModels`/`excludeModels` (config, not a selection), and the models page lists the catalogue.
+The pool could only be sampled by luck.
+
+`/routes?route=<name>` is that landing spot (`src/renderer/src/pages/Routes.tsx`, sidebar entry
+`nav.routes`). It reads the **same** `routes:menu` snapshot - one call for the left column, one
+`{ route, limit }` call for the detail, both through `autoRouter.routeMenu` - so the pool, the
+serving model, the soft pin and the circuit read exactly what the tray draws; nothing is recomputed
+from route config. The range arguments only **narrow** the query: `route` filters the route list,
+`limit` is clamped in the handler to `1..ROUTE_MENU_MODELS_MAX` (2000) with
+`ROUTE_MENU_MODELS_DEFAULT` (8) as the absent case, precisely so the tray keeps its short menu while
+the console asks for all of them. Search filters the full result on `displayName` / `providerName` /
+`providerId`. Pinning calls `routes:switch` with `source: 'console'` (in-memory soft pin, 30 min), and
+"back to automatic order" calls `routes:unpin` (which also clears the persistent `preferredModel`) -
+the page never writes route config, i.e. never a second routing decision. Four absences stay distinct
+in the page: API unavailable (no bridge), read failed (with `snapshot.error`), no enabled routes,
+no switchable model right now, plus "no search match". The tray's overflow line and
+`在控制台管理路由…` both deep-link to `/routes?<URLSearchParams>` so the console opens on that route
+instead of the first one.
+
+Tests: `tests/renderer/routes-console-surface.test.mjs` (entry points, the full-limit request, no
+recomputation from `includeModels`, the three search fields, both management calls, the four
+absences, locale slots in both languages), `tests/shell/tray-model-menu.test.ts` (the overflow line
+is clickable and carries the route), `tests/ipc/routes-menu-wire.test.ts` (the range arguments only
+narrow the query).
+
 ### An empty pool: three causes, three answers (2026-11-13)
 
 Live report after A shipped: `unexpected status 503 Service Unavailable: No available model for route

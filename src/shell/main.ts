@@ -1065,6 +1065,15 @@ function routeMenuModelLabel(model: RouteMenuEntry['models'][number]): string {
   return parts.join(' · ')
 }
 
+/** 打开控制台的路由页并选中这条路由：托盘列不下的模型在那里能搜到也能切。 */
+function openRouteManager(route: string): void {
+  const target = window
+  if (target === null || target.isDestroyed()) return
+  target.show()
+  target.focus()
+  target.webContents.send('shell:navigate', `/routes?${new URLSearchParams({ route }).toString()}`)
+}
+
 function routeMenuSubmenu(entry: RouteMenuEntry): MenuItemConstructorOptions[] {
   const current = entry.current === undefined
     ? '当前：还没有服务过的模型'
@@ -1102,14 +1111,16 @@ function routeMenuSubmenu(entry: RouteMenuEntry): MenuItemConstructorOptions[] {
       ? models
       : [{ label: '这条路由当前没有可切换的模型', enabled: false } as MenuItemConstructorOptions]),
     ...(entry.totalModels > entry.models.length
-      ? [{ label: `…另有 ${entry.totalModels - entry.models.length} 个模型在控制台`, enabled: false } as MenuItemConstructorOptions]
+      ? [{
+          // 托盘列不完的模型只能在控制台**选**：以前这行是纯文本，而它指向的页面
+          // （模型管理）既不按路由看也不能切换 —— 等于告诉用户“去那儿”，那儿却没有。
+          // 现在它直接打开路由页并选中这条路由，搜索框就在模型列表上方。
+          label: `…另有 ${entry.totalModels - entry.models.length} 个模型（在控制台搜索并切换）`,
+          click: () => openRouteManager(entry.route),
+        } as MenuItemConstructorOptions]
       : []),
     { type: 'separator' },
-    trayAction('在控制台管理路由…', () => {
-      window?.show()
-      window?.focus()
-      window?.webContents.send('shell:navigate', '/models')
-    }),
+    trayAction('在控制台管理路由…', () => openRouteManager(entry.route)),
   ]
 }
 
