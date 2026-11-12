@@ -82,6 +82,30 @@ test('an empty window reports unknown figures, not zeroes', () => {
   assert.equal(windowTokenSummary({}, { kind: 'all' }, NOW), null)
 })
 
+test('重建天（tokenLedger）不进平均延迟，但照常进请求数', () => {
+  const rebuilt: DailyBucket = {
+    totalRequests: 6860,
+    successRequests: 6860,
+    failedRequests: 0,
+    // 清空事故后按用量桶重建：总数与成功数被抬高，而 totalLatency 只剩已记段。
+    totalLatency: 795669,
+    totalRequestsSource: 'tokenLedger',
+  }
+  const buckets: Record<string, DailyBucket> = {
+    '2026-11-08': bucket(10, 8, 3000),
+    '2026-11-09': rebuilt,
+  }
+
+  const totals = windowDayTotals(buckets, { kind: 'range', start: '2026-11-08', end: '2026-11-09' }, NOW)
+  assert.equal(totals.requests, 6870, '请求数照常进窗口')
+  assert.equal(totals.avgLatencyMs, Math.round(3000 / 8), '平均延迟只能由带已记延迟的那几天算出')
+
+  const onlyRebuilt = windowDayTotals({ '2026-11-09': rebuilt }, { kind: 'all' }, NOW)
+  // 拿抬高后的成功数去除半截延迟，实测会读出 116ms —— 那比"未记录"更假。
+  assert.equal(onlyRebuilt.avgLatencyMs, null, '窗口里只剩重建天时读未记录，不是 0ms')
+  assert.equal(onlyRebuilt.requests, 6860)
+})
+
 test('a window sums its days into one comparable period', () => {
   const buckets: Record<string, DailyBucket> = {
     '2026-11-08': bucket(10, 8, 3000),

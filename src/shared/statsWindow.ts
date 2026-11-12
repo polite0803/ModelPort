@@ -117,19 +117,26 @@ export function windowDayTotals(
   let requests = 0
   let success = 0
   let latency = 0
+  let latencySuccess = 0
 
   for (const key of keys) {
     const bucket = buckets[key]
     if (bucket === undefined) continue
     requests += bucket.totalRequests ?? 0
     success += bucket.successRequests ?? 0
-    latency += bucket.totalLatency ?? 0
+    // 重建天（`tokenLedger`）的 `totalLatency` 只有已记段，而它的成功数已按构造抬高，
+    // 一起平均会把整窗口的平均延迟拉成一个凭空的低值（现网实测 116ms）。这类天不进
+    // 延迟分子分母；窗口里只剩这类天时读 `null`（未记录），不是 0ms。
+    if (bucket.totalRequestsSource !== 'tokenLedger') {
+      latency += bucket.totalLatency ?? 0
+      latencySuccess += bucket.successRequests ?? 0
+    }
   }
 
   return {
     requests,
     successRate: requests > 0 ? Math.round((success / requests) * 100) : null,
-    avgLatencyMs: success > 0 ? Math.round(latency / success) : null,
+    avgLatencyMs: latencySuccess > 0 ? Math.round(latency / latencySuccess) : null,
     coveredFrom: keys[0],
     days: keys.length,
   }

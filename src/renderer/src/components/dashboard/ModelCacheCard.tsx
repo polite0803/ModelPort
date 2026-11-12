@@ -20,7 +20,7 @@ import { Card } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
 import type { ModelWindowCoverage, ModelWindowTokenUsage, ProviderStatsWindow } from '@shared/providerUsage'
 import { formatTokens } from './TokenUsageCard'
-import { StatsWindowPresets } from './StatsWindowPicker'
+import { StatsWindowPresets, StatsWindowRangeInputs } from './StatsWindowPicker'
 
 export interface ModelCacheCardProps {
   stats: Record<string, ModelWindowTokenUsage>
@@ -77,6 +77,17 @@ export function ModelCacheCard({
 
         <StatsWindowPresets value={statsWindow} onChange={onWindowChange} />
       </div>
+
+      {/*
+        自定义区间的起止输入必须和这张卡片自己的预设行放在一起：这张卡与供应商统计
+        共用同一个窗口，以前这里只渲染预设、不渲染日期输入，点这张卡的「自定义」之后
+        日期框只出现在隔壁那张卡里——看着像是隔壁那张卡的控件，改的却是这张卡的区间。
+      */}
+      <StatsWindowRangeInputs
+        value={statsWindow}
+        onChange={onWindowChange}
+        className="mt-2"
+      />
 
       {rows.length === 0 ? (
         <p className="mt-3 text-sm text-[var(--text-dim)]">{t('dashboard.modelCache.noData')}</p>

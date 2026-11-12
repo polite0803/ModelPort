@@ -27,6 +27,12 @@ export interface DailyBucket {
   successRequests: number
   failedRequests: number
   totalLatency: number
+  /**
+   * `tokenLedger` = 这一天的总数与成功数不是逐笔记出来的（清空事故后按用量桶重建）。
+   * `totalLatency` 只有已记段，除以抬高后的成功数会读出一个凭空的低延迟，所以带这个
+   * 标记的天**不参与**平均延迟：图上断线、窗口聚合跳过它。
+   */
+  totalRequestsSource?: 'tokenLedger'
 }
 
 /**
@@ -48,12 +54,17 @@ export function dailyTrendPoints(
 
     const bucket = buckets[window.key]
     const success = bucket?.successRequests ?? 0
+    // 重建天的 `totalLatency` 只是已记段，除以抬高后的成功数会得到一个凭空的低延迟
+    // （现网实测 11-12 因此从 2.6s 掉到 116ms）。延迟这一格对它取 `null` = 未记录。
+    const latencyRecorded = bucket?.totalRequestsSource !== 'tokenLedger'
     return {
       date: window.key,
       total: bucket?.totalRequests ?? 0,
       success,
       error: bucket?.failedRequests ?? 0,
-      avgLatency: bucket && success > 0 ? Math.round(bucket.totalLatency / success) : 0,
+      avgLatency: !latencyRecorded
+        ? null
+        : bucket && success > 0 ? Math.round(bucket.totalLatency / success) : 0,
     }
   })
 }

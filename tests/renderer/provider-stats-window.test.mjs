@@ -108,3 +108,35 @@ test('every window label exists in both shipped locales', () => {
     assert.match(costHint, /models\.dev/, `${locale} costHint hides the price source`)
   }
 })
+
+test('the custom range editor renders in the card whose presets opened it', () => {
+  // 两张卡片共用同一个窗口。以前缓存命中卡只渲染预设、不渲染日期输入，点它的
+  // 「自定义」之后日期框只出现在供应商统计里：读者会当成隔壁那张卡的控件，而它
+  // 改的其实是这张卡的区间。控件必须跟着它自己的预设行走。
+  const readCard = (name) => readFileSync(
+    join(root, `src/renderer/src/components/dashboard/${name}.tsx`),
+    'utf8',
+  )
+
+  const problemsOf = (source) => {
+    const problems = []
+    if (!/import \{[^}]*StatsWindowRangeInputs[^}]*\} from '\.\/StatsWindowPicker'/.test(source)) {
+      problems.push('the card does not import the range editor')
+    }
+    if (!/<StatsWindowPresets value=\{statsWindow\} onChange=\{onWindowChange\}/.test(source)) {
+      problems.push('the card does not render the shared preset row')
+    }
+    if (!/<StatsWindowRangeInputs\s+value=\{statsWindow\}\s+onChange=\{onWindowChange\}/.test(source)) {
+      problems.push('the card renders no range editor bound to its own window')
+    }
+    return problems
+  }
+
+  const cacheCard = readCard('ModelCacheCard')
+  assert.deepEqual(problemsOf(cacheCard), [])
+  assert.deepEqual(problemsOf(readCard('ProviderStatusCard')), [])
+
+  // 负控：退回「只有预设」的事故形态必须被判红。
+  const withoutRange = cacheCard.replace(/<StatsWindowRangeInputs[\s\S]*?\/>/, '')
+  assert.deepEqual(problemsOf(withoutRange), ['the card renders no range editor bound to its own window'])
+})

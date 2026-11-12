@@ -8,6 +8,7 @@ import {
   isolatedIndices,
   percentChange,
   successRateOf,
+  type DailyBucket,
 } from '../../src/shared/trendMath.ts'
 
 test('a comparison with an unknown side is null, never 0%', () => {
@@ -79,6 +80,25 @@ test('the trend reads the daily rollup, day by day', () => {
   for (const point of points.slice(0, 4)) {
     assert.equal(point.total, null, `${point.date} predates the oldest recorded day`)
   }
+})
+
+test('重建天画得出请求数与成败，画不出平均延迟', () => {
+  const now = Date.parse('2026-10-30T12:00:00')
+  const rollup: Record<string, DailyBucket> = {
+    '2026-10-29': {
+      totalRequests: 5031,
+      successRequests: 4906,
+      failedRequests: 125,
+      totalLatency: 2999467,
+      totalRequestsSource: 'tokenLedger',
+    },
+  }
+
+  const point = dailyTrendPoints(rollup, 2, now).find((item) => item.date === '2026-10-29')
+  assert.equal(point?.total, 5031)
+  assert.equal(point?.success, 4906)
+  assert.equal(point?.error, 125)
+  assert.equal(point?.avgLatency, null, '延迟只有已记段，除以抬高后的成功数会读出一个凭空的低值')
 })
 
 test('a day inside the rollup that served nothing is a real zero', () => {
