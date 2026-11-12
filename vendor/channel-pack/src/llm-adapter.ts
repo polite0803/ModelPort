@@ -34,6 +34,20 @@ export const PROVIDER = 'codearts'
 const BENEFIT_NOT_FOUND_CODE = 'BENEFIT_NOT_FOUND'
 /** CodeArts 在账号没有 benefit 包时下发的事件 error_code。 */
 const CODEARTS_BENEFIT_NOT_FOUND_ERROR_CODE = 'InferHub.4004.200'
+/**
+ * 「该账号这个模型的免费权益已用尽」（HTTP 403，2026-11-12 现网实测）。
+ *
+ * 报文：`{"error_code":"TM.000010051","error_msg":"多模态功能或当前所选模型的使用权益已耗尽，
+ * 可选择如下模型: [GLM-5.2-ArkTS-SPARK, OpenPangu-2.0-Pro, OpenPangu-2.0-Flash]…"}`
+ *
+ * 与 `InferHub.4291.200` 同属「确定性失败、重试无意义」，但**不是按自然日重置**：
+ * 烧光的是体验版 token 包（`codearts.agent.trial`，5,000,000），要等套餐续期或
+ * 升级积分套餐 —— 故文案不能沿用「明日重置」那句。
+ *
+ * ⚠️ 本码曾落在「未识别 4xx」兜底里：被 `httpErrorCode(403)` 报成 AUTH，既没有
+ * 可读原因、也不换号，另一个积分充足的账号永远轮不到（2026-11-12 报障的根因）。
+ */
+const CODEARTS_RIGHTS_EXHAUSTED_CODE = 'TM.000010051'
 
 // DeepSeek V4（CodeArts Agent 模型列表新增，UI 标注"每日 1000 万免费 Tokens"福利）：
 //
@@ -437,6 +451,28 @@ export interface CodeArtsQueueStatus {
   readonly message: string
 }
 
+/**
+ * 「权益已用尽」的文案（`TM.000010051`，HTTP 403）。
+ *
+ * 不能复用 {@link codeartsQuotaExhaustedMessage}：那句话承诺「按 UTC+8 自然日结算、
+ * 明日重置」，而这里耗尽的是**体验版 token 包**（有明确起止日期），明天既不会重置
+ * 也不会自愈。上游报文里已列出该账号仍可用的模型，这里如实转述，不自行推测。
+ */
+export function codeartsRightsExhaustedMessage(model: string): string {
+  return (
+    `codearts: 模型 ${model} 的免费使用权益已用尽（该账号的免费 Token 包已耗尽；`
+    + '上游未给出恢复时间，需等套餐续期或在 CodeArts 升级积分套餐）。'
+    + '可改用该账号仍有权益的模型（上游明示：GLM-5.2-ArkTS-SPARK / OpenPangu-2.0-Pro / '
+    + 'OpenPangu-2.0-Flash），或在 Channel Pack 的 CodeArts 面板切换/添加账号。'
+  )
+}
+
+/** 按上游错误码在两种「额度类」文案间选择：权益耗尽与每日额度是不同的恢复语义。 */
+function codeartsExhaustedMessage(detail: string, model: string): string {
+  if (detail.includes(CODEARTS_RIGHTS_EXHAUSTED_CODE)) return codeartsRightsExhaustedMessage(model)
+  return codeartsQuotaExhaustedMessage(model, nextUtc8DayStartMs())
+}
+
 /** 判断 HTTP 错误体是否表示 CodeArts 并发排队限流。 */
 function isQueueError(status: number, body: string): boolean {
   return status === 400
@@ -526,9 +562,23 @@ export function isSseQueueErrorCode(code: string): boolean {
  *
  * 文案兜底（`insufficient quota`）不可省：万一上游换了码值，序列化后的
  * detail 文本仍能命中 —— 与 `zcode` / `qoder` 的既有做法一致。
+ *
+ * 「该账号这个模型的免费权益已用尽」（HTTP 403，2026-11-12 现网实测）。
+ *
+ * 报文：`{"error_code":"TM.000010051","error_msg":"多模态功能或当前所选模型的使用权益已耗尽，
+ * 可选择如下模型: [GLM-5.2-ArkTS-SPARK, OpenPangu-2.0-Pro, OpenPangu-2.0-Flash]…"}`
+ *
+ * 与 `InferHub.4291.200` 同属「确定性失败、重试无意义」，但**不是按自然日重置**：
+ * 耗尽的是体验版 token 包（`codearts.agent.trial`，5,000,000），要等套餐续期或
+ * 升级积分套餐，故文案不能沿用 {@link codeartsQuotaExhaustedMessage} 的「明日重置」。
+ *
+ * ⚠️ 本码曾落在「未识别 4xx」兜底：被 `httpErrorCode(403)` 报成 AUTH，既无可读原因、
+ * 也不换号，另一个积分充足的账号永远轮不到（2026-11-12 报障的根因）。
  */
 export function isSseQuotaExhaustedErrorCode(code: string, message: string): boolean {
-  return code.includes('4291') || /insufficient[\s_-]+quota/i.test(message)
+  return code.includes('4291')
+    || code.includes(CODEARTS_RIGHTS_EXHAUSTED_CODE)
+    || /insufficient[\s_-]+quota/i.test(message)
 }
 
 /** 从错误体提取可分类的 detail 文本（OpenAI 风格 error 或 CodeArts error_code/error_msg）。 */
@@ -1224,7 +1274,7 @@ export class CodeArtsAdapter extends LlmAdapter {
             // 与 qoder / zcode 的额度处理同款。标记写进 `modelRateLimits` 后，
             // Channel Pack 的「限额重置 · <模型> · N 小时后」徽章与池的选号
             // （`getAvailableAccount` 会跳过未到期的账号）同时生效。
-            const message = codeartsQuotaExhaustedMessage(options.model, nextUtc8DayStartMs())
+            const message = codeartsExhaustedMessage(error.code, options.model)
             // ① 先给**当前**账号记上限流标记（UI 徽章与池的选号都依赖它）。
             if (this.options.accountPool && currentAccountId) {
               await this.options.accountPool.updateModelRateLimit(
@@ -1292,7 +1342,7 @@ export class CodeArtsAdapter extends LlmAdapter {
         // ⚠️ 判据用整个错误体（`errorDetail` 会拼出 `error_code` + `error_msg`）：
         // 4xx 的报文形态与 SSE 不同，不能指望顶层 `error_code` 字段名一致。
         if (isSseQuotaExhaustedErrorCode(errorDetail(errorText), errorText)) {
-          const message = codeartsQuotaExhaustedMessage(options.model, nextUtc8DayStartMs())
+          const message = codeartsExhaustedMessage(errorDetail(errorText), options.model)
           if (this.options.accountPool) {
             if (currentAccountId) {
               await this.options.accountPool.updateModelRateLimit(
@@ -1312,6 +1362,33 @@ export class CodeArtsAdapter extends LlmAdapter {
             }
           }
           throw new LlmError(message, QUOTA_EXCEEDED_CODE, { status: response.status })
+        }
+        // 403 是**账号级拒绝**：令牌被吊销、权益耗尽、账号风控都用它表达，只看状态码分不出来。
+        // 上面已刷新过一次凭据，仍 403 说明不是「本机令牌过期」能自愈的那一类 ——
+        // 与 buddy 适配器同一处置（401/403 一律换号，试完才报错）：换下一个账号再试一次，
+        // 每个账号最多一次（`rateLimitTried`）。
+        //
+        // ⚠️ 缺这一段时，粘性「当前服务账号」（account-pool 的 `activeAccounts`）会被一个
+        // 403 账号长期钉死：它既不写 `modelRateLimits`、也不进 tried 集合，池子每次都把它
+        // 排回第一，另一个账号余额再充足也永远轮不到（2026-11-12 现网报障）。
+        if (response.status === 403) {
+          const detail = errorDetail(errorText).slice(0, 300)
+          if (this.options.accountPool) {
+            const next = await this.options.accountPool.getAvailableAccount(
+              'codearts', options.model, rateLimitTried,
+            )
+            if (next && !rateLimitTried.has(next.entry.id)) {
+              rateLimitTried.add(next.entry.id)
+              credential = next.credential as CodeArtsCredential
+              currentAccountId = next.entry.id
+              authRefreshed = false
+              continue
+            }
+          }
+          // 所有账号都 403：把上游原文带出去。此前只写 `HTTP 403`，日志里分不出
+          // 「权益耗尽 / 令牌失效 / 账号风控」，每次排查都得再实探一次上游。
+          const upstream = detail.length > 0 ? detail : 'model request failed with HTTP 403'
+          throw new LlmError(`codearts: ${upstream}`, httpErrorCode(403, errorText), { status: 403 })
         }
         // 限流处理：记录当前账号在该模型上的重置时间，然后切换账号重试
         // （外层 for(;;) 会在拿到新凭据后重新签名发请求）。用 tried 集合
@@ -1360,7 +1437,13 @@ export class CodeArtsAdapter extends LlmAdapter {
             // 与 deepseek 适配器的 httpErrorCode 词汇保持一致；
             // 400 + 上下文超限措辞归为 CONTEXT_WINDOW_EXCEEDED（触发 compaction）。
             const code = httpErrorCode(response.status, errorText)
-            throw new LlmError(`codearts: model request failed with HTTP ${response.status}`, code, { status: response.status })
+            // 上游原文必须随错误带出：只写状态码会把「模型不存在 / 参数非法 /
+            // 权益不足」压成同一句 `HTTP 4xx`，排查只能再实探一次上游。
+            const detail = errorDetail(errorText).slice(0, 300)
+            const upstream = detail.length > 0
+              ? detail
+              : `model request failed with HTTP ${response.status}`
+            throw new LlmError(`codearts: ${upstream}`, code, { status: response.status })
           }
           // probe.status 为 'waiting' 或 'queue_full' → 落入下方排队流程。
         }

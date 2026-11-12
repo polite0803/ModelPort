@@ -112,8 +112,12 @@ function sseResponse(text) {
   }), { status: 200, headers: { 'content-type': 'text/event-stream' } })
 }
 
+function jsonResponse(status, body) {
+  return new Response(body, { status, headers: { 'content-type': 'application/json' } })
+}
+
 /** 用固定帧应答的适配器；`seen` 收集每次出站请求（按次序）。 */
-function makeAdapter({ CodeArtsAdapter }, seen, frame) {
+function makeAdapter({ CodeArtsAdapter }, seen, frame, respond) {
   const credential = {
     access_key_id: 'AK-test',
     secret_access_key: 'SK-test',
@@ -126,9 +130,9 @@ function makeAdapter({ CodeArtsAdapter }, seen, frame) {
     refresh: async () => {},
     fetchImpl: async (_url, init) => {
       seen.push(new Headers(init?.headers))
-      return sseResponse(frame)
+      return respond === undefined ? sseResponse(frame) : respond(seen.length)
     },
-  })
+ })
 }
 
 async function runStream(adapter, model) {
@@ -195,4 +199,127 @@ test('额度耗尽（4291）优先于 benefit 判据，不被去头重试抢走'
 
   assert.equal(seen.length, 1, '额度是按自然日结算的确定性失败，重试只会白烧一次往返')
   assert.equal(error?.code, 'QUOTA_EXCEEDED', '必须仍按额度分支报出，而不是被 benefit 判据降级成 INVALID_REQUEST')
+})
+
+// ── 2026-11-12 现网：体验版 token 包烧光后的 403 TM.000010051 ────────────────
+
+/** 上游 403 原文（照抄实测响应，中文不翻译：判据是码值，文案只是取证）。 */
+const RIGHTS_EXHAUSTED_403 = JSON.stringify({
+  error_code: 'TM.000010051',
+  error_msg: '多模态功能或当前所选模型的使用权益已耗尽，可选择如下模型: '
+    + '[GLM-5.2-ArkTS-SPARK, OpenPangu-2.0-Pro, OpenPangu-2.0-Flash]。',
+})
+
+/** 普通 403（令牌失效一类）：不得被误判成额度。 */
+const PLAIN_403 = JSON.stringify({ error_code: 'APIG.0602', error_msg: 'Invalid token' })
+
+/**
+ * 双账号池的最小替身：`a1` 是粘性 pin 钉住的「当前服务账号」，`a2` 余额充足。
+ *
+ * `findAccountIdByCredential` 是适配器解析「本笔请求用的是哪个账号」的唯一入口 ——
+ * 缺了它 `currentAccountId` 是空串，限流标记根本写不下去，换号逻辑静默失效。
+ */
+function makePoolAdapter({ CodeArtsAdapter }, seen, respond) {
+  const accounts = [
+    { id: 'a1', provider: 'codearts', credentialRef: 'CODEARTS_ACCOUNT_1' },
+    { id: 'a2', provider: 'codearts', credentialRef: 'CODEARTS_ACCOUNT_2' },
+  ]
+  const marks = []
+  const credentialFor = (index) => ({
+    access_key_id: `AK-${index}`,
+    secret_access_key: `SK-${index}`,
+    security_token: `ST-${index}`,
+    expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+  })
+  let active = 0
+  const pool = {
+    async findAccountIdByCredential(_provider, accessKeyId) {
+      return accessKeyId === 'AK-0' ? 'a1' : 'a2'
+    },
+    async updateModelRateLimit(accountId, modelId, resetAtMs) {
+      marks.push({ accountId, modelId, resetAtMs })
+    },
+    async getAvailableAccount(_provider, _modelId, tried) {
+      for (let index = 0; index < accounts.length; index += 1) {
+        if (tried !== undefined && tried.has(accounts[index].id)) continue
+        active = index
+        return { entry: accounts[index], credential: credentialFor(index) }
+      }
+      return null
+    },
+  }
+  const adapter = new CodeArtsAdapter({
+    credentialRef: { id: 'codearts-test', provider: 'codearts' },
+    resolveCredential: async () => credentialFor(active),
+    refresh: async () => {},
+    fetchImpl: async (_url, init) => {
+      seen.push(new Headers(init?.headers))
+      return respond(seen.length)
+    },
+    accountPool: pool,
+  })
+  return { adapter, marks }
+}
+
+/** 出站请求实际使用的 access key（签名头里的 `Access=` 段）。 */
+function accessKeyOf(headers) {
+  return /Access=([^,]+)/.exec(headers.get('authorization') ?? '')?.[1]
+}
+
+test('权益耗尽 403（TM.000010051）：写限流标记并换到下一个账号', async (t) => {
+  isolateBenefitCache(t)
+  const mod = await loadAdapter(t)
+  const seen = []
+  const { adapter, marks } = makePoolAdapter(mod, seen, () => jsonResponse(403, RIGHTS_EXHAUSTED_403))
+
+  const error = await runStream(adapter, 'deepseek-v4.1-flash')
+
+  assert.deepEqual(
+    seen.map(accessKeyOf),
+    ['AK-0', 'AK-0', 'AK-1', 'AK-1'],
+    '每个账号各「首试 + 刷新凭据后重试」一次，第二个账号必须真的被投到（原缺陷正是永不换号）',
+  )
+  assert.deepEqual(
+    marks.map((mark) => mark.accountId),
+    ['a1', 'a2'],
+    '两个账号都要在各自模型上写限流标记，否则下一次请求又被钉回耗尽账号',
+  )
+  assert.equal(error?.code, 'QUOTA_EXCEEDED', '权益耗尽属额度类；落回 AUTH 会让网关与用户都以为要重新登录')
+  assert.match(String(error?.message), /权益已用尽/, '文案必须说清是权益耗尽')
+  assert.match(String(error?.message), /GLM-5\.2-ArkTS-SPARK/, '上游明示仍可用的模型要转述给用户')
+  assert.doesNotMatch(String(error?.message), /自然日/, 'token 包耗尽不会按自然日重置，不能沿用每日额度那句')
+})
+
+test('普通 403：刷新后仍失败则换号一次，全部失败时带上上游原文', async (t) => {
+  isolateBenefitCache(t)
+  const mod = await loadAdapter(t)
+  const seen = []
+  const { adapter, marks } = makePoolAdapter(mod, seen, () => jsonResponse(403, PLAIN_403))
+
+  const error = await runStream(adapter, 'openpangu-2.0-flash')
+
+  assert.deepEqual(
+    seen.map(accessKeyOf),
+    ['AK-0', 'AK-0', 'AK-1', 'AK-1'],
+    '403 是账号级拒绝：必须把下一个账号也试过才算判死',
+  )
+  assert.equal(marks.length, 0, '普通 403 不写限流标记：真假分不出，不能凭一次 403 停用一个账号')
+  assert.equal(error?.code, 'AUTH')
+  assert.equal(error?.status, 403)
+  assert.match(String(error?.message), /APIG\.0602/, '抛出的文本必须带上游 error_code')
+  assert.match(String(error?.message), /Invalid token/, '抛出的文本必须带上游 error_msg')
+})
+
+test('没有账号池时，403 也必须把上游原文带出去', async (t) => {
+  isolateBenefitCache(t)
+  const mod = await loadAdapter(t)
+  const seen = []
+  const adapter = makeAdapter(mod, seen, '', () => jsonResponse(403, PLAIN_403))
+
+  const error = await runStream(adapter, 'openpangu-2.0-flash')
+
+  assert.equal(seen.length, 2, '无账号池时只有「首试 + 刷新凭据后重试」两次')
+  assert.equal(error?.status, 403)
+  assert.match(String(error?.message), /APIG\.0602/, '只写 HTTP 403 的旧行为让日志无法定性')
+  assert.match(String(error?.message), /Invalid token/)
 })
