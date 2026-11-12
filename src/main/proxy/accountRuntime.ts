@@ -53,6 +53,12 @@ export interface StreamOutcomeInput {
   endReason?: 'done' | 'eof' | 'timeout' | 'client_gone' | 'error'
   /** 未请求输出上限却 finish_reason=length（由路由层判定）。 */
   degraded?: boolean
+  /**
+   * 这一笔的失败是**模型没把活干完**（渠道包合成的 incomplete_step），不是账号
+   * 接不住。按架构 A 它只上模型熔断票：AIMD 不降速（降的是「账号能不能接」），
+   * 但成功连击要清零，否则一次退化还被当成「干净成功」去加并发。
+   */
+  modelQuality?: boolean
 }
 
 /**
@@ -263,7 +269,10 @@ export class AccountRuntime {
     const flow = this.flowOf(accountId, model, now)
     if (outcome.endReason === 'client_gone') return
 
-    if (outcome.endReason === 'error' || outcome.endReason === 'timeout') {
+    // 模型级退化走错误帧收尾（endReason=error），但它不是账号故障：按 degraded
+    // 记（清零连击、不降并发），不进 recordAttemptOutcome 的拥塞降速。
+    const degraded = outcome.degraded === true || outcome.modelQuality === true
+    if ((outcome.endReason === 'error' || outcome.endReason === 'timeout') && outcome.modelQuality !== true) {
       this.recordAttemptOutcome(accountId, model, {
         success: false,
         timedOut: outcome.endReason === 'timeout',
@@ -271,7 +280,7 @@ export class AccountRuntime {
       return
     }
 
-    if (outcome.degraded) {
+    if (degraded) {
       flow.windowDegraded += 1
       flow.successStreak = 0
     }
@@ -279,7 +288,7 @@ export class AccountRuntime {
       firstTokenMs: outcome.firstTokenMs,
       totalMs: outcome.totalMs,
     }, now)
-    if (!outcome.degraded) this.maybeIncrease(flow, now)
+    if (!degraded) this.maybeIncrease(flow, now)
   }
 
   /**

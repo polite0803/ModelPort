@@ -30,6 +30,14 @@ export const IpcChannels = {
   ROUTES_PREVIEW: 'routes:preview',
   // 逐路由的候选模型数（一次采集折全表，比逐条 preview 便宜一个量级）。只读。
   ROUTES_POOL_SIZES: 'routes:pool-sizes',
+  // 快捷切换模型（架构 A）：菜单快照、切换/点名、恢复自动排序。
+  //
+  // 分三条而不是一条 `routes:pin(...args)`：菜单是只读轮询面，切换是写操作，
+  // 撤销是另一件事（还要连带清掉持久 `preferredModel`）。合成一条会让管理面的
+  // 限流桶把「打开托盘」和「点了切换」算成同一个调用。
+  ROUTES_MENU: 'routes:menu',
+  ROUTES_SWITCH: 'routes:switch',
+  ROUTES_UNPIN: 'routes:unpin',
 
   // Anthropic 客户端（Claude Desktop / Claude Code）的可发现名：一条只读预览、一条落库。
   // 分两条是因为客户端那一侧的白名单会筛名字，用户必须先看一眼「会新增哪几条」再写。

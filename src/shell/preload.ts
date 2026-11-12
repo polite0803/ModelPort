@@ -16,6 +16,7 @@ import type {
   ShellBridge,
   ShellCertificateTrustResult,
   ShellCertificateTrustStatus,
+  ShellRouteCommand,
   ShellUpdateCheck,
   ShellUpdateProgress,
   ShellUpgradeResult,
@@ -42,6 +43,22 @@ const bridge: ShellBridge = {
       const handler = (): void => callback()
       ipcRenderer.on('shell:gateways-changed', handler)
       return () => ipcRenderer.removeListener('shell:gateways-changed', handler)
+    },
+  },
+
+  routes: {
+    publishRouteMenu: (result): void => ipcRenderer.send('shell:route-menu', result),
+    onRouteMenuRequest: (callback: () => void): (() => void) => {
+      const handler = (): void => callback()
+      ipcRenderer.on('shell:route-menu-request', handler)
+      return () => ipcRenderer.removeListener('shell:route-menu-request', handler)
+    },
+    onRouteCommand: (callback: (command: ShellRouteCommand) => void): (() => void) => {
+      const handler = (_event: IpcRendererEvent, command: unknown): void => {
+        if (command !== null && typeof command === 'object') callback(command as ShellRouteCommand)
+      }
+      ipcRenderer.on('shell:route-command', handler)
+      return () => ipcRenderer.removeListener('shell:route-command', handler)
     },
   },
 

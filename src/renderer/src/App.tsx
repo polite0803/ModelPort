@@ -6,6 +6,7 @@ import { Toaster } from '@/components/ui/toaster'
 import { Skeleton } from '@/components/ui/skeleton'
 import ErrorBoundary from '@/components/ErrorBoundary'
 import type { ShellBridge } from '@shared/shellBridge'
+import { installTrayRouteBridge } from '@/api/trayRoutes'
 
 const Dashboard = lazy(() => import('@/pages/Dashboard').then(m => ({ default: m.Dashboard })))
 const Providers = lazy(() => import('@/pages/Providers').then(m => ({ default: m.Providers })))
@@ -49,6 +50,16 @@ function ShellNavigation(): null {
   return null
 }
 
+/**
+ * The tray's model submenu is drawn by the shell but answered here (the secret lives in
+ * this page). Mounted once at the app root: it must be alive on every route, not only on
+ * the models page - the tray does not know which page the user is looking at.
+ */
+function TrayRouteBridge(): null {
+  useEffect(() => installTrayRouteBridge(), [])
+  return null
+}
+
 function App() {
   return (
     <>
@@ -70,6 +81,7 @@ function App() {
         </Route>
       </Routes>
       <ShellNavigation />
+      <TrayRouteBridge />
       <Toaster />
     </>
   )

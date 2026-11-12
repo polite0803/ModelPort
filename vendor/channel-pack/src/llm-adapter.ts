@@ -14,7 +14,7 @@ import { nextUtc8DayStartMs } from './model-queue.js'
 import { isCodeArtsBenefitModel } from './models.js'
 import { normalizeHarnessMessages } from './message-shape.js'
 import { signRequestHuawei } from './sign.js'
-import { createBlankReasoningSuppressor, createReasoningLoopDetector, hasUsableToolName, isReasoningLoopGuardEnabled, isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, reasoningLoopFailure, resolveEmptyResponseReason, resolveToolPairing, stripCourseLeakFromHistoryContent, stripCourseLeakIfEnabled } from './sse.js'
+import { createBlankReasoningSuppressor, createReasoningLoopDetector, hasUsableToolName, incompleteStep, isReasoningLoopGuardEnabled, isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, reasoningLoopFailure, resolveEmptyResponseReason, resolveToolPairing, stripCourseLeakFromHistoryContent, stripCourseLeakIfEnabled } from './sse.js'
 import type { CodeArtsCredential } from './types.js'
 import {
   registerAdapterIdempotent,
@@ -2156,10 +2156,11 @@ export class CodeArtsAdapter extends LlmAdapter {
         ) }
       // 循环命中但另有可见产出：只能报 max-tokens（保住内容），不能报 error。
       : loopDetected
-        ? { kind: 'max-tokens' as const }
+        ? incompleteStep('reasoning-loop')
       : finishReason === 'length'
-        || (droppedUnnamedCalls && toolOrder.length === 0)
         ? { kind: 'max-tokens' as const }
+      : droppedUnnamedCalls && toolOrder.length === 0
+        ? incompleteStep('tool-call-unnamed')
         : finishReason === 'tool_calls' || toolOrder.length > 0
           ? { kind: 'tool-calls' as const }
           : { kind: 'stop' as const }

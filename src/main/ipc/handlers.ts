@@ -66,6 +66,7 @@ import type { RouteListResult, RouteMutationResult, RouteRemovalResult, RoutePoo
 import type { ManagementApiConfig, AppConfig } from '../store/types'
 import { DEFAULT_CONTEXT_MANAGEMENT_CONFIG } from '../store/types'
 import type { TlsStatus, TlsTrustResult } from '../../shared/types'
+import type { RouteMenuResult, RouteSwitchRequest, RouteSwitchResult } from '../../shared/types'
 import type { ProviderType } from '../oauth/types'
 import type { ModelsFetchFailure } from '../store/types'
 
@@ -457,6 +458,78 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
         return { ok: true, sizes: autoRouter.routePoolSizes(storeManager.listModelRoutes()) }
       } catch (error) {
         return { ok: false, error: routeStorageError(error) }
+      }
+    },
+  )
+
+  /**
+   * 快捷切换模型的菜单快照（托盘与控制台共用）。
+   *
+   * 只读、不置钉：打开菜单不该改变任何行为。逐路由调用 `autoRouter.routeMenu`，
+   * 池来自与生产请求同一条预览管线，所以「菜单里看到的」与「真的会路由到的」是同一份。
+   */
+  registerMainHandler(IpcChannels.ROUTES_MENU, async (): Promise<RouteMenuResult> => {
+    const generatedAt = Date.now()
+    try {
+      return {
+        routes: storeManager.listModelRoutes().map(route => autoRouter.routeMenu(route)),
+        generatedAt,
+      }
+    } catch (error) {
+      // 存储没起来时菜单必须是「读不到」而不是「没有路由」：后者会让用户以为自己的
+      // 配置被清了。托盘把 error 原样画成一行灰字。
+      return { routes: [], generatedAt, error: routeStorageError(error).message }
+    }
+  })
+
+  /**
+   * 切换模型（点名或「换下一个」）。写的是内存软钉，不落盘 —— 一次显式选择不该
+   * 改写持久配置；「恢复自动排序」是另一条通道（`routes:unpin`），两者分开。
+   */
+  registerMainHandler(
+    IpcChannels.ROUTES_SWITCH,
+    async (_, request: RouteSwitchRequest): Promise<RouteSwitchResult> => {
+      if (request === null || typeof request !== 'object' || typeof request.route !== 'string') {
+        return { ok: false, route: '', reason: '切换请求缺少路由名' }
+      }
+      try {
+        return autoRouter.switchModel(request, storeManager.listModelRoutes())
+      } catch (error) {
+        return { ok: false, route: request.route, reason: routeStorageError(error).message }
+      }
+    },
+  )
+
+  /**
+   * 撤销这条路由的全部显式选择：内存软钉 + 持久 `preferredModel`。
+   *
+   * 持久那一份必须一起清 —— 只清内存的话，下一次重启钉子在「恢复自动排序」之后
+   * 又回来了，用户会认为这个按钮时灵时不灵。
+   */
+  registerMainHandler(
+    IpcChannels.ROUTES_UNPIN,
+    async (_, routeName: string): Promise<RouteSwitchResult> => {
+      try {
+        const route = storeManager.listModelRoutes().find(candidate => candidate.name === routeName)
+        if (route === undefined) {
+          return { ok: false, route: routeName, reason: `路由 '${routeName}' 不存在` }
+        }
+        autoRouter.clearPin(routeName)
+        if (route.preferredModel !== undefined) {
+          const result = storeManager.updateRoute(routeName, { preferredModel: undefined })
+          if (!result.ok) {
+            return { ok: false, route: routeName, reason: result.error.message }
+          }
+          broadcastConfigChanged(storeManager.getConfig())
+        }
+        const fresh = storeManager.listModelRoutes().find(candidate => candidate.name === routeName)
+        return {
+          ok: true,
+          route: routeName,
+          ...(fresh === undefined ? {} : { menu: autoRouter.routeMenu(fresh) }),
+        }
+      } catch (error) {
+        return { ok: false, route: routeName, reason: routeStorageError(error).message }
       }
     },
   )

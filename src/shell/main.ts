@@ -66,7 +66,8 @@ import { gatewayListPageUrl } from './gatewayListPage'
 import { gatewayPromptPageUrl } from './gatewayPromptPage'
 import { escapeHtml } from './htmlEscape'
 import { installShellConsoleLog } from './consoleLogSink'
-import type { ShellUpdateProgress } from '../shared/shellBridge'
+import type { ShellRouteCommand, ShellUpdateProgress } from '../shared/shellBridge'
+import type { RouteMenuEntry, RouteMenuResult } from '../shared/types'
 
 app.setPath('userData', join(app.getPath('appData'), 'modelport-shell'))
 app.setAppUserModelId('com.modelport.shell')
@@ -531,6 +532,9 @@ function createWindow(): void {
     if ((window?.webContents.getURL() ?? '').startsWith('data:')) return
     refusedCertificate = null
     trustFailurePageUrl = null
+    // The page is the only holder of the management secret, so the tray menu can exist
+    // only after the page mounts. Ask once per load; the page republishes on changes.
+    requestRouteMenu()
   })
 
   // A page that fails to mount shows a dark rectangle and leaves nothing behind: the shell
@@ -1003,6 +1007,138 @@ function openDeployGuide(entry: GatewayEntry, release: ReleaseInfo | null, error
   void guideWindow.loadURL(url)
 }
 
+/**
+ * The tray's model menu is built from a snapshot the **page** publishes.
+ *
+ * The console process never holds the management secret - it is sealed by the page's
+ * transport (`headless.ts`) - so the tray cannot call `routes:menu` itself. It asks the
+ * page to refresh and renders whatever came back; a missing snapshot is shown as
+ * "reading…" rather than as "no routes", because those two are different failures.
+ */
+let routeMenuCache: RouteMenuResult | null = null
+
+/** 托盘右键时刷新一次；超过这个年龄的快照还会被标成「稍旧」。 */
+const ROUTE_MENU_STALE_MS = 20_000
+
+function routeMenuSnapshot(): RouteMenuResult | null {
+  return routeMenuCache
+}
+
+function sanitizeRouteMenu(raw: unknown): RouteMenuResult | null {
+  if (raw === null || typeof raw !== 'object') return null
+  const record = raw as { routes?: unknown; generatedAt?: unknown; error?: unknown }
+  if (!Array.isArray(record.routes)) return null
+  return {
+    routes: record.routes.filter((entry): entry is RouteMenuEntry => {
+      if (entry === null || typeof entry !== 'object') return false
+      const candidate = entry as { route?: unknown; models?: unknown }
+      return typeof candidate.route === 'string' && Array.isArray(candidate.models)
+    }),
+    generatedAt: typeof record.generatedAt === 'number' ? record.generatedAt : Date.now(),
+    ...(typeof record.error === 'string' ? { error: record.error } : {}),
+  }
+}
+
+function requestRouteMenu(): void {
+  const target = window
+  if (target === null || target.isDestroyed()) return
+  target.webContents.send('shell:route-menu-request')
+}
+
+function trayRouteCommand(command: ShellRouteCommand): void {
+  const target = window
+  if (target === null || target.isDestroyed()) return
+  console.log(`[Shell] tray route command: ${command.action} ${command.route}${command.model === undefined ? '' : ` -> ${command.model}`}`)
+  target.webContents.send('shell:route-command', command)
+}
+
+function routeMenuModelLabel(model: RouteMenuEntry['models'][number]): string {
+  const parts = [model.displayName]
+  if (model.current) parts.push('当前')
+  if (model.pinned) parts.push('已固定')
+  parts.push(model.accountCount > 0 ? `${model.accountCount} 账号` : '无可用账号')
+  if (model.ewmaFirstTokenMs !== undefined) parts.push(`首字 ${Math.round(model.ewmaFirstTokenMs)}ms`)
+  if (model.costBucket === 'free') parts.push('免费')
+  if (model.circuitUntil !== undefined) {
+    parts.push(`熔断中 ${Math.max(1, Math.round((model.circuitUntil - Date.now()) / 60_000))}m`)
+  }
+  return parts.join(' · ')
+}
+
+function routeMenuSubmenu(entry: RouteMenuEntry): MenuItemConstructorOptions[] {
+  const current = entry.current === undefined
+    ? '当前：还没有服务过的模型'
+    : `当前：${entry.current.displayName}${
+        entry.current.firstTokenMs === undefined ? '' : ` · 首字 ${Math.round(entry.current.firstTokenMs)}ms`
+      }`
+  const pin = entry.pin === undefined
+    ? []
+    : [{
+        label: entry.pin.until === 0
+          ? `已固定：${entry.pin.displayName}（持久）`
+          : `已固定：${entry.pin.displayName}（${Math.max(1, Math.round((entry.pin.until - Date.now()) / 60_000))} 分钟后到期）`,
+        enabled: false,
+      } satisfies MenuItemConstructorOptions]
+  const models: MenuItemConstructorOptions[] = entry.models.map(model => ({
+    label: routeMenuModelLabel(model),
+    type: 'checkbox',
+    checked: model.pinned,
+    enabled: model.accountCount > 0,
+    click: () => trayRouteCommand({
+      action: 'switch',
+      route: entry.route,
+      model: model.displayName,
+      providerId: model.providerId,
+    }),
+  }))
+  return [
+    { label: current, enabled: false },
+    ...pin,
+    { type: 'separator' },
+    trayAction('换下一个', () => trayRouteCommand({ action: 'switch', route: entry.route })),
+    trayAction('恢复到自动排序', () => trayRouteCommand({ action: 'reset', route: entry.route })),
+    { type: 'separator' },
+    ...(models.length > 0
+      ? models
+      : [{ label: '这条路由当前没有可切换的模型', enabled: false } as MenuItemConstructorOptions]),
+    ...(entry.totalModels > entry.models.length
+      ? [{ label: `…另有 ${entry.totalModels - entry.models.length} 个模型在控制台`, enabled: false } as MenuItemConstructorOptions]
+      : []),
+    { type: 'separator' },
+    trayAction('在控制台管理路由…', () => {
+      window?.show()
+      window?.focus()
+      window?.webContents.send('shell:navigate', '/models')
+    }),
+  ]
+}
+
+function modelMenuItems(): MenuItemConstructorOptions[] {
+  const snapshot = routeMenuSnapshot()
+  if (snapshot === null) {
+    return [{ label: '读取模型列表…（打开控制台后可用）', enabled: false }]
+  }
+  if (snapshot.error !== undefined) {
+    return [{ label: `读取失败：${snapshot.error}`, enabled: false }]
+  }
+  const routes = snapshot.routes.filter(entry => entry.enabled)
+  if (routes.length === 0) {
+    return [{ label: '没有启用的路由', enabled: false }]
+  }
+  const stale = Date.now() - snapshot.generatedAt > ROUTE_MENU_STALE_MS
+  return [
+    ...(stale ? [{ label: '数据稍旧，正在刷新…', enabled: false } as MenuItemConstructorOptions] : []),
+    ...routes.slice(0, 12).map(entry => ({
+      label: entry.pin !== undefined
+        ? `${entry.pin.displayName}（${entry.route} · 已固定）`
+        : entry.current !== undefined
+          ? `${entry.current.displayName}（${entry.route}）`
+          : `${entry.route}（未服务过）`,
+      submenu: routeMenuSubmenu(entry),
+    } satisfies MenuItemConstructorOptions)),
+  ]
+}
+
 function buildTrayMenu(): void {
   if (!tray) return
   const book = readBook()
@@ -1074,6 +1210,7 @@ function buildTrayMenu(): void {
   ]
 
   const items: MenuItemConstructorOptions[] = [
+    { label: '模型', submenu: modelMenuItems() },
     { label: '网关', submenu: gatewayMenu },
     trayAction('检查更新（控制台 + 可管理的网关）…', () => void checkForUpdatesFromTray()),
     { type: 'separator' },
@@ -1083,6 +1220,13 @@ function buildTrayMenu(): void {
     }),
   ]
   tray.setContextMenu(Menu.buildFromTemplate(items))
+  // 提示行回答「现在跑的是谁」—— 托盘图标本身没有文字，用户不该为了看一眼模型名
+  // 去点开菜单。没有任何快照时保留默认文案。
+  const primary = routeMenuCache?.routes.find(entry => entry.enabled)
+  const running = primary?.pin?.displayName ?? primary?.current?.displayName
+  tray.setToolTip(primary === undefined || running === undefined
+    ? 'ModelPort 控制台'
+    : `ModelPort · ${primary.route} · ${running}`)
 }
 
 function createTray(): void {
@@ -1090,6 +1234,9 @@ function createTray(): void {
   tray = new Tray(image.isEmpty() ? nativeImage.createEmpty() : image.resize({ width: 16, height: 16 }))
   tray.setToolTip('ModelPort 控制台')
   buildTrayMenu()
+  // 菜单是 `setContextMenu` 挂上去的，打开不会经过我们；先在按下时请页面刷新一次，
+  // 下一次打开就是新快照（首屏已经拿到的那份照常立刻可用）。
+  tray.on('right-click', () => requestRouteMenu())
   tray.on('double-click', () => {
     window?.show()
     window?.focus()
@@ -1153,6 +1300,16 @@ const secretSealer: SecretSealer = {
 ipcMain.handle('shell:secret-get', (_event, origin: unknown) => {
   if (typeof origin !== 'string' || origin === '') return { status: 'none' }
   return getSecret(secretsPath(), secretSealer, origin)
+})
+
+// 托盘模型菜单：只接受主窗口自己发的快照（`send` 是单向的，来源判定与 `handle`
+// 同一口径）。形状不合就丢弃 —— 这份数据只用于画菜单，坏数据不该让托盘崩掉。
+ipcMain.on('shell:route-menu', (event, payload: unknown) => {
+  if (window === null || event.sender !== window.webContents) return
+  const snapshot = sanitizeRouteMenu(payload)
+  if (snapshot === null) return
+  routeMenuCache = snapshot
+  buildTrayMenu()
 })
 
 ipcMain.handle('shell:secret-set', (_event, origin: unknown, secret: unknown) => {

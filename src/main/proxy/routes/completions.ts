@@ -291,7 +291,7 @@ router.post('/completions', async (ctx: Context) => {
           isStream: request.stream || false,
         },
         // 换家预算随 decision 走（与 chat 路由同因）
-        { baseCap: autoDecision.baseCap }
+        { baseCap: autoDecision.baseCap, ...(autoDecision.wallClockBudgetMs === undefined ? {} : { wallClockBudgetMs: autoDecision.wallClockBudgetMs }) }
       )
 
       if (!outcome) {

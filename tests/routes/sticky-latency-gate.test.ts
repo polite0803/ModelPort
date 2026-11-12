@@ -99,6 +99,9 @@ const route = (() => {
     prefer: 'fast',
     maxAttempts: 3,
     stickyMinutes: 30,
+    // 门槛是「池内 p75」，要池里同时有四个模型的读数才成立；架构 A 的缺省范围
+    // `single` 会把池裁成一个模型（那时门槛退化成该模型自己的读数），所以显式要 `pool`。
+    modelScope: 'pool',
   })
   assert.equal(created.ok, true, JSON.stringify(created.error))
   return created.route as ModelRoute

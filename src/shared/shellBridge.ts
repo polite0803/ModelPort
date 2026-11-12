@@ -13,6 +13,31 @@
  */
 
 import type { GatewayListSnapshot } from './shellList'
+import type { RouteMenuResult } from './types'
+
+/**
+ * A tray click, on its way to the page that can actually perform it.
+ *
+ * The shell process never holds the management secret (it is sealed by the page's
+ * transport), so the tray cannot call `routes:switch` itself. It forwards an intent and
+ * the page answers with the RPC plus a fresh menu snapshot.
+ */
+export interface ShellRouteCommand {
+  /** `reset` = 恢复自动排序（清软钉 + 持久偏好）；`switch` = 换下一个 / 点名。 */
+  action: 'switch' | 'reset'
+  route: string
+  model?: string
+  providerId?: string
+}
+
+export interface ShellTrayRoutes {
+  /** The page publishes a menu snapshot after every read, switch and config change. */
+  publishRouteMenu?(result: RouteMenuResult): void
+  /** Shell → page: rebuild the snapshot (tray opening, or a switch just landed). */
+  onRouteMenuRequest?(callback: () => void): () => void
+  /** Shell → page: the user picked something in the tray's model submenu. */
+  onRouteCommand?(callback: (command: ShellRouteCommand) => void): () => void
+}
 
 export type ShellUpdateStage =
   | 'checking'
@@ -148,6 +173,13 @@ export interface ShellBridge {
   quit(): Promise<void>
 
   gateways?: ShellGatewayAdmin
+
+  /**
+   * Quick model switching from the tray. Optional for the same reason as `gateways`:
+   * a plain browser has no tray, and an installed console older than this feature has
+   * no such surface - the page must detect the absence rather than assume it.
+   */
+  routes?: ShellTrayRoutes
 
   /**
    * Navigates the console page. The main process sends this when a menu entry or the tray

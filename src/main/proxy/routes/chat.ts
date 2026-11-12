@@ -46,7 +46,7 @@ import { accountChannelManager } from '../../providers/accountChannels/manager'
 import { accountRuntime } from '../accountRuntime'
 import { storeManager } from '../../store/store'
 import { AUTO_PREFERENCES, type AutoPreference } from '../../../shared/types'
-import { isEmptyTurnAfterStream, isAnnouncedStopAfterStream, shouldRevokeStickyAfterStream } from '../streamOutcomePolicy'
+import { INCOMPLETE_STEP_CODE, isEmptyTurnAfterStream, isAnnouncedStopAfterStream, modelQualityDegradation, shouldRevokeStickyAfterStream } from '../streamOutcomePolicy'
 import { readRequestContextFit } from '../../../shared/requestContextFit.ts'
 import { DEFAULT_REPETITION_GUARD, measureStreamEmptyTurn, measureStreamRepetition } from '../../../shared/streamRepetition.ts'
 import { readOrEstimateUsage, usageInputText, type UsageReading } from '../quota/usage'
@@ -172,10 +172,42 @@ function autoLogRecord(
     // 流结束时同一格用来判「慢到该撤锚点」；`stickyGated` 说明这一轮硬粘性被跳过。
     ...(decision.latencyGateMs === undefined ? {} : { latencyGateMs: decision.latencyGateMs }),
     ...(decision.stickyGated === true ? { stickyGated: true as const } : {}),
+    // 架构 A：这一轮的作用域、选定的模型、软钉与熔断读数。没有这四格，日志里
+    // `chainLength` 从「池子大小」缩到「同模型账号数」会被读成池子塌了。
+    ...(decision.modelScope === undefined ? {} : { modelScope: decision.modelScope }),
+    ...(decision.model === undefined ? {} : { model: decision.model }),
+    ...(decision.pin === undefined ? {} : { pin: decision.pin }),
+    ...(decision.pinMiss === undefined ? {} : { pinMiss: decision.pinMiss }),
+    ...(decision.circuited === undefined || decision.circuited.length === 0
+      ? {}
+      : { circuited: decision.circuited }),
     ...(decision.degraded.length > 0 ? { degraded: decision.degraded } : {}),
     // 第一家就命中时数组为空 —— 空数组不写，日志里没成功的请求不会出现空字段。
     ...(failures.length > 0 ? { failures } : {}),
   }
+}
+
+/**
+ * `X-ModelPort-Model`：客户端对本轮模型的点名（架构 A 的客户端侧快速切换）。
+ *
+ * 值按展示名匹配（`provider/model` 那种名字整体算一个），非 ASCII 允许按
+ * `toHeaderValue` 的百分号编码传入。点名不中的结果不静默 —— 选路把 `pinMiss`
+ * 写进日志与 `X-ModelPort-Pin`。
+ */
+function autoModelFromHeader(ctx: Context): { displayName: string } | undefined {
+  const raw = ctx.headers['x-modelport-model']
+  const first = Array.isArray(raw) ? raw[0] : raw
+  if (typeof first !== 'string') return undefined
+  let value = first.trim()
+  if (value.length === 0) return undefined
+  if (value.includes('%')) {
+    try {
+      value = decodeURIComponent(value)
+    } catch {
+      // 保留原文：一个写坏的百分号不该把整轮请求判成错误。
+    }
+  }
+  return { displayName: value }
 }
 
 /**
@@ -556,7 +588,7 @@ router.post('/completions', async (ctx: Context) => {
   // 需要它，以及为什么这条链只有一份判断）。
   const clientSession = clientSessionKey({ body: request, headers: ctx.headers })
   const autoDecision = route !== undefined
-    ? autoRouter.select(request, config.loadBalanceStrategy, autoPreferenceFromHeader(ctx), route, clientSession)
+    ? autoRouter.select(request, config.loadBalanceStrategy, autoPreferenceFromHeader(ctx), route, clientSession, autoModelFromHeader(ctx))
     : null
 
   // 限流预检：worker 内部账号池的模型级限流（loomy spark-x2.6 当日额度用尽、
@@ -882,7 +914,12 @@ router.post('/completions', async (ctx: Context) => {
         // 换家预算随 decision 走：这条路由的 maxAttempts，而不是转发层自己去读
         // 全局 legacy `autoRouting.maxAttempts`。池语义（换下一家含下一个模型）由
         // `forwardAutoCompletion` 自己打开，调用方不再传栅栏。
-        { baseCap: autoDecision.baseCap }
+        {
+          baseCap: autoDecision.baseCap,
+          ...(autoDecision.wallClockBudgetMs === undefined
+            ? {}
+            : { wallClockBudgetMs: autoDecision.wallClockBudgetMs }),
+        }
       )
 
       if (!outcome) {
@@ -916,6 +953,14 @@ router.post('/completions', async (ctx: Context) => {
       const switched = autoSwitchOf(autoDecision, chosenCandidate)
       if (switched !== null) {
         ctx.set('X-ModelPort-Switch', toHeaderValue(`${switched.from} -> ${switched.to}`))
+      }
+      // 软钉的客户端可见形态：命中说明「这一轮是因你点名才跑的它」，失配说明
+      // 「点了但没生效」。失配静默是这类功能最坏的失败方式 —— 用户会以为切换坏了。
+      if (autoDecision.pinMiss !== undefined) {
+        ctx.set('X-ModelPort-Pin', toHeaderValue(`miss=${autoDecision.pinMiss}`))
+      } else if (autoDecision.pin !== undefined
+        && chosenCandidate.displayName === autoDecision.pin.displayName) {
+        ctx.set('X-ModelPort-Pin', toHeaderValue(`hit=${autoDecision.pin.displayName}`))
       }
     } else if (chainCandidates.length > 1) {
       const outcome = await requestForwarder.forwardChainCompletion(
@@ -1048,6 +1093,7 @@ router.post('/completions', async (ctx: Context) => {
             result.error,
             autoAttempts,
             finalRetryAfterSeconds,
+            autoDecision.modelScope === 'single' ? autoDecision.model : undefined,
           )
         : null
       const mapped = exhausted
@@ -1338,6 +1384,7 @@ router.post('/completions', async (ctx: Context) => {
         reason: RequestStreamTrace['endReason'],
         totalMs: number,
         degraded = false,
+        modelQuality = false,
       ): void => {
         if (streamOutcomeReported) return
         streamOutcomeReported = true
@@ -1346,6 +1393,7 @@ router.post('/completions', async (ctx: Context) => {
           totalMs,
           endReason: reason,
           degraded,
+          modelQuality,
         })
       }
 
@@ -1378,7 +1426,20 @@ router.post('/completions', async (ctx: Context) => {
        * 把会话钉住 —— 2026-11-03 的重复退化会话与 2026-11-06 qodercn 的三连
        * 停摆都是这个形状。
        */
-      const settleSticky = (trace: RequestStreamTrace, truncated: boolean): void => {
+      const settleSticky = (
+        trace: RequestStreamTrace,
+        truncated: boolean,
+        errorCode?: string | null,
+      ): void => {
+        if (!autoDecision || !chosenCandidate) return
+        // 架构 A：内容级退化（重复/空转/宣布即停/只说话不做事/合成不完整）落成
+        // 一张**模型级**熔断票。这是「回合之间换模型」的唯一通路 —— 一轮之内不换
+        // 模型，所以「这家干不了活」必须在回合边界变成「下一轮从别家开始」。账号级
+        // AIMD 管的是账号能不能接，两者不合并（同模型三家账号全限流不代表模型该换）。
+        const quality = modelQualityDegradation(trace, autoAttempts > 1, errorCode)
+        if (quality !== undefined) {
+          autoRouter.tripModelCircuit(autoDecision.routeName, chosenCandidate.displayName, quality)
+        }
         // 第六类（第 2 条）：这一轮首字慢于池内 p75。门槛是选路阶段算好的同一格，
         // 与硬粘性「要不要提前」同源；读数缺失（非流式/首块没打点）时不判。
         // 第七类：这一轮是换家换来的，替补给了一句正文就收尾 —— 不钉在替补上。
@@ -1386,10 +1447,9 @@ router.post('/completions', async (ctx: Context) => {
         if (!shouldRevokeStickyAfterStream(
           trace,
           truncated,
-          autoDecision?.latencyGateMs,
+          autoDecision.latencyGateMs,
           autoAttempts > 1,
         )) return
-        if (!autoDecision || !chosenCandidate) return
         autoRouter.revokeSticky(autoDecision.conversationKey, autoDecision.route)
       }
 
@@ -1515,13 +1575,18 @@ router.post('/completions', async (ctx: Context) => {
           const trace = streamTraceOf(endReason, elapsed)
           // 客户端没给上限、上游却按自己的默认值截断：这一轮末尾是断的，锚点必须撤。
           const truncated = outcome.finishReason === 'length' && requestedMaxTokens === undefined
-          settleSticky(trace, truncated)
+          // 渠道包合成的 incomplete（工具批被丢/连接被掐断…）走错误帧，码在这里读。
+          // 它是模型级缺陷：上熔断票，但不按账号拥塞失败降 AIMD。
+          const errorCode = streamError && typeof streamError.code === 'string' ? streamError.code : undefined
+          const modelQuality = errorCode === INCOMPLETE_STEP_CODE
+          settleSticky(trace, truncated, errorCode)
           reportStreamOutcome(
             endReason,
             elapsed,
             truncated
             || isEmptyTurnAfterStream(trace)
             || isAnnouncedStopAfterStream(trace),
+            modelQuality,
           )
           // One reading feeds both the log row and the ledger; a second read of
           // the collected stream is how the two figures drift apart.

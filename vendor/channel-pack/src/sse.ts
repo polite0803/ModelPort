@@ -131,6 +131,30 @@ export function resolveEmptyResponseReason(reason: FinishReason, blockCount: num
 }
 
 /**
+ * 合成 `max-tokens` 的成因标签 —— 它与「上游真报了输出上限」的分界。
+ *
+ * DSH 把 `max-tokens` 当「不完整、可重试」的通用信号，七种与上限无关的条件都折进
+ * 它，harness 收到后重跑该步，所以折叠在 DSH 里成立。**ModelPort 没有 harness**
+ * （`channelPack/worker.ts` 只投影一次）：`max-tokens` → `finish_reason:length` →
+ * Responses `incomplete/max_output_tokens` → Codex 就地结束回合，报一句与事实无关
+ * 的「输出 token 上限」。故投影层要能分辨：带标签的走错误帧，不带标签的保持 length。
+ */
+export type IncompleteStepCause =
+  | 'reasoning-loop'
+  | 'incomplete-tools'
+  | 'stream-cut'
+  | 'tool-args-truncated'
+  | 'tool-args-empty'
+  | 'prose-cut-by-stop-string'
+  | 'tool-call-unnamed'
+
+export function incompleteStep(
+  cause: IncompleteStepCause,
+): { kind: 'max-tokens'; incompleteCause: IncompleteStepCause } {
+  return { kind: 'max-tokens', incompleteCause: cause }
+}
+
+/**
  * 行首空白思考（`trim()` 为空）的累积器。
  *
  * 为什么需要它：模型偶发只输出一个空格当思考（实测 2232 次，

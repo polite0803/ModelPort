@@ -55,6 +55,40 @@ export function shouldRevokeStickyAfterStream(
 }
 
 /**
+ * 渠道包合成的「本步不完整」错误码（`openai-gateway/stream.ts` 的投影出口）。
+ *
+ * 七种与输出上限无关的条件（工具参数残缺、无名调用被丢、连接被掐断…）此前一律
+ * 折成 `finish_reason:'length'`，客户端读到 `incomplete/max_output_tokens` 就
+ * 就地结束回合。现在它们带成因走错误帧，码就是这个 —— 它是**模型级**缺陷，
+ * 不是账号容量故障，也不是上游输出上限。
+ */
+export const INCOMPLETE_STEP_CODE = 'incomplete_step'
+
+/**
+ * 模型级退化判据 —— 架构 A 的熔断票来源（2026-11-13）。
+ *
+ * 只有「这个模型自己没把活干完」的五类算在内：内容重复、空转、宣布即停、只说话
+ * 不做事、合成不完整。截断（第五类）是上游输出上限、慢首字（第六类）是排队，
+ * 两者都可能只发生在这一次，换掉模型并不比留在原地更正确 —— 它们只撤锚点，
+ * 不上熔断票。
+ *
+ * 返回原因就是为了让日志能回答「这个模型为什么被跳过」，而不是只留一个布尔值。
+ */
+export function modelQualityDegradation(
+  trace: Pick<RequestStreamTrace, 'endReason' | 'repetition' | 'emptyTurn'>,
+  servedByFallback = false,
+  /** 流内错误帧的 `code`（直通路径扫出来的那一个）。 */
+  errorCode?: string | null,
+): 'repetition' | 'empty-turn' | 'announced-stop' | 'prose-only-stop' | 'incomplete-step' | undefined {
+  if (errorCode === INCOMPLETE_STEP_CODE) return 'incomplete-step'
+  if (trace.repetition?.degraded === true) return 'repetition'
+  if (isEmptyTurnAfterStream(trace)) return 'empty-turn'
+  if (isAnnouncedStopAfterStream(trace)) return 'announced-stop'
+  if (servedByFallback && isProseOnlyStopAfterStream(trace)) return 'prose-only-stop'
+  return undefined
+}
+
+/**
  * 第七类（2026-11-13 现网 `chatcmpl-mwdt3j2s-d8em3q`）：**换家之后替补只说话、不做事**。
  *
  * 那一轮形状：粘性把会话放在 `minimax/MiniMax-M3.1-Flash`，它在 20s 首块切片内

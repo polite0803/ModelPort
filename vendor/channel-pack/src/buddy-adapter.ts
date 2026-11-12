@@ -40,7 +40,7 @@ import { CODEBUDDY, resolveUserAgent, type BuddyFallbackModel, type BuddyProduct
 import { codebuddyClientVersion, workbuddyClientVersion } from './client-identity.js'
 import { normalizeHarnessMessages } from './message-shape.js'
 import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
-import { createBlankReasoningSuppressor, createReasoningLoopDetector, hasUsableToolName, isProseTruncatedByStopString, isReasoningLoopGuardEnabled, isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, reasoningLoopFailure, resolveEmptyResponseReason, resolveToolPairing, splitThinkTaggedContent, stripBareThinkCloseTagIfEnabled, stripCourseLeakFromHistoryContent, stripCourseLeakIfEnabled } from './sse.js'
+import { createBlankReasoningSuppressor, createReasoningLoopDetector, hasUsableToolName, incompleteStep, isProseTruncatedByStopString, isReasoningLoopGuardEnabled, isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, reasoningLoopFailure, resolveEmptyResponseReason, resolveToolPairing, splitThinkTaggedContent, stripBareThinkCloseTagIfEnabled, stripCourseLeakFromHistoryContent, stripCourseLeakIfEnabled } from './sse.js'
 import {
   registerAdapterIdempotent,
 } from './llm-register-compat.js'
@@ -2371,13 +2371,17 @@ export class BuddyAdapter extends LlmAdapter {
         ) }
       // 循环命中但另有可见产出：只能报 max-tokens（保住内容），不能报 error。
       : loopDetected
-        ? { kind: 'max-tokens' as const }
+        ? incompleteStep('reasoning-loop')
       : finishReason === 'length'
-        || finishReason === undefined && toolOrder.length > 0
-        || argsTruncated
-        || proseCutByStopString
-        || droppedUnnamedCalls && toolOrder.length === 0
         ? { kind: 'max-tokens' as const }
+      : finishReason === undefined && toolOrder.length > 0
+        ? incompleteStep('incomplete-tools')
+      : argsTruncated
+        ? incompleteStep('tool-args-truncated')
+      : proseCutByStopString
+        ? incompleteStep('prose-cut-by-stop-string')
+      : droppedUnnamedCalls && toolOrder.length === 0
+        ? incompleteStep('tool-call-unnamed')
         : finishReason === 'tool_calls' || toolOrder.length > 0
           ? { kind: 'tool-calls' as const }
           : { kind: 'stop' as const }

@@ -203,6 +203,13 @@ export interface RoutePreviewModel {
   unavailableReason?: 'vision' | 'tools' | 'reasoning' | 'context'
   capability: ModelCapability
   costBucket?: CostBucket
+  /**
+   * 该模型各账号短窗口 EWMA 首字延迟里的最小值（只读展示）。
+   *
+   * 菜单里「这个模型现在快不快」与选路打分读的是同一个读数，不另算一份 ——
+   * 两处各算一次，展示与行为迟早会不一致。没有读数时不写（不写 `0`）。
+   */
+  ewmaFirstTokenMs?: number
   costClass?: AggregateCostClass
   /**
    * 渠道目录报的消耗权重（倍率，`1` 为基准价）。
@@ -439,6 +446,112 @@ export interface ModelRoute {
    * a hand-broken config can never reintroduce a model the user removed.
    */
   excludeModels: RouteModelRef[]
+  /**
+   * 一条路由在**一轮请求内**允许跨几个模型换家。
+   *
+   * - `single`（缺省）：本轮只服务一个模型，失败只在这个模型的多个账号之间换家；
+   * - `family`：允许同 `modelFamilyKey` 的模型（同名不同供应商，同一份实现）；
+   * - `pool`：2026-11-12 的整池跨模型换家，保留为显式回退，不再是默认。
+   *
+   * 为什么缺省是 `single`（2026-11-13 拍板）：跨模型换家把「首选 20s 切片 +
+   * 替补 29s 首字」叠成近一分钟，并且替补与首选契约不同（工具调用形态、思考
+   * 历史、输出上限、会话亲和头）—— 用户读到的就是「路由又慢又莫名出错」。
+   * 模型仍然可以换，但只发生在**回合之间**：本轮诚实失败，下一轮重新选路。
+   */
+  modelScope?: ModelScope
+  /**
+   * 用户的显式偏好：这条路由优先用这个模型（软钉，不改变候选池）。
+   *
+   * 与 `pinModels`（只允许集合）是两件事：那个是**允许**，这个是**优先**。
+   * 命中即提到队首并取代粘性；该模型没有可用账号时**不静默**，日志与响应头
+   * 写明 `pinMiss`，然后照常排序 —— 静默回退正是「不可预知」的来源。
+   */
+  preferredModel?: RouteModelRef
+}
+
+/** 一轮请求内的模型换家范围（见 `ModelRoute.modelScope`）。 */
+export type ModelScope = 'single' | 'family' | 'pool'
+
+/** `ModelScope` 的声明顺序：界面按它列选项，`normalize` 按它收值。 */
+export const MODEL_SCOPES: readonly ModelScope[] = ['single', 'family', 'pool']
+
+/** 一次显式切换的发起者；只用于日志与界面口径，不参与判定。 */
+export type ModelPinSource = 'console' | 'tray' | 'header'
+
+/** 软钉的作用域：本路由（所有会话）或本会话。 */
+export type ModelPinScope = 'route' | 'session'
+
+/** 管理面/托盘共享的「当前模型」读数（服务者，不是配置意图）。 */
+export interface RouteMenuCurrent {
+  providerId: string
+  providerName: string
+  displayName: string
+  /** 真实首字耗时；代理重启后第一轮没有读数。 */
+  firstTokenMs?: number
+  /** 这一轮是什么时候结束的（毫秒时间戳）。 */
+  at: number
+}
+
+export interface RouteMenuModel {
+  providerId: string
+  providerName: string
+  displayName: string
+  /** 当前可派发的账号数（已扣冷却）。 */
+  accountCount: number
+  /** 该模型各账号 EWMA 首字里的最小值；没有读数时不写。 */
+  ewmaFirstTokenMs?: number
+  costBucket?: CostBucket
+  /** 熔断中的模型：这段时间内不会被选作队首。 */
+  circuitUntil?: number
+  /** 这条路由目前实际在服务的模型。 */
+  current: boolean
+  /** 被 `preferredModel` 或一次显式切换钉住的模型。 */
+  pinned: boolean
+}
+
+/** 一条路由的托盘/界面菜单快照。 */
+export interface RouteMenuEntry {
+  route: string
+  enabled: boolean
+  modelScope: ModelScope
+  current?: RouteMenuCurrent
+  pin?: {
+    displayName: string
+    scope: ModelPinScope
+    until: number
+    source: ModelPinSource
+  }
+  models: RouteMenuModel[]
+  /** 池内模型总数；`models` 只列前面几个。 */
+  totalModels: number
+}
+
+export interface RouteMenuResult {
+  routes: RouteMenuEntry[]
+  generatedAt: number
+  /** 读取失败（存储没起来/网关未连接）时的一句可读原因；`routes` 此时为空。 */
+  error?: string
+}
+
+/** 一次切换请求。`model` 缺省 = 「换下一个」：取当前模型在菜单顺序里的下一项。 */
+export interface RouteSwitchRequest {
+  route: string
+  model?: string
+  providerId?: string
+  scope?: ModelPinScope
+  minutes?: number
+  /** 谁发起的：托盘 / 控制台。只用于菜单与日志回显。 */
+  source?: ModelPinSource
+}
+
+export interface RouteSwitchResult {
+  ok: boolean
+  route: string
+  model?: string
+  /** 失败原因，可直接展示。 */
+  reason?: string
+  /** 切换后新的菜单快照，省一次往返。 */
+  menu?: RouteMenuEntry
 }
 
 /** How two adjacent pool strategies combine: intersect (`and`) or union (`or`). */
@@ -1423,6 +1536,28 @@ export interface RequestLogEntry {
     latencyGateMs?: number
     /** 这一轮硬粘性因上面那个门槛被跳过：上一轮的模型慢于池内 p75，没提到队首。 */
     stickyGated?: true
+    /**
+     * 这一轮生效的换家范围（`single` / `family` / `pool`）。与 `chainLength` 一起读：
+     * `single` 下 `chainLength` 是同模型账号数，不再是池子大小 —— 没有这一格，
+     * 旧读数会被误读成「池子塌了」。
+     */
+    modelScope?: ModelScope
+    /** 这一轮实际选定的模型（队首候选）。`candidates[0]` 也是它，这里单独写便于检索。 */
+    model?: string
+    /** 显式切换（软钉）在本轮生效：谁按的、作用域、到期时间。没有切换时整格不出现。 */
+    pin?: {
+      displayName: string
+      scope: ModelPinScope
+      source: ModelPinSource
+      until: number
+    }
+    /**
+     * 钉子没命中（模型没有可派账号/被筛掉）：**不静默回退**，写明差的是哪个。
+     * 与 `pin` 互斥 —— 同一轮要么钉住，要么报未命中。
+     */
+    pinMiss?: string
+    /** 本轮因模型级熔断被排到队尾的模型（`provider/model`），写入时截尾。 */
+    circuited?: string[]
     /**
      * Why each skipped candidate was skipped, in attempt order. The chain logs the
      * winner only, so without this a candidate that fails every time (a dead

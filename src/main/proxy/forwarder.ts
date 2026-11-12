@@ -96,6 +96,14 @@ export interface FailoverBudget {
    * 有问题，继续换只是把同一次拒绝重演。
    */
   switchOnRejectedRequest?: boolean
+  /**
+   * 整条链的墙钟预算；缺省 {@link AUTO_WALL_CLOCK_BUDGET_MS}（90s）。
+   *
+   * 单模型作用域（`ModelRoute.modelScope: 'single'`）由 `select()` 传 40s：链里只剩
+   * 同一模型的账号，等不到新模型上台（换模型只发生在回合之间），长预算只会让客户端
+   * 多挂几十秒才发现「这家现在接不了」。
+   */
+  wallClockBudgetMs?: number
 }
 import { attemptTraceOf } from './attemptTrace.ts'
 import { accountRuntime } from './accountRuntime'
@@ -781,6 +789,9 @@ export class RequestForwarder {
     // 账号故障类的尝试上限：由调用方随本次决策传入（auto 走命中的那条路由，
     // 无路由的裸名链走出厂默认），见 forwardAutoCompletion 的注释。
     const baseCap = budget.baseCap
+    // 墙钟预算也随本次决策走：单模型作用域更短（`AutoRouteDecision.wallClockBudgetMs`），
+    // 裸名链/池作用域仍是出厂 90s。
+    const budgetMs = budget.wallClockBudgetMs ?? AUTO_WALL_CLOCK_BUDGET_MS
     // 池内换家：候选顺序由 `autoRouter.select` 排好（同名账号相邻、首模型家族紧随），
     // 循环本身只有一个条件 —— 还有预算就发下一发。没有任何模型栅栏。
     //
@@ -802,7 +813,7 @@ export class RequestForwarder {
 
     for (const candidate of candidates) {
       const budgetElapsedMs = Date.now() - budgetStart
-      const remainingBudgetMs = AUTO_WALL_CLOCK_BUDGET_MS - budgetElapsedMs
+      const remainingBudgetMs = budgetMs - budgetElapsedMs
       // 分级尝试上限 + 墙钟预算（分级判据本体与测试在 failover.ts）。
       // `extendedCap` 现在就是整条候选链的长度：选号阶段不再裁家数，所以可恢复类
       // 失败实际由墙钟预算收口，账号故障类由 `baseCap` 收口。
@@ -812,7 +823,7 @@ export class RequestForwarder {
         baseCap,
         extendedCap: candidates.length,
         elapsedMs: budgetElapsedMs,
-        budgetMs: AUTO_WALL_CLOCK_BUDGET_MS,
+        budgetMs,
       })) {
         break
       }
@@ -828,7 +839,7 @@ export class RequestForwarder {
       const attemptDeadlineMs = planAttemptDeadline({
         completeMs: requestDeadlines().completeMs,
         elapsedMs: budgetElapsedMs,
-        budgetMs: AUTO_WALL_CLOCK_BUDGET_MS,
+        budgetMs,
         // 首轮切片压低：一发慢首块不该吃掉 90s 预算的 2/3，让后面几家连一次
         // 像样的等待都分不到（见 `FIRST_ATTEMPT_CAP_MS` 的实测依据）。
         ...(attempts === 0 ? { capMs: FIRST_ATTEMPT_CAP_MS } : {}),
@@ -1003,7 +1014,7 @@ export class RequestForwarder {
       const waitMs = planRecoveryWaitMs({
         retryAfterSeconds: parseRetryAfterSeconds(last.result.retryAfter),
         elapsedMs: Date.now() - budgetStart,
-        budgetMs: AUTO_WALL_CLOCK_BUDGET_MS,
+        budgetMs,
       })
       if (waitMs !== undefined) {
         await sleep(waitMs)

@@ -21,12 +21,21 @@ import type {
   AutoPreference,
   ModelCapability,
   ModelCapabilityHint,
+  ModelPinScope,
+  ModelPinSource,
   ModelRoute,
+  ModelScope,
+  RouteMenuCurrent,
+  RouteMenuEntry,
+  RouteMenuModel,
+  RouteMenuResult,
   RouteModelRef,
   RoutePreviewModel,
   RoutePreviewResult,
   RoutePreviewSample,
   RoutePreviewStatus,
+  RouteSwitchRequest,
+  RouteSwitchResult,
 } from '../../shared/types'
 import { DEFAULT_FAIRNESS_LEAD } from '../../shared/types'
 import type { ChatCompletionRequest } from './types'
@@ -88,6 +97,19 @@ const AUTO_MAX_ATTEMPTS = 3
 
 /** 会话粘性表容量上限，超出后按插入顺序淘汰最旧的条目 */
 const STICKY_CAPACITY = 500
+
+/**
+ * 单模型作用域（`modelScope: 'single'`）的换家墙钟预算。
+ *
+ * 90s 的池预算在单模型下没有意义：链只剩同一模型的几个账号，一旦它们都失败，
+ * 继续等只会让客户端多挂几十秒才发现「这家现在不行」。40s 够覆盖两次首轮切片
+ * （每次 20s），把「这个模型现在接不了」尽快交回给客户端 —— 下一轮由熔断/软钉
+ * 换模型，而不是在这一轮里把墙钟耗完。
+ */
+export const AUTO_SINGLE_SCOPE_BUDGET_MS = 40_000
+
+/** 菜单里最多列几个候选模型：托盘子菜单再长就滚不动了。 */
+export const ROUTE_MENU_MODELS_DEFAULT = 8
 
 /**
  * Whether this candidate's upstream has a documented cache behaviour.
@@ -193,6 +215,26 @@ export interface AutoRouteDecision {
    * 与 `reason` 分开写 —— `reason: 'score'` 说明不了「本来是粘性命中」。
    */
   stickyGated?: true
+  /**
+   * 本轮生效的换家范围。`single` 下 `candidates` 只剩同一模型的账号 —— 日志里
+   * `chainLength` 从「池子大小」变成「同模型账号数」，没有这一格会被误读成池子塌了。
+   */
+  modelScope?: ModelScope
+  /** 本轮实际选定的模型（队首候选），与 `candidates[0].displayName` 同值，便于检索。 */
+  model?: string
+  /** 生效中的软钉：谁、按什么作用域、什么时候到期。 */
+  pin?: {
+    displayName: string
+    scope: ModelPinScope
+    source: ModelPinSource
+    until: number
+  }
+  /** 钉子没命中（模型没有可派账号/被筛掉）：不静默回退，写明差的是哪个。 */
+  pinMiss?: string
+  /** 本轮被模型级熔断排到队尾的模型。 */
+  circuited?: string[]
+  /** 本条路由的换家墙钟预算；缺省用 `AUTO_WALL_CLOCK_BUDGET_MS`。 */
+  wallClockBudgetMs?: number
 }
 
 // 预览的 DTO 定义在 shared/types.ts：渲染进程要用同一份形状，而 renderer 不能
@@ -294,6 +336,56 @@ function promoteSticky<
   const sameModel = matches.filter(candidate => candidate.accountId !== sticky.accountId)
   const others = ranked.filter(candidate => !matches.includes(candidate))
   return [...exact, ...sameModel, ...others]
+}
+
+/**
+ * 软钉提升：把被钉住的模型提到队首（同模型不限账号，具体账号仍由打分决定）。
+ *
+ * 与 `promoteSticky` 的差别只在意图来源：粘性是「上一轮成功过」，软钉是
+ * 「用户/客户端这一轮点名要它」。后者优先于前者 —— 用户意图高于历史惯性。
+ */
+function promotePinned<
+  T extends { providerId: string; displayName: string },
+>(ranked: readonly T[], target: { providerId?: string; displayName: string }): { list: T[]; hit: boolean } {
+  const matches = ranked.filter(candidate =>
+    candidate.displayName === target.displayName
+    && (target.providerId === undefined || candidate.providerId === target.providerId)
+  )
+  if (matches.length === 0) return { list: [...ranked], hit: false }
+  return { list: [...matches, ...ranked.filter(candidate => !matches.includes(candidate))], hit: true }
+}
+
+/** 软钉默认存活 30 分钟：一个 agent 回合通常在这个窗口内结束，忘了解除也不会永久。 */
+export const DEFAULT_PIN_MINUTES = 30
+
+/** 模型级熔断默认 5 分钟：够跨过一阵额度/上游抖动，又不至于把还能用的模型锁太久。 */
+export const MODEL_CIRCUIT_MINUTES = 5
+
+/** 一次显式选择（路由级或会话级）。全部在内存里：重启即清，不落盘。 */
+export interface ModelPin {
+  route: string
+  displayName: string
+  providerId?: string
+  scope: ModelPinScope
+  sessionKey?: string
+  until: number
+  source: ModelPinSource
+}
+
+/** 一次模型级熔断：某个 (路由, 模型) 在这一轮之前反复退化或被上游拒绝。 */
+export interface ModelCircuitEntry {
+  route: string
+  displayName: string
+  until: number
+  reason: string
+}
+
+function pinMapKey(routeName: string, scope: ModelPinScope, sessionKey?: string): string {
+  return `${routeName}|${scope}|${scope === 'session' ? sessionKey ?? '' : '*'}`
+}
+
+function circuitMapKey(routeName: string, displayName: string): string {
+  return `${routeName}|${displayName.trim().toLowerCase()}`
 }
 
 /**
@@ -399,6 +491,41 @@ class AutoRouter {
    * this map.
    */
   private cacheAffinity = new Map<string, StickyRoute>()
+
+  /**
+   * 软钉：用户/客户端这一轮点名要的模型，按 (路由, 作用域) 存。
+   *
+   * 三条边界都在这一格里：
+   * - **只影响回合之间**。一轮请求选定模型后，换家只在同模型内换账号；软钉改变的
+   *   是「下一轮从谁开始」，不是「这一轮途中换谁」。
+   * - **优先于粘性**。用户意图高于历史惯性；粘性子句仍然负责「同一模型内选哪个账号」。
+   * - **失配不静默**。钉住的模型不在池里时照样按原池服务，但 `pinMiss` 会落进日志、
+   *   响应头（`X-ModelPort-Pin: miss=...`），菜单里也能看到这颗钉子没生效。
+   *
+   * 过期时间在写入时烘焙（与 `sticky` 同一口径的陈旧态边界），`sweepPins` 负责清。
+   */
+  private modelPins = new Map<string, ModelPin>()
+
+  /**
+   * 模型级熔断：`(路由, 模型)` -> 解禁时间。
+   *
+   * 这是「回合之间换模型」的**唯一通路** —— 泳道栅栏退役后，跨模型换家只能发生在
+   * 回合边界，而退化读数（重复/空转/只说不做/被上游拒绝）必须先落成一张模型级的票，
+   * 下一轮才会从别的模型开始。账号级 AIMD 管的是「这个账号此刻能不能接」，两者不合并：
+   * 同一个模型的三家账号全被限流，不代表这个模型本身该被换掉。
+   *
+   * 全部候选都在熔断里时不熔断（`select` 里判）：没有落脚点的「跳过」等于把这一轮
+   * 变成空池，比多试一次更糟。
+   */
+  private modelCircuit = new Map<string, ModelCircuitEntry>()
+
+  /**
+   * 每条路由上一轮实际服务的模型/账号。
+   *
+   * 只用于菜单的「当前」一格与托盘提示：粘性表以会话为键，回答不了「这条路由
+   * 现在在跑谁」；而托盘的整个价值就是让用户一眼看到这一点。
+   */
+  private lastServed = new Map<string, RouteMenuCurrent>()
 
   /**
    * `/v1/models` 的 `context_window`：**这条路由自己的候选池**里最小的那个窗口。
@@ -695,7 +822,12 @@ class AutoRouter {
      * 粘性键 —— agent 客户端自动摘要会改写首条用户消息，内容指纹随之改变，于是同一段
      * 会话中途被派到别家（`conversationKey` 的口径见 `autoRouting.ts`）。
      */
-    sessionKey?: ClientSessionKey
+    sessionKey?: ClientSessionKey,
+    /**
+     * 客户端本轮点名的模型（`X-ModelPort-Model`）。给定时写成**会话级**软钉再照常
+     * 选路 —— 会话键只有这一处算得出来，调用方各自拼一份就会两个键对不上。
+     */
+    headerModel?: { displayName: string },
   ): AutoRouteDecision {
     const profile = profileRequest(request)
     const now = Date.now()
@@ -817,12 +949,97 @@ class AutoRouter {
     // 第 2 条（2026-11-12）：硬粘性也不是无条件的 —— 被提前的那个候选慢于池内
     // 首字延迟 p75 时不让位，退回同一套加分语义。判据与流结束撤销锚点共用
     // `latencyGateMs` 这一格，避免「选路觉得它慢、收尾觉得它不慢」两头不一致。
-    const latencyGateMs = poolLatencyGateMs(ranked)
+    const modelScope: ModelScope = route?.modelScope ?? 'single'
+    // 客户端点名的模型先落成会话级软钉（同一段会话的后续轮次沿用）。会话键缺失时
+    // 退回路由级：没有会话标识就无法收窄作用域，而「按本轮这一下」没有第三种表达。
+    if (headerModel !== undefined && headerModel.displayName.trim().length > 0) {
+      this.setPin({
+        route: routeName,
+        displayName: headerModel.displayName,
+        scope: key === undefined ? 'route' : 'session',
+        ...(key === undefined ? {} : { sessionKey: key }),
+        source: 'header',
+      }, now)
+    }
+    const softPin = this.pinFor(routeName, key)
+    const pinRef: { providerId?: string; displayName: string } | undefined =
+      softPin !== undefined
+        ? {
+            ...(softPin.providerId === undefined ? {} : { providerId: softPin.providerId }),
+            displayName: softPin.displayName,
+          }
+        : route?.preferredModel
+    // 日志/菜单读的「生效中的选择」：一次点击的软钉优先，否则是持久偏好（`until: 0`
+    // 读作「一直」，与软钉的倒计时区分）。
+    const effectivePin: ModelPin | undefined = softPin ?? (pinRef === undefined
+      ? undefined
+      : {
+          route: routeName,
+          displayName: pinRef.displayName,
+          ...(pinRef.providerId === undefined ? {} : { providerId: pinRef.providerId }),
+          scope: 'route' as const,
+          until: 0,
+          source: 'console' as const,
+        })
+
+    // 延迟门在**作用域内**算：单模型路由里「池内 p75」就是它自己几个账号的 p75。
+    // 拿全池（几十个模型）的分布判它慢不慢，等于用一个它不参与的竞赛决定它该不该上台。
+    const gatePool = pinRef === undefined
+      ? modelScope === 'single' && ranked.length > 0
+        ? ranked.filter(input => input.displayName === ranked[0]!.displayName)
+        : ranked
+      : ranked.filter(input =>
+          input.displayName === pinRef.displayName
+          && (pinRef.providerId === undefined || input.providerId === pinRef.providerId)
+        )
+    const latencyGateMs = poolLatencyGateMs(gatePool.length > 0 ? gatePool : ranked)
     const stickyGated = route?.stickyHardPin !== false
       && stickyLatencyExceeded(ranked, sticky, latencyGateMs)
-    const ordered = route?.stickyHardPin === false || stickyGated
+    const stickyOrdered = route?.stickyHardPin === false || stickyGated
       ? ranked
       : promoteSticky(ranked, sticky)
+
+    // 软钉优先于粘性（用户意图高于历史惯性），失配不静默：钉住的模型不在池里时
+    // 按原排序服务，但 `pinMiss` 要进日志与响应头 —— 否则托盘显示的选择与实际
+    // 行为会长期不一致而无处可查。
+    const pinnedOrder = pinRef === undefined
+      ? { list: stickyOrdered, hit: false }
+      : promotePinned(stickyOrdered, pinRef)
+    const pinMiss = pinRef !== undefined && !pinnedOrder.hit ? pinRef.displayName : undefined
+
+    // 模型级熔断：退化过的模型排到队尾（不是删掉）。全池都在熔断时这张票不生效
+    // —— 没有落脚点的跳过等于把这一轮变成空池。
+    //
+    // 显式选择（软钉 / 持久 `preferredModel`）优先于熔断：用户点了某个模型，就按
+    // 那个模型跑 —— 熔断是「没人选时自动让位」，不是对用户选择的否决权。熔断中的
+    // 模型在菜单里带「熔断中」标记，用户看得见。
+    this.sweepCircuits(now)
+    const modelOrder: string[] = []
+    for (const input of pinnedOrder.list) {
+      if (!modelOrder.includes(input.displayName)) modelOrder.push(input.displayName)
+    }
+    const circuitHit = pinRef === undefined
+      ? modelOrder.filter(name => this.modelCircuitUntil(routeName, name, now) !== undefined)
+      : []
+    const circuited = circuitHit.length >= modelOrder.length ? [] : circuitHit
+    const circuitOrdered = circuited.length === 0
+      ? pinnedOrder.list
+      : [
+          ...pinnedOrder.list.filter(input => !circuited.includes(input.displayName)),
+          ...pinnedOrder.list.filter(input => circuited.includes(input.displayName)),
+        ]
+
+    // 作用域裁剪（架构 A，2026-11-13）：一轮只用**一个模型**（`single`，默认），或
+    // 一个跨供应商同名家族（`family`），或保留全池换家（`pool`）。裁剪发生在软钉与
+    // 熔断之后，所以「用户点名 / 上一轮退化」都能把队首换掉；裁剪之后，这一轮里
+    // 换家只换账号 —— 中途换模型正是「客户端莫名其妙崩掉」的主要来源。
+    const scoped = (() => {
+      if (modelScope === 'pool' || circuitOrdered.length === 0) return circuitOrdered
+      const head = circuitOrdered[0]!.displayName
+      if (modelScope === 'single') return circuitOrdered.filter(input => input.displayName === head)
+      const family = modelFamilyKey(head)
+      return circuitOrdered.filter(input => modelFamilyKey(input.displayName) === family)
+    })()
 
     // 池内顺序（2026-11-12 策略改：池，不是泳道）。
     //
@@ -834,13 +1051,13 @@ class AutoRouter {
     // 跨供应商同名优先（同一份实现，行为漂移最小），异名其次 —— 直到有候选答上来
     // 或墙钟预算耗尽。原先「默认停在队首模型」的开关与对应的日志字段已随那道栅栏
     // 一起退役（用户实测：客户端一上来就中断）。
-    const headModel = ordered[0]?.displayName
-    const headTail = ordered.filter(input => input.displayName !== headModel)
+    const headModel = scoped[0]?.displayName
+    const headTail = scoped.filter(input => input.displayName !== headModel)
     const familyKey = headModel === undefined ? undefined : modelFamilyKey(headModel)
     const sequenced = headModel === undefined
-      ? ordered
+      ? scoped
       : [
-          ...ordered.filter(input => input.displayName === headModel),
+          ...scoped.filter(input => input.displayName === headModel),
           ...headTail.filter(input => modelFamilyKey(input.displayName) === familyKey),
           ...headTail.filter(input => modelFamilyKey(input.displayName) !== familyKey),
         ]
@@ -863,7 +1080,7 @@ class AutoRouter {
     const cacheAffinityHit = cacheHint !== undefined && stickyHit
 
     // 服务候选自己的能力描述只算一次：下面两个读数同源，不许各折一遍。
-    const servedCapability = ordered.length === 0 ? undefined : capabilityOfCandidate(ordered[0]!)
+    const servedCapability = scoped.length === 0 ? undefined : capabilityOfCandidate(scoped[0]!)
     // 对外承诺的窗口要过 `/v1/models` 那道闸门（只收误差只会朝安全方向的来源）。
     // 不复用 `contextWindow`：日志与界面看推定值是有用的，客户端拿它安排压缩时机不是。
     const servedAdvertisedWindow = servedCapability === undefined
@@ -891,6 +1108,23 @@ class AutoRouter {
       ...(sticky === undefined ? {} : { previousHint: sticky }),
       ...(latencyGateMs === undefined ? {} : { latencyGateMs }),
       ...(stickyGated ? { stickyGated: true as const } : {}),
+      modelScope,
+      ...(candidates[0] === undefined ? {} : { model: candidates[0].displayName }),
+      ...(effectivePin === undefined
+        ? {}
+        : {
+            pin: {
+              displayName: effectivePin.displayName,
+              scope: effectivePin.scope,
+              source: effectivePin.source,
+              until: effectivePin.until,
+            },
+          }),
+      ...(pinMiss === undefined ? {} : { pinMiss }),
+      ...(circuited.length === 0 ? {} : { circuited: [...circuited] }),
+      // 单模型作用域的换家墙钟预算更短：链只剩同一模型的几个账号，继续等不会
+      // 等到新模型上台（换模型只能发生在回合之间），只会让客户端多挂几十秒。
+      ...(modelScope === 'single' ? { wallClockBudgetMs: AUTO_SINGLE_SCOPE_BUDGET_MS } : {}),
       conversationKey: key,
       stickyKeySource,
       degraded,
@@ -953,6 +1187,13 @@ class AutoRouter {
       const existing = index.get(key)
       if (existing !== undefined) {
         existing.accountCount += 1
+        // 同模型的展示读数取各账号里**最快**的那个：菜单问的是「换到它会多快」，
+        // 一个正在限流的账号不该把这个模型的读数拖成「这家很慢」。
+        if (candidate.ewmaFirstTokenMs !== undefined
+          && (existing.ewmaFirstTokenMs === undefined
+            || candidate.ewmaFirstTokenMs < existing.ewmaFirstTokenMs)) {
+          existing.ewmaFirstTokenMs = candidate.ewmaFirstTokenMs
+        }
         continue
       }
 
@@ -987,6 +1228,7 @@ class AutoRouter {
         ...(failure === undefined ? {} : { unavailableReason: failure }),
         capability,
         ...(candidate.costBucket === undefined ? {} : { costBucket: candidate.costBucket }),
+        ...(candidate.ewmaFirstTokenMs === undefined ? {} : { ewmaFirstTokenMs: candidate.ewmaFirstTokenMs }),
         ...(candidate.costClass === undefined ? {} : { costClass: candidate.costClass }),
         ...(candidate.weight === undefined ? {} : { weight: candidate.weight }),
       }
@@ -1021,6 +1263,274 @@ class AutoRouter {
     }
   }
 
+  /** 清掉过期软钉：过期记录不参与匹配，也不出现在菜单里。 */
+  private sweepPins(now: number): void {
+    for (const [key, pin] of this.modelPins) {
+      if (pin.until <= now) this.modelPins.delete(key)
+    }
+  }
+
+  private sweepCircuits(now: number): void {
+    for (const [key, entry] of this.modelCircuit) {
+      if (entry.until <= now) this.modelCircuit.delete(key)
+    }
+  }
+
+  /**
+   * 生效中的软钉：会话级优先于路由级（更窄的意图更该赢），同作用域后写覆盖前写。
+   * `sessionKey` 与粘性键同一个口径（`conversationKey` / 客户端会话指纹）。
+   */
+  pinFor(routeName: string, sessionKey?: string, now = Date.now()): ModelPin | undefined {
+    this.sweepPins(now)
+    if (sessionKey !== undefined && sessionKey.length > 0) {
+      const sessionPin = this.modelPins.get(pinMapKey(routeName, 'session', sessionKey))
+      if (sessionPin !== undefined) return sessionPin
+    }
+    return this.modelPins.get(pinMapKey(routeName, 'route'))
+  }
+
+  /**
+   * 写一颗软钉。只进内存：一次显式选择不该改写用户的持久配置，重启后回到
+   * `preferredModel` / 自动排序 —— 这也让「换错了」有自愈路径。
+   */
+  setPin(pin: Omit<ModelPin, 'until'> & { minutes?: number }, now = Date.now()): ModelPin {
+    this.sweepPins(now)
+    const minutes = pin.minutes !== undefined && pin.minutes > 0 ? pin.minutes : DEFAULT_PIN_MINUTES
+    const record: ModelPin = {
+      route: pin.route,
+      displayName: pin.displayName.trim(),
+      ...(pin.providerId === undefined ? {} : { providerId: pin.providerId }),
+      scope: pin.scope,
+      ...(pin.sessionKey === undefined ? {} : { sessionKey: pin.sessionKey }),
+      until: now + minutes * 60_000,
+      source: pin.source,
+    }
+    this.modelPins.set(pinMapKey(record.route, record.scope, record.sessionKey), record)
+    return record
+  }
+
+  clearPin(routeName: string, scope: ModelPinScope = 'route', sessionKey?: string): boolean {
+    return this.modelPins.delete(pinMapKey(routeName, scope, sessionKey))
+  }
+
+  /**
+   * 给一个 (路由, 模型) 上熔断票。
+   *
+   * 只在轮次边界起作用：下一轮选路时被熔断的模型排到队尾（而不是删掉 —— 全池都在
+   * 熔断时这张票不生效，见 `select`）。同一模型先成功一次就清票（`rememberRoute`），
+   * 所以一次抖动不会把模型锁满整个 TTL。
+   */
+  tripModelCircuit(
+    routeName: string,
+    displayName: string,
+    reason: string,
+    minutes = MODEL_CIRCUIT_MINUTES,
+    now = Date.now(),
+  ): ModelCircuitEntry {
+    this.sweepCircuits(now)
+    const entry: ModelCircuitEntry = {
+      route: routeName,
+      displayName: displayName.trim(),
+      until: now + Math.max(1, minutes) * 60_000,
+      reason,
+    }
+    this.modelCircuit.set(circuitMapKey(routeName, displayName), entry)
+    return entry
+  }
+
+  /** 读熔断解禁时间；过期即删（读到的是这一格在 `now` 的真相）。 */
+  modelCircuitUntil(routeName: string, displayName: string, now = Date.now()): number | undefined {
+    const entry = this.modelCircuit.get(circuitMapKey(routeName, displayName))
+    if (entry === undefined) return undefined
+    if (entry.until <= now) {
+      this.modelCircuit.delete(circuitMapKey(routeName, displayName))
+      return undefined
+    }
+    return entry.until
+  }
+
+  clearModelCircuit(routeName?: string, displayName?: string): number {
+    let removed = 0
+    for (const [key, entry] of this.modelCircuit) {
+      if (routeName !== undefined && entry.route !== routeName) continue
+      if (displayName !== undefined && entry.displayName !== displayName.trim()) continue
+      this.modelCircuit.delete(key)
+      removed += 1
+    }
+    return removed
+  }
+
+  circuitEntries(routeName?: string, now = Date.now()): ModelCircuitEntry[] {
+    this.sweepCircuits(now)
+    return [...this.modelCircuit.values()]
+      .filter(entry => routeName === undefined || entry.route === routeName)
+      .sort((a, b) => a.until - b.until)
+  }
+
+  /** 记录某条路由上一轮实际服务的模型，菜单的「当前」与托盘提示行读这一格。 */
+  noteServedModel(
+    routeName: string,
+    candidate: { provider: { id: string; name: string }; displayName: string },
+    now = Date.now(),
+  ): void {
+    this.lastServed.set(routeName, {
+      providerId: candidate.provider.id,
+      providerName: candidate.provider.name,
+      displayName: candidate.displayName,
+      at: now,
+    })
+    while (this.lastServed.size > STICKY_CAPACITY) {
+      const oldest = this.lastServed.keys().next()
+      if (oldest.done) break
+      this.lastServed.delete(oldest.value)
+    }
+  }
+
+  /** 这条路由当前可切换的模型：预览池里没被筛掉的那些，当前/被钉的排最前。 */
+  private selectableModels(route: ModelRoute, now: number): {
+    models: RoutePreviewModel[]
+    current?: RouteMenuCurrent
+    pin?: ModelPin
+    preferred?: RouteModelRef
+  } {
+    const preview = this.preview(route)
+    const selectable = preview.models.filter(model => model.status === 'kept' || model.status === 'included')
+    const current = this.lastServed.get(route.name)
+    const pin = this.pinFor(route.name, undefined, now)
+    const preferred = route.preferredModel
+    const headName = pin?.displayName ?? preferred?.displayName
+    const ordered = headName === undefined
+      ? selectable
+      : [
+          ...selectable.filter(model => model.displayName === headName),
+          ...selectable.filter(model => model.displayName !== headName),
+        ]
+    const currentFirst = current === undefined
+      ? ordered
+      : [
+          ...ordered.filter(model => model.displayName === current.displayName),
+          ...ordered.filter(model => model.displayName !== current.displayName),
+        ]
+    return {
+      models: currentFirst,
+      ...(current === undefined ? {} : { current }),
+      ...(pin === undefined ? {} : { pin }),
+      ...(preferred === undefined ? {} : { preferred }),
+    }
+  }
+
+  /**
+   * 一条路由的菜单快照（托盘与控制台共用）。
+   *
+   * 池来自 `preview` —— 与生产请求同一条采集/策略/手动增删管线，菜单里列的就是
+   * 选路真的会用的那几个。这里不重新排序、也不另算一份池：两处各算一次，菜单与
+   * 真实行为迟早会不一致。
+   */
+  routeMenu(route: ModelRoute, limit = ROUTE_MENU_MODELS_DEFAULT, now = Date.now()): RouteMenuEntry {
+    this.sweepCircuits(now)
+    const { models, current, pin, preferred } = this.selectableModels(route, now)
+    const routeName = route.name
+    const pinnedName = pin?.displayName ?? preferred?.displayName
+    return {
+      route: routeName,
+      enabled: route.enabled !== false,
+      modelScope: route.modelScope ?? 'single',
+      ...(current === undefined ? {} : { current }),
+      ...(pin !== undefined
+        ? { pin: { displayName: pin.displayName, scope: pin.scope, until: pin.until, source: pin.source } }
+        : preferred !== undefined
+          // 持久偏好没有到期时间：`until: 0` 在界面上读作「一直」（与软钉的倒计时区分）。
+          ? { pin: { displayName: preferred.displayName, scope: 'route' as const, until: 0, source: 'console' as const } }
+          : {}),
+      models: models.slice(0, Math.max(1, limit)).map(model => {
+        const circuitUntil = this.modelCircuitUntil(routeName, model.displayName, now)
+        return {
+          providerId: model.providerId,
+          providerName: model.providerName,
+          displayName: model.displayName,
+          accountCount: model.accountCount,
+          ...(model.ewmaFirstTokenMs === undefined ? {} : { ewmaFirstTokenMs: model.ewmaFirstTokenMs }),
+          ...(model.costBucket === undefined ? {} : { costBucket: model.costBucket }),
+          ...(circuitUntil === undefined ? {} : { circuitUntil }),
+          current: current !== undefined && current.displayName === model.displayName,
+          pinned: pinnedName !== undefined && pinnedName === model.displayName,
+        } satisfies RouteMenuModel
+      }),
+      totalModels: models.length,
+    }
+  }
+
+  /**
+   * 「换下一个 / 点名切换」的唯一入口（托盘与控制台共用）。
+   *
+   * 只写软钉，不改路由配置：切回自动排序是 `clearPin` + 清 `preferredModel` 的
+   * 管理操作，两件事分开，避免一次误点把用户的持久选择也抹掉。
+   *
+   * 失败一定带原因：模型不在池里、池是空的、路由不存在 —— 静默成功会让托盘显示
+   * 一个其实没生效的选择。
+   */
+  switchModel(request: RouteSwitchRequest, routes: readonly ModelRoute[], now = Date.now()): RouteSwitchResult {
+    const route = routes.find(candidate => candidate.name === request.route)
+    if (route === undefined) {
+      return { ok: false, route: request.route, reason: `路由 '${request.route}' 不存在` }
+    }
+    if (route.enabled === false) {
+      return { ok: false, route: route.name, reason: `路由 '${route.name}' 已停用` }
+    }
+    const { models, current } = this.selectableModels(route, now)
+    if (models.length === 0) {
+      return { ok: false, route: route.name, reason: '这条路由当前没有可切换的模型' }
+    }
+
+    let target = request.model?.trim()
+    if (target === undefined || target.length === 0) {
+      // 「换下一个」：从当前服务的模型往前走一格，绕回池首。没有当前读数时取池首。
+      const index = current === undefined
+        ? -1
+        : models.findIndex(model => model.displayName === current.displayName)
+      target = models[(index + 1) % models.length]!.displayName
+    }
+    const hit = models.find(model =>
+      model.displayName === target
+      && (request.providerId === undefined || model.providerId === request.providerId)
+    )
+    if (hit === undefined) {
+      return {
+        ok: false,
+        route: route.name,
+        model: target,
+        reason: `模型 '${target}' 不在这条路由的候选池里`,
+        menu: this.routeMenu(route, ROUTE_MENU_MODELS_DEFAULT, now),
+      }
+    }
+
+    const scope: ModelPinScope = request.scope ?? 'route'
+    if (scope === 'session') {
+      return {
+        ok: false,
+        route: route.name,
+        model: hit.displayName,
+        reason: '会话级切换需要控制台内的会话上下文；托盘只能按路由切换',
+      }
+    }
+    this.setPin({
+      route: route.name,
+      displayName: hit.displayName,
+      providerId: hit.providerId,
+      scope,
+      // 来源只用于菜单与日志回显：调用方显式给的 `console` 照收，其余按托盘算。
+      // 不接受线上自报 `header` —— 那一条是选路自己写的，不是一次点击。
+      source: request.source === 'console' ? 'console' : 'tray',
+      ...(request.minutes === undefined ? {} : { minutes: request.minutes }),
+    }, now)
+    return {
+      ok: true,
+      route: route.name,
+      model: hit.displayName,
+      menu: this.routeMenu(route, ROUTE_MENU_MODELS_DEFAULT, now),
+    }
+  }
+
   /**
    * 撤掉一条会话的粘性锚点。
    *
@@ -1047,6 +1557,11 @@ class AutoRouter {
    * 可以保留「同一段会话尽量落在同一个账号/模型」这条缓存规则。
    */
   rememberRoute(key: string | undefined, candidate: AutoCandidate, route?: ModelRoute): void {
+    const routeName = route?.name ?? LEGACY_ROUTE_NAME
+    // 「当前在跑谁」与「这颗熔断票可以撕了」都在成功那一刻记账，且不依赖粘性键：
+    // 粘性可以关（`stickyMinutes: 0`），菜单和熔断清除不能跟着一起失效。
+    this.noteServedModel(routeName, candidate)
+    this.modelCircuit.delete(circuitMapKey(routeName, candidate.displayName))
     if (!key) return
 
     const config = storeManager.getConfig().autoRouting
@@ -1141,6 +1656,10 @@ class AutoRouter {
     // 份额账本与运行时指标同生命周期：重启后不该继续背着上一轮的派发欠债
     dispatchLedger.reset()
     this.sticky.clear()
+    // 软钉/熔断/「当前服务者」都是进程内瞬时状态：重启后回到配置本身
+    this.modelPins.clear()
+    this.modelCircuit.clear()
+    this.lastServed.clear()
     this.seed = 0
   }
 }

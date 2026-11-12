@@ -83,6 +83,11 @@ const harness = await bootstrapStore({
   },
 })
 const sm = harness.storeManager
+
+// 架构 A 的缺省换家范围是 `single`：一轮只在同一个模型的账号之间换，换模型发生在回合
+// 之间。本文件证明的「装不下就换下一家（另一个模型）」是 `pool` 这一档的语义，显式声明。
+assert.equal(sm.updateRoute('auto', { modelScope: 'pool' }).ok, true, '迁移必须造出 auto 路由')
+
 // 2026-11-12 起 `auto` 是池：这家装不下/不认这个参数就换下一家（可以是下一个
 // 模型），不再需要任何开关。
 const upstreamBase = `http://127.0.0.1:${UPSTREAM_PORT}/v1`

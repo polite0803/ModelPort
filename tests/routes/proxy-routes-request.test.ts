@@ -49,6 +49,10 @@ const harness = await bootstrapStore({
 })
 const sm = harness.storeManager
 
+// 本文件的两条「中途换实现」用例要跨模型换家（锚点那家停服 ⇒ 换到另一个模型），
+// 那是 `pool` 这一档的语义；架构 A 的缺省是 `single`（一轮只试一个模型）。
+assert.equal(sm.updateRoute('auto', { modelScope: 'pool' }).ok, true, '迁移必须造出 auto 路由')
+
 function providerFixture(id: string, displayName: string, overrides: Record<string, unknown> = {}) {
   return {
     id,
@@ -175,7 +179,13 @@ test('A/请求级：createRoute 之后同一个代理实例（未重启）的下
 
 test('请求级：服务者与上一轮锚点不同 → 响应头 X-ModelPort-Switch 与日志 auto.switchedFrom', async () => {
   // 锚点用真写入通道造：`rememberRoute` 就是成功路径在 `chat.ts` 里调的那个函数。
-  const decision = autoRouter.select({ model: 'auto', messages: [{ role: 'user', content: 'ping' }] })
+  // 这里要能在池里找到「另一家」，所以带上盘上那条 `pool` 路由（缺省范围是 `single`）。
+  const decision = autoRouter.select(
+    { model: 'auto', messages: [{ role: 'user', content: 'ping' }] },
+    'round-robin',
+    undefined,
+    sm.getModelRoutes().auto,
+  )
   assert.ok(decision.conversationKey)
   const anchor = decision.candidates.find(candidate => candidate.provider.id === 'rp1')
   assert.ok(anchor)
@@ -196,7 +206,12 @@ test('请求级：服务者与上一轮锚点不同 → 响应头 X-ModelPort-Sw
 })
 
 test('请求级：服务者就是锚点时没有 X-ModelPort-Switch（负控）', async () => {
-  const decision = autoRouter.select({ model: 'auto', messages: [{ role: 'user', content: 'ping' }] })
+  const decision = autoRouter.select(
+    { model: 'auto', messages: [{ role: 'user', content: 'ping' }] },
+    'round-robin',
+    undefined,
+    sm.getModelRoutes().auto,
+  )
   const anchor = decision.candidates.find(candidate => candidate.provider.id === 'rp1')
   assert.ok(anchor)
   autoRouter.rememberRoute(decision.conversationKey, anchor, undefined)

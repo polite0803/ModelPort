@@ -36,6 +36,9 @@ import type {
   ModelCapabilityHint,
   RoutePreviewResult,
   RoutePreviewSample,
+  RouteMenuResult,
+  RouteSwitchRequest,
+  RouteSwitchResult,
   TlsStatus,
   TlsTrustResult,
   ProviderModelTestResult,
@@ -632,6 +635,8 @@ interface DailyStatistics {
   successRequests: number
   failedRequests: number
   totalLatency: number
+  /** Set when this day's total came from the per-day token ledger, not from row counting. */
+  totalRequestsSource?: 'tokenLedger'
   modelUsage: Record<string, number>
   providerUsage: Record<string, number>
   /** Absent on buckets written before outcomes were recorded; never read as 0. */
@@ -824,6 +829,17 @@ const routesAPI = {
   // 只算不写：一次采集折全表，返回每条路由的候选模型数（列表页要的是数字，不是明细）。
   poolSizes: (): Promise<RoutePoolSizesResult> =>
     wire.invoke(IpcChannels.ROUTES_POOL_SIZES),
+
+  // 快捷切换模型（架构 A）：菜单快照 / 切换 / 恢复自动排序。托盘通过 shell 桥
+  // 把这三件事转给这个页面，凭据仍然只在这里 —— 主进程不持有管理密钥。
+  menu: (): Promise<RouteMenuResult> =>
+    wire.invoke(IpcChannels.ROUTES_MENU),
+
+  switchModel: (request: RouteSwitchRequest): Promise<RouteSwitchResult> =>
+    wire.invoke(IpcChannels.ROUTES_SWITCH, request),
+
+  unpin: (route: string): Promise<RouteSwitchResult> =>
+    wire.invoke(IpcChannels.ROUTES_UNPIN, route),
 }
 
 interface ManagementApiConfig {

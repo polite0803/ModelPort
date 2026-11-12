@@ -65,7 +65,7 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { collectHarnessSystem, normalizeHarnessMessages } from './message-shape.js'
-import { resolveToolPairing, isMissingRequiredArgs, isTruncatedArguments } from './sse.js'
+import { resolveToolPairing, isMissingRequiredArgs, isTruncatedArguments, incompleteStep } from './sse.js'
 
 /**
  * 构造 Anthropic Messages 请求体。
@@ -710,5 +710,11 @@ export async function* consumeMinimaxSse(
     // 发：缓冲的工具块分片原序补发（必须在 finish 之前，块序才完整）。
     for (const chunk of deferredToolChunks) yield chunk
   }
-  yield { type: 'finish', reason: discardToolChunks ? { kind: 'max-tokens' } : baseReason }
+  // 丢弃工具批 ⇒ 合成 incomplete（不是上游上限），带上成因让投影层走错误帧。
+  const discardCause = argsTruncated
+    ? 'tool-args-truncated' as const
+    : emptyRequiredArgs
+      ? 'tool-args-empty' as const
+      : truncatedStream ? 'stream-cut' as const : undefined
+  yield { type: 'finish', reason: discardCause === undefined ? baseReason : incompleteStep(discardCause) }
 }

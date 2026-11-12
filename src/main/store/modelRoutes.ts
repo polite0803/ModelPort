@@ -18,9 +18,10 @@ import type {
   AutoRoutingConfig,
   LoadBalanceStrategy,
   ModelRoute,
+  ModelScope,
   RouteModelRef,
 } from '../../shared/types.ts'
-import { isAutoPoolStrategyId, FAIRNESS_LEAD_MAX } from '../../shared/types.ts'
+import { isAutoPoolStrategyId, FAIRNESS_LEAD_MAX, MODEL_SCOPES } from '../../shared/types.ts'
 import { normalizeAutoRoutingConfig } from './autoRoutingConfig.ts'
 import type { ModelRouteError } from '../../shared/modelRouteName.ts'
 import {
@@ -167,6 +168,18 @@ function normalizeRouteFields(name: string, entry: Record<string, unknown>, opti
   // 同形，缺省键不进 Record，盘上每条路由才不会多出这一格。
   const fairnessLead = normalizeFairnessLead(entry.fairnessLead)
 
+  // 换家范围：只认 `MODEL_SCOPES` 里的字面量；其他值（包括手写的怪值）按「没配」处理，
+  // 读侧落到 `single`。不把缺省写进 Record，与 `stickyHardPin` 同一条规则 —— 盘上不多出这一格。
+  const modelScope = typeof entry.modelScope === 'string'
+    && (MODEL_SCOPES as readonly string[]).includes(entry.modelScope)
+    ? entry.modelScope as ModelScope
+    : undefined
+  // 软钉：靠 `normalizeRouteModelRefs` 同一套引用归一，只取第一条（一条路由只有一个
+  // 优先模型）。providerId 与 displayName 都要在，缺一个就是配了一半，按没配处理。
+  const preferredModel = normalizeRouteModelRefs(
+    entry.preferredModel === undefined ? [] : [entry.preferredModel]
+  )[0]
+
   return {
     name,
     enabled: entry.enabled !== false,
@@ -180,6 +193,8 @@ function normalizeRouteFields(name: string, entry: Record<string, unknown>, opti
     includeModels: normalizeRouteModelRefs(entry.includeModels),
     excludeModels: normalizeRouteModelRefs(entry.excludeModels),
     pinModels: normalizeRouteModelRefs(entry.pinModels),
+    ...(modelScope === undefined ? {} : { modelScope }),
+    ...(preferredModel === undefined ? {} : { preferredModel }),
     // 只在显式关掉时落键：缺省即硬钉（见 `ModelRoute.stickyHardPin`）。把「没配」也归一成
     // `true` 会让盘上每条路由多出这一格，而读侧两处判断（`!== false`）本来就同形。
     ...(entry.stickyHardPin === false ? { stickyHardPin: false } : {}),
@@ -678,6 +693,16 @@ export function validateRoutesForWrite(
       if (refError !== undefined) {
         errors.push(`routes.${name}: ${refError.message}`)
       }
+    }
+    if (record.modelScope !== undefined
+      && record.modelScope !== 'single'
+      && record.modelScope !== 'family'
+      && record.modelScope !== 'pool') {
+      errors.push(`routes.${name}: 'modelScope' must be one of single, family, pool`)
+    }
+    // 软钉是单条引用，不是列表：写成数组等于把「优先集合」与「允许集合」混成一个字段。
+    if (record.preferredModel !== undefined && Array.isArray(record.preferredModel)) {
+      errors.push(`routes.${name}: 'preferredModel' is a single { providerId, displayName } object`)
     }
 
     // 池引用的三条硬规则在这里定一次：目标必须是已存在的规范名、不能自引用、只能一跳。

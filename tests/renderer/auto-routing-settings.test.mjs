@@ -230,3 +230,46 @@ test('both locales explain what turning the hard pin off means', () => {
     assert.doesNotMatch(messages.proxy.autoRoutingStickyHardPinIdle, /0\.12/)
   }
 })
+
+// 架构 A（2026-11-13）：一轮只在**一个模型**的账号之间换家，所以「范围」是一个必须
+// 能从界面落盘的档位。反向检查同样重要 —— 一个看着存在、盘上却没人读的控件就是死路。
+test('the model-scope selector is rendered, persisted and read by the router', () => {
+  const fields = readRoutePanel('src/renderer/src/components/proxy/ModelRouteFields.tsx')
+
+  // 选项只许来自共享常量：手写第二份枚举就是下一次漂移的起点。
+  assert.match(fields, /MODEL_SCOPES\.map/)
+  assert.equal(
+    (fields.match(/ModelScope/g) ?? []).length >= 3,
+    true,
+    'the field, the draft mapping and the selector all speak ModelScope',
+  )
+
+  // 缺省口径只有一条：新建草稿与盘上读回转出的草稿都落在 `single`。
+  assert.match(fields, /modelScope: 'single'/, 'a new route defaults to the single-model scope')
+  assert.match(fields, /modelScope: route\.modelScope \?\? 'single'/, 'an old route reads as single')
+
+  // 归一化按共享枚举收值，不是第二份三字面量。
+  const modelRoutes = readFileSync(join(root, 'src/main/store/modelRoutes.ts'), 'utf8')
+  assert.match(modelRoutes, /MODEL_SCOPES as readonly string\[\]\)\.includes\(entry\.modelScope\)/)
+
+  // 读取侧：select 的裁剪与 40s 墙钟都跟着这一格走。
+  const router = readFileSync(join(root, 'src/main/proxy/autoRouter.ts'), 'utf8')
+  assert.match(router, /const modelScope: ModelScope = route\?\.modelScope \?\? 'single'/)
+  assert.match(router, /modelScope === 'single' \? \{ wallClockBudgetMs: AUTO_SINGLE_SCOPE_BUDGET_MS \}/)
+
+  // 三种档位都有文案，且两种语言都在。
+  for (const locale of ['zh-CN', 'en-US']) {
+    const messages = JSON.parse(
+      readFileSync(join(root, 'src/renderer/src/i18n/locales', `${locale}.json`), 'utf8'),
+    )
+    for (const key of [
+      'autoRoutingModelScope',
+      'autoRoutingModelScopeHelp',
+      'autoRoutingModelScope_single',
+      'autoRoutingModelScope_family',
+      'autoRoutingModelScope_pool',
+    ]) {
+      assert.equal(typeof messages.proxy?.[key], 'string', `${locale} is missing proxy.${key}`)
+    }
+  }
+})

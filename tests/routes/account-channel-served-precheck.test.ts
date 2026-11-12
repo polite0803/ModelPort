@@ -45,6 +45,11 @@ const harness = await bootstrapStore({
 })
 const sm = harness.storeManager
 
+// 架构 A 的缺省换家范围是 `single`：一轮只试一个模型，换模型发生在回合之间。
+// 本文件证明的「剔掉必败条目后另一条接住」是**同回合跨模型**换家，那是 `pool`
+// 这一档的语义，所以显式写上，不靠缺省值。
+assert.equal(sm.updateRoute('auto', { modelScope: 'pool' }).ok, true, '迁移必须造出 auto 路由')
+
 /**
  * 一家账号渠道，目录里两个条目：
  * - `OpenCode / Gone` —— pack 的服务清单里没有它（今天的必败条目）；标 `free` 让

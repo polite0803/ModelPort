@@ -517,6 +517,12 @@ export function autoExhaustedResponse(
   lastError: string | undefined,
   attempts: number,
   upstreamRetryAfterSeconds?: number,
+  /**
+   * 单模型作用域下的服务模型名。给了它就把「候选」写成「这个模型的账号」——
+   * 架构 A 的诚实失败要求模型名出现在错误里：用户看到 503 时得知道是哪个模型
+   * 现在接不了，而不是「路由坏了」。
+   */
+  model?: string,
 ): AutoExhaustedResponse | null {
   if (attempts <= 1) return null
   if (status === 400 || status === 422) return null
@@ -531,7 +537,9 @@ export function autoExhaustedResponse(
     status: 503,
     type: 'service_unavailable_error',
     code: 'no_available_model',
-    message: `Route '${routeName}' exhausted all ${attempts} candidates (last: ${lastError ?? status ?? 'no status'})`,
+    message: model === undefined
+      ? `Route '${routeName}' exhausted all ${attempts} candidates (last: ${lastError ?? status ?? 'no status'})`
+      : `Route '${routeName}' exhausted all ${attempts} accounts of '${model}' (last: ${lastError ?? status ?? 'no status'})`,
     retryAfterSeconds: upstreamRetryAfterSeconds ?? AUTO_EXHAUSTED_RETRY_AFTER_SECONDS,
   }
 }

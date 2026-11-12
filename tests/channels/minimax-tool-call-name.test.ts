@@ -252,7 +252,7 @@ async function projectMinimax(t, sseText, options = {}) {
   return parseSseFrames(frames.join(''))
 }
 
-test('缺必填键的工具调用：分片缓冲发弃，客户端只见 length 收场（无 tool_calls）', async (t) => {
+test('缺必填键的工具调用：分片缓冲发弃，客户端只见 incomplete_step 错误帧（无 tool_calls）', async (t) => {
   const frames = await projectMinimax(t, MISSING_REQUIRED_TOOL_SSE, {
     toolsRequiringArgs: new Map([['Bash', ['command']]]),
   })
@@ -260,18 +260,21 @@ test('缺必填键的工具调用：分片缓冲发弃，客户端只见 length 
   const toolDeltas = frames.flatMap(frame => frame.choices?.[0]?.delta?.tool_calls ?? [])
   assert.equal(toolDeltas.length, 0, `命中缺参判据后不得下发任何 tool_calls 分片，收到 ${JSON.stringify(toolDeltas)}`)
 
-  const finish = frames.find(frame => frame.choices?.[0]?.finish_reason != null)
-  assert.equal(finish?.choices?.[0]?.finish_reason, 'length', 'finish 必须升级为 length 让客户端重试')
+  // 2026-11-13 契约变更：合成 incomplete 不再冒充输出上限（`length` 会让 Codex
+  // 报「max_output_tokens」并就地结束回合），改走可重试的错误帧。
+  assert.equal(frames.some(frame => frame.choices?.[0]?.finish_reason != null), false)
+  const error = frames.find(frame => frame.error !== undefined)
+  assert.equal(error?.error?.code, 'incomplete_step', '必须以有分辨力的错误码收场让客户端重试')
 })
 
-test('流被掐断（无 stop_reason）：工具分片缓冲发弃，finish 升级为 length', async (t) => {
+test('流被掐断（无 stop_reason）：工具分片缓冲发弃，收场是 incomplete_step 错误帧', async (t) => {
   const frames = await projectMinimax(t, TRUNCATED_TOOL_SSE)
 
   const toolDeltas = frames.flatMap(frame => frame.choices?.[0]?.delta?.tool_calls ?? [])
   assert.equal(toolDeltas.length, 0, `截断流不得下发任何 tool_calls 分片，收到 ${JSON.stringify(toolDeltas)}`)
 
-  const finish = frames.find(frame => frame.choices?.[0]?.finish_reason != null)
-  assert.equal(finish?.choices?.[0]?.finish_reason, 'length')
+  assert.equal(frames.some(frame => frame.choices?.[0]?.finish_reason != null), false)
+  assert.equal(frames.find(frame => frame.error !== undefined)?.error?.code, 'incomplete_step')
 })
 
 test('判据未命中：缓冲的分片照常原序补发（block-start → deltas → block-end）', async (t) => {

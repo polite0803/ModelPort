@@ -36,6 +36,9 @@ import type {
   SchedulerTaskStatus,
   RoutePreviewResult,
   RoutePreviewSample,
+  RouteMenuResult,
+  RouteSwitchRequest,
+  RouteSwitchResult,
   TlsStatus,
   TlsTrustResult,
   ProviderModelTestResult,
@@ -515,6 +518,15 @@ interface RoutesAPI {
    * 缺席代表「没数」，界面要显示省略而不是 0 —— 取不到与池是空的不是同一件事。
    */
   poolSizes: () => Promise<RoutePoolSizesResult>
+  /**
+   * 快捷切换模型的菜单快照（架构 A）。托盘通过 shell 桥转给这个页面，因为管理
+   * 密钥只在这里；主进程不持有它。只读：打开菜单不改变任何路由行为。
+   */
+  menu: () => Promise<RouteMenuResult>
+  /** 点名/换下一个：写一颗内存软钉（默认 30 分钟），不落盘。 */
+  switchModel: (request: RouteSwitchRequest) => Promise<RouteSwitchResult>
+  /** 恢复自动排序：清软钉并清掉持久 `preferredModel`。 */
+  unpin: (route: string) => Promise<RouteSwitchResult>
 }
 
 interface RequestLogEntry {
@@ -626,6 +638,8 @@ interface DailyStatistics {
   totalLatency: number
   modelUsage: Record<string, number>
   providerUsage: Record<string, number>
+  /** Set when this day's total came from the per-day token ledger, not from row counting. */
+  totalRequestsSource?: 'tokenLedger'
   /**
    * Per-provider successes and latency sums for the day. Absent when the bucket
    * was written by a build that recorded neither - not a zero, so a per-provider

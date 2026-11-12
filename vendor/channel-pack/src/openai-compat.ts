@@ -14,6 +14,7 @@ import {
   createBlankReasoningSuppressor,
   createReasoningLoopDetector,
   hasUsableToolName,
+  incompleteStep,
   isProseTruncatedByStopString,
   isReasoningLoopGuardEnabled,
   isTruncatedArguments,
@@ -28,6 +29,7 @@ import {
   stripCourseLeakFromHistoryContent,
   unwrapActionParamsWrapper,
   stripCourseLeakIfEnabled,
+  type IncompleteStepCause,
 } from './sse.js'
 import { normalizeHarnessMessages } from './message-shape.js'
 import { isBillingBusinessCode, looksLikeBillingError, parseQueueError, queueDelayMs, ModelQueuedError, throwIfModelQueued } from './model-queue.js'
@@ -1336,6 +1338,27 @@ export async function* consumeOpenAiSse(
     && emittedProse === ''
     && toolOrder.length === 0
 
+  // 合成 incomplete 的成因（**不含**上游真报的 `length`）：投影层据此决定
+  // 「错误帧 vs finish_reason=length」，见 sse.ts 的 IncompleteStepCause。
+  // 丢弃了无名 tool-call、且**没有**任何可用调用留下来时，本步否则会以 `stop`
+  // 收场 —— 模型本意要调工具、harness 却认为「正常答完了」，又是一次无报错中断。
+  // 若同批还有可用调用（`toolOrder.length > 0`），则照常报 `tool-calls`：那几个
+  // 调用与无名块各自独立，没理由因一个坏块把它们一起作废（实测线上形态正是
+  // 「一个无名 + 一个合法 pwsh」）。
+  const incompleteCause: IncompleteStepCause | undefined = incompleteTools
+    ? 'incomplete-tools'
+    : truncatedStream
+      ? 'stream-cut'
+      : argsTruncated
+        ? 'tool-args-truncated'
+        : emptyRequiredArgs
+          ? 'tool-args-empty'
+          : proseCutByStopString
+            ? 'prose-cut-by-stop-string'
+            : droppedUnnamedCalls && toolOrder.length === 0
+              ? 'tool-call-unnamed'
+              : undefined
+
   const reason = reasoningLoopIsSoleOutput
     // 思考死循环：报**有分辨力的 error**（见 REASONING_LOOP_CODE 的长注释）。
     //
@@ -1351,22 +1374,11 @@ export async function* consumeOpenAiSse(
     // 循环命中但**另有可见产出**：只能报 max-tokens（保住内容），
     // 不能报 error（会丢内容）。见上面 `reasoningLoopIsSoleOutput` 的表格。
     : loopDetected
-      ? { kind: 'max-tokens' as const }
+      ? incompleteStep('reasoning-loop')
     : finishReason === 'length'
-    || incompleteTools
-    || truncatedStream
-    || argsTruncated
-    || emptyRequiredArgs
-    || proseCutByStopString
-    // 丢弃了无名 tool-call、且**没有**任何可用调用留下来时，本步否则会以
-    // `stop` 收场 —— 模型本意要调工具、harness 却认为「正常答完了」，
-    // 又是一次无报错中断。报 max-tokens 让它重试。
-    //
-    // 若同批还有可用调用（`toolOrder.length > 0`），则照常报 `tool-calls`：
-    // 那几个调用与无名块各自独立，没理由因一个坏块把它们一起作废
-    // （实测线上形态正是「一个无名 + 一个合法 pwsh」）。
-    || (droppedUnnamedCalls && toolOrder.length === 0)
-    ? { kind: 'max-tokens' as const }
+      ? { kind: 'max-tokens' as const }
+    : incompleteCause !== undefined
+      ? incompleteStep(incompleteCause)
     : finishReason === 'tool_calls' || toolOrder.length > 0
       ? { kind: 'tool-calls' as const }
       : { kind: 'stop' as const }

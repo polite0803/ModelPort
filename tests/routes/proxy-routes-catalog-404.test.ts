@@ -180,6 +180,11 @@ const harness = await bootstrapStore({
 })
 const sm = harness.storeManager
 
+// 架构 A 的缺省换家范围是 `single`：一轮只试一个模型，换模型发生在回合之间。本文件
+// 证明的「这一家供不了这个模型 ⇒ 换下一家」是**同回合跨模型**换家，属于 `pool` 这一档，
+// 所以显式声明，不靠缺省值。
+assert.equal(sm.updateRoute('auto', { modelScope: 'pool' }).ok, true, '迁移必须造出 auto 路由')
+
 const upstreamBase = `http://127.0.0.1:${UPSTREAM_PORT}/v1`
 
 function providerFixture(id: string, displayName: string, capabilities: Record<string, unknown> = {}) {
@@ -262,10 +267,12 @@ test('目录漂移类 404：换成下一家并成功，账号不被记冷却/记
 
   // 不记冷却是这条修复的另一半：Bad 的账号是健康的（请求在自己的进程里就被拒），
   // 记了冷却它就从**后续所有**请求的池里消失，把一次目录漂移放大成整家停摆。
+  // 查的是「池里还有谁」，所以显式带上这条 `pool` 路由（不传 route 走的是缺省 `single`）。
   const after = autoRouter.select(
     { model: 'auto', messages: [{ role: 'user', content: 'ping' }] } as never,
     'round-robin',
     'cheap',
+    sm.getModelRoutes().auto,
   )
   assert.deepEqual([...new Set(after.candidates.map(candidate => candidate.displayName))].sort(),
     ['Bad-Channel', 'Good-Model'], '失败之后 Bad 仍必须在池里（没有冷却）')
@@ -322,6 +329,8 @@ function createPoolRoute(name: string) {
     pinModels: [],
     includeModels: [],
     excludeModels: [],
+    // 这一组用例证明的就是池语义本身（同回合跨模型换家），显式要 `pool`。
+    modelScope: 'pool',
   })
 }
 

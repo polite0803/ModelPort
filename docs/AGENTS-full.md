@@ -1256,6 +1256,74 @@ What it no longer does is let the preference become a cliff: a conversation can 
 inside the same request when the ones ahead of it fail, and the 503 + `Retry-After` collection at the chain
 head is reserved for "the whole pool was tried and nothing answered".
 
+### Architecture A: one model per turn (2026-11-13)
+
+The 2026-11-12 pool fixed the dead end by letting a turn walk the whole catalogue, and the user's verdict
+after living with it was the opposite complaint: "延迟大；不可预知错误多（换模型契约难对齐）". Both readings
+are the same fact from two sides - a turn that moves between *models* has to re-establish context
+expectations, tool protocol and the prefix cache mid-conversation, and each new model is a new contract to
+align. The approved answer is **A**: a turn serves **one model**; accounts of that model are still a
+failover group; a *different model* is only ever reached at a turn boundary. The pool semantics above
+remain, but they now describe `modelScope: 'pool'` rather than the default.
+
+**The scope.** `ModelRoute.modelScope: 'single' | 'family' | 'pool'`, default `'single'` when the field is
+absent (a route record written before this change keeps working and lands on the new default). `single`
+trims the ordered list to the head model's accounts, `family` keeps everything sharing
+`modelFamilyKey(head)`, `pool` keeps the previous behaviour. Trimming happens in `autoRouter::select`
+*after* the soft pin and *after* the circuit reorder, so a user pick or a degraded model decides which
+model the turn serves; nothing downstream re-expands it. A single-scope turn gets
+`AUTO_SINGLE_SCOPE_BUDGET_MS` = 40 s through `AutoRouteDecision.wallClockBudgetMs` instead of the 90 s
+pool clock: with only accounts left in the chain, waiting longer cannot promote a new model (that can only
+happen between turns) and only holds the client's socket.
+
+**Fast switching, and its precedence.** `ModelPin` is the soft pin: memory only, keyed by route plus
+scope (route-wide, or a session key), 30 minutes (`DEFAULT_PIN_MINUTES`), `source: 'console' | 'tray' |
+'header'`. Precedence in `select` is **soft pin > `ModelRoute.preferredModel` > sticky**: the pin
+reorders the list before the latency gate and the circuit, so a pin is *not* vetoed by an automated
+ticket (user intent outranks it; the menu still shows the model as circuited). A pinned model that is not
+in the pool at all (disabled, no accounts) serves the ordinary order but reports `pinMiss` into the log
+and the response headers - a silently ignored choice is how "the tray says X, the traffic says Y" goes
+unnoticed. `preferredModel` is the persistent form of the same choice (one `RouteModelRef`), surfaced with
+`until: 0` so the UI can draw "一直" instead of a countdown. A client that asks for a model with
+`X-ModelPort-Model: <displayName>` (`autoModelFromHeader`) pins it for the conversation
+(`source: 'header'`, session scope when a session key exists) - the same mechanism, so the next turn does
+not "think for" the client and switch away.
+
+**The model circuit - the between-turn switching channel.** Since a turn cannot change models, "this model
+cannot do the job" has to become "start the next turn elsewhere". `tripModelCircuit` records
+`(route, model) → until` for 5 minutes (`MODEL_CIRCUIT_MINUTES`), memory only, and `select` demotes those
+models to the tail. It is tripped by `modelQualityDegradation` and by nothing else - the five classes
+where the model itself failed to finish: ② repetition, ③ empty turn, ④ announced stop, ⑦ prose-only
+fallback stop, ⑧ synthesized incomplete step (§Synthesized Incomplete Step, 2026-11-13). ① unrequested
+`length`, ⑤ upstream truncation and ⑥ slow first token deliberately do not
+trip it: a cap and a queue are events of one turn, and switching models over them is not more correct than
+staying. The ticket demotes rather than deletes (a circuited model is still a valid last resort), is
+disabled entirely when every model is circuited (an empty pool serves nobody), and is cleared by the first
+successful turn on that model in `rememberRoute`. Account-level AIMD stays a separate domain: three
+accounts of one model rate-limited say nothing about whether the model can work.
+
+**One menu, three wires.** `autoRouter::routeMenu(route, limit = 8, now)` returns per route: `enabled`,
+`modelScope`, `current` (what the next turn would serve), `pin`, the model list with `pinned` /
+`circuitUntil`, and `totalModels` so a truncated menu does not read as the whole pool.
+`routes:menu` / `routes:switch` / `routes:unpin` are the channels; `switchModel` validates
+(unknown route, disabled route, empty pool, session scope from the tray) and returns the refreshed menu
+entry even on a refusal, so a refused click still repaints the truth. The shell's tray cannot call them: it
+does not hold the management secret, so it publishes `shell:route-menu-request`, the page runs
+`routes:menu` on its own transport and answers with `shell:route-menu`, and a click comes back as a
+`shell:route-command` intent.
+Both directions are gated on `event.sender === window.webContents`. The tray keeps three absences
+distinct - no snapshot yet (console not opened), read failed (`snapshot.error`), no enabled routes - and
+the tooltip names the route and the model that would serve, because an icon with a menu nobody opens
+answers nothing.
+
+Tests: `tests/routes/model-scope-pin-circuit.test.ts` (18 cases: trimming per scope, wall clock, pin vs
+sticky, pin vs circuit, `pinMiss`, persistent preference, header pin, circuit trip/expiry/clear on the
+*next* turn, all-circuited disabled, menu order and limit, switch reasons, tray session-scope refusal),
+`tests/shell/tray-model-menu.test.ts` (artifact-level: menu shape, the three channels on both sides, sender
+gate, the four label markers, three absences), `tests/ipc/routes-menu-wire.test.ts` (channel strings, the
+`error` shape, unpin clearing both the pin and `preferredModel`). The older pool tests declare
+`modelScope: 'pool'` explicitly, which is what they actually prove.
+
 ### Fallback-served prose-only stop (2026-11-13, the seventh degraded class)
 
 `codex-deepseek` kept stopping mid-task while the client reported no error. Row
@@ -1283,6 +1351,58 @@ Tests: `tests/proxy/sticky-revoke-policy.test.ts` pins the live row shape in bot
 class ③, tool deltas disqualify, tools not offered disqualify, `client_gone` disqualifies, no reading
 disqualifies); `tests/renderer/repetition-guard-wiring.test.mjs` pins the call site's fourth argument and
 the policy term.
+
+### Synthesized incomplete step (2026-11-13, the eighth degraded class)
+
+The user reported `codex-deepseek` "always" triggering
+`Incomplete response returned, reason: max_output_tokens` in Codex. Two readings killed the stated
+cause: every `codex-deepseek` row carries **no `maxTokens`** (the client never set a cap), and the
+frequency is 1 turn in 61 across both Codex histories, not "always". The cap story was never true.
+
+**The real mechanism is in the channel pack.** `vendor/channel-pack/src/openai-compat.ts` reused DSH's
+`{kind: 'max-tokens'}` as a generic "this step is incomplete, re-run it" signal for seven conditions
+that have nothing to do with an output cap: tool-arg JSON truncated, required args arriving empty, an
+unnamed tool call dropped, the connection cut before any `stop_reason`, tool chunks announced but never
+finished, prose cut by an upstream stop string, and a reasoning loop. `openai-gateway/stream.ts` mapped
+that kind to `finish_reason: 'length'`, `shared/responsesInbound.ts::statusOf` turned it into
+`response.incomplete` + `incomplete_details: {reason: 'max_output_tokens'}`, and Codex ended the turn
+with a token-limit message that named a limit nobody set. DSH's remedy ("let the harness retry the
+step") cannot run here: `src/main/channelPack/worker.ts:343-350` streams exactly once and ModelPort has
+no harness.
+
+**The fix keeps DSH's vocabulary and adds a cause.** `sse.ts` exports `incompleteStep(cause)` returning
+`{kind: 'max-tokens', incompleteCause}` - seven causes, one label each - and every producer that used
+to collapse the OR now labels: `openai-compat.ts`, `buddy-adapter.ts`, `lobsterai-adapter.ts`,
+`trae-adapter.ts`, `llm-adapter.ts`, `minimax-messages.ts`. `gemini-messages.ts` and `zcode-anthropic.ts`
+keep the plain kind because those are genuine upstream `MAX_TOKENS`. At the projection boundary
+`openai-gateway/stream.ts::incompleteStepError` turns a *labeled* reason into a 502
+`data: {"error": {code: "incomplete_step", ...}}` frame before `state.finishReason` is written, so an
+unlabeled `length` (a real cap) still projects as `finish_reason: 'length'` and nothing else changes.
+The Responses lane renders that frame as `response.failed` with `response.error.code`, which is the
+gateway's existing post-stream failure contract rather than a fabricated token.
+
+**Routing consequence.** `streamOutcomePolicy.ts::modelQualityDegradation` gained a fifth vote
+(`'incomplete-step'`, read from the SSE error code in `routes/chat.ts`), so class ⑧ trips the **model**
+circuit - the only between-turn switching channel under 架构 A. `accountRuntime.ts::recordStreamOutcome`
+gained `modelQuality`, which keeps an `endReason: 'error'` outcome with a model-quality cause out of the
+congestion path: AIMD does not shrink (the account answered; the model did not finish), but the success
+streak resets. Before this, the only judge that noticed was class ⑤, and it read the synthesized
+`length` as an upstream output cap: the anchor got revoked and the row scored as a degraded success,
+while the model that could not finish the job took no ticket at all.
+
+**What this does not cover.** (1) No step-level retry exists, so a dropped tool batch still costs the
+turn - the fix makes the next turn start elsewhere and makes the message truthful, it does not recover
+the current one. (2) Failover only happens when the error frame is the *first* frame (`probeSseHead`);
+once prose has streamed, the client sees `response.failed` mid-turn. Whether Codex auto-retries on
+`response.failed` was not verifiable from the shipped binary and is deliberately not claimed. (3) The
+pack's own Responses projector (`openai-gateway/responses.ts:666`) still maps the kind to `length`;
+ModelPort's worker imports only `toOpenAiSse` / `collectOpenAiCompletion`, so that path is unreachable
+from this product and was left alone rather than patched blind. (4) The **non-streaming** leg of the same
+pack throws `OpenAiGatewayError(502, code: 'incomplete_step')` (`worker.ts` → `bridge.ts:310`
+`ChannelBridgeError`), and that leg is recorded by the attempt-outcome path, where `isCongestionFailure`
+reads a bare 502 as account congestion and shrinks AIMD. The `modelQuality` bypass exists only on the
+streaming settle path - extending it means editing `forwarder.ts` / `failover.ts`, which were mid-rewrite
+by another session at the time of this change.
 
 ### OpenCode: three lanes, one shipped
 

@@ -121,6 +121,9 @@ function makeRoute(overrides: Record<string, unknown> = {}): ModelRoute {
     prefer: 'fast',
     maxAttempts: 3,
     stickyMinutes: 30,
+    // 本文件证明的是**多模型候选池**的语义。架构 A 的缺省范围是 `single`（一轮只试
+    // 一个模型，换模型发生在回合之间），所以要显式要 `pool` —— 顺带把这一档钉在用例里。
+    modelScope: 'pool',
     ...overrides,
   })
   assert.equal(created.ok, true, JSON.stringify(created.error))
@@ -147,8 +150,10 @@ test('C：`poolStrategies: []` 是 no-op —— 池就是「在服名单」本�
 
   assert.deepEqual(modelsIn(decision), served)
   assert.deepEqual(modelsIn(decision), ['Alpha-Flash', 'Beta-Lite', 'Gamma-Mini'])
-  // legacy（不传 route）走的是同一条采集路径：两边成员必须逐项相同
-  assert.deepEqual(modelsIn(select()), modelsIn(decision))
+  // legacy（不传 route）走架构 A 的缺省范围 `single`：成员只剩队首那一个模型。
+  // 它不再与 `pool` 路由同形 —— 这一格正是「一轮只试一个模型」在决策返回值里的样子。
+  assert.equal(new Set(select().candidates.map(candidate => candidate.displayName)).size, 1,
+    '缺省范围只留队首模型')
 })
 
 test('C：单个策略就是它的谓词；第一个条目的 operator 被忽略（`and`/`or` 结果相同）', () => {
@@ -226,7 +231,9 @@ test('C：未知策略 id 由写入归一剔掉（fail-open），剩下的照旧
     prefer: 'fast',
     maxAttempts: 3,
     stickyMinutes: 30,
-    // 绕过 `createRoute` 的写入校验（那是 IPC 之外的手改通道）：读取侧必须自己剔掉
+    // 绕过 `createRoute` 的写入校验（那是 IPC 之外的手改通道），但范围仍是路由语义的
+    // 一部分：缺省 `single` 会把池裁成一个模型，本用例证明的是多模型池上的形状。
+    modelScope: 'pool',
     poolStrategies: [
       { id: 'not-a-real-strategy', operator: 'and' },
       { id: 'vision-capable', operator: 'or' },
@@ -347,7 +354,9 @@ test('E：粘性按路由分键 —— 同一段对话，另一条路由不被�
 
   const legacy = select()
   assert.equal(legacy.routeName, 'auto')
-  assert.equal(legacy.reason, 'score', 'legacy 路径的键名前缀是 `auto`，同样不共享')
+  // legacy 不传 route ⇒ 架构 A 的缺省范围 `single`：裁剪后只剩队首一个候选，reason 是
+  // `only`。要点仍是「不共享」：它既没读到 routeX 的 Beta-Lite，也不是 sticky。
+  assert.notEqual(legacy.reason, 'sticky', 'legacy 路径的键名前缀是 `auto`，同样不共享')
   assert.equal(legacy.candidates[0].displayName, 'Alpha-Flash')
 
   // 反方向也要成立：给 routeY 钉住 Alpha-Flash 之外的另一家后，routeX 的记录仍是自己那条

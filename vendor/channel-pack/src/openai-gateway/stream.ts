@@ -83,6 +83,38 @@ function finishReason(reason: FinishReason): string {
 }
 
 /**
+ * 合成 incomplete 的成因 → 可读文案（见 sse.ts 的 `IncompleteStepCause`）。
+ *
+ * ⚠️ 这些条件**都不是输出上限**。此前它们与真实 `length` 一起投影成
+ * `finish_reason:'length'`，Responses 侧翻成 `incomplete/max_output_tokens`，
+ * Codex 就地结束回合並且只报「输出 token 上限」—— 与事实无关，用户无从判断。
+ * 本投影没有 harness 可重跑该步，故改走错误帧（网关契约：流后失败是
+ * `data:{"error":…}`，不是正文），把真实成因交给客户端与路由。
+ */
+const INCOMPLETE_STEP_MESSAGES: Record<string, string> = {
+  'reasoning-loop': '模型陷入思考循环，本步产出已被截断',
+  'incomplete-tools': '上游未宣告结束就断流，工具调用不完整',
+  'stream-cut': '上游连接被掐断（既无 finish_reason 也无 [DONE]）',
+  'tool-args-truncated': '工具调用参数 JSON 残缺，该批调用已丢弃',
+  'tool-args-empty': '必填参数的工具调用收到空参数，该批调用已丢弃',
+  'prose-cut-by-stop-string': '正文被上游停止串掐断',
+  'tool-call-unnamed': '工具调用缺少可用名称，该批调用已丢弃',
+}
+
+export const INCOMPLETE_STEP_CODE = 'incomplete_step'
+
+/** 带成因标签的 `max-tokens` ⇒ 错误帧；真实上限（无标签）仍走 `length`。 */
+function incompleteStepError(reason: FinishReason): { message: string; code: string } | undefined {
+  if (reason.kind !== 'max-tokens') return undefined
+  const cause = (reason as { incompleteCause?: string }).incompleteCause
+  if (typeof cause !== 'string') return undefined
+  return {
+    message: `模型本步产出不完整：${INCOMPLETE_STEP_MESSAGES[cause] ?? cause}`,
+    code: INCOMPLETE_STEP_CODE,
+  }
+}
+
+/**
  * DSH 的用量 → OpenAI Chat Completions 的 `usage`。
  *
  * ⚠️ 口径转换全部在 `usage.ts` 里（两个端点共用一份判断，见该文件头）。
@@ -191,6 +223,17 @@ function consumeChunk(state: Accumulated, chunk: StreamChunk): Record<string, un
             type: 'server_error',
             code: chunk.reason.failure.code,
             status: chunk.reason.failure.status,
+          },
+        }
+      }
+      const synthesized = incompleteStepError(chunk.reason)
+      if (synthesized) {
+        return {
+          error: {
+            message: synthesized.message,
+            type: 'server_error',
+            code: synthesized.code,
+            status: 502,
           },
         }
       }

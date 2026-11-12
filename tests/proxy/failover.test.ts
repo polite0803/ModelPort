@@ -1262,6 +1262,10 @@ test('恢复轮最多一次，且等待用剩余墙钟（不提高总预算）',
     'the recursive recovery pass must carry zero rounds left — no rolling retry loop')
   assert.match(forwarderSource, /await sleep\(waitMs\)/,
     'the wait must be honoured by the gateway itself, not handed to the client as 503')
-  assert.match(forwarderSource, /elapsedMs: Date\.now\(\) - budgetStart,\s*\r?\n\s*budgetMs: AUTO_WALL_CLOCK_BUDGET_MS,/,
+  // 预算不再是全局常量：架构 A 的单模型作用域传 40s（`AutoRouteDecision.wallClockBudgetMs`），
+  // 池作用域与裸名链才落回 90s。恢复轮必须用同一个 `budgetMs` 变量，否则「一等就超出预算」。
+  assert.match(forwarderSource, /const budgetMs = budget\.wallClockBudgetMs \?\? AUTO_WALL_CLOCK_BUDGET_MS/,
+    'the budget comes from the decision, with the shipped 90s as the fallback')
+  assert.match(forwarderSource, /elapsedMs: Date\.now\(\) - budgetStart,\s*\r?\n\s*budgetMs,/,
     'the recovery wait is bounded by the same wall budget, never beyond it')
 })
