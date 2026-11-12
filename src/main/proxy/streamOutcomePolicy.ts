@@ -30,6 +30,11 @@ export function shouldRevokeStickyAfterStream(
   trace: Pick<RequestStreamTrace, 'endReason' | 'repetition' | 'emptyTurn' | 'firstTokenMs'>,
   truncated = false,
   latencyGateMs?: number,
+  /**
+   * 这一轮的服务者是**换家换来的**（`auto.attempts > 1`）。见第七类：
+   * 首选没答上来、替补只给了一句正文就收尾时，不该把会话钉在替补上。
+   */
+  servedByFallback = false,
 ): boolean {
   // 第五类：被上游输出上限截断（`finish_reason=length`）且客户端没给上限。
   // Codex 把这一轮读成 `response.incomplete (max_output_tokens)` 并**就地结束
@@ -46,6 +51,32 @@ export function shouldRevokeStickyAfterStream(
     || isEmptyTurnAfterStream(trace)
     || isAnnouncedStopAfterStream(trace)
     || isSlowTurnAfterStream(trace, latencyGateMs)
+    || (servedByFallback && isProseOnlyStopAfterStream(trace))
+}
+
+/**
+ * 第七类（2026-11-13 现网 `chatcmpl-mwdt3j2s-d8em3q`）：**换家之后替补只说话、不做事**。
+ *
+ * 那一轮形状：粘性把会话放在 `minimax/MiniMax-M3.1-Flash`，它在 20s 首块切片内
+ * 没产出任何字节（504），循环换到 `loomy/spark-x2.6`；替补 29s 才吐首字，正文 35 个
+ * 字符、零工具调用、`finish_reason=stop`，客户端读到「一句计划」就结束了回合。
+ * 三道既有判据全放过它：有正文（③ 不成立）、只有一行（去重率 `too_short`）、
+ * 正文以「。」收尾（④ 只认冒号）。
+ *
+ * **只在换家来的那一轮判**：一句话正文在单轮里无法与「任务正常收尾」区分 ——
+ * 后者同样是零工具调用、同样以句号结束，把它判退化会罚到每一次成功的收尾。
+ * 但「首选没答上来、替补给了一句就停」有额外的信息量：池子没被试对。这一格
+ * 不罚账号、不进 AIMD/Bandit，只**撤锚点**，让下一轮重新排序 —— 与第六类同口径。
+ */
+export function isProseOnlyStopAfterStream(
+  trace: Pick<RequestStreamTrace, 'endReason' | 'emptyTurn'>,
+): boolean {
+  if (trace.endReason !== 'done') return false
+  const reading = trace.emptyTurn
+  if (reading === undefined) return false
+  return reading.toolsOffered === true
+    && reading.toolCallDeltas === 0
+    && reading.contentChars > 0
 }
 
 /**

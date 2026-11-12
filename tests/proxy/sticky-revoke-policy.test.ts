@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   isEmptyTurnAfterStream,
   isAnnouncedStopAfterStream,
+  isProseOnlyStopAfterStream,
   isSlowTurnAfterStream,
   shouldRevokeStickyAfterStream,
 } from '../../src/main/proxy/streamOutcomePolicy.ts'
@@ -135,4 +136,31 @@ test('首字判据的三种缺席：没有门槛、没有读数、刚好等于�
     false,
     '正常速度的完成流不撤锚点',
   )
+})
+
+test('换家来的替补只说话不做事：撤锚点（2026-11-13 chatcmpl-mwdt3j2s-d8em3q）', () => {
+  // 现网形状：粘性选 minimax，20s 首块切片内零字节（504）→ 换到 loomy/spark-x2.6；
+  // 替补 29s 首字、35 字正文、零工具调用、句号收尾 —— 客户端读到一句计划就结束回合。
+  const proseOnly = {
+    endReason: 'done',
+    emptyTurn: { contentChars: 35, toolCallDeltas: 0, toolsOffered: true, empty: false, lastChar: '。', announcedStop: false },
+  } as never
+  assert.equal(isProseOnlyStopAfterStream(proseOnly), true)
+  assert.equal(shouldRevokeStickyAfterStream(proseOnly, false, undefined, true), true)
+  // 负控：同一份读数但服务者是首选本身 —— 单轮里它与「任务正常收尾」无法区分，
+  // 判退化会罚到每一次成功的收尾，所以不撤。
+  assert.equal(shouldRevokeStickyAfterStream(proseOnly, false, undefined, false), false)
+})
+
+test('第七类只认「有正文、零调用、带工具、正常收尾」四件同时成立', () => {
+  const reading = (patch: Record<string, unknown>) => ({
+    endReason: 'done',
+    emptyTurn: { contentChars: 35, toolCallDeltas: 0, toolsOffered: true, empty: false, announcedStop: false, ...patch },
+  }) as never
+  assert.equal(isProseOnlyStopAfterStream(reading({ contentChars: 0 })), false, '零正文属第三类，不在这里判')
+  assert.equal(isProseOnlyStopAfterStream(reading({ toolCallDeltas: 3 })), false, '真的调了工具就不算')
+  assert.equal(isProseOnlyStopAfterStream(reading({ toolsOffered: false })), false, '客户端没带工具时「只说不做」是合法答案')
+  assert.equal(isProseOnlyStopAfterStream({ endReason: 'client_gone', emptyTurn: { contentChars: 35, toolCallDeltas: 0, toolsOffered: true, empty: false, announcedStop: false } } as never), false,
+    '被掐断的流不判')
+  assert.equal(isProseOnlyStopAfterStream({ endReason: 'done' } as never), false, '没有读数就不判')
 })

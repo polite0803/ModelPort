@@ -1256,6 +1256,34 @@ What it no longer does is let the preference become a cliff: a conversation can 
 inside the same request when the ones ahead of it fail, and the 503 + `Retry-After` collection at the chain
 head is reserved for "the whole pool was tried and nothing answered".
 
+### Fallback-served prose-only stop (2026-11-13, the seventh degraded class)
+
+`codex-deepseek` kept stopping mid-task while the client reported no error. Row
+`chatcmpl-mwdt3j2s-d8em3q` is the shape: the sticky anchor held `minimax/MiniMax-M3.1-Flash`, that
+candidate produced no first block inside the lowered first-round slice (504, `budgetElapsedMs` 1643,
+`attemptDeadlineMs` 20000), the pool advanced to `loomy/spark-x2.6`, and the substitute spent 29 067 ms to
+the first token and then returned **35 characters of prose, zero `tool_calls` deltas,
+`finish_reason=stop`** - "我先看最近几次提交的改动面——新代码最容易藏缺陷。". The client treats a `stop`
+with no calls as a finished turn, so the task ends there while the gateway records a success.
+
+None of the six earlier classes catches it: content > 0 (not the empty turn), one line (the dedup ratio
+says `notJudged: too_short`), the last character is `。` not `：` (not the announced stop), the client sent
+no cap, and `codex-deepseek`'s pool produced no `latencyGateMs` reading for that request.
+
+`streamOutcomePolicy.ts::isProseOnlyStopAfterStream` is deliberately **not** a judgement on the prose. A
+one-line answer with no tool call is exactly what a healthy finish looks like, so judging it on its own
+would penalise every normal turn. What carries information is that **the first choice failed**: the pool was
+never really sampled. The predicate therefore fires only when `auto.attempts > 1` - `settleSticky` passes
+`autoAttempts > 1` as the fourth argument - and it lifts only the anchor: no AIMD reading, no Bandit
+sample, no account cooldown or failure. Turning the anchor over once re-ranks the next turn; if the
+substitute really was the best answer, it wins the ranking again.
+
+Tests: `tests/proxy/sticky-revoke-policy.test.ts` pins the live row shape in both directions
+(`servedByFallback` true revokes, false does not) plus the four-part conjunction controls (zero content is
+class ③, tool deltas disqualify, tools not offered disqualify, `client_gone` disqualifies, no reading
+disqualifies); `tests/renderer/repetition-guard-wiring.test.mjs` pins the call site's fourth argument and
+the policy term.
+
 ### OpenCode: three lanes, one shipped
 
 "OpenCode" names three unrelated things in this repo; only the third is live.

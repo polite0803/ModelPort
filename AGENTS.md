@@ -339,6 +339,17 @@ completed (`done`) but its `firstTokenMs` was above the pool's p75, computed at 
 as `AutoRouteDecision.latencyGateMs`. It does not touch the account - it only lifts the anchor so the next
 turn re-ranks. This is the turn-level half of the same threshold that stops the hard pin from promoting a
 slow model; both read one derivation (see the latency-gate invariant below the stickiness bullet).
+* **A fallback-served prose-only stop is the seventh degraded class** (2026-11-13,
+`isProseOnlyStopAfterStream`). Measured `chatcmpl-mwdt3j2s-d8em3q` on `codex-deepseek`: the anchor held
+`minimax/MiniMax-M3.1-Flash`, that candidate emitted nothing inside the 20 s first-block slice (504), the
+pool advanced to `loomy/spark-x2.6`, which took 29 s to the first token and then returned 35 characters of
+prose with zero tool-call deltas and `finish_reason=stop` - the client ends the turn on "我先看…". Every
+earlier class passes it: content > 0 (not ③), one line (dedup `too_short`), ends in `。` not `：` (not ④),
+no client cap, no `latencyGateMs`. The information is not the prose - a one-line answer is indistinguishable
+from a normal finish - but that the **first choice failed**, so the pool was never actually sampled. The
+predicate is therefore gated on `auto.attempts > 1` (`settleSticky` passes `autoAttempts > 1` as the fourth
+argument) and lifts only the anchor: no AIMD, no Bandit, no account penalty, the same policy as the sixth
+class.
 * **A degraded reading must reach the Bandit table, or it is decoration.** `autoBandit` aggregates the
 request-log rows, and those rows carry `repetition`/`emptyTurn` **nested under `streamTrace`**;
 reading only the top-level field (as it did until 2026-11-12) means classes ②③④ never entered the

@@ -41,13 +41,16 @@ function checkMainProcess(chatSource, routerSource, policySource) {
   if (settleCalls !== 3) {
     problems.push(`all three stream settle paths must settle stickiness, saw ${settleCalls}`)
   }
-  // 第三个实参是 2026-11-12 新增的池内首字门槛（第六类退化）。摘掉它 ⇒ 慢回合
-  // 不再撤锚点，这条接线要红。
-  if (!/shouldRevokeStickyAfterStream\(trace, truncated, autoDecision\?\.latencyGateMs\)/.test(chatSource)) {
+  // 第三个实参是 2026-11-12 新增的池内首字门槛（第六类退化），第四个是 2026-11-13
+  // 的「换家来的替补只说话」（第七类）。摘掉任一格 ⇒ 对应的撤锚点不再发生，这条接线要红。
+  if (!/shouldRevokeStickyAfterStream\(\s*trace,\s*truncated,\s*autoDecision\?\.latencyGateMs,\s*autoAttempts > 1,\s*\)/.test(chatSource)) {
     problems.push('settleSticky does not delegate to the shared policy')
   }
   if (!/isSlowTurnAfterStream\(trace, latencyGateMs\)/.test(policySource)) {
     problems.push('the policy does not revoke on a slow first token')
+  }
+  if (!/servedByFallback && isProseOnlyStopAfterStream\(trace\)/.test(policySource)) {
+    problems.push('the policy does not revoke when a fallback only talks')
   }
   if (!/endReason === 'timeout' \|\| trace\.endReason === 'error'/.test(policySource)) {
     problems.push('the policy does not revoke on timeout or upstream error')

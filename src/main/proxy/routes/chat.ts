@@ -1381,7 +1381,14 @@ router.post('/completions', async (ctx: Context) => {
       const settleSticky = (trace: RequestStreamTrace, truncated: boolean): void => {
         // 第六类（第 2 条）：这一轮首字慢于池内 p75。门槛是选路阶段算好的同一格，
         // 与硬粘性「要不要提前」同源；读数缺失（非流式/首块没打点）时不判。
-        if (!shouldRevokeStickyAfterStream(trace, truncated, autoDecision?.latencyGateMs)) return
+        // 第七类：这一轮是换家换来的，替补给了一句正文就收尾 —— 不钉在替补上。
+        // `attempts > 1` 就是「首选没答上来」的现成读数，不另记一份。
+        if (!shouldRevokeStickyAfterStream(
+          trace,
+          truncated,
+          autoDecision?.latencyGateMs,
+          autoAttempts > 1,
+        )) return
         if (!autoDecision || !chosenCandidate) return
         autoRouter.revokeSticky(autoDecision.conversationKey, autoDecision.route)
       }
