@@ -2027,7 +2027,8 @@
     "unreachable": "连不上网关：{{message}}",
     "daemonKeepsRunning": "关掉这个标签页不会停止网关，它会继续服务请求。",
     "retrieving": "正在从系统密钥库取回这台网关的口令…",
-    "remembered": "在这个壳里，连接成功后口令会存进系统密钥库（只有当前 Windows 用户能解开）。换机器或换用户登录后会再问一次。"
+    "remembered": "在这个壳里，连接成功后口令会存进系统密钥库（只有当前 Windows 用户能解开）。换机器或换用户登录后会再问一次。",
+    "languageLabel": "界面语言"
   },
   "routes": {
     "title": "路由与模型",

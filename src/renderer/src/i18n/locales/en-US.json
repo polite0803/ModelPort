@@ -2027,7 +2027,8 @@
     "unreachable": "Cannot reach the gateway: {{message}}",
     "daemonKeepsRunning": "Closing this tab does not stop the gateway; it keeps serving requests.",
     "retrieving": "Retrieving this gateway's secret from the system keystore...",
-    "remembered": "In this shell, an accepted secret is stored in the system keystore (only the current Windows user can decrypt it). After moving to another machine or account it asks once more."
+    "remembered": "In this shell, an accepted secret is stored in the system keystore (only the current Windows user can decrypt it). After moving to another machine or account it asks once more.",
+    "languageLabel": "Interface language"
   },
   "routes": {
     "title": "Routes and models",

@@ -91,7 +91,9 @@ export const useSettingsStore = create<SettingsState>()(
           console.error('Failed to update oauthProxyMode:', error)
         }
       },
-      language: 'en-US',
+      // 首访跟随浏览器语言检测（i18n 初始化时已同步完成）；硬编码 en-US 会在 rehydrate 时
+      // 把检测结果覆盖掉，中文浏览器首访也只见英文。显式选择仍由持久化偏好与网关配置接管。
+      language: i18n.language === 'zh-CN' ? 'zh-CN' : 'en-US',
       setLanguage: async (language) => {
         set({ language })
         await i18n.changeLanguage(language)

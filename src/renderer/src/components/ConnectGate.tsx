@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import i18n from '../i18n'
+import { useSettingsStore, type Language } from '../stores/settingsStore'
 import {
   hasManagementSecret,
   loadRememberedSecret,
@@ -26,6 +28,13 @@ export default function ConnectGate({
   children: React.ReactNode
 }) {
   const { t } = useTranslation()
+  const language = useSettingsStore((state) => state.language)
+  // 登录前只写本地偏好：setLanguage 会调 config.update，此刻没有管理密钥，必然 401。
+  // changeLanguage 让 detector 把选择缓存进 localStorage，下次首访直接沿用。
+  const switchLanguage = (lng: Language): void => {
+    useSettingsStore.setState({ language: lng })
+    void i18n.changeLanguage(lng)
+  }
   const [ready, setReady] = useState(() => !remote || hasManagementSecret())
   // The shell keeps the secret in the OS keystore; asking for it is one IPC round trip, so
   // the form must not flash before the answer arrives.
@@ -97,6 +106,30 @@ export default function ConnectGate({
           <div className="space-y-1">
             <h1 className="text-lg font-semibold text-foreground">{t('connect.title')}</h1>
             <p className="text-sm text-muted-foreground">{t('connect.subtitle')}</p>
+          </div>
+
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-muted-foreground">{t('connect.languageLabel')}</span>
+            <div
+              role="group"
+              aria-label={t('connect.languageLabel')}
+              className="flex overflow-hidden rounded-md border border-input"
+            >
+              {(['zh-CN', 'en-US'] as const).map((lng) => (
+                <button
+                  key={lng}
+                  type="button"
+                  onClick={() => switchLanguage(lng)}
+                  className={`px-2 py-1 text-xs ${
+                    language === lng
+                      ? 'bg-primary text-primary-foreground'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  {lng === 'zh-CN' ? '中文' : 'English'}
+                </button>
+              ))}
+            </div>
           </div>
 
           <label className="block space-y-1">
