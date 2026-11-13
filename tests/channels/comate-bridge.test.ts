@@ -130,6 +130,13 @@ test('没有对应工具时返回不可用原因，todo_write 是无操作成功
   const todo = mapComateToolCall('todo_write', {}, claudeTools)
   assert.equal(todo.noop, true)
   assert.equal(todo.mapped, false)
+
+  // 官方 CLI 内部工具：必须回空成功，否则 agent 会认为压缩工具坏了，
+  // 上下文超限时反复撞 NeedCompressionException。
+  const compress = mapComateToolCall('compress_message', { status: 'success' }, claudeTools)
+  assert.equal(compress.noop, true)
+  assert.equal(compress.mapped, false)
+  assert.equal(compress.failure, undefined)
 })
 
 test('客户端 tool-result 被提取，并与 pending/noop/不可用结果合并', () => {

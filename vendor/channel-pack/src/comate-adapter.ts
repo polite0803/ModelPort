@@ -75,6 +75,84 @@ const CONVERSATION_PATH = '/aidevops/autocomate/rest/autowork/v2/conversation'
 const TASK_PATH = '/aidevops/autocomate/rest/autowork/v2/task'
 /** 一次请求内“全部工具都无法映射”的连续轮次上限（正常不会触发）。 */
 const MAX_UNMAPPED_ROUNDS = 12
+/**
+ * 会话上下文超过上限时上游发的终止帧文案（`EXCEPTION` 帧的 `exceptionMsg`）。
+ *
+ * 官方 CLI 的 `isCompressionRetry` 只认这一条，处理方式是**同一轮重发**并在
+ * payload 上加 `needCompression: true`（`buildCompressionParams`），由服务端压缩
+ * 历史后继续。把它当普通 400/502 抛出，长会话会永久卡死：每个新会话都从整段
+ * transcript 重建，必然再次超限（2026-11-13 实测：同一会话第 32 轮起全部 502）。
+ */
+const COMPRESSION_EXCEPTION = 'NeedCompressionException'
+/** 压缩重发次数上限；官方 CLI 与其它重试共用 7 次预算，这里只给压缩留 2 次。 */
+const MAX_COMPRESSION_RETRIES = 2
+
+/**
+ * 上游明确拒绝「上下文超过最大限制」。与 `NeedCompressionException` 的区别：
+ * 前者压缩一次就能继续，这一条说明连压缩都放不下 —— 只能裁剪历史后重建会话。
+ * 实测文案（2026-11-13）：`当前对话上下文超过最大限制，请减少输入指令长度、…`
+ */
+const CONTEXT_LIMIT_PATTERN = /超过最大限制|超过.{0,4}上限|maximum context|context.{0,20}(?:limit|exceed)/i
+/** 超限后重建会话的次数上限；每次把预算降到上一次的 60%。 */
+const MAX_CONTEXT_REBUILDS = 2
+
+/** 上游要求压缩上下文。`emitted` 为 true 时本轮已吐出内容，无法原样重来。 */
+class ComateCompressionRequired extends Error {
+  constructor(readonly emitted: boolean) {
+    super('comate: upstream requested context compression')
+    this.name = 'ComateCompressionRequired'
+  }
+}
+
+/** 上游拒绝本轮输入：上下文硬超限。同样只在没有吐出内容时才能重建。 */
+class ComateContextLimitExceeded extends Error {
+  constructor(readonly emitted: boolean) {
+    super('comate: context limit exceeded')
+    this.name = 'ComateContextLimitExceeded'
+  }
+}
+
+/** 宽松的内容体积（图片等非文本块不渲染，也不该让裁剪失明）。 */
+function contentSize(content: unknown): number {
+  if (typeof content === 'string') return content.length
+  if (content === undefined || content === null) return 0
+  try {
+    return JSON.stringify(content).length
+  } catch {
+    return 0
+  }
+}
+
+/** 整段历史的近似字符数（不渲染，因此不会因图片抛错）。 */
+function approxTranscriptChars(system: string | undefined, messages: readonly HarnessMessageLike[]): number {
+  return messages.reduce((sum, message) => sum + contentSize(message.content), 0)
+    + (system?.length ?? 0)
+}
+
+/**
+ * 按字符预算保留「首条 user（任务原文）+ 最新一段消息」。
+ *
+ * 首条 user 是任务锚点，被裁掉模型会失焦（与 `contextManagementService` 的
+ * `keepToolGroupAndTask` 同一取舍）；最新一条永远保留，裁剪绝不清空历史。
+ */
+function trimMessagesForBudget(
+  system: string | undefined,
+  messages: readonly HarnessMessageLike[],
+  budgetChars: number,
+): readonly HarnessMessageLike[] {
+  const kept: HarnessMessageLike[] = []
+  let used = system?.length ?? 0
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    const size = contentSize(message.content) + 32
+    if (kept.length > 0 && used + size > budgetChars) break
+    kept.unshift(message)
+    used += size
+  }
+  const firstUser = messages.find(message => message.role === 'user')
+  if (firstUser !== undefined && !kept.includes(firstUser)) kept.unshift(firstUser)
+  return kept
+}
 
 interface ConversationState {
   conversationId: number
@@ -553,10 +631,10 @@ export class ComateAdapter extends LlmAdapter {
       throw new LlmError('comate: nothing to send (empty transcript)', 'INVALID_REQUEST')
     }
 
-    const basePayload: Record<string, unknown> = {
+    const basePayloadFor = (created: CreatedConversation): Record<string, unknown> => ({
       ...comateClientInfo(credential.license),
-      conversationId: state.conversationId,
-      taskId: state.taskId,
+      conversationId: created.conversationId,
+      taskId: created.taskId,
       modelKey: options.model,
       thinkingEnabled: options.reasoningEffort !== 'off',
       ...entry?.contextWindow !== undefined
@@ -569,30 +647,91 @@ export class ComateAdapter extends LlmAdapter {
       agentVersion: '',
       enableMemory: false,
       uploadBaseInfo: comateUploadBaseInfo(credential.license),
-    }
+    })
+
+    const queryPayload = (
+      created: CreatedConversation,
+      text: string,
+      first: boolean,
+    ): Record<string, unknown> => ({
+      ...basePayloadFor(created),
+      query: text,
+      isUserQuery: true,
+      isFirstQuery: first,
+      toolUseResults: [],
+    })
 
     let payload: Record<string, unknown> = isContinuation
       ? {
-          ...basePayload,
+          ...basePayloadFor(state),
           query: '',
           isUserQuery: false,
           isFirstQuery: false,
           toolUseResults: continuationResults,
         }
-      : {
-          ...basePayload,
-          query,
-          isUserQuery: true,
-          isFirstQuery,
-          toolUseResults: [],
-        }
+      : queryPayload(state, query, isFirstQuery)
+
+    let contextBudgetChars = Number.POSITIVE_INFINITY
+    let contextRebuilds = 0
+
+    /**
+     * 上下文硬超限时的恢复：丢弃服务端会话，按预算裁剪历史后新建。
+     * 服务端的拒绝本身就是「放不下」的判据 —— 不猜上限，只按 60% 几何收缩，
+     * 首条 user（任务原文）与最新消息永远保留。
+     */
+    const reopenWithBudget = async (): Promise<void> => {
+      if (state !== undefined) this.forgetConversation(key, state.conversationId)
+      contextBudgetChars = Math.floor(
+        (Number.isFinite(contextBudgetChars)
+          ? contextBudgetChars
+          : approxTranscriptChars(options.system, messages)) * 0.6,
+      )
+      const subset = trimMessagesForBudget(options.system, messages, contextBudgetChars)
+      const title = lastUserText(subset) || firstUserText(subset) || 'Comate'
+      const created = await this.createConversation(credential, title, options.signal)
+      state = { ...created, seen: [], updatedAt: Date.now() }
+      payload = queryPayload(created, renderWithSystem(options.system, subset), true)
+    }
 
     const streamState: StreamState = { nextIndex: 0, text: '', reasoning: '' }
     let unmappedRounds = 0
+    let compressionRetries = 0
 
     try {
       for (;;) {
-        const round = yield* this.consumeExecution(payload, credential, options, streamState)
+        let round: { toolCalls: AgentToolCall[] }
+        try {
+          round = yield* this.consumeExecution(payload, credential, options, streamState)
+        } catch (error) {
+          if (!(error instanceof ComateCompressionRequired) && !(error instanceof ComateContextLimitExceeded)) {
+            throw error
+          }
+          // 本轮已经吐出内容时不能重来（客户端已看到部分输出）。
+          if (error.emitted) {
+            throw new LlmError(
+              'comate: 上下文超过模型上限（本轮已输出内容，未重建会话）',
+              'INVALID_REQUEST',
+              { status: 502 },
+            )
+          }
+          // ① 官方路径：同一轮重发 + needCompression，让服务端压缩历史后继续。
+          if (error instanceof ComateCompressionRequired && compressionRetries < MAX_COMPRESSION_RETRIES) {
+            compressionRetries += 1
+            payload = { ...payload, needCompression: true }
+            continue
+          }
+          // ② 压缩已帮不上（或直接报硬超限）：裁剪历史、重建会话。
+          if (contextRebuilds < MAX_CONTEXT_REBUILDS) {
+            contextRebuilds += 1
+            await reopenWithBudget()
+            continue
+          }
+          throw new LlmError(
+            `comate: 上下文超过模型上限（压缩 ${compressionRetries} 次、裁剪重建 ${contextRebuilds} 次后仍被拒）；请新开会话`,
+            'INVALID_REQUEST',
+            { status: 502 },
+          )
+        }
         if (round.toolCalls.length === 0) {
           state.pending = undefined
           break
@@ -655,7 +794,7 @@ export class ComateAdapter extends LlmAdapter {
         }
         const results = buildToolUseResults(pendingCalls, [])
         payload = {
-          ...basePayload,
+          ...basePayloadFor(state),
           query: '',
           isUserQuery: false,
           isFirstQuery: false,
@@ -727,6 +866,8 @@ export class ComateAdapter extends LlmAdapter {
     const decoder = new TextDecoder()
     let buffer = ''
     const calls = new Map<string, AgentToolCall>()
+    /** 本轮是否已向客户端吐出内容（压缩重发的前提是还没有）。 */
+    let emitted = false
 
     const applyToolUse = (detail: NonNullable<ComateFrame['content']>['detail']): void => {
       const toolUses = Array.isArray(detail?.toolUse)
@@ -780,6 +921,7 @@ export class ComateAdapter extends LlmAdapter {
                       yield { type: 'block-start', index: state.reasoningIndex, blockType: 'reasoning' }
                     }
                     state.reasoning += reasoningDelta
+                    emitted = true
                     yield { type: 'reasoning-delta', index: state.reasoningIndex, text: reasoningDelta }
                   }
                   const delta = typeof detail?.delta === 'string' ? detail.delta : ''
@@ -790,6 +932,7 @@ export class ComateAdapter extends LlmAdapter {
                       yield { type: 'block-start', index: state.textIndex, blockType: 'text' }
                     }
                     state.text += delta
+                    emitted = true
                     yield { type: 'text-delta', index: state.textIndex, text: delta }
                   }
                 } else if (type === 'TOKEN_USAGE' && detail?.usage !== undefined) {
@@ -819,12 +962,24 @@ export class ComateAdapter extends LlmAdapter {
                   const message = typeof detail?.exceptionMsg === 'string' && detail.exceptionMsg.length > 0
                     ? detail.exceptionMsg
                     : 'agent execution failed'
+                  // `NEED_RETRY_EXCEPTION` 是官方 CLI 的 RetryServerError（退避重试），
+                  // 压缩/硬超限只挂在 `EXCEPTION` 帧上，别把两者混成一条。
+                  if (type === 'EXCEPTION' && message === COMPRESSION_EXCEPTION) {
+                    throw new ComateCompressionRequired(emitted)
+                  }
+                  if (type === 'EXCEPTION' && CONTEXT_LIMIT_PATTERN.test(message)) {
+                    throw new ComateContextLimitExceeded(emitted)
+                  }
                   throw new LlmError(`comate: ${message}`, 'INVALID_REQUEST')
                 } else if (type !== undefined && (type.startsWith('FUNCTION_CALL') || type.startsWith('TOOL_CALL'))) {
                   applyToolUse(detail)
                 }
               } catch (error) {
-                if (error instanceof LlmError) throw error
+                if (
+                  error instanceof LlmError
+                  || error instanceof ComateCompressionRequired
+                  || error instanceof ComateContextLimitExceeded
+                ) throw error
                 // 畸形帧（心跳/增量 JSON）跳过，不终止整段流。
               }
             }

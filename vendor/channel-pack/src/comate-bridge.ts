@@ -383,6 +383,10 @@ export function mapComateToolCall(
       }
       return unavailable(agentName, 'no WebSearch tool was provided')
     }
+    // `compress_message` 是官方 CLI 的**内部**工具（CompressMessage 返回空成功、
+    // 且被排除在 toolUseResults 之外）。当失败回给 agent 会让它以为压缩工具坏了，
+    // 上下文超限时反复撞 NeedCompressionException。
+    case 'compress_message':
     case 'todo_write':
     case 'send_user_message':
       return { name: '', arguments: '', mapped: false, noop: true }
