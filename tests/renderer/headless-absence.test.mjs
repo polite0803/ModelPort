@@ -67,7 +67,7 @@ test('the browser transport actually carries the file to the gateway', () => {
   const source = headless()
   assert.match(source, /input\.type = 'file'/, 'the picker is the browser dialog, not a dead button')
   assert.match(source, /\/v1\/management\/backup\/stage/, 'the bytes go to the upload route')
-  assert.match(source, /uploadBackup,\s*\}/, 'the wire advertises the capability')
+  assert.match(source, /uploadBackup,[^}]*\}/, 'the wire advertises the capability')
   // One table, two transports: the table must prefer the wire's own answer and still fall
   // back to the IPC channel for the desktop app.
   assert.match(apiTable(), /wire\.uploadBackup \? wire\.uploadBackup\(\) : wire\.invoke\(IpcChannels\.BACKUP_PICK\)/)
