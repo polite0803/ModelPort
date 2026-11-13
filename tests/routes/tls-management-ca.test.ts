@@ -5,7 +5,7 @@ import { request as httpsRequest } from 'node:https'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { generate } from 'selfsigned'
+import { generateParseablePair } from '../fixtures/selfsigned.ts'
 
 import { bootstrapStore, loadModule } from './harness.mjs'
 
@@ -20,7 +20,7 @@ const dir = mkdtempSync(join(tmpdir(), 'modelport-tls-mgmt-'))
 after(() => rmSync(dir, { recursive: true, force: true }))
 
 function writePair(name: string, commonName: string): { certPath: string; keyPath: string } {
-  const pair = generate([{ name: 'commonName', value: commonName }], {
+  const pair = generateParseablePair([{ name: 'commonName', value: commonName }], {
     days: 30,
     keySize: 2048,
     algorithm: 'sha256',

@@ -3,17 +3,17 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { generate } from 'selfsigned'
 import { X509Certificate } from 'node:crypto'
 import { createServer, request } from 'node:https'
 
 import { loadTlsMaterial } from '../../src/main/proxy/tls.ts'
+import { generateParseablePair } from '../fixtures/selfsigned.ts'
 
 const dir = mkdtempSync(join(tmpdir(), 'modelport-tls-'))
 after(() => rmSync(dir, { recursive: true, force: true }))
 
 function writePair(name: string): { certPath: string; keyPath: string } {
-  const pair = generate([{ name: 'commonName', value: 'ModelPort Test' }], {
+  const pair = generateParseablePair([{ name: 'commonName', value: 'ModelPort Test' }], {
     days: 30,
     keySize: 2048,
     algorithm: 'sha256',

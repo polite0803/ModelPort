@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { generate } from 'selfsigned'
+import { generateParseablePair } from '../fixtures/selfsigned.ts'
 import {
   installCertificateTrust,
   isCertificateTrusted,
@@ -21,7 +21,7 @@ import {
  * regression back to it must be caught here rather than on a user's machine.
  */
 
-const cert = generate([{ name: 'commonName', value: 'ModelPort Test' }], {
+const cert = generateParseablePair([{ name: 'commonName', value: 'ModelPort Test' }], {
   days: 1,
   keySize: 2048,
   algorithm: 'sha256',

@@ -11,7 +11,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const ROOT = process.cwd()
@@ -47,11 +47,11 @@ async function loadAdapter(t) {
       name: 'channel-pack-compat',
       setup(build) {
         build.onResolve({ filter: /^undici$/ }, args => {
-          if (!args.importer.startsWith(VENDOR_SRC + '/')) return undefined
+          if (!args.importer.startsWith(VENDOR_SRC + sep)) return undefined
           return { path: join(COMPAT, 'undici.ts') }
         })
         build.onResolve({ filter: /^\.\.\/\.\.\/\.\.\/src\/image-pricing\.js$/ }, args => {
-          if (!args.importer.startsWith(VENDOR_SRC + '/')) return undefined
+          if (!args.importer.startsWith(VENDOR_SRC + sep)) return undefined
           return { path: join(COMPAT, 'imagePricing.ts') }
         })
       },

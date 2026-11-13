@@ -5,7 +5,7 @@ import { request as httpsRequest } from 'node:https'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { generate } from 'selfsigned'
+import { generateParseablePair } from '../fixtures/selfsigned.ts'
 
 import { bootstrapStore, loadModule } from './harness.mjs'
 
@@ -27,7 +27,7 @@ async function freePort(): Promise<number> {
 }
 
 function writeCert(): { certPath: string; keyPath: string; cert: string } {
-  const pair = generate([{ name: 'commonName', value: 'ModelPort HTTPS Test' }], {
+  const pair = generateParseablePair([{ name: 'commonName', value: 'ModelPort HTTPS Test' }], {
     days: 30,
     keySize: 2048,
     algorithm: 'sha256',
