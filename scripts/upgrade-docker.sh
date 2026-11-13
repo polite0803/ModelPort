@@ -62,7 +62,7 @@ docker rm "$CONTAINER"
 docker run "${RUN_ARGS[@]}"
 
 echo "== wait for HTTP listener =="
-HTTP_PORT=$(docker exec "$CONTAINER" node -e "const d=require('/data/data.json');process.stdout.write(String((d.config&&d.config.proxyPort)||8080))")
+HTTP_PORT=$(docker exec "$CONTAINER" node -e "const d=require(require('path').join(require('os').homedir(),'.modelport','data.json'));process.stdout.write(String((d.config&&d.config.proxyPort)||8080))")
 healthy=0
 for _ in $(seq 1 40); do
   if curl -fsS "http://127.0.0.1:${HTTP_PORT}/" >/dev/null 2>&1; then healthy=1; break; fi
@@ -80,7 +80,7 @@ echo "== version =="
 curl -fsS "http://127.0.0.1:${HTTP_PORT}/" | grep -o '"version":"[^"]*"'
 
 echo "== management plane (secret read inside container, never echoed) =="
-SECRET=$(docker exec "$CONTAINER" node -e "const d=require('/data/data.json');process.stdout.write((d.config&&d.config.managementApi&&d.config.managementApi.managementApiSecret)||'')")
+SECRET=$(docker exec "$CONTAINER" node -e "const d=require(require('path').join(require('os').homedir(),'.modelport','data.json'));process.stdout.write((d.config&&d.config.managementApi&&d.config.managementApi.managementApiSecret)||'')")
 echo "secret prefix: ${SECRET:0:5}  len: ${#SECRET}"
 WITH=$(curl -s -o /dev/null -w '%{http_code}' -H "X-Management-Secret: ${SECRET}" "http://127.0.0.1:${HTTP_PORT}/v1/management/config")
 WITHOUT=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${HTTP_PORT}/v1/management/config")
