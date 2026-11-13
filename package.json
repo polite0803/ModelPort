@@ -92,6 +92,7 @@
     "react-window": "^2.2.7",
     "recharts": "^3.7.0",
     "selfsigned": "^2.4.1",
+    "sql.js": "^1.16.0",
     "tailwind-merge": "^2.5.4",
     "undici": "^6.29.1",
     "zstd-codec": "^0.1.5",

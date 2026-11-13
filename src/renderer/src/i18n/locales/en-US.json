@@ -14,6 +14,7 @@
     "logs": "Logs",
     "settings": "Settings",
     "gatewayManager": "Gateway Manager",
+    "clientSync": "Client Setup",
     "about": "About"
   },
   "dashboard": {
@@ -647,6 +648,52 @@
     "routePoolSourceShort_third-party": "3rd",
     "routePoolSourceShort_heuristic": "guess",
     "routePoolSourceShort_unknown": "?"
+  },
+  "clientSync": {
+    "title": "Client Setup",
+    "description": "Point the clients installed on this machine at the current gateway in one pass: the console writes the endpoint and the key, so switching gateways no longer means editing each client by hand.",
+    "desktopOnly": "Client setup is desktop-only: it reads and writes client configuration on this machine.",
+    "refresh": "Re-check",
+    "apply": "Apply to {{n}} clients",
+    "loading": "Reading client configuration…",
+    "loadFailed": "Could not read client configuration: {{error}}",
+    "targetGateway": "Target gateway",
+    "canonicalKey": "Canonical key",
+    "noKey": "No key available - enter it yourself",
+    "modelsTitle": "Routes advertised by the target",
+    "modelsCount": "{{n}} total",
+    "modelsEmpty": "The target advertises no routes: enable one first, or the clients will have nothing to pick after the switch.",
+    "contextUnknown": "context not advertised",
+    "distributionTitle": "Canonical key distribution",
+    "distribution": {
+      "already": "already holds this key",
+      "added": "written",
+      "failed": "write failed",
+      "no-secret": "no management secret, skipped"
+    },
+    "noReady": "Nothing is writable right now: read each row's reason (not installed / no custom model / app is running).",
+    "state": {
+      "ready": "Ready",
+      "unchanged": "Already on target",
+      "not-installed": "Not installed",
+      "no-entry": "No entry to update",
+      "app-running": "App is running",
+      "blocked": "Prerequisite missing",
+      "error": "Read failed"
+    },
+    "changesTitle": "Will change",
+    "added": "(new)",
+    "unservedTitle": "The target does not serve these models:",
+    "unservedHint": "Reported, never renamed: renaming changes what the client actually sends, and in Trae it is tied to custom_model_id.",
+    "manualTitle": "One step only you can do:",
+    "backupsTitle": "Backups (for rollback):",
+    "applyDone": "Client configuration written",
+    "applyFailed": "Write did not complete",
+    "confirmTitle": "Write client configuration?",
+    "confirmDescription": "{{n}} clients will have their custom endpoint changed to {{origin}}; every other setting stays as it is.",
+    "confirmChanges": "{{n}} changes",
+    "confirmBackup": "Each file/database gets a .bak backup before the write; the key is only ever shown masked, never on this page.",
+    "confirmApply": "Write"
   },
   "gateways": {
     "title": "Gateway Manager",

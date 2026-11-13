@@ -15,6 +15,7 @@ import {
   KeyRound,
   Network,
   Waypoints,
+  MonitorSmartphone,
 } from 'lucide-react'
 import type { ShellBridge } from '@shared/shellBridge'
 import { cn } from '@/lib/utils'
@@ -113,6 +114,9 @@ export function Sidebar() {
   // The manager is a console page now, so the entry is a route like every other one. A shell
   // that predates the page still gets the old side-window button instead of nothing.
   const canManageGateways = typeof shellBridge?.gateways?.snapshot === 'function'
+  // Gated separately: a shell that has the gateway manager but predates client sync must
+  // still show the manager, and a browser tab shows neither.
+  const canSyncClients = typeof shellBridge?.clients?.preview === 'function'
 
   const hasBlockers = blockers.length > 0
 
@@ -171,6 +175,15 @@ export function Sidebar() {
               onNavigate={handleNavigation}
               hasBlockers={hasBlockers}
               isCurrent={location.pathname === '/gateways'}
+            />
+          )}
+          {canSyncClients && (
+            <NavButton
+              item={{ titleKey: 'nav.clientSync', href: '/clients', icon: MonitorSmartphone }}
+              collapsed={sidebarCollapsed}
+              onNavigate={handleNavigation}
+              hasBlockers={hasBlockers}
+              isCurrent={location.pathname === '/clients'}
             />
           )}
         </nav>

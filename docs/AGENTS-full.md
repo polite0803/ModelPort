@@ -1851,6 +1851,81 @@ missing from its SAN (`proxy/tls.ts::loadTlsMaterial`).
 * Never report a client as working on the strength of the trust flag; the honest evidence is a handshake
   that turned into a request row.
 
+### Client Repointing (2026-11-14)
+
+The console can point the clients installed on its own machine at the active gateway, so switching
+gateways stops meaning "edit six config stores by hand". It is a **client capability**: the shell opens
+no listener and never evaluates the gateway tree (`tests/build/shell-entries.test.ts` lists all four
+`clientSync*` / `clientSqlite` files under that fence). Plan: `docs/plan/PLAN-client-config-switch.md`.
+
+* **The page names ids, never paths.** `shellBridge.clients` has exactly two methods: `preview()` and
+  `apply(clientIds)`. `shell/main.ts::clientSyncInputFor` re-derives every path from `app.getPath`, the
+  address book and the sealed secrets, and gates on `activeGatewayForSender` like the TLS actions.
+  `applySync` runs the **same `gather()`** as the preview, so a stale or forged preview cannot aim a
+  write at another file; ids are filtered through `isClientId` first.
+* **No plaintext key crosses the bridge.** Plans carry `KEY_PLACEHOLDER`; `materialize()` substitutes
+  immediately before the write and **refuses** a file that still contains it (a placeholder on disk
+  looks configured and fails every request). The preview carries `keyPreview` (masked) only.
+* **One canonical key, distributed by append.** `ensureCanonicalKey` prefers the active gateway's first
+  enabled key, then any gateway's, and only mints (`POST /v1/management/api-keys`) when none exists.
+  The linchpin is that **`config:get` returns plaintext `apiKeys`** (`handlers.ts` → `store.ts`); the
+  masking lives only in `apiKeys.ts`'s dedicated REST route. Distribution is `config:update` with the
+  key appended - never a replacement - and an already-present key is a no-op (`already`).
+  **The target must be reachable and must accept the key, or there is no key.** Every address-book url
+  is `normalizeOrigin`-ed first (`readBook` keeps it as written, so a legacy trailing slash would lose
+  the target); an unreachable target or a failed write to it returns `key: null` rather than a key
+  borrowed from another gateway, which would look configured and 401 on arrival. Those rows then say
+  so instead of looking finished: Qoder and WorkBuddy carry `NO_KEY_MANUAL_STEP` ("address moved, enter
+  the key yourself"), Codex names `MODELPORT_CODEX_API_KEY` because its UI has no key field at all.
+  `applySync` refuses only when `plans.length === 0`, so address-only writes with a manual step stay
+  possible; the placeholder guard is what keeps a keyless plan from writing a credential.
+* **In place, never a new entry.** Each client's own marker selects the rows: Qoder `type ===
+  'openai-compatible'`, WorkBuddy `vendor === 'Custom'`, CodeBuddy CN presence of `oaicopilot.baseUrl`,
+  Trae `provider === 'custom_openai_compatible'`, Claude `env.ANTHROPIC_BASE_URL`, Codex
+  `[model_providers.modelport]`. Address-book membership is **not** the predicate: measured clients
+  pointed at `192.168.0.239:8080` and `192.168.85.131:8080`, neither listed. Stable ids (Qoder uuid,
+  WorkBuddy `id`, Trae `custom_model_id`) are what preserve the user's selection.
+* **Endpoint shape is per client, measured.** Codex/Qoder/WorkBuddy take `origin + /v1`; Trae takes the
+  full `origin + /v1/chat/completions`; Claude takes the **bare origin** (`ANTHROPIC_BASE_URL`). Claude
+  needs no model name: `routes/messages.ts` maps inbound names itself (`anthropicInbound`).
+* **Model lists are reported, not rewritten.** `unservedModels` names what the target does not serve;
+  renaming would change what the client sends and, in Trae, is coupled to `custom_model_id`. Codex's
+  `model_catalog_json` and `env_key` are deliberately untouched (bare-filename rule; `comp_hash`
+  derivation unknown, so cloning it would be fabrication). `context_window` obeys the standing rule:
+  absent stays absent, never `0`. Codex's top-level `model` moves only when the current name is
+  unserved, preferring `auto`.
+* **Seven states, three of them absences that must not merge.** `ready`, `unchanged`, `not-installed`,
+  `no-entry` (installed but nothing of ours to update - creating a provider entry needs a uuid and a
+  model list the user has not chosen), `app-running`, `blocked`, `error`. `runningImageNames()` returns
+  `{names, known}`: a failed `tasklist`/`ps` is `blocked`, **never** an empty set read as "nothing is
+  running". Trae also refuses when `-wal`/`-shm` is non-empty.
+* **SQLite via sql.js inline wasm.** Electron 33 is Node 20 (no `node:sqlite`), a native `.node` would
+  need per-ABI rebuilds, and the asar ships no `node_modules` - so `sql.js/dist/sql-wasm-inline.js`
+  (wasm as base64) is in `externalizeDepsPlugin`'s `exclude` and lazily imported.
+  `writeSqliteItems` copies a `.bak`, preserves each value's storage class, writes through a temp file
+  plus `renameSync`, then **reopens and verifies every item**, throwing (backup retained) on mismatch.
+  Trae keys come in both `<uid>:AI.agent.model.model_list_map` and `<uid>_AI...` forms and **both carry
+  endpoints**; the read is a `LIKE` over all of them, and every agent label is rewritten (measured: 3
+  keys, 43 labels, 29 carrying custom models) so the client cannot behave differently per mode.
+* **Two keys cannot be minted.** Trae's `ak` (108 base64 chars = 79 bytes = 51 + 12 IV + 16 tag) and
+  CodeBuddy CN's are app-encrypted, so those rows carry a `manualStep`: enter the target gateway's key
+  once in the client's own UI. That wording has to be true when no canonical key could be established
+  too, so an always-manual row names the **target's** key, never "the canonical key".
+  Codex's key is a **User environment variable** (`MODELPORT_CODEX_API_KEY`),
+  written through PowerShell with the name and value in the *child's environment* (`MP_ENV_NAME` /
+  `MP_ENV_VALUE`), never on the command line; non-Windows hosts get a manual step instead.
+* **Claude's install test is the config dir OR the MSIX package family** `Claude_pzs8sxrjxfjjc` under
+  `%LOCALAPPDATA%\Packages`. Desktop bundles the CLI but never writes `~/.claude/settings.json` until
+  configured, so "not installed" and "installed, never configured" must stay different - otherwise the
+  console creates a file for a client that is not there. `CLAUDE_CONFIG_DIR` overrides the location.
+* Fences: `tests/shell/client-sync-plan.test.ts` (pure writers, measured fixtures),
+  `tests/shell/client-sqlite.test.ts` (real SQLite round-trip, `-wal` refusal leaves the original
+  byte-identical), `tests/shell/client-sync-key.test.ts` (url normalization, no key without a reachable
+  and accepting target, append-only idempotent distribution, the keyless caveat, and no manual step
+  naming a canonical key unconditionally),
+  `tests/renderer/client-sync-surface.test.mjs` (in-page entry, host gate, id-only
+  bridge, state labels enumerated from the shared union in both locales).
+
 ## Gateway-Authored Text Reaching the Model
 
 Ruling (2026-11-03, 用户拍板): the gateway writes **no** prompt text into a user's conversation. What is

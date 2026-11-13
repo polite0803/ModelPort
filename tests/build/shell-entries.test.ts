@@ -64,6 +64,12 @@ test('the shell imports no gateway module tree', () => {
     // bridge lives under `shared/` (same reason as `shared/certificateTrust`) rather than
     // under `src/main/logging/`, where importing it would make the shell a gateway module.
     'src/shell/consoleLogSink.ts',
+    // Client repointing writes the *client's* config stores, never the gateway's: it reads
+    // the address book and talks to each gateway over the management RPC like any client.
+    'src/shell/clientSync.ts',
+    'src/shell/clientSyncPlan.ts',
+    'src/shell/clientSyncRpc.ts',
+    'src/shell/clientSqlite.ts',
   ]
   for (const file of shellSources) {
     const source = readFileSync(file, 'utf8')

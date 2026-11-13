@@ -13,6 +13,7 @@
  */
 
 import type { GatewayListSnapshot } from './shellList'
+import type { ClientSyncApplyResult, ClientSyncPreview } from './clientSync'
 import type { RouteMenuResult } from './types'
 
 /**
@@ -167,12 +168,34 @@ export interface ShellGatewayAdmin {
   onChanged(callback: () => void): () => void
 }
 
+/**
+ * Repointing the installed clients at the active gateway, as an in-page surface.
+ *
+ * Gated like the update actions: only the active gateway's origin may ask, because the
+ * writes land in the user's own config stores and one of them is an OS environment
+ * variable. The page names **client ids only** - never a path, never a key, never a
+ * prepared edit. The main process re-derives everything at apply time, so a stale or
+ * forged preview cannot aim a write somewhere else.
+ *
+ * Optional: a plain browser has no host to ask, and a console older than this feature has
+ * no such surface, so the page must detect the absence rather than assume it.
+ */
+export interface ShellClientAdmin {
+  /** What would change, per client, with the key masked. Writes nothing. */
+  preview(): Promise<ClientSyncPreview>
+  /** Writes the named clients after re-deriving the plan. */
+  apply(clientIds: string[]): Promise<ClientSyncApplyResult>
+}
+
 export interface ShellBridge {
   openInBrowser(): Promise<void>
   reconnect(): Promise<void>
   quit(): Promise<void>
 
   gateways?: ShellGatewayAdmin
+
+  /** One-click client repointing. Optional for the same reason as `gateways`. */
+  clients?: ShellClientAdmin
 
   /**
    * Quick model switching from the tray. Optional for the same reason as `gateways`:

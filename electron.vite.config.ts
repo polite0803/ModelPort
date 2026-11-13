@@ -75,6 +75,11 @@ export default defineConfig({
           'js-sha3',
           'mime-types',
           'zstd-codec',
+          // 客户端一键切换要写 VSCode fork 的 state.vscdb。Electron 33 是 Node 20，
+          // 没有 node:sqlite；原生 .node 又要按 Electron ABI 逐平台重编，而安装包
+          // 里没有 node_modules。sql.js 的 inline 构建把 wasm 以 base64 自带，
+          // 因此能被 rollup 内联成单文件，不需要额外资产（同 electron-store 的理由）。
+          'sql.js',
           // TLS: the packaged asar has no node_modules, so the certificate
           // generator and its node-forge dependency must be rolled into the
           // main bundle (same reason as electron-store below).

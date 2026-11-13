@@ -42,6 +42,17 @@ import {
 import { decideWindowOpen } from './openTarget'
 import { dropSecret, getSecret, putSecret, type SecretSealer } from './secretStore'
 import { changeGatewayTrust, describeCertificate, gatewayTrustStatus, type TrustTarget } from './gatewayTrust'
+import {
+  applySync,
+  buildPreview,
+  claudeClientInstalled,
+  readUserEnv,
+  runningImageNames,
+  type GatherInput,
+} from './clientSync'
+import { clientPaths } from './clientSyncPlan'
+import type { GatewayCredential } from './clientSyncRpc'
+import { CODEX_ENV_KEY } from '../shared/clientSync'
 import { checkForUpdates, runUpgrade } from './updater'
 import {
   adoptLocalHandshake,
@@ -1579,4 +1590,41 @@ ipcMain.handle('shell:tls-install-trust', async (event: IpcMainInvokeEvent) => {
 
 ipcMain.handle('shell:tls-uninstall-trust', async (event: IpcMainInvokeEvent) => {
   return await changeGatewayTrust(trustTargetFor(event), 'uninstall')
+})
+
+/**
+ * Client repointing, gated exactly like the update actions: these writes land in the
+ * user's own config stores and one of them is a User environment variable, so a page that
+ * is not the active gateway must not be able to ask for them.
+ *
+ * The input is assembled here, never taken from the page. `apply` re-runs the same gather
+ * as `preview`, so confirming a stale preview cannot write something the user did not see.
+ */
+async function clientSyncInputFor(event: IpcMainInvokeEvent): Promise<GatherInput> {
+  const active = activeGatewayForSender(event)
+  const gateways: GatewayCredential[] = readBook().entries.map(entry => {
+    const origin = normalizeOrigin(entry.url)
+    const found = origin === null ? null : getSecret(secretsPath(), secretSealer, origin)
+    return { entry, secret: found !== null && found.status === 'found' ? (found.secret ?? null) : null }
+  })
+  const paths = clientPaths(app.getPath('home'), app.getPath('appData'), process.env.CLAUDE_CONFIG_DIR)
+  const running = await runningImageNames()
+  return {
+    active,
+    gateways,
+    paths,
+    running: running.names,
+    runningKnown: running.known,
+    codexEnv: await readUserEnv(CODEX_ENV_KEY),
+    claudeInstalled: claudeClientInstalled(paths, process.env.LOCALAPPDATA),
+  }
+}
+
+ipcMain.handle('shell:clients-preview', async (event: IpcMainInvokeEvent) => {
+  return await buildPreview(await clientSyncInputFor(event))
+})
+
+ipcMain.handle('shell:clients-apply', async (event: IpcMainInvokeEvent, clientIds: unknown) => {
+  const ids = Array.isArray(clientIds) ? clientIds.filter((id): id is string => typeof id === 'string') : []
+  return await applySync(await clientSyncInputFor(event), ids)
 })

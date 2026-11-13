@@ -21,6 +21,7 @@ import type {
   ShellUpdateProgress,
   ShellUpgradeResult,
 } from '../shared/shellBridge'
+import type { ClientSyncApplyResult, ClientSyncPreview } from '../shared/clientSync'
 
 const bridge: ShellBridge = {
   openInBrowser: (): Promise<void> => ipcRenderer.invoke('shell:openInBrowser'),
@@ -44,6 +45,13 @@ const bridge: ShellBridge = {
       ipcRenderer.on('shell:gateways-changed', handler)
       return () => ipcRenderer.removeListener('shell:gateways-changed', handler)
     },
+  },
+
+  clients: {
+    preview: (): Promise<ClientSyncPreview> => ipcRenderer.invoke('shell:clients-preview'),
+    // Ids only: the main process re-derives every path and every edit, so the page cannot
+    // aim a write at a file of its choosing.
+    apply: (clientIds: string[]): Promise<ClientSyncApplyResult> => ipcRenderer.invoke('shell:clients-apply', clientIds),
   },
 
   routes: {

@@ -16,6 +16,7 @@ const ProxySettings = lazy(() => import('@/pages/ProxySettings').then(m => ({ de
 const Models = lazy(() => import('@/pages/Models').then(m => ({ default: m.Models })))
 const RoutesPage = lazy(() => import('@/pages/Routes').then(m => ({ default: m.Routes })))
 const Gateways = lazy(() => import('@/pages/Gateways').then(m => ({ default: m.Gateways })))
+const ClientSync = lazy(() => import('@/pages/ClientSync').then(m => ({ default: m.ClientSync })))
 const Logs = lazy(() => import('@/pages/Logs'))
 const Settings = lazy(() => import('@/pages/Settings').then(m => ({ default: m.Settings })))
 
@@ -75,6 +76,7 @@ function App() {
           <Route path="/models" element={<Suspense fallback={<PageLoader />}><Models /></Suspense>} />
           <Route path="/routes" element={<Suspense fallback={<PageLoader />}><RoutesPage /></Suspense>} />
           <Route path="/gateways" element={<Suspense fallback={<PageLoader />}><Gateways /></Suspense>} />
+          <Route path="/clients" element={<Suspense fallback={<PageLoader />}><ClientSync /></Suspense>} />
           <Route path="/logs" element={<Suspense fallback={<PageLoader />}><Logs /></Suspense>} />
           <Route path="/settings" element={<Suspense fallback={<PageLoader />}><Settings /></Suspense>} />
           {/* 兜底：书签或深链指向已改名/已删除的路由时，之前是「有侧边栏、内容区空白」，

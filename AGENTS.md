@@ -229,6 +229,10 @@ registry) → `adapters/<provider>.ts` → upstream; `loadbalancer.ts` picks the
   **system-scope** unit (`systemctl --user` dies with the login session). The update check reads
   `releases.atom` and derives asset URLs from the tag (`releaseFromTag`) - never the anonymous REST
   API, whose 60-per-hour-per-IP quota turns a spent budget into a bare 403 on every check.
+- **Client repointing is a console capability, not a new listener** (`shell/clientSync*.ts`, page
+  `/clients`): it edits the clients' own stores in place and distributes one canonical key to every
+  gateway via `config:update`. The page names client ids, never paths, and sees only a masked key;
+  SQLite writes refuse while the fork runs. Detail: §Client Repointing.
 
 ## Logging
 

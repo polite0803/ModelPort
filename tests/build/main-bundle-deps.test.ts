@@ -46,6 +46,19 @@ test('packaging ships no node_modules, so conf must stay bundled', () => {
     /['"]koa-ratelimit['"]/,
     'koa-ratelimit must be in the exclude list (bundled), never external',
   )
+
+  // 同一个坑的第三例：客户端一键切换要读写 VSCode fork 的 state.vscdb。Electron 33 是
+  // Node 20（没有 node:sqlite），原生 .node 要按 Electron ABI 逐平台重编，所以用 sql.js
+  // 的 inline 构建（wasm 以 base64 自带）。留作 external 时，只有点了「客户端接入」才会
+  // ERR_MODULE_NOT_FOUND —— 启动照常，故这里连子路径一起钉。
+  assert.ok(pkg.dependencies?.['sql.js'], 'sql.js must remain a runtime dependency')
+  assert.match(mainExclude, /['"]sql\.js['"]/, 'sql.js must be in the exclude list (bundled), never external')
+  const sqlite = readFileSync('src/shell/clientSqlite.ts', 'utf8')
+  assert.match(
+    sqlite,
+    /sql\.js\/dist\/sql-wasm-inline\.js/,
+    'the inline build is what makes bundling possible: the plain build needs a separate .wasm asset',
+  )
 })
 
 /**

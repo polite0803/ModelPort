@@ -14,6 +14,7 @@
     "logs": "日志",
     "settings": "设置",
     "gatewayManager": "网关管理",
+    "clientSync": "客户端接入",
     "about": "关于"
   },
   "dashboard": {
@@ -647,6 +648,52 @@
     "routePoolSourceShort_third-party": "三方",
     "routePoolSourceShort_heuristic": "启发",
     "routePoolSourceShort_unknown": "?"
+  },
+  "clientSync": {
+    "title": "客户端接入",
+    "description": "把本机已安装的客户端一次性指向当前网关：地址与密钥由控制台代写，换网关不用再逐个手改。",
+    "desktopOnly": "客户端接入只在桌面端可用：需要读写本机上的客户端配置文件。",
+    "refresh": "重新检查",
+    "apply": "写入 {{n}} 个客户端",
+    "loading": "正在读取客户端配置…",
+    "loadFailed": "读取客户端配置失败：{{error}}",
+    "targetGateway": "目标网关",
+    "canonicalKey": "规范密钥",
+    "noKey": "取不到密钥，需手动填写",
+    "modelsTitle": "目标网关公布的路由",
+    "modelsCount": "{{n}} 个",
+    "modelsEmpty": "目标网关没有公布任何路由：先启用路由，否则客户端切过去也选不到模型。",
+    "contextUnknown": "上下文未公布",
+    "distributionTitle": "规范密钥分发",
+    "distribution": {
+      "already": "已有同一把密钥",
+      "added": "已写入",
+      "failed": "写入失败",
+      "no-secret": "没有管理密钥，跳过"
+    },
+    "noReady": "当前没有可写入的客户端：逐行看原因（未安装 / 没有自定义模型 / 应用正在运行）。",
+    "state": {
+      "ready": "可写入",
+      "unchanged": "已指向目标",
+      "not-installed": "未安装",
+      "no-entry": "没有可改的条目",
+      "app-running": "应用正在运行",
+      "blocked": "前提缺失",
+      "error": "读取失败"
+    },
+    "changesTitle": "将修改",
+    "added": "（新增）",
+    "unservedTitle": "目标网关不提供这些模型：",
+    "unservedHint": "只报告不改名：改名会改变客户端实际发送的模型，Trae 里还与 custom_model_id 绑定。",
+    "manualTitle": "还需你手动一步：",
+    "backupsTitle": "备份（可用于回滚）：",
+    "applyDone": "客户端配置已写入",
+    "applyFailed": "写入未完成",
+    "confirmTitle": "确认写入客户端配置？",
+    "confirmDescription": "将把 {{n}} 个客户端的自定义端点改为 {{origin}}，其余设置保持不变。",
+    "confirmChanges": "{{n}} 处改动",
+    "confirmBackup": "写入前会为每个文件/数据库留一份 .bak 备份；密钥只以掩码显示，不会出现在页面上。",
+    "confirmApply": "确认写入"
   },
   "gateways": {
     "title": "网关管理",
