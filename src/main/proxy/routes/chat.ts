@@ -177,6 +177,8 @@ function autoLogRecord(
     ...(decision.pin === undefined ? {} : { pin: decision.pin }),
     ...(decision.pinMiss === undefined ? {} : { pinMiss: decision.pinMiss }),
     ...(decision.pinStale === undefined ? {} : { pinStale: decision.pinStale }),
+    ...(decision.pinCooling === undefined ? {} : { pinCooling: decision.pinCooling }),
+    ...(decision.pinBlocked === undefined ? {} : { pinBlocked: decision.pinBlocked }),
     ...(decision.circuited === undefined || decision.circuited.length === 0
       ? {}
       : { circuited: decision.circuited }),
@@ -885,6 +887,46 @@ router.post('/completions', async (ctx: Context) => {
       storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
       return
     }
+    const coolingPin = autoDecision.pinCooling
+    if (coolingPin) {
+      // 钉子还在，只是它名下的账号刚被上游拒过、正在退避（15s–10min）。这不是
+      // 「模型没了」，所以不退役、也不换一个模型顶上：换家只在回合之间发生。
+      // 429 + `Retry-After` 是这件事的形状 —— 客户端退避后回到同一颗钉。
+      const message = `The pinned model '${coolingPin.displayName}' on route '${autoDecision.routeName}' is cooling down after an upstream failure; retry in ${coolingPin.retryAfterSeconds}s`
+      const body = {
+        error: {
+          message,
+          type: 'rate_limit_error',
+          param: null,
+          code: 'model_temporarily_unavailable',
+          details: {
+            pin: coolingPin.displayName,
+            scope: coolingPin.scope,
+            source: coolingPin.source,
+            retry_after_seconds: coolingPin.retryAfterSeconds,
+          },
+        },
+      }
+      ctx.status = 429
+      ctx.body = body
+      ctx.set('Retry-After', String(coolingPin.retryAfterSeconds))
+      ctx.set('X-ModelPort-Pin', toHeaderValue(`cooling=${coolingPin.displayName};retry=${coolingPin.retryAfterSeconds}`))
+      const refused = {
+        ...selectionRefusalEntry(ctx, {
+          statusCode: 429,
+          code: 'model_temporarily_unavailable',
+          type: 'rate_limit_error',
+          message,
+          body,
+          requestId,
+          client,
+        }),
+        ...(refusalAuto === undefined ? {} : { auto: refusalAuto }),
+      }
+      storeManager.addRequestLog(refused)
+      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+      return
+    }
     const transient = autoDecision.transientUnavailable
     if (transient) {
       const message = `All candidates for route '${autoDecision.routeName}' are temporarily unavailable (${describeTransientCause(transient.cause)}); retry in ${transient.retryAfterSeconds}s`
@@ -930,15 +972,22 @@ router.post('/completions', async (ctx: Context) => {
         type: 'service_unavailable_error',
         param: null,
         code: 'no_available_model',
-        details: autoDecision.missing.length > 0
-          ? { missing: autoDecision.missing }
-          : autoDecision.skipped.length > 0
-            ? { skipped: autoDecision.skipped.slice(0, AUTO_SKIPPED_REPORT_LIMIT) }
-            : undefined,
+        // 被钉住的模型挡下这一轮时，缺的能力来自那颗钉而不是整池：不单说一句，
+        // 客户端只能读到「这条路由没有可用模型」，而用户明明固定了一个模型。
+        details: autoDecision.pinBlocked !== undefined
+          ? { pin: autoDecision.pinBlocked.displayName, missing: autoDecision.pinBlocked.missing }
+          : autoDecision.missing.length > 0
+            ? { missing: autoDecision.missing }
+            : autoDecision.skipped.length > 0
+              ? { skipped: autoDecision.skipped.slice(0, AUTO_SKIPPED_REPORT_LIMIT) }
+              : undefined,
       },
     }
     ctx.status = 503
     ctx.body = body
+    if (autoDecision.pinBlocked !== undefined) {
+      ctx.set('X-ModelPort-Pin', toHeaderValue(`blocked=${autoDecision.pinBlocked.displayName}`))
+    }
     const refused = {
       ...selectionRefusalEntry(ctx, {
         statusCode: 503,
@@ -1004,6 +1053,7 @@ router.post('/completions', async (ctx: Context) => {
     startTime,
     isStream: request.stream || false,
     clientIP,
+    clientUserAgent: ctx.headers['user-agent'],
   }
 
   proxyStatusManager.recordRequestStart(request.model, provider.id, account.id)

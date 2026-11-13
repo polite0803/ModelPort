@@ -18,7 +18,7 @@ import {
   isProseTruncatedByStopString,
   isReasoningLoopGuardEnabled,
   isTruncatedArguments,
-  isMissingRequiredArgs,
+  missingRequiredArgs,
   normalizeToolArguments,
   readWithIdleTimeout,
   reasoningLoopFailure,
@@ -1068,12 +1068,24 @@ export async function* consumeOpenAiSse(
    * - 名字不可用的块不参与：那些块本就走 `droppedUnnamedCalls` 的丢弃路径。
    * - **fail-open**：调用方没传集合（或为空集）时整个判据关闭，绝不误伤。
    */
-  const emptyRequiredArgs = config.toolsRequiringArgs !== undefined && config.toolsRequiringArgs.size > 0
-    && [...toolCalls.values()].some(block => {
-      if (!hasUsableToolName(block.name)) return false
-      const required = config.toolsRequiringArgs!.get(restoreToolName(block.name!))
-      return required !== undefined && isMissingRequiredArgs(block.text, required)
-    })
+  const emptyRequiredArgsOffender = config.toolsRequiringArgs === undefined
+      || config.toolsRequiringArgs.size === 0
+    ? undefined
+    : [...toolCalls.values()].reduce<{ name: string; missing: string[] } | undefined>((found, block) => {
+        if (found !== undefined) return found
+        if (!hasUsableToolName(block.name)) return undefined
+        const name = restoreToolName(block.name!)
+        const required = config.toolsRequiringArgs!.get(name)
+        if (required === undefined) return undefined
+        const missing = missingRequiredArgs(block.text, required)
+        return missing.length === 0 ? undefined : { name, missing }
+      }, undefined)
+  const emptyRequiredArgs = emptyRequiredArgsOffender !== undefined
+  // 错误帧文案的补充说明（工具名 + 缺失键）。判据与文案必须同源：这条判据同时
+  // 覆盖「空参数」与「缺任一必填键」，只说「收到空参数」会把部分缺键误述成空。
+  const emptyRequiredArgsDetail = emptyRequiredArgsOffender === undefined
+    ? undefined
+    : `${emptyRequiredArgsOffender.name} 缺 ${emptyRequiredArgsOffender.missing.join('/')}`
   const incompleteTools = finishReason === undefined && toolOrder.length > 0
   /**
    * 连接是否**被掐断**：既没有显式 `finish_reason`，也没有收到 `[DONE]`。
@@ -1378,7 +1390,10 @@ export async function* consumeOpenAiSse(
     : finishReason === 'length'
       ? { kind: 'max-tokens' as const }
     : incompleteCause !== undefined
-      ? incompleteStep(incompleteCause)
+      ? incompleteStep(
+          incompleteCause,
+          incompleteCause === 'tool-args-empty' ? emptyRequiredArgsDetail : undefined,
+        )
     : finishReason === 'tool_calls' || toolOrder.length > 0
       ? { kind: 'tool-calls' as const }
       : { kind: 'stop' as const }

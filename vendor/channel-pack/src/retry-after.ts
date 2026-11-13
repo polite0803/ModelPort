@@ -60,6 +60,29 @@ export function retryAfterMsFromResponse(
 }
 
 /**
+ * 把「最早解禁时刻」写成人话（「约 25 分钟后恢复」/「11-14 08:00 恢复，约 20.9 小时后」）。
+ *
+ * ⚠️ 长等待**必须带绝对时刻**：2026-11-13 实测匿名免费通道的日额度耗尽时，
+ * 上游回 `retry-after: 75411`（≈20.9 小时，正好指向次日 `00:00 UTC` 的窗口复位），
+ * 而旧文案只会说「约 30 分钟后恢复」—— 用户与客户端都拿不到真实复位点。
+ * 短等待只给相对时长（「21 小时」这种跨度上，读者还得自己再算一遍时钟）。
+ *
+ * 返回值可直接接在「最早」后面，两种长度共用一份措辞。
+ */
+export function formatRecoveryReset(resetAtMs: number, nowMs: number = Date.now()): string {
+  const waitMs = Math.max(0, resetAtMs - nowMs)
+  if (waitMs < 60_000) return `约 ${Math.max(1, Math.ceil(waitMs / 1000))} 秒后恢复`
+  if (waitMs < 60 * 60_000) return `约 ${Math.ceil(waitMs / 60_000)} 分钟后恢复`
+  const at = new Date(resetAtMs)
+  const pad = (value: number) => String(value).padStart(2, '0')
+  const clock = `${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())}`
+  const hours = waitMs / 3_600_000
+  return hours < 48
+    ? `${clock} 恢复，约 ${hours.toFixed(1)} 小时后`
+    : `${clock} 恢复，约 ${(hours / 24).toFixed(1)} 天后`
+}
+
+/**
  * 从普通记录形态取（大小写两种键都认）。
  *
  * `undici` 的 `Headers` 之外，有些调用方（单测替身、代理层）拿到的是

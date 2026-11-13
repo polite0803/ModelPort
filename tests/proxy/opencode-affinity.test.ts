@@ -114,10 +114,29 @@ test('会话标识按 prompt_cache_key → user → metadata.user_id 的优先�
 
 test('接线门：buildHeaders 的两个调用点都把 request 传进去', () => {
   const source = readSource('src/main/proxy/forwarder.ts')
-  const calls = source.match(/this\.buildHeaders\([^)]*\)/g) ?? []
+  // 调用点里现在嵌着 `clientShapeHeaders(...)`，`[^)]*` 会停在第一个右括号，
+  // 所以这里做括号配对扫描取完整调用文本。
+  const marker = 'this.buildHeaders('
+  const calls: string[] = []
+  let idx = source.indexOf(marker)
+  while (idx !== -1) {
+    let depth = 1
+    let end = idx + marker.length
+    while (end < source.length && depth > 0) {
+      const ch = source[end]
+      if (ch === '(') depth += 1
+      else if (ch === ')') depth -= 1
+      end += 1
+    }
+    calls.push(source.slice(idx, end))
+    idx = source.indexOf(marker, end)
+  }
   assert.equal(calls.length, 2, 'chat 与 responses 两条出站都要接上')
   for (const call of calls) {
-    assert.match(call, /,\s*request\)/, `${call} must pass the request so the session id stays per-conversation`)
+    // request 是亲和会话 id 的来源：少传它，会话就退化成按账号派生。
+    assert.match(call, /\brequest\b/, `${call} must pass the request so the session id stays per-conversation`)
+    // 客户端形状头（转发入站 UA）也要接上（2026-11-13 起）。
+    assert.match(call, /clientShapeHeaders\(context\.clientUserAgent\)/, `${call} must forward the client shape`)
   }
   assert.match(source, /opencodeAffinityHeaders\(\{/)
 })

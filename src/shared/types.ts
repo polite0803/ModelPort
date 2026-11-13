@@ -1413,6 +1413,12 @@ export interface RequestStreamTrace {
   emptyTurn?: StreamEmptyTurnReading
 }
 
+/**
+ * 一次请求对模型能力的硬要求（`autoRouting.ts::hardFilterFailure` 的返回值）。
+ * 与 `MissingRequirement` 的差别：这里只有请求画像那四项，不含配置类成因。
+ */
+export type ModelHardRequirement = 'vision' | 'tools' | 'reasoning' | 'context'
+
 export interface RequestLogEntry {
   /** Log ID */
   id: string
@@ -1640,6 +1646,26 @@ export interface RequestLogEntry {
       scope: ModelPinScope
       source: ModelPinSource
       action: 'retired' | 'ignored'
+    }
+    /**
+     * 钉子指向的模型**在池里，但账号此刻全在冷却**。与 `pinStale` 互斥：钉子没坏，
+     * 本轮不派候选（不中途换模型）、钉不清除，投影成 429 + `Retry-After`。
+     */
+    pinCooling?: {
+      displayName: string
+      scope: ModelPinScope
+      source: ModelPinSource
+      retryAfterSeconds: number
+    }
+    /**
+     * 软钉指向的模型这一轮**用不了**（缺视觉/工具/推理/上下文，或被契约过滤挡下）。
+     * 钉子没错，所以不退役；`missing` 是挡下它的能力名（契约过滤时为空数组）。
+     */
+    pinBlocked?: {
+      displayName: string
+      scope: ModelPinScope
+      source: ModelPinSource
+      missing: ModelHardRequirement[]
     }
     /** 本轮因模型级熔断被排到队尾的模型（`provider/model`），写入时截尾。 */
     circuited?: string[]

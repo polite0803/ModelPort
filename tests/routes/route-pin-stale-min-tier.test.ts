@@ -169,6 +169,80 @@ test('菜单：钉子指向池外模型时带 stale，不显示成「已固定�
   autoRouter.clearPin(route.name, 'route')
 })
 
+test('冷却不是失效：钉住的账号在退避 → pinCooling，本轮不派候选但钉子留着', () => {
+  const route = makeRoute({ modelScope: 'pool' })
+  autoRouter.setPin({ route: route.name, displayName: 'Core-Mid', scope: 'route', source: 'console' })
+  assert.equal(select(route).reason, 'pin', '前置：钉得住')
+
+  autoRouter.markAccountCooldown('pbal-acct1', 504)
+
+  const decision = select(route)
+  assert.equal(decision.pinMiss, 'Core-Mid')
+  assert.equal(decision.pinStale, undefined, '退避不是失效：不许退役用户的选择')
+  assert.deepEqual(decision.candidates, [], '本轮零候选：中途换模型比等一次更伤')
+  assert.equal(decision.pinCooling?.displayName, 'Core-Mid')
+  assert.equal(decision.pinCooling?.scope, 'route')
+  assert.equal(decision.pinCooling?.source, 'console')
+  const retry = decision.pinCooling?.retryAfterSeconds ?? 0
+  assert.ok(retry >= 13 && retry <= 15, `首次 5xx 退避 15s，实际报 ${retry}s`)
+
+  // 钉子没有被退役：再问一次仍在，冷却清掉后立刻恢复命中
+  assert.equal(select(route).pin?.displayName, 'Core-Mid')
+  autoRouter.clearAccountCooldown('pbal-acct1')
+  assert.equal(select(route).reason, 'pin')
+})
+
+test('持久 preferredModel 的账号在退避：照常按池服务，不退役也不报成失效', () => {
+  // 长期固定是「默认」不是「这一轮」：它没有作用域、也不会到期，拿一次 15s 退避
+  // 把整条路由停住（或标成失效）比按池服务更贵。软钉才是「这一轮就要它」。
+  const route = makeRoute({
+    modelScope: 'pool',
+    preferredModel: { providerId: 'pstr', displayName: 'Heavy-Pro' },
+  })
+  autoRouter.markAccountCooldown('pstr-acct1', 429, 'pstr-upstream')
+
+  const decision = select(route)
+  assert.equal(decision.pinStale, undefined, '冷却不是失效')
+  assert.equal(decision.pinCooling, undefined, '偏好在退避时由池子顶上，不阻塞本轮')
+  assert.equal(decision.pinMiss, 'Heavy-Pro', '没命中要如实写，界面据此知道这一轮跑的不是它')
+  assert.ok(decision.candidates.length > 0, '配置合格的池不因为偏好一时不可用而 503')
+
+  const stored = sm.listModelRoutes().find(candidate => candidate.name === route.name)
+  assert.equal(stored?.preferredModel?.displayName, 'Heavy-Pro', '配置不替用户删')
+
+  autoRouter.clearAccountCooldown('pstr-acct1')
+  assert.equal(select(route).reason, 'pin', '冷却过去后回到偏好本身')
+})
+
+test('钉住的模型这一轮用不了（缺视觉）：不退役、本轮 503 并写明缺什么', () => {
+  const route = makeRoute({ modelScope: 'pool' })
+  autoRouter.setPin({ route: route.name, displayName: 'Core-Mid', scope: 'route', source: 'console' })
+
+  // 三个 fixture 都没有标注视觉：这张图谁都不满足，但钉子的错不在这里
+  const withImage = {
+    model: 'auto',
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'what is in this picture' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } },
+      ],
+    }],
+  } as unknown as ChatCompletionRequest
+
+  const decision = select(route, withImage)
+  assert.equal(decision.pinStale, undefined, '一张图不该把用户固定的模型撤掉')
+  assert.deepEqual(decision.pinBlocked, {
+    displayName: 'Core-Mid',
+    scope: 'route',
+    source: 'console',
+    missing: ['vision'],
+  })
+  assert.deepEqual(decision.candidates, [], '本轮不换家：换模型只发生在回合之间')
+
+  assert.equal(select(route).reason, 'pin', '下一张纯文本请求仍然命中同一颗钉')
+})
+
 // ---------------- 2. reason 在裁剪前算 ----------------
 
 test('reason：钉名池只有一个模型报 only（裁剪前），点名命中报 pin', () => {

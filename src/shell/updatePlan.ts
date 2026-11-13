@@ -77,6 +77,52 @@ export function normalizeVersion(tag: string): string {
   return tag.trim().replace(/^v/i, '')
 }
 
+const RELEASE_PAGE_BASE = 'https://github.com/polite0803/ModelPort/releases/tag'
+const RELEASE_DOWNLOAD_BASE = 'https://github.com/polite0803/ModelPort/releases/download'
+
+/**
+ * 一次发布里控制台会消费的四个资产。名字是**约定**，不是读出来的：发布工作流按这个
+ * 形状上传，CI 末尾的 verify 步骤校验这四个名字都在。
+ */
+export function releaseAssetNames(version: string): string[] {
+  return ['x64', 'arm64'].flatMap(arch => [
+    `ModelPort-${version}-${arch}-setup.exe`,
+    `modelport-daemon-${version}-${arch}.tar.gz`,
+  ])
+}
+
+/**
+ * 只按 tag 合成一份 `ReleaseInfo`。更新检查不该花匿名 GitHub API 的配额
+ * （每 IP 每小时 60 次）：`releases.atom` 给出最新 tag，下载地址与 `.sha256` 由
+ * tag + 约定名拼出，与 API 返回的 `browser_download_url` 同形。
+ */
+export function releaseFromTag(tag: string): ReleaseInfo {
+  const trimmed = tag.trim()
+  const version = normalizeVersion(trimmed)
+  if (!/^[0-9A-Za-z][0-9A-Za-z._+-]*$/.test(version)) throw new Error(`unsupported release tag: ${tag}`)
+  const base = `${RELEASE_DOWNLOAD_BASE}/${trimmed}`
+  const assets: ReleaseAsset[] = releaseAssetNames(version).flatMap(name => [
+    { name, url: `${base}/${name}` },
+    { name: `${name}.sha256`, url: `${base}/${name}.sha256` },
+  ])
+  return { version, tag: trimmed, pageUrl: `${RELEASE_PAGE_BASE}/${trimmed}`, assets }
+}
+
+/**
+ * `releases.atom` 里最新一条的 tag。只取第一条 `<entry>` 的 alternate 链接：
+ * 正文里可能链到更早的 tag，按全文匹配会把旧版当成最新版。
+ */
+export function parseLatestTagFromAtom(feed: string): string | null {
+  const entry = /<entry\b[\s\S]*?<\/entry>/.exec(feed)?.[0]
+  if (entry === undefined) return null
+  const href = /<link\b[^>]*\bhref="([^"]+)"/.exec(entry)?.[1]
+  if (href === undefined) return null
+  const match = /\/releases\/tag\/([^"#?]+)\s*$/.exec(href)
+  if (match === null) return null
+  const tag = match[1].trim()
+  return tag === '' ? null : tag
+}
+
 function coreParts(version: string): { core: number[]; pre: string | null } {
   const normalized = normalizeVersion(version)
   const [core, pre] = normalized.split('-', 2)

@@ -12,18 +12,28 @@ import { createReadStream, createWriteStream, existsSync, readFileSync } from 'n
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { once } from 'node:events'
-import { parseSha256, type AssetPair } from './updatePlan'
+import { parseLatestTagFromAtom, parseRelease, parseSha256, releaseFromTag, type AssetPair, type ReleaseInfo } from './updatePlan'
 import { decodeWslOutput } from './wslInstallPlan'
 
 const execFileAsync = promisify(execFile)
 
 export { decodeWslOutput }
 
-export const RELEASE_API = 'https://api.github.com/repos/polite0803/ModelPort/releases/latest'
+/**
+ * 更新检查走**网页端点**，不走 REST API：匿名 `api.github.com` 是每 IP 每小时 60 次，
+ * 这个配额被同网段的任何工具烧光之后，控制台的「检查更新」就只剩一个 403。
+ * `releases.atom` 是同一个仓库的公开 feed，不占 API 配额；资产名与下载地址由 tag
+ * 按约定拼出（`updatePlan::releaseFromTag`），所以这里只需要一个 tag。
+ */
+export const RELEASES_ATOM = 'https://github.com/polite0803/ModelPort/releases.atom'
 
-export function releaseFeedUrl(): string {
+/**
+ * `MODELPORT_UPDATE_FEED` 只为测试与企业镜像存在：给的是**完整 release JSON**。
+ * 返回 `null` 表示没有覆盖，按 atom feed 走。
+ */
+export function releaseFeedUrl(): string | null {
   const override = process.env.MODELPORT_UPDATE_FEED?.trim()
-  if (!override) return RELEASE_API
+  if (!override) return null
   const url = new URL(override)
   const local = url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '::1'
   if (url.protocol !== 'https:' && !local) {
@@ -33,12 +43,9 @@ export function releaseFeedUrl(): string {
 }
 
 /**
- * One release-feed read shared by every caller, with a TTL.
+ * 一次发布读取，三次调用方共享，带 TTL。
  *
- * The feed is anonymous HTTPS, so GitHub caps it at 60 requests per hour per IP. Before this
- * existed the console asked again on startup, on every panel open, on every tray check, before
- * every upgrade and during every WSL install - so one user's own clicking spent the whole
- * quota and every later check reported a bare 403.
+ * 退避与重试上限保留：atom 没有配额头，但被限流/断网时立刻重问同样没有意义。
  */
 const RELEASE_FEED_TTL_MS = 10 * 60 * 1000
 /** Fallback when the server states no reset time; asking sooner only burns the quota again. */
@@ -46,24 +53,34 @@ const RELEASE_FEED_FAILURE_BACKOFF_MS = 60 * 1000
 /** A bogus or far-future reset must not park the console forever. */
 const RELEASE_FEED_RETRY_CAP_MS = 60 * 60 * 1000
 
-let releaseFeedSuccess: { url: string; text: string; expiresAt: number } | null = null
-let releaseFeedFailure: { url: string; message: string; retryAtMs: number } | null = null
+let releaseFeedSuccess: { key: string; release: ReleaseInfo; expiresAt: number } | null = null
+let releaseFeedFailure: { key: string; message: string; retryAtMs: number } | null = null
 
-export async function fetchReleaseFeed(): Promise<string> {
-  const url = releaseFeedUrl()
+export async function fetchLatestRelease(): Promise<ReleaseInfo> {
+  const override = releaseFeedUrl()
+  const key = override ?? RELEASES_ATOM
   const now = Date.now()
-  if (releaseFeedSuccess && releaseFeedSuccess.url === url && releaseFeedSuccess.expiresAt > now) {
-    return releaseFeedSuccess.text
+  if (releaseFeedSuccess && releaseFeedSuccess.key === key && releaseFeedSuccess.expiresAt > now) {
+    return releaseFeedSuccess.release
   }
-  if (releaseFeedFailure && releaseFeedFailure.url === url && releaseFeedFailure.retryAtMs > now) {
+  if (releaseFeedFailure && releaseFeedFailure.key === key && releaseFeedFailure.retryAtMs > now) {
     const waitSeconds = Math.ceil((releaseFeedFailure.retryAtMs - now) / 1000)
     throw new Error(`${releaseFeedFailure.message}（已退避，${waitSeconds}s 后才会再次请求）`)
   }
   try {
-    const text = await fetchText(url)
-    releaseFeedSuccess = { url, text, expiresAt: now + RELEASE_FEED_TTL_MS }
+    let release: ReleaseInfo
+    if (override !== null) {
+      release = parseRelease(JSON.parse(await fetchText(override)) as unknown)
+    } else {
+      const tag = parseLatestTagFromAtom(
+        await fetchText(RELEASES_ATOM, 'application/atom+xml, application/xml;q=0.9, text/xml;q=0.8'),
+      )
+      if (tag === null) throw new Error(`${RELEASES_ATOM} 里没有可解析的 release tag`)
+      release = releaseFromTag(tag)
+    }
+    releaseFeedSuccess = { key, release, expiresAt: now + RELEASE_FEED_TTL_MS }
     releaseFeedFailure = null
-    return text
+    return release
   } catch (error) {
     const failure = error as { message?: string; rateLimitResetAtMs?: number }
     const message = failure.message ?? String(error)
@@ -71,7 +88,7 @@ export async function fetchReleaseFeed(): Promise<string> {
     // window to roll over instead of re-burning the same quota on every click.
     const statedRetryAtMs = failure.rateLimitResetAtMs ?? now + RELEASE_FEED_FAILURE_BACKOFF_MS
     releaseFeedFailure = {
-      url,
+      key,
       message,
       retryAtMs: Math.min(statedRetryAtMs, now + RELEASE_FEED_RETRY_CAP_MS),
     }
@@ -122,10 +139,10 @@ export async function runWsl(
   }
 }
 
-export async function fetchText(url: string): Promise<string> {
+export async function fetchText(url: string, accept = 'application/vnd.github+json'): Promise<string> {
   const response = await net.fetch(url, {
     redirect: 'follow',
-    headers: { accept: 'application/vnd.github+json', 'user-agent': 'ModelPort' },
+    headers: { accept, 'user-agent': 'ModelPort' },
   })
   if (!response.ok) {
     // The server's own reason must survive the throw. GitHub answers an exhausted anonymous

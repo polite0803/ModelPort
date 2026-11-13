@@ -264,6 +264,9 @@ test('短窗口记录首字 EWMA、429/超时/degraded 比例', () => {
   assert.equal(snapshot.rateLimitedRate, 1 / 3)
   assert.equal(snapshot.degradedRate, 1 / 3)
   assert.equal(snapshot.timeoutRate, 0)
+  // 长窗口均值要一起暴露：无下家时等多久由 max(近期, 长期) 推导
+  // （几笔快样本不能抹掉「这家常态就是三十秒才开口」）
+  assert.equal(snapshot.slowFirstTokenMs, 1020)
 })
 
 /**

@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { useToast } from '@/hooks/use-toast'
+import { publishTrayRouteMenu, ROUTES_CHANGED_EVENT } from '@/api/trayRoutes'
 import { cn } from '@/lib/utils'
 import type { RouteMenuEntry, RouteMenuModel } from '@shared/types'
 
@@ -116,6 +117,30 @@ export function Routes() {
     if (target !== undefined) await loadDetail(target)
   }, [loadList, loadDetail, selectedName])
 
+  // 托盘改了模型之后清空这一页的旧读数：托盘命令是这一页执行的，但执行不等于重读。
+  useEffect(() => {
+    const onChange = (): void => { void refresh() }
+    window.addEventListener(ROUTES_CHANGED_EVENT, onChange)
+    return () => window.removeEventListener(ROUTES_CHANGED_EVENT, onChange)
+  }, [refresh])
+
+  // 倒计时是「到点就过期」的东西：没有心跳，页面会一直停在加载那一刻的分钟数。
+  // 到期再拉一次 —— 钉子到点就该从本页和托盘上一起消失，而不是等下次手动刷新。
+  const [, setTick] = useState(0)
+  const pinUntil = detail?.pin !== undefined && detail.pin.until > 0 ? detail.pin.until : undefined
+  useEffect(() => {
+    if (pinUntil === undefined) return
+    const ticker = setInterval(() => setTick(value => value + 1), 30_000)
+    const expiry = setTimeout(() => {
+      void refresh()
+      publishTrayRouteMenu()
+    }, Math.max(1_000, pinUntil - Date.now() + 1_000))
+    return () => {
+      clearInterval(ticker)
+      clearTimeout(expiry)
+    }
+  }, [pinUntil, refresh])
+
   const runSwitch = async (
     action: 'next' | 'reset' | 'pin' | 'persist',
     model?: RouteMenuModel,
@@ -154,6 +179,8 @@ export function Routes() {
     } finally {
       setBusy(false)
       await refresh()
+      // 托盘缓存只有这一页能更新：切完不发布，托盘就停在切之前的那份快照上。
+      publishTrayRouteMenu()
     }
   }
 
@@ -171,6 +198,15 @@ export function Routes() {
   // `until: 0` 是持久偏好（`preferredModel`），其余是 30 分钟的软钉：两者在列表里
   // 必须长得不一样，否则用户点「长期」之后看到的仍是倒计时，会以为没生效。
   const persistentPin = detail?.pin !== undefined && detail.pin.until === 0
+    ? detail.pin.displayName
+    : undefined
+
+  // 「上轮服务」是已经发生的事实，「已固定」是下一轮的选择。两者不同时把下一轮
+  // 明写出来 —— 否则固定之后列表上仍挂着上一个模型，读起来像「固定了但没生效」。
+  // 失效的钉子不参与：那一轮会明确失败（pinStale），写成「下一轮」就是骗人。
+  const nextModel = detail?.pin !== undefined
+    && !detail.pin.stale
+    && detail.pin.displayName !== detail.current?.displayName
     ? detail.pin.displayName
     : undefined
 
@@ -294,6 +330,9 @@ export function Routes() {
                   <Badge variant="outline">{t('routes.disabled')}</Badge>
                 )}
               </div>
+              {nextModel !== undefined && (
+                <p className="text-xs text-muted-foreground">{t('routes.nextTurn', { model: nextModel })}</p>
+              )}
               <div className="relative">
                 <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
@@ -333,7 +372,11 @@ export function Routes() {
                     <span className="block truncate text-xs text-muted-foreground">{model.providerName}</span>
                   </span>
                   <span className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-                    {model.current && <Badge variant="secondary">{t('routes.currentBadge')}</Badge>}
+                    {model.current && (
+                      <Badge variant="secondary" title={t('routes.currentBadgeHint')}>
+                        {t('routes.currentBadge')}
+                      </Badge>
+                    )}
                     {model.pinned && (
                       <Badge variant="secondary">
                         {model.displayName === persistentPin

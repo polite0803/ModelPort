@@ -13,6 +13,7 @@
  */
 
 import { storeManager } from '../store/store'
+import { accountChannelManager } from '../providers/accountChannels/manager'
 import { resolvePoolRoute } from '../store/modelRoutes'
 import type { Account, Provider, UserModelMarks } from '../store/types'
 import type {
@@ -21,6 +22,7 @@ import type {
   AutoPreference,
   ModelCapability,
   ModelCapabilityHint,
+  ModelHardRequirement,
   ModelPinScope,
   ModelPinSource,
   ModelRoute,
@@ -271,6 +273,29 @@ export interface AutoRouteDecision {
     scope: ModelPinScope
     source: ModelPinSource
     action: 'retired' | 'ignored'
+  }
+  /**
+   * 钉子指向的模型**仍在池里，只是它名下的账号此刻全部在冷却**（15s–10min 的
+   * 账号/限流退避）。这不是失效：钉子在，等冷却过去自己回来。调用方投影成
+   * 429 + `Retry-After` 且**不清钉** —— 一次上游抖动的首字超时不该让用户的选择
+   * 消失（现网：03:14:07 一次 504，25 秒后同一颗钉报 `pin_stale` 并退役）。
+   */
+  pinCooling?: {
+    displayName: string
+    scope: ModelPinScope
+    source: ModelPinSource
+    retryAfterSeconds: number
+  }
+  /**
+   * 软钉指向的模型**这一轮用不了**：请求要的能力它没有（`missing` 给出能力名），
+   * 或被契约过滤挡下（`missing` 为空）。钉子本身没错，所以不退役；本轮不换家，
+   * 由调用方投影成 503「没有可用模型」，并把「是这颗钉挡的」写进 details。
+   */
+  pinBlocked?: {
+    displayName: string
+    scope: ModelPinScope
+    source: ModelPinSource
+    missing: ModelHardRequirement[]
   }
   /** 本轮被模型级熔断排到队尾的模型。 */
   circuited?: string[]
@@ -697,8 +722,8 @@ class AutoRouter {
   /**
    * 每条路由上一轮实际服务的模型/账号。
    *
-   * 只用于菜单的「当前」一格与托盘提示：粘性表以会话为键，回答不了「这条路由
-   * 现在在跑谁」；而托盘的整个价值就是让用户一眼看到这一点。
+   * 只用于菜单的「上轮服务」一格与托盘提示：粘性表以会话为键，回答不了「这条路由
+   * 上一轮跑的是谁」；而托盘的整个价值就是让用户一眼看到这一点。
    */
   private lastServed = new Map<string, RouteMenuCurrent>()
 
@@ -882,6 +907,22 @@ class AutoRouter {
       for (const model of storeManager.getEffectiveModels(provider.id)) {
         // 通配符模型名不能作为上游真实模型使用
         if (model.displayName.endsWith('*')) {
+          continue
+        }
+
+        // 渠道 pack 明确不服务的模型不进候选池（2026-11-13 `codex-deepseek` 实测）。
+        //
+        // 宿主的可路由名单来自 `listAllModels()`（静态兜底表，不套身份档），而 worker
+        // 的请求前闸门读的是**分档后**的 `listModels(provider)`。越过这道闸门的模型
+        // 以前只在 `chat.ts` 的异步预检里被剔 —— 那道预检跑在**单模型裁剪之后**，
+        // 头部模型被剔光就是整轮零候选：40 秒内 11 笔 `no_available_model`，而池子里
+        // 其实还有别家能跑。预检必须在裁剪之前生效，头部才有可能落到下一个模型。
+        //
+        // 判据只读缓存且 fail-open（`null` = 清单未知 ⇒ 放行）；预热发生时它可能还
+        // 是未知的，此时行为与旧版完全一致，`chat.ts` 的异步预检继续兜住那一笔。
+        if (provider.type === 'account'
+          && accountChannelManager.packServesModelNow(provider.id, model.actualModelId) === false) {
+          skipped.add(`${provider.id}/${model.displayName}:pack_not_serving`)
           continue
         }
 
@@ -1217,12 +1258,48 @@ class AutoRouter {
     //   退役后下一次请求就走自动排序，钉子不会在进程里挂满 30 分钟。
     // - **持久 `preferredModel`**（配置）：不替用户删配置（撤销是 `routes:unpin`），
     //   照常按池服务，但把「已失效」写进日志、响应头与菜单 —— 配置错误不能让整条
-    //   路由 503，也不能让用户以为钉子生效了。
+    //   路由 503，也不能让用户以为钉子生效了。冷却/本轮不满足能力时同样按池服务
+    //   （偏好是「默认」，可用性优先），只是不再报成失效。
     //
-    // 判据是「不在池里」而不是「此刻冷却」：冷却中的账号仍然留在 `ranked` 里
-    // （`coolingUntil` 只影响排序与派发），所以这里命中的一定是配置/能力层面的
-    // 失配，不会因为一次 15s 限流把用户的钉子撤掉。
-    const pinStale: AutoRouteDecision['pinStale'] = pinMiss === undefined
+    // 判据是「还在不在排序前的池里」，不是「这一轮排不排得出来」：`rankCandidates`
+    // 会把冷却中的账号从 `ranked` 里摘掉（只要池里还有一个热候选），也会按本次请求
+    // 的能力画像硬过滤 —— 两者都让 `promotePinned` 落空，但都不是「这颗钉指错了
+    // 模型」。混为一谈的后果实测在现网日志里：钉在正常服务的 GLM 5.3 Flash 上，一次
+    // 首字超时的 504 之后 25 秒报 `pin_stale` 并退役（2026-11-13 03:14）；另一条同源
+    // 路径是「固定了一个不支持视觉的模型 → 一张图就把钉撤掉」。
+    const pinMatches = pinRef === undefined || pinMiss === undefined
+      ? []
+      : rankInputs.filter(input =>
+          input.displayName === pinRef.displayName
+          && (pinRef.providerId === undefined || input.providerId === pinRef.providerId))
+    // 软钉的两种「这一轮用不了」分开说：全在退避 → 429 可重试（`pinCooling`）；
+    // 请求级不满足 → 503 并写明缺什么（`pinBlocked`）。两种都不清钉。
+    const pinCooling: AutoRouteDecision['pinCooling'] = (() => {
+      if (softPin === undefined || pinMiss === undefined || pinMatches.length === 0) return undefined
+      const cooling = pinMatches.filter(input =>
+        input.coolingUntil !== undefined && input.coolingUntil > now)
+      if (cooling.length !== pinMatches.length) return undefined
+      const until = Math.min(...cooling.map(input => input.coolingUntil as number))
+      return {
+        displayName: pinMiss,
+        scope: softPin.scope,
+        source: softPin.source,
+        retryAfterSeconds: Math.max(1, Math.ceil((until - now) / 1000)),
+      }
+    })()
+    const pinBlocked: AutoRouteDecision['pinBlocked'] = (() => {
+      if (softPin === undefined || pinMiss === undefined || pinMatches.length === 0) return undefined
+      if (pinCooling !== undefined) return undefined
+      const reasons: ModelHardRequirement[] = []
+      for (const input of pinMatches) {
+        const failure = hardFilterFailure(profile, capabilityOfCandidate(input))
+        if (failure !== undefined && !reasons.includes(failure)) reasons.push(failure)
+      }
+      // 契约过滤（`n` / `response_format`）不是能力名，`reasons` 为空也照样拦：
+      // 客户端至少要知道「是这颗钉挡住了这一轮」。
+      return { displayName: pinMiss, scope: softPin.scope, source: softPin.source, missing: reasons }
+    })()
+    const pinStale: AutoRouteDecision['pinStale'] = pinMiss === undefined || pinMatches.length > 0
       ? undefined
       : softPin !== undefined
         ? { displayName: pinMiss, scope: softPin.scope, source: softPin.source, action: 'retired' }
@@ -1262,7 +1339,10 @@ class AutoRouter {
     const scoped = (() => {
       // 退役的钉子让这一轮直接收在选号阶段：不派任何候选 = 不产生上游调用，
       // 客户端在毫秒级拿到「钉子已失效」，而不是先跑满 40s 再换一个模型答上来。
-      if (pinStale?.action === 'retired') return []
+      // 冷却/本轮不满足能力同样不派候选（中途换模型比等一次更伤），但都不清钉。
+      if (pinStale?.action === 'retired' || pinCooling !== undefined || pinBlocked !== undefined) {
+        return []
+      }
       if (modelScope === 'pool' || circuitOrdered.length === 0) return circuitOrdered
       const head = circuitOrdered[0]!.displayName
       if (modelScope === 'single') return circuitOrdered.filter(input => input.displayName === head)
@@ -1363,6 +1443,8 @@ class AutoRouter {
           }),
       ...(pinMiss === undefined ? {} : { pinMiss }),
       ...(pinStale === undefined ? {} : { pinStale }),
+      ...(pinCooling === undefined ? {} : { pinCooling }),
+      ...(pinBlocked === undefined ? {} : { pinBlocked }),
       ...(transientUnavailable === undefined ? {} : { transientUnavailable }),
       ...(circuited.length === 0 ? {} : { circuited: [...circuited] }),
       // 单模型作用域的换家墙钟预算更短：链只剩同一模型的几个账号，继续等不会
@@ -1671,7 +1753,7 @@ class AutoRouter {
       .sort((a, b) => a.until - b.until)
   }
 
-  /** 记录某条路由上一轮实际服务的模型，菜单的「当前」与托盘提示行读这一格。 */
+  /** 记录某条路由上一轮实际服务的模型，菜单的「上轮服务」与托盘提示行读这一格。 */
   noteServedModel(
     routeName: string,
     candidate: { provider: { id: string; name: string }; displayName: string },

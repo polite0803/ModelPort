@@ -51,6 +51,22 @@ async function runCommand(command: ShellRouteCommand): Promise<void> {
 }
 
 /**
+ * 托盘改了模型之后，已经打开的路由页也要重读一次 —— 否则页面停在旧徽章上，
+ * 用户看到「托盘点了固定、页面还说没固定」。
+ */
+export const ROUTES_CHANGED_EVENT = 'modelport:routes-changed'
+
+/**
+ * 页面自己完成一次切换后调用。外壳进程拿不到管理口令，托盘缓存只有这一页能更新：
+ * 不发布的话，托盘要等下一次右键请求才会看到新状态，开关永远慢一拍。
+ */
+export function publishTrayRouteMenu(): void {
+  const surface = traySurface()
+  if (surface === null) return
+  void readMenu().then(snapshot => surface.publishRouteMenu?.(snapshot))
+}
+
+/**
  * Installs the bridge and publishes a first snapshot. Returns the unsubscribe function,
  * so a re-mount cannot leave two listeners answering the same tray click.
  */
@@ -67,7 +83,10 @@ export function installTrayRouteBridge(): () => void {
 
   const offRequest = surface.onRouteMenuRequest?.(publish) ?? (() => {})
   const offCommand = surface.onRouteCommand?.(command => {
-    void runCommand(command).then(publish)
+    void runCommand(command).then(() => {
+      publish()
+      window.dispatchEvent(new Event(ROUTES_CHANGED_EVENT))
+    })
   }) ?? (() => {})
   publish()
 

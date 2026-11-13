@@ -22,6 +22,10 @@ export function redactSensitiveText(value: string): string {
       .replace(/\bBearer\s+[A-Za-z0-9\-._~+/]{8,}=*/gi, 'Bearer [REDACTED]')
       // 3. 裸 key 形态（sk- / sk-proj- / sk-ant- …），不依赖任何字段名。
       .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, '[REDACTED]')
+      // 3b. OpenCode Zen 的 key 是 `oc_sk_` 前缀（2026-11-13 用户实测）：它既没有
+      // `sk-` 的连字符、前面又多了个词字符，`\bsk-` 一条都匹配不到 —— 裸 key 出现在
+      // 文案里就不会被抹掉。尾部按「到空白/引号/括号为止」取，宁可多抹也不要漏。
+      .replace(/\boc_sk_[^\s"',}\])]+/g, '[REDACTED]')
       // 4. URL 查询串里的凭据。
       .replace(/([?&](?:key|token|api_key|access_token|secret)=)[^&\s\"']+[^&\s\"']*/gi, '$1[REDACTED]')
   )

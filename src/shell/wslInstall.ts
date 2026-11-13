@@ -9,10 +9,10 @@
 import { app, net } from 'electron'
 import { mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { archFromUname, parseRelease, selectAsset, type DaemonArch } from './updatePlan'
+import { archFromUname, selectAsset, type DaemonArch } from './updatePlan'
 import {
   downloadFile,
-  fetchReleaseFeed,
+  fetchLatestRelease,
   fetchText,
   runWsl,
   sha256File,
@@ -138,7 +138,7 @@ export async function installWslGateway(input: {
     }
 
     report('detecting', '正在读取发布版本…')
-    const release = parseRelease(JSON.parse(await fetchReleaseFeed()) as unknown)
+    const release = await fetchLatestRelease()
     const assetName = `modelport-daemon-${release.version}-${probe.arch}.tar.gz`
     const daemon = selectAsset(release, assetName)
     if (!daemon) {

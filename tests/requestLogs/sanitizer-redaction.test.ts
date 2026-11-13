@@ -70,6 +70,15 @@ test('脱敏发生在截断之前：越界处的 Key 不会被截成认不出的
   assert.match(out.errorMessage ?? '', /\[REDACTED\]/)
 })
 
+test('OpenCode 的 oc_sk_ 裸 key 也要被抹掉（旧 sk- 规则一条都匹配不到它）', () => {
+  const out = sanitizeRequestLogEntry({
+    ...BASE,
+    errorMessage: 'opencode: HTTP 401 — invalid key oc_sk_live_4f9a1c7e2b3d5a6f8e0c1b2d end',
+  }, CONFIG)
+  assert.equal((out.errorMessage ?? '').includes('oc_sk_live_4f9a1c7e2b3d5a6f8e0c1b2d'), false)
+  assert.match(out.errorMessage ?? '', /\[REDACTED\]/)
+})
+
 test('增量更新路径与整条路径同口径', () => {
   const patch = sanitizeRequestLogUpdates({ errorMessage: 'boom sk-orv-AAAAAAAAAAAAAAAAAAAA' }, CONFIG)
   assert.equal((patch.errorMessage ?? '').includes('AAAAAAAAAAAAAAAAAAAA'), false)

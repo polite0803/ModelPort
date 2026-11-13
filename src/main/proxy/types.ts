@@ -268,6 +268,8 @@ export interface ProxyContext {
   startTime: number
   isStream: boolean
   clientIP?: string
+  /** 入站客户端的 User-Agent 原值：聚合线出站转发它，让形状与客户端直连一致（见 utils/clientShape.ts）。 */
+  clientUserAgent?: string
 }
 
 /**

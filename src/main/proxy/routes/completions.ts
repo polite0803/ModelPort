@@ -264,6 +264,8 @@ router.post('/completions', async (ctx: Context) => {
       ...(autoDecision.modelScope === undefined ? {} : { modelScope: autoDecision.modelScope }),
       ...(autoDecision.pinMiss === undefined ? {} : { pinMiss: autoDecision.pinMiss }),
       ...(autoDecision.pinStale === undefined ? {} : { pinStale: autoDecision.pinStale }),
+      ...(autoDecision.pinCooling === undefined ? {} : { pinCooling: autoDecision.pinCooling }),
+      ...(autoDecision.pinBlocked === undefined ? {} : { pinBlocked: autoDecision.pinBlocked }),
     }
     // 与 chat 路由同形：钉子指向池外模型时选路已把软钉退役并返回空链，这一轮必须
     // 明确说出来（503 + `pin_stale`），沉默换模型才是更坏的失败。
@@ -292,6 +294,44 @@ router.post('/completions', async (ctx: Context) => {
           statusCode: 503,
           code: 'pin_stale',
           type: 'service_unavailable_error',
+          message,
+          body,
+          requestId,
+          client,
+        }),
+        auto: refusalAuto,
+      }
+      storeManager.addRequestLog(refused)
+      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+      return
+    }
+    const coolingPin = autoDecision.pinCooling
+    if (coolingPin) {
+      // 与 chat 路由同形：钉子留着（模型仍在池里），只是它的账号在退避 —— 429
+      // 可重试，而不是 503「这颗钉已经失效」。
+      const message = `The pinned model '${coolingPin.displayName}' on route '${autoDecision.routeName}' is cooling down after an upstream failure; retry in ${coolingPin.retryAfterSeconds}s`
+      const body = {
+        error: {
+          message,
+          type: 'rate_limit_error',
+          code: 'model_temporarily_unavailable',
+          details: {
+            pin: coolingPin.displayName,
+            scope: coolingPin.scope,
+            source: coolingPin.source,
+            retry_after_seconds: coolingPin.retryAfterSeconds,
+          },
+        },
+      }
+      ctx.set('Retry-After', String(coolingPin.retryAfterSeconds))
+      ctx.status = 429
+      ctx.body = body
+      ctx.set('X-ModelPort-Pin', toHeaderValue(`cooling=${coolingPin.displayName};retry=${coolingPin.retryAfterSeconds}`))
+      const refused = {
+        ...selectionRefusalEntry(ctx, {
+          statusCode: 429,
+          code: 'model_temporarily_unavailable',
+          type: 'rate_limit_error',
           message,
           body,
           requestId,
@@ -344,16 +384,21 @@ router.post('/completions', async (ctx: Context) => {
         message,
         type: 'service_unavailable_error',
         code: 'no_available_model',
-        // 与 chat 路由同源：没有 `missing` 时跳过清单是唯一线索
-        details: autoDecision.missing.length > 0
-          ? { missing: autoDecision.missing }
-          : autoDecision.skipped.length > 0
-            ? { skipped: autoDecision.skipped.slice(0, AUTO_SKIPPED_REPORT_LIMIT) }
-            : undefined,
+        // 与 chat 路由同源：被钉住的模型挡下这一轮时，缺的能力来自那颗钉而不是整池
+        details: autoDecision.pinBlocked !== undefined
+          ? { pin: autoDecision.pinBlocked.displayName, missing: autoDecision.pinBlocked.missing }
+          : autoDecision.missing.length > 0
+            ? { missing: autoDecision.missing }
+            : autoDecision.skipped.length > 0
+              ? { skipped: autoDecision.skipped.slice(0, AUTO_SKIPPED_REPORT_LIMIT) }
+              : undefined,
       },
     }
     ctx.status = 503
     ctx.body = body
+    if (autoDecision.pinBlocked !== undefined) {
+      ctx.set('X-ModelPort-Pin', toHeaderValue(`blocked=${autoDecision.pinBlocked.displayName}`))
+    }
     const refused = {
       ...selectionRefusalEntry(ctx, {
         statusCode: 503,
@@ -406,6 +451,7 @@ router.post('/completions', async (ctx: Context) => {
           actualModel,
           startTime,
           isStream: request.stream || false,
+          clientUserAgent: ctx.headers['user-agent'],
         },
         // 换家预算随 decision 走（与 chat 路由同因）
         { baseCap: autoDecision.baseCap, ...(autoDecision.wallClockBudgetMs === undefined ? {} : { wallClockBudgetMs: autoDecision.wallClockBudgetMs }) }
@@ -446,6 +492,7 @@ router.post('/completions', async (ctx: Context) => {
           actualModel,
           startTime,
           isStream: request.stream || false,
+          clientUserAgent: ctx.headers['user-agent'],
         }
       )
     }

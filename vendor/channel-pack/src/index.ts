@@ -73,6 +73,7 @@ import { describeGeminiIdentity, publishAntigravityHubRelease, antigravityHubRel
 import { fetchAntigravityHubRelease } from './gemini-hub-manifest.js'
 import { createGeminiSigStore } from './gemini-sigstore.js'
 import { registerOpencodeLlm } from './opencode-adapter.js'
+import { formatRecoveryReset } from './retry-after.js'
 // ⚠️ opencode 的 RPC 由 `channel-pack-rpc.ts` 的 handleMethod 统一分派
 // （它调 handleOpencodeRpc），本文件**不再**单独注册端点 —— 详见
 // `opencode-rpc.ts` 模块头「为什么是被主 switch 调用」。
@@ -1916,7 +1917,7 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
   //
   // 形态与前面所有 provider 相同：进程内 LlmAdapter 直发远端，无子进程、无端口。
   // 两处独有语义：
-  // 1. **身份 = 槽**：账号槽（手动粘贴的 `sk-` key，可各配代理）+ 匿名槽
+  // 1. **身份 = 槽**：账号槽（手动粘贴的 `oc_sk_` key，可各配代理）+ 匿名槽
   //    （凭证就是字面量 `public`，永远本机出口）。免费模型下全槽**平权**轮换，
   //    收费模型只走账号槽（匿名凭证只被服务端认作免费通道）。
   // 2. **每账号可配代理**：NAT 后的多台 PC 共享一个出口 IP，而 Zen 的匿名通道
@@ -1946,7 +1947,10 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
             const waitMs = earliestReset === undefined ? undefined : Math.max(0, earliestReset - now)
             throw new LlmError(
               'opencode: 该模型的所有通道当前都在限流中'
-              + (waitMs === undefined ? '' : `（最早约 ${Math.ceil(waitMs / 60_000)} 分钟后恢复）`)
+              // ⚠️ 长等待必须给绝对复位时刻（日额度在次日 00:00 UTC 复位，
+              // 上游给的是 21 小时级别的 `retry-after`）。旧文案一律按分钟折算，
+              // 21 小时被钳成 30 分钟（2026-11-13 实测，见 `opencode-retry.ts`）。
+              + (earliestReset === undefined ? '' : `（最早 ${formatRecoveryReset(earliestReset, now)}）`)
               + '；这不是登录问题，可等待、添加 API key 账号或更换出口代理',
               'RATE_LIMIT',
               { status: 429, ...(waitMs === undefined ? {} : { providerRetryAfterMs: waitMs }) },

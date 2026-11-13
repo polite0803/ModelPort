@@ -1,6 +1,6 @@
 # OpenCode
 
-> 适用版本：v1.7.3 ｜ 最后核对：2026-11-12 ｜ 状态：现行
+> 适用版本：v1.8.11 ｜ 最后核对：2026-11-13 ｜ 状态：现行
 
 “OpenCode”在这个仓库里指三件互不相关的东西，只有下面第 1 项是本文档的对象。
 
@@ -23,7 +23,7 @@
 | 渠道 ID | `opencode` |
 | 类型 | 账号渠道（`loginKind: 'api-key'`），不打开浏览器 |
 | 端点 | `https://opencode.ai/inference` |
-| 凭据 | 匿名槽位无需凭据；粘贴 `sk-` Key 可解锁付费模型 |
+| 凭据 | 匿名槽位无需凭据；粘贴 `oc_sk_` Key 可解锁付费模型（官方格式，2026-11-13 实测；校验**不按前缀**白名单，只挡空白/非 ASCII/明显半截） |
 | 免费额度 | 免费档按出口 IP 限额，因此每个账号可单独配置出口代理 |
 
 添加账号时宿主调用渠道包的 `opencode.addAccount` / `opencode.addAnonymous`，而不是通用的
@@ -44,6 +44,11 @@
 写端口**，支持 `user:pass@`；面板拿到的现有值由 `account.list` 的 `proxyLabel` 回传，口令
 始终被掩码。清除代理 = 回到与其它无代理账号共享的本机出口。
 
+账号行的「刷新凭据」按钮（`account.refresh`）对 OpenCode 只能做**重读该账号自己的 ref
+并规范化回写**：静态 API key 没有续期端点，匿名槽更是字面量 `public`。不做在线判断是刻意的
+——`GET /v1/models` 实测不鉴权（匿名 Bearer 也 200），拿它当 key 探针会造假成功；唯一的鉴权
+探针是 chat 端点，会真花额度。key 被吊销时下一次真实请求即 401，刷新不替上游下结论。
+
 匿名槽的指纹按**条目 id** 派生（`api_key` 全是 `public`，用它派生会让所有匿名槽拿到同一份
 身份）。这份差异性只用于防关联，不参与配额计算——换 key、换伪装头、换指纹都不会多出额度。
 
@@ -56,6 +61,41 @@
 
 `403` 与 `429` 的区分就是全部诊断：403 表示客户端形状被拒绝，429 表示形状通过、但该出口 IP 的
 匿名额度已用尽。接入这条渠道只代表它被诚实地列出来，不代表立刻可用。
+
+### 额度复位：`retry-after` 是权威（2026-11-13 实测）
+
+同一天补测（`POST /inference/v1/chat/completions`，`Bearer public`）：
+
+| 读数 | 值 |
+| --- | --- |
+| 状态 / 类型 | `429` · `FreeUsageLimitError`（不是 `FreeTierError` ⇒ 形状通过） |
+| `retry-after` | `75411` 秒 ≈ 20.9 小时 |
+| `03:03:09Z + 75411s` | `2026-11-14T00:00:00Z` = **08:00 CST** |
+
+⇒ 免费额度是**按日的固定窗口**，在 `00:00 UTC` 复位；上游每次都会把到那一刻的秒数写进
+`retry-after`。渠道包据此标记该槽受限，**不钳位**（只保留 7 天防畸形头的上界，
+见 `opencode-retry.ts`）；整池受限时用最早的那个解禁时刻回 `providerRetryAfterMs`
+（→ 宿主的 `Retry-After` 与面板文案）。旧实现把上游值一律钳到 30 分钟，会变成
+「每 30 分钟必然重撞一次 + 面板说 30 分钟后恢复而真实复位在 21 小时后」。
+
+### key 账号不附带免费额度（2026-11-13 实测）
+
+用户添加了两个独立工作区的 `oc_sk_` key（402 报错里的 org/wrk id 不同）后逐槽探测：
+
+| 槽 | 出口 | 免费模型 `deepseek-v4.1-flash-free` | 付费模型 `deepseek-v4.1-flash` |
+| --- | --- | --- | --- |
+| 主 key / 辅 key / 匿名 | 直连（NAT 出口） | `429 FreeUsageLimitError` | — |
+| 主 key / 辅 key / 匿名 | 隧道代理（不同 IP） | `429 FreeUsageLimitError` | — |
+| 主 key | 直连 | — | `402 Insufficient balance`（wrk_…0M，余额 0） |
+| 辅 key | 直连 | — | `402 Insufficient balance`（org_…CMZ，余额 0） |
+
+结论：**加 API key 不会多出免费额度**。免费档聊天模型只随 OpenCode 客户端提供，API key
+认证的是付费面（ToS：「Free-tier chat models require OpenCode; use paid models or Go from
+other clients」）；key 有效与否看付费模型 —— `402` 是「认证通过、余额为零」，`401` 才是 key
+无效。网关请求日志里 0 行 opencode，额度不是被本仓流量消耗的。渠道的实际价值 =
+付费模型（充值 / 订阅 Go 后 45 个模型可用）+ 每槽独立出口代理。
+
+本机桌面客户端早已卸载、当日未产生任何消耗，这个 429 仍然出现 —— 额度耗尽不是本机用量造成的。
 
 模型目录、积分倍率与免费标注由渠道包 `model.list` 提供，解析规则见
 [`../AGENTS-full.md`](../AGENTS-full.md) §Account Channels。

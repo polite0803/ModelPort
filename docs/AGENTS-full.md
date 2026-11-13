@@ -1064,7 +1064,7 @@ the whole chain (`attempts: 1`) while four other candidates went untried, which 
 "auto is unavailable". The third class exists because the two catalogue views of the pack disagree by
 design: the host's `supportedModels` comes from `model.list` -> `listAllModels()` (**no** identity
 gating), while the worker's request-time pre-check reads `listModels`, which for `opencode` is
-free-only when no `sk-` key was pasted - an anonymous-only install therefore advertises 6 paid models
+free-only when no `oc_sk_` key was pasted - an anonymous-only install therefore advertises 6 paid models
 it can never serve, and `auto` ranks one of them first (big window + tools + reasoning). Measured
 2026-11-01 08:06:40 / 08:11:00, `opencode/qwen3.8-max`. An opaque aggregate 400 (empty body /
 `Unknown error`) joins the same switch list via `isOpaqueAggregateBadRequest`, also without
@@ -1256,6 +1256,25 @@ What it no longer does is let the preference become a cliff: a conversation can 
 inside the same request when the ones ahead of it fail, and the 503 + `Retry-After` collection at the chain
 head is reserved for "the whole pool was tried and nothing answered".
 
+### First-block wait with no fallback: a floor, not a ceiling (2026-11-13)
+
+The user pushed back on the 504 text 「渠道 30s 内未产出任何首块…该模型没有可换的下家，等更久只会被客户端
+自己的超时截断」 with 「对于某些账号 30 秒可能不够」, and the log agrees. In the 11:34-13:11 window on
+2026-11-13, `codearts/DeepSeek-V4.1-Flash` succeeded 11 times and hit the 30 s cap 80 times; the successes'
+first token was p50 28.5 s, p90 30.5 s, max 33.1 s (an hour earlier: p50 30.4 s, max 37.2 s - the log
+rolls). The cap sat at the surviving edge of that channel's distribution, so "dead" requests were mostly
+"queued for thirty seconds, killed at thirty seconds". The long-run mean (`slowFirstTokenMs`, α=0.1) was
+about 22-25 s.
+
+`planFirstEventWait` therefore treats `SINGLE_CANDIDATE_FIRST_EVENT_CAP_MS` (30 s) as a **floor** for
+requests with no other candidate: the ceiling becomes `max(30 s, 2 × measured)` where measured is
+`max(ewmaFirstTokenMs, slowFirstTokenMs)` for that `(account, model)`. 2 × 24 ≈ 48 s covers the observed
+maximum and still finishes inside the client's ~60 s patience, so the original 11-12 goal (the gateway
+answers before the client leaves, and the failure is attributable) survives. It only ever widens: fast
+channels keep 30 s, accounts with no success reading yet keep 30 s (that is what a hang looks like), and
+the in-chain path ignores the measurement entirely - with a fallback available, switching beats waiting.
+The 504 message names the measurement when it applied (`已按该账号实测首字 24s 放宽到 48s`).
+
 ### Architecture A: one model per turn (2026-11-13)
 
 The 2026-11-12 pool fixed the dead end by letting a turn walk the whole catalogue, and the user's verdict
@@ -1305,6 +1324,32 @@ implementation, and each turn first paid a failure. `preferredModel` is **not** 
 `action: 'ignored'`. Both also write `pinMiss`, and the menu carries `pin.stale` so it never reads
 "pinned" while another model actually runs - a silently ignored choice is how "the tray says X, the
 traffic says Y" goes unnoticed.
+
+**Cooling is not staleness (`pinCooling`).** `rankCandidates` removes cooling accounts from `ranked`
+as soon as any warm candidate exists (`warm.length > 0 ? warm : soonestCooling(...)`), so
+`promotePinned` misses for two very different reasons: the model left the eligible pool, or its
+accounts are simply backing off (15 s → 2 min for a 5xx/network failure, 60 s → 10 min for a 429). The
+selector used to treat both as `pinStale` and retire the pin, and the live log shows exactly that: a
+pin on a model that had been serving, one 504 first-token timeout, and 25 s later `pin_stale` +
+`action: 'retired'` (`codex-deepseek`, 2026-11-13 03:14). The criterion is now **presence in
+`rankInputs`** (the pre-rank pool from `collectCandidates`, which still carries `coolingUntil`), not
+"did this turn rank it". A **soft pin** whose model is present but unusable this turn keeps the pin and
+returns zero candidates - switching models mid-conversation is the failure this mechanism exists to
+avoid:
+
+- all matching accounts cooling → `pinCooling {displayName, scope, source, retryAfterSeconds}` (at
+  least 1 s), projected as 429 `model_temporarily_unavailable` + `Retry-After` and
+  `X-ModelPort-Pin: cooling=<name>;retry=<s>`;
+- a request-level miss (vision/tools/reasoning/context, or the contract filter) → `pinBlocked
+  {displayName, scope, source, missing}` with the capability names `hardFilterFailure` reported,
+  projected as the ordinary 503 `no_available_model` whose `details` become `{pin, missing}` and
+  `X-ModelPort-Pin: blocked=<name>`. One image request must not revoke a pin.
+
+`preferredModel` is a default, not a turn: neither case stalls the route or marks it stale - it serves
+the ordinary order and reports `pinMiss` only (availability wins; the existing `ignored` disposition is
+reserved for a model that is truly absent). The menu needs no special case: `preview` never deducts
+cooldown, so `pin.stale` stays false and the countdown keeps running. Both readings land in the request
+log next to `auto.pinStale` as `auto.pinCooling` / `auto.pinBlocked`.
 
 **`auto.reason` is computed before the scope trim.** `pin` when a pin hit, `only` when the pre-trim pool
 held exactly one display name, otherwise `cache-affinity` / `sticky` / `score`. Computing it after

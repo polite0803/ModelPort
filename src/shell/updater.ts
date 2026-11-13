@@ -13,7 +13,6 @@ import {
   isNewer,
   normalizeVersion,
   parseBackupPath,
-  parseRelease,
   parseSystemdUnit,
   selectReleaseAssets,
   type PackageArch,
@@ -21,7 +20,7 @@ import {
   type DaemonArch,
   type ReleaseInfo,
 } from './updatePlan'
-import { fetchReleaseFeed, runWsl, toWslPath, verifyDownload } from './wslExec'
+import { fetchLatestRelease, runWsl, toWslPath, verifyDownload } from './wslExec'
 import { isPidAlive, readLocalGatewayView, stopLocalGateway } from './localGateway'
 
 const SERVICE = 'modelport'
@@ -121,7 +120,7 @@ export async function checkForUpdates(entry: GatewayEntry): Promise<ShellUpdateC
   let release: ReleaseInfo | null = null
   let releaseError: string | undefined
   try {
-    release = parseRelease(JSON.parse(await fetchReleaseFeed()) as unknown)
+    release = await fetchLatestRelease()
   } catch (error) {
     releaseError = error instanceof Error ? error.message : String(error)
   }

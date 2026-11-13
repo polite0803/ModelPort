@@ -213,8 +213,28 @@ export const FIRST_ATTEMPT_CAP_MS = 20_000
  * 30s 的依据与 {@link FIRST_ATTEMPT_CAP_MS} 同源：同一窗口里 codearts 成功请求的
  * 首块 1.9–5.5s（另有三笔 30.8–32.7s 的慢样本）。30s 覆盖正常首帧，超出就该把
  * 结论交给客户端，而不是陪它一起等到双双超时。
+ *
+ * ⚠️ 它是**地板**，不是定值：对该账号自己有成功首字读数的情形，上限按
+ * {@link SINGLE_CANDIDATE_SLOW_FACTOR} 放宽（见 `planFirstEventWait`）。
  */
 export const SINGLE_CANDIDATE_FIRST_EVENT_CAP_MS = 30_000
+
+/**
+ * 「没有下家」时，用该 (账号, 模型) 自己的首字实测把 30s 地板放宽到 `实测 × 2`。
+ *
+ * 2026-11-13 窗口（11:34–13:11）把一刀切的代价量出来了：codearts 成功首字
+ * p50 **28.5s** / p90 30.5s / max 33.1s（早一小时的读数是 p50 30.4s / max 37.2s，
+ * 日志滚动所以区间随读数移动），而 30s 上限正好压在分布的屁股上 ——
+ * 同一窗口 11 笔成功 vs 80 笔 30s 超时，成功的那些只是「刚好在 30s 前落下」。
+ * 对这种「排队三十秒才开口」的账号，多等十几秒是省一次失败，不是浪费。
+ *
+ * 倍数 2 的推导：该账号 long-run 首字均值（α=0.1）约 22–25s，观测上界 33–37s，
+ * 2× 后落在 45–50s：覆盖实测上界，同时仍在客户端 ~60s 耐心之内 —— 11-12 那次
+ * 「客户端先走、网关既没换家也没记故障」的收尾条件不能重演。
+ * 实测值只用来**放宽**：快账号的 2× 远低于 30s，地板仍然生效；没有成功读数
+ * （EWMA 尚未建立）的账号仍按 30s 判死，那才是真假死。
+ */
+export const SINGLE_CANDIDATE_SLOW_FACTOR = 2
 
 /** 首块等待被谁截断：超时文案按它归因，不能一律写成「剩余墙钟预算」。 */
 export type FirstEventClamp = 'none' | 'attempt-budget' | 'single-candidate'
@@ -231,14 +251,23 @@ export interface FirstEventWaitPlan {
  *
  * - 换家链里（`attemptDeadlineMs` 已给）：`min(出厂 firstEventMs, 本次尝试截止)`，
  *   被压短时归因 `attempt-budget`；
- * - 不在链里：再叠一道 {@link SINGLE_CANDIDATE_FIRST_EVENT_CAP_MS}，归因 `single-candidate`。
+ * - 不在链里：`min(出厂 firstEventMs, 截止, max(30s, 实测首字 × 2))`，归因
+ *   `single-candidate`。实测只放宽地板：没有读数时仍是 30s。
+ *
+ * 换家链不读 `measuredFirstTokenMs` —— 链里有下家，换一家比等一个慢账号便宜。
  */
 export function planFirstEventWait(input: {
   firstEventMs: number
   deadlineMs: number
   attemptDeadlineMs?: number
+  /** 该 (账号, 模型) 的首字实测（毫秒）；无读数时不给这个键。 */
+  measuredFirstTokenMs?: number
 }): FirstEventWaitPlan {
-  const ceiling = input.attemptDeadlineMs ?? SINGLE_CANDIDATE_FIRST_EVENT_CAP_MS
+  const measuredCeiling = input.measuredFirstTokenMs === undefined
+    ? 0
+    : Math.round(input.measuredFirstTokenMs * SINGLE_CANDIDATE_SLOW_FACTOR)
+  const ceiling = input.attemptDeadlineMs
+    ?? Math.max(SINGLE_CANDIDATE_FIRST_EVENT_CAP_MS, measuredCeiling)
   const waitMs = Math.min(input.firstEventMs, input.deadlineMs, ceiling)
   if (waitMs >= input.firstEventMs) return { waitMs, clampedBy: 'none' }
   return {

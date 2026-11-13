@@ -106,6 +106,12 @@ function toolCallFrames(name: string, argsFragment: string | undefined): string[
   ]
 }
 
+interface FinishReasonView {
+  kind: string
+  incompleteCause?: string
+  incompleteDetail?: string
+}
+
 async function consume(
   bundle: VendorBundle,
   frames: string[],
@@ -113,7 +119,7 @@ async function consume(
     tools?: readonly ToolDef[]
     restoreToolName?: (name: string) => string
   } = {},
-): Promise<{ finishKind: string; emittedArguments: string[] }> {
+): Promise<{ finishKind: string; reason: FinishReasonView; emittedArguments: string[] }> {
   const chunks: Array<Record<string, unknown>> = []
   for await (const chunk of bundle.consumeOpenAiSse(sseResponse(frames), {}, {
     label: 'test',
@@ -124,12 +130,16 @@ async function consume(
   })) {
     chunks.push(chunk)
   }
-  const finish = chunks.find(chunk => chunk.type === 'finish') as { reason: { kind: string } } | undefined
+  const finish = chunks.find(chunk => chunk.type === 'finish') as { reason: FinishReasonView } | undefined
   const emittedArguments = chunks
     .filter(chunk => chunk.type === 'block-end'
       && (chunk.block as { type?: string } | undefined)?.type === 'tool-call')
     .map(chunk => (chunk.block as { arguments: string }).arguments)
-  return { finishKind: finish?.reason.kind ?? 'none', emittedArguments }
+  return {
+    finishKind: finish?.reason.kind ?? 'none',
+    reason: finish?.reason ?? { kind: 'none' },
+    emittedArguments,
+  }
 }
 
 test('toolNamesRequiringArgs 只收 required 非空的工具', async (t) => {
@@ -156,6 +166,9 @@ test('必填参数工具 + 空参数分片 → finish 报 max-tokens（重试，
   const bundle = await loadVendorBundle(t)
   const result = await consume(bundle, toolCallFrames('mcp_get', ''), { tools: AGENT_TOOLS })
   assert.equal(result.finishKind, 'max-tokens')
+  // 文案要能回答「哪个工具、缺哪个键」：只有成因时，客户端与日志都无从判断
+  // 是模型系统性缺陷还是单发（2026-11-13 Codex 报障）。
+  assert.equal(result.reason.incompleteDetail, 'mcp_get 缺 toolName')
 })
 
 test('必填参数工具 + 完全没有 arguments 字段 → 同样报 max-tokens', async (t) => {
@@ -173,7 +186,7 @@ test('必填参数工具 + 显式空对象 {} → 同样报 max-tokens', async (
   assert.deepEqual(result.emittedArguments, [])
 })
 
-test('必填参数工具 + 部分参数缺必填键（02:23 Bash 形态）→ max-tokens', async (t) => {
+test('必填参数工具 + 部分参数缺必填键（02:23 Bash 形态）→ max-tokens，说明列出缺的键', async (t) => {
   const bundle = await loadVendorBundle(t)
   // 非空、合法 JSON，但缺 toolName —— 客户端照样报 required property
   const result = await consume(
@@ -182,6 +195,8 @@ test('必填参数工具 + 部分参数缺必填键（02:23 Bash 形态）→ ma
     { tools: AGENT_TOOLS },
   )
   assert.equal(result.finishKind, 'max-tokens')
+  assert.equal(result.reason.incompleteDetail, 'mcp_get 缺 toolName',
+    '部分缺键与空参数是同一成因、不同形态：说明必须列出真实缺的键')
 })
 
 test('必填参数工具 + 必填键齐全（哪怕别的键缺失）→ 照常 tool-calls', async (t) => {
@@ -248,6 +263,8 @@ test('wire 名经 restoreToolName 还原后比对（opencode 改名表形态）'
     restoreToolName: (name: string) => (name === 'a1' ? 'mcp_get' : name),
   })
   assert.equal(result.finishKind, 'max-tokens')
+  assert.equal(result.reason.incompleteDetail, 'mcp_get 缺 toolName',
+    '说明里的工具名用调用方名称，与 required 集合同一口径')
 })
 
 // ── MiniMax（Anthropic Messages 形状，自走 consumeMinimaxSse 组装） ──
@@ -272,38 +289,46 @@ async function consumeMinimax(
   bundle: VendorBundle,
   frames: string[],
   tools?: readonly ToolDef[],
-): Promise<string> {
-  let finishKind = 'none'
+): Promise<{ finishKind: string; reason: FinishReasonView }> {
+  let reason: FinishReasonView = { kind: 'none' }
   for await (const chunk of bundle.consumeMinimaxSse({
     body: sseResponse(frames).body as ReadableStream<Uint8Array>,
     ...bundle.requiredArgsToolsOption(tools),
   })) {
-    if (chunk.type === 'finish') finishKind = (chunk.reason as { kind: string }).kind
+    if (chunk.type === 'finish') reason = (chunk.reason as FinishReasonView)
   }
-  return finishKind
+  return { finishKind: reason.kind, reason }
 }
 
 test('minimax：必填参数工具 + 零参数 → finish 由 tool-calls 升级为 max-tokens', async (t) => {
   const bundle = await loadVendorBundle(t)
-  assert.equal(await consumeMinimax(bundle, minimaxToolUseFrames('mcp_get'), AGENT_TOOLS), 'max-tokens')
+  const result = await consumeMinimax(bundle, minimaxToolUseFrames('mcp_get'), AGENT_TOOLS)
+  assert.equal(result.finishKind, 'max-tokens')
+  assert.equal(result.reason.incompleteCause, 'tool-args-empty')
+  assert.equal(result.reason.incompleteDetail, 'mcp_get 缺 toolName')
 })
 
 test('minimax：无必填参数的工具（mcp_list）空参数照常 tool-calls', async (t) => {
   const bundle = await loadVendorBundle(t)
-  assert.equal(await consumeMinimax(bundle, minimaxToolUseFrames('mcp_list'), AGENT_TOOLS), 'tool-calls')
+  const result = await consumeMinimax(bundle, minimaxToolUseFrames('mcp_list'), AGENT_TOOLS)
+  assert.equal(result.finishKind, 'tool-calls')
 })
 
-test('minimax：必填参数工具 + 部分参数缺必填键 → max-tokens', async (t) => {
+test('minimax：必填参数工具 + 部分参数缺必填键 → max-tokens，说明列出缺的键', async (t) => {
   const bundle = await loadVendorBundle(t)
-  assert.equal(
-    await consumeMinimax(bundle, minimaxToolUseFrames('mcp_get', '{"keyword":"weather"}'), AGENT_TOOLS),
-    'max-tokens',
+  const result = await consumeMinimax(
+    bundle,
+    minimaxToolUseFrames('mcp_get', '{"keyword":"weather"}'),
+    AGENT_TOOLS,
   )
+  assert.equal(result.finishKind, 'max-tokens')
+  assert.equal(result.reason.incompleteDetail, 'mcp_get 缺 toolName')
 })
 
 test('minimax：fail-open 未传集合时空参数照常放行', async (t) => {
   const bundle = await loadVendorBundle(t)
-  assert.equal(await consumeMinimax(bundle, minimaxToolUseFrames('mcp_get')), 'tool-calls')
+  const result = await consumeMinimax(bundle, minimaxToolUseFrames('mcp_get'))
+  assert.equal(result.finishKind, 'tool-calls')
 })
 
 // ── {action, params} 包装层解包（2026-10-31 Qoder 团队任务报障）────────────

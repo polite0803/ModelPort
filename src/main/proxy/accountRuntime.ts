@@ -27,6 +27,11 @@ export interface AccountRuntimeSnapshot {
   modelInFlight?: number
   modelLimit?: number
   ewmaFirstTokenMs?: number
+  /**
+   * 首字的长窗口均值（α=0.1）。近期 EWMA 会被几笔快样本拉低，而「这家常态
+   * 就是 30s 才开口」是长期事实：无下家时按两者较大者定等待上限。
+   */
+  slowFirstTokenMs?: number
   rateLimitedRate?: number
   timeoutRate?: number
   degradedRate?: number
@@ -560,6 +565,7 @@ export class AccountRuntime {
           modelInFlight: flow.inFlight,
           modelLimit: flow.limit,
           ...(flow.ewmaFirstTokenMs === undefined ? {} : { ewmaFirstTokenMs: flow.ewmaFirstTokenMs }),
+          ...(flow.slowFirstTokenMs === undefined ? {} : { slowFirstTokenMs: flow.slowFirstTokenMs }),
           rateLimitedRate: flow.windowAttempts > 0 ? flow.windowRateLimited / flow.windowAttempts : 0,
           timeoutRate: flow.windowAttempts > 0 ? flow.windowTimeouts / flow.windowAttempts : 0,
           degradedRate: flow.windowAttempts > 0 ? flow.windowDegraded / flow.windowAttempts : 0,

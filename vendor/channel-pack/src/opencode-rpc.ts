@@ -31,8 +31,39 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { ProviderAccountEntry } from './types.js'
 import { OPENCODE } from './opencode-product.js'
 import { newAccountFingerprint } from './opencode-auth.js'
+import { normalizeOpencodeApiKey, opencodeApiKeyShapeError, planOpencodeCredentialRefresh } from './opencode-api-key.js'
 import { normalizeProxy } from './opencode.js'
 import { buildProxyDispatcher } from './opencode-proxy.js'
+
+/**
+ * `account.refresh` 的 OpenCode 分支。
+ *
+ * ⚠️ 用户报障 2026-11-13：账号行的「刷新凭据」按钮对所有渠道都在渲染，而
+ * `channel-pack-rpc.ts` 的 `account.refresh` switch **没有 opencode 分支**，
+ * 点下去落到 `default` ⇒ 弹「刷新凭据失败 / Unknown provider: opencode」。
+ *
+ * OpenCode 的凭据是**静态 API key**：没有续期端点，也没有可续期字段；匿名槽
+ * 更是字面量 `public`。所以这里不做在线判断 —— `GET /v1/models` 实测**不鉴权**
+ * （2026-11-01 读数，匿名 Bearer 也 200），拿它当 key 探针会造出假成功；
+ * 而唯一的鉴权探针是 chat 端点，会真花额度。能做的实事只有一件：**重读该账号
+ * 自己的 ref 并规范化回写**（与 zcode 的静态凭据同型）；key 真的被吊销时，
+ * 下一次真实请求会 401，这里不替上游下结论。
+ *
+ * ⚠️ 只读写传入账号自己的 ref，绝不碰其它账号（zcode 跨账号覆盖缺陷的同类面）。
+ */
+export async function refreshOpencodeAccountCredential(
+  ctx: Context,
+  entry: { id: string; credentialRef: string },
+): Promise<void> {
+  const ref = credentialRef(entry.credentialRef)
+  const resolved = await ctx.credentials.resolve(ref).catch(() => undefined)
+  if (resolved === undefined) {
+    throw new Error(`OpenCode 账号（${entry.credentialRef}）的凭据不存在，请删除该账号后重新粘贴 API key`)
+  }
+  // 判据在 `opencode-api-key.ts`（纯函数，可被 node --test 直接 import）。
+  const plan = planOpencodeCredentialRefresh(resolved.value, entry.credentialRef, OPENCODE.anonymousKey)
+  if (plan.writeValue !== undefined) await ctx.credentials.set(ref, plan.writeValue)
+}
 
 export interface RpcOpencodeAddAccountRequest {
   apiKey: string
@@ -71,13 +102,13 @@ export interface OpencodePoolLike {
 }
 
 /**
- * key 形状：`sk-` 前缀 + 至少 20 位。
+ * key 的入库前校验在 `opencode-api-key.ts`。
  *
- * ⚠️ 这只是**形状**校验（挡手滑/占位符），**不是**有效性验证：
- * 真 key 仍要等第一次真实请求才知道。形状校验的价值是让「明显没粘贴对」
- * 在入库前就被挡下，而不是等到发消息时才 401。
+ * ⚠️ 上一版在这里写死了 `^sk-[A-Za-z0-9_-]{20,}$`，把一把**真实的**
+ * opencode.ai/auth key 挡在界面外（2026-11-13 用户报障）：`sk-` 前缀
+ * 是我们自己的假设，官方文档从未声明过 key 格式。现在只挡「明显没粘对」
+ * （空白/非 ASCII/太短/超长），有效性交给上游的 200/401。
  */
-const KEY_PATTERN = /^sk-[A-Za-z0-9_-]{20,}$/
 
 /** 出口 IP 查询（公开服务，仅用于「测试代理」按钮，不承载业务流量）。 */
 const EXIT_IP_URL = 'http://ip-api.com/json/?fields=status,query,country'
@@ -85,9 +116,15 @@ const EXIT_IP_URL = 'http://ip-api.com/json/?fields=status,query,country'
 /** 探测连接用的超时（测试按钮不能无限等）。 */
 const TEST_TIMEOUT_MS = 10_000
 
-/** 账号 id / credentialRef 由 key 尾段派生，使重复 key 落到同一账号。 */
+/**
+ * 账号 id / credentialRef 由 key 尾段派生，使重复 key 落到同一账号。
+ *
+ * ⚠️ key 的字符集不再保证是 `[A-Za-z0-9_-]`（校验已不假设形状），而 id 与
+ * 凭据名要进池子/凭据表当键，所以只取尾段里的字母数字；对历史上那些
+ * `sk-…` key 来说结果与旧实现完全一致（它们的尾段本来就都是字母数字）。
+ */
 function slotNamesOf(apiKey: string): { id: string; refName: string } {
-  const tail = apiKey.slice(-8)
+  const tail = apiKey.replace(/[^A-Za-z0-9]/g, '').slice(-8) || 'key'
   return { id: `${OPENCODE.id}-${tail.toLowerCase()}`, refName: `OPENCODE_ACCOUNT_${tail.toUpperCase()}` }
 }
 
@@ -117,10 +154,9 @@ export async function handleOpencodeRpc(
 
             case 'opencode.addAccount': {
               const req = call.payload as RpcOpencodeAddAccountRequest
-              const apiKey = typeof req?.apiKey === 'string' ? req.apiKey.trim() : ''
-              if (!KEY_PATTERN.test(apiKey)) {
-                return fail('API key 形状不对（应以 sk- 开头、至少 20 位；可在 https://opencode.ai/auth 生成）')
-              }
+              const apiKey = normalizeOpencodeApiKey(req?.apiKey)
+              const shapeError = opencodeApiKeyShapeError(apiKey)
+              if (shapeError !== undefined) return fail(shapeError)
               const { id, refName } = slotNamesOf(apiKey)
               // ⚠️ 重复 key 必须**复用**同一账号：同 key 加两次会让用户误以为是
               // 两个独立配额桶，实际请求仍会打到同一份额度上（并在限额时一起被跳过）。

@@ -180,6 +180,28 @@ test('在服务清单里的候选正常放行（预检不是黑名单以外的�
     '没有剔除就不该发这个头，否则客户端读到一条假的「跳过」')
 })
 
+test('single 作用域：pack 不服务的头部模型必须在裁剪前剔掉，不能把整轮变成空池', async () => {
+  // 2026-11-13 现网：`codex-deepseek` 被裁成单一模型（OpenCode / Nemotron 3 Ultra Free），
+  // 而它不在 pack 的服务清单里 —— 预检跑在裁剪之后，剔光就是 40 秒内 11 笔 503，
+  // 池子里其实还有能跑的模型。剔必须发生在「本轮用哪个模型」决定之前。
+  assert.equal(sm.updateRoute('auto', { modelScope: 'single' }).ok, true)
+  try {
+    await serveView([{ id: 'opencode/live' }])
+
+    const response = await postAuto()
+
+    assert.equal(response.status, 200, '头部模型不可服务时应落到下一个模型，而不是零候选 503')
+    assert.deepEqual(seenModels, ['opencode/live'])
+    assert.match(
+      decodeURIComponent(String(response.headers['x-modelport-auto-skipped'] ?? '')),
+      /OpenCode \/ Gone:pack_not_serving/,
+      '被剔的头部模型仍要可解释',
+    )
+  } finally {
+    assert.equal(sm.updateRoute('auto', { modelScope: 'pool' }).ok, true)
+  }
+})
+
 test('冷启动那一笔不等目录：先放行，后台补齐后下一笔才剔', async () => {
   // 预检读的是 pack 的目录视图（`bridge.models()` 的 RPC 上限 120s），所以它只能在
   // 后台刷，绝不能摆在选择路径上等它 —— 否则「一次本地必败」被换成「一笔可能卡两分钟

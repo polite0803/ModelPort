@@ -118,7 +118,10 @@ registry) → `adapters/<provider>.ts` → upstream; `loadbalancer.ts` picks the
   turn fails fast (503 `pin_stale`, zero candidates - serving the ordinary order instead was 3x 504
   because the client kept talking to a model that never ran); **`preferredModel`** is not deleted by
   the selector (only `routes:unpin` revokes config) - it serves the ordinary order and reports
-  `pinStale.action: 'ignored'`. Both also report `pinMiss`; the menu carries `pin.stale`. `reason` is
+  `pinStale.action: 'ignored'`. Both also report `pinMiss`; the menu carries `pin.stale`. A **soft pin** is
+  retired only when the name is absent from the pre-rank pool (`rankInputs`): all-cooling accounts give
+  `pinCooling` (429 + `Retry-After`, pin kept), a capability/contract miss gives `pinBlocked` (503 naming
+  what is missing) - both return zero candidates and keep the pin. `reason` is
   computed **before** the `single` scope trim (`pin` / `only` / `cache-affinity` / `sticky` /
   `score`) - post-trim every single-scope row reads `only`. `preferredModel` is the persistent form (`until: 0`, no countdown), written by
   `routes:switch` with `persist: true` (the console's 「长期」; config write + broadcast, soft pin
@@ -213,7 +216,9 @@ registry) → `adapters/<provider>.ts` → upstream; `loadbalancer.ts` picks the
 - One installer per platform plus `dist/modelport-daemon-<ver>-<arch>.tar.gz`; the console is a thin
   argv orchestrator (dynamic imports only - `tests/build/shell-entries.test.ts`), no `latest.yml` is
   published (updates use release assets + `.sha256`), and headless persistence needs a
-  **system-scope** unit (`systemctl --user` dies with the login session).
+  **system-scope** unit (`systemctl --user` dies with the login session). The update check reads
+  `releases.atom` and derives asset URLs from the tag (`releaseFromTag`) - never the anonymous REST
+  API, whose 60-per-hour-per-IP quota turns a spent budget into a bare 403 on every check.
 
 ## Logging
 

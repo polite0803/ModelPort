@@ -1,5 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 
 import {
   archFromUname,
@@ -9,9 +12,11 @@ import {
   isNewer,
   normalizeVersion,
   parseBackupPath,
+  parseLatestTagFromAtom,
   parseRelease,
   parseSha256,
   parseSystemdUnit,
+  releaseFromTag,
   selectReleaseAssets,
   shellQuote,
 } from '../../src/shell/updatePlan.ts'
@@ -178,4 +183,45 @@ test('BACKUP= 行可被调用方解析', () => {
 
 test('shell 引号函数处理单引号', () => {
   assert.equal(shellQuote("a'b"), "'a'\\''b'")
+})
+
+test('atom 只取第一条 entry 的 tag，正文里的旧 tag 链接不算数', () => {
+  const feed = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <link type="text/html" rel="alternate" href="https://github.com/polite0803/ModelPort/releases"/>
+  <entry>
+    <id>tag:github.com,2008:Repository/1434662634/v1.8.11</id>
+    <link type="text/html" rel="alternate" href="https://github.com/polite0803/ModelPort/releases/tag/v1.8.11"/>
+    <content type="html">&lt;a href="https://github.com/polite0803/ModelPort/releases/tag/v1.8.0"&gt;旧版&lt;/a&gt;</content>
+  </entry>
+  <entry>
+    <link type="text/html" rel="alternate" href="https://github.com/polite0803/ModelPort/releases/tag/v1.8.10"/>
+  </entry>
+</feed>`
+  assert.equal(parseLatestTagFromAtom(feed), 'v1.8.11')
+  assert.equal(parseLatestTagFromAtom('<feed></feed>'), null)
+  assert.equal(parseLatestTagFromAtom('<entry><link href="https://github.com/polite0803/ModelPort/releases"/></entry>'), null)
+})
+
+test('按 tag 合成的发布与实际下载地址同形：四个资产各带 .sha256', () => {
+  const release = releaseFromTag('v1.8.11')
+  assert.equal(release.version, '1.8.11')
+  assert.equal(release.tag, 'v1.8.11')
+  assert.equal(release.pageUrl, 'https://github.com/polite0803/ModelPort/releases/tag/v1.8.11')
+  const pairs = selectReleaseAssets(release, 'x64', 'x64')
+  assert.deepEqual(pairs.missing, [])
+  assert.equal(pairs.shell?.url, `${ASSET_BASE.replace('v1.7.5', 'v1.8.11')}/${SHELL.replace('1.7.5', '1.8.11')}`)
+  assert.equal(pairs.shell?.checksumUrl, `${pairs.shell?.url}.sha256`)
+  assert.equal(pairs.daemon?.name, DAEMON.replace('1.7.5', '1.8.11'))
+  assert.throws(() => releaseFromTag('not a tag'))
+})
+
+test('更新检查不碰匿名 GitHub API：只用 releases.atom 与约定资产名', () => {
+  const root = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
+  const exec = readFileSync(join(root, 'src/shell/wslExec.ts'), 'utf8')
+  assert.match(exec, /releases\.atom/, '更新检查必须走网页 feed，REST API 匿名配额是每 IP 每小时 60 次')
+  assert.doesNotMatch(exec, /https:\/\/api\.github\.com/, '回到 api.github.com 就会重新出现「配额 0 → 403」')
+  const plan = readFileSync(join(root, 'src/shell/updatePlan.ts'), 'utf8')
+  assert.match(plan, /ModelPort-\$\{version\}-\$\{arch\}-setup\.exe/, '资产名必须与发布工作流的上传名同源')
+  assert.match(plan, /modelport-daemon-\$\{version\}-\$\{arch\}\.tar\.gz/)
 })

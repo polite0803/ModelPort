@@ -96,20 +96,32 @@ const INCOMPLETE_STEP_MESSAGES: Record<string, string> = {
   'incomplete-tools': '上游未宣告结束就断流，工具调用不完整',
   'stream-cut': '上游连接被掐断（既无 finish_reason 也无 [DONE]）',
   'tool-args-truncated': '工具调用参数 JSON 残缺，该批调用已丢弃',
-  'tool-args-empty': '必填参数的工具调用收到空参数，该批调用已丢弃',
+  // 判据同时覆盖「空参数」与「缺任一必填键」两种形态（`sse.ts` 的
+  // `missingRequiredArgs`），所以文案不许写死「空参数」—— 2026-11-13 Codex 报障
+  // 里就是一句「收到空参数」，而实际可能是只缺一个键。
+  'tool-args-empty': '必填参数的工具调用缺必填字段，该批调用已丢弃',
   'prose-cut-by-stop-string': '正文被上游停止串掐断',
   'tool-call-unnamed': '工具调用缺少可用名称，该批调用已丢弃',
 }
 
 export const INCOMPLETE_STEP_CODE = 'incomplete_step'
 
+/** 错误文案里补充说明的长度上限：工具名与缺键都是短标识，超长只可能是上游发了垃圾。 */
+const INCOMPLETE_STEP_DETAIL_LIMIT = 120
+
 /** 带成因标签的 `max-tokens` ⇒ 错误帧；真实上限（无标签）仍走 `length`。 */
 function incompleteStepError(reason: FinishReason): { message: string; code: string } | undefined {
   if (reason.kind !== 'max-tokens') return undefined
   const cause = (reason as { incompleteCause?: string }).incompleteCause
   if (typeof cause !== 'string') return undefined
+  // 补充说明来自上游输出（工具名与缺键），只当**事实**拼进文案：过长的截断，
+  // 换行等控制字符交给下面的 JSON.stringify 转义 —— 不在这里猜它的用途。
+  const rawDetail = (reason as { incompleteDetail?: unknown }).incompleteDetail
+  const detail = typeof rawDetail === 'string' && rawDetail.length > 0
+    ? rawDetail.slice(0, INCOMPLETE_STEP_DETAIL_LIMIT)
+    : undefined
   return {
-    message: `模型本步产出不完整：${INCOMPLETE_STEP_MESSAGES[cause] ?? cause}`,
+    message: `模型本步产出不完整：${INCOMPLETE_STEP_MESSAGES[cause] ?? cause}${detail === undefined ? '' : `（${detail}）`}`,
     code: INCOMPLETE_STEP_CODE,
   }
 }

@@ -150,7 +150,7 @@ import {
   testAccount,
 } from './account-probe.js'
 import { exportBackup, importBackup } from './backup.js'
-import { handleOpencodeRpc } from './opencode-rpc.js'
+import { handleOpencodeRpc, refreshOpencodeAccountCredential } from './opencode-rpc.js'
 import { clearDeadModels, deadModelIdsFor } from './dead-model-store.js'
 import { OPENCODE } from './opencode-product.js'
 import { normalizeProxy } from './opencode.js'
@@ -2462,10 +2462,11 @@ function registerChannelPackEndpoints(
           //    「已过期」。早先只有 raccoon 分支传了，其余七个分支漏传，
           //    凭据续好了、界面纹丝不动，用户没有任何自救手段。
           //
-          // ⚠⚠ **本端点没有面板入口**（issue IKJOZA 取证）：账号卡片上并没有
-          // 「刷新」按钮（按钮是 测试/重测/重置/停用/代理/指纹/删除），
-          // 调用方是仓库外的脚本/手工 RPC。下面三处历史注释曾把它写成
-          // 「账号卡片的刷新按钮」——那是失实的，会把排障的人引到不存在的 UI。
+          // ⚠⚠ **本端点有面板入口**（2026-11-13 更正；旧注释据 issue IKJOZA
+          // 写的是「没有刷新按钮」，那是失实的）：`Channels.tsx` 的账号行对
+          // 每个账号都渲染「刷新凭据」按钮，点它就走 `channels.rpc('account.refresh')`。
+          // 所以**每个支持的 provider 都必须有分支** —— 漏一个就是用户看到
+          // 「刷新凭据失败 / Unknown provider: <id>」。
           switch (entry.provider) {
             case COMATE.id:
               await comate.refreshAccountCredential(entry.credentialRef, pool, entry.id)
@@ -2537,6 +2538,13 @@ function registerChannelPackEndpoints(
               // WorkBuddy **有** refresh 端点（`/v2/plugin/auth/token/refresh`，
               // refresh_token 轮换）。必须传 pool + entry.id 回写 expiresAt。
               await workbuddy.refreshAccountCredential(entry.credentialRef, pool, entry.id)
+              break
+            case OPENCODE.id:
+              // 用户报障 2026-11-13：账号行对**所有**渠道都渲染「刷新凭据」按钮，
+              // 而这个 switch 原本没有 opencode 分支 ⇒ 落到 `default` 弹
+              // 「Unknown provider: opencode」。静态 API key 没有续期端点，
+              // 见 `refreshOpencodeAccountCredential` 的取舍说明。
+              await refreshOpencodeAccountCredential(ctx, entry)
               break
             default:
               throw new Error(`Unknown provider: ${entry.provider}`)

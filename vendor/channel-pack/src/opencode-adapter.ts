@@ -42,7 +42,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import {
   OPENCODE, OPENCODE_FALLBACK_MODELS, classifyOpencodeError, isFreeOpencodeModel,
   isReachableOpencodeModel,
-  type OpencodeErrorInfo, type OpencodeErrorKind, type OpencodeFallbackModel,
+  type OpencodeErrorInfo, type OpencodeFallbackModel,
 } from './opencode-product.js'
 import { listIdentitySlots, pickSlot, type IdentitySlot } from './opencode-auth.js'
 import { deriveSessionId, opencodeHeaders, opencodeUserAgent } from './opencode.js'
@@ -56,7 +56,8 @@ import { consumeOpenAiSse, collectImages, httpErrorCode, requiredArgsToolsOption
 import { registerAdapterIdempotent } from './llm-register-compat.js'
 import { translateReasoningEffort } from './reasoning-ladder.js'
 import { reportLedgerAccount } from './token-ledger.js'
-import { retryAfterMsFromResponse } from './retry-after.js'
+import { formatRecoveryReset, retryAfterMsFromResponse } from './retry-after.js'
+import { opencodeRetryAfterMs, QUOTA_DEFAULT_MS, RATE_LIMIT_BASE_MS } from './opencode-retry.js'
 import { isAccountStoppedMessage } from './account-stop.js'
 
 /** 目录条目（远端与兜底共用的输出形状）。 */
@@ -163,37 +164,6 @@ export interface OpencodeAdapterOptions {
    * 而不是把图片静默丢掉（Qoder 图片丢失事故的教训）。
    */
   readImage?: (ref: unknown) => Promise<{ data: Uint8Array; mediaType: string } | undefined>
-}
-
-/** 限流退避上限：服务端再狠也不让它单次阻塞超过 30 分钟。 */
-const RETRY_AFTER_CAP_MS = 30 * 60_000
-/** 匿名/账号额度穷尽时的默认标记时长（当日额度）。 */
-const FREE_USAGE_DEFAULT_MS = 24 * 60 * 60_000
-/** 首次 429 的默认冷却。 */
-const RATE_LIMIT_BASE_MS = 60_000
-
-/**
- * 把「错误语义 + 服务端给的延迟」换算成该槽该模型的受限时长（相对 now 的毫秒数）。
- *
- * ⚠️ **服务端给了就用它的**，且 **0 是合法值**（「立即解除」而非「未知」）：
- * 必须用 `retryAfterMs === undefined` 判空，写成 `?? default` 之外的任何
- * falsy 判据都会把 0 静默换成 1 小时 —— 那会让刚恢复的账号继续被跳过。
- * ⚠️ 没给才退避：`free_usage_limit` 按当日 24h（与 qoder 的「当日额度」同思路），
- * `rate_limit` 指数退避并封顶 30 分钟（否则单次阻塞可能数小时，UI 无法区分
- * 「在等」与「卡死」）。
- */
-export function opencodeRetryAfterMs(
-  kind: OpencodeErrorKind,
-  retryAfterMs: number | undefined,
-  attempt: number,
-): number {
-  if (retryAfterMs !== undefined) return Math.max(0, Math.min(retryAfterMs, RETRY_AFTER_CAP_MS))
-  if (kind === 'free_usage_limit') return FREE_USAGE_DEFAULT_MS
-  // ⚠️ 余额不足（402）：按**当日**标记，而不是短冷却 —— 钱不会在 60 秒内到账，
-  // 短冷却会让同一个空钱包账号被反复选中、反复 402。
-  if (kind === 'quota') return 24 * 60 * 60_000
-  if (kind === 'auth') return RATE_LIMIT_BASE_MS
-  return Math.min(RATE_LIMIT_BASE_MS * 2 ** Math.max(0, attempt - 1), RETRY_AFTER_CAP_MS)
 }
 
 /**
@@ -426,14 +396,38 @@ export class OpencodeAdapter extends LlmAdapter {
 
     const tried = new Set<string>()
     const limited: string[] = []
+    // 已受限槽的解禁时刻。全部槽都受限时，回给宿主/客户端的是**最早**一个 ——
+    // 那才是「这条通道什么时候可能恢复」的唯一事实（见 `opencode-retry.ts`）。
+    const resets: number[] = []
+    let lastError: unknown
 
     for (;;) {
       const slot = pickSlot(slots, options.model, tried)
       if (slot === undefined) {
-        // 全 tried ⇒ 每个槽都试过一次。收费模型走到这里通常是「没有账号槽」。
+        // 全 tried ⇒ 每个槽都试过一次。
+        // ⚠️ **一个槽都没被记成受限**时不能报「均受限」：上游 5xx / 网络错误
+        // 会被这条文案抹成「额度用尽」，宿主还会据此记小时级冷却
+        // （2026-11-13 请求日志：一次 502 之后整条链被读成配额问题）。
+        if (limited.length === 0) {
+          if (lastError instanceof Error) throw lastError
+          throw new LlmError(
+            `opencode: 所有通道均失败（${String(lastError).slice(0, 200)}）`,
+            'SERVER',
+          )
+        }
+        // ⚠️ 带上**最早解禁时刻**（`providerRetryAfterMs` → 客户端 `Retry-After`）：
+        // 日额度复位在 21 小时后，只报「受限」等于让客户端再连撞 21 小时。
+        const earliestReset = resets.length === 0 ? undefined : Math.min(...resets)
         throw new LlmError(
-          `opencode: 所有通道对该模型均受限${limited.length > 0 ? `（${limited.join('、')}）` : ''}`,
+          `opencode: 所有通道对该模型均受限（${limited.join('、')}）`
+          + (earliestReset === undefined ? '' : `，最早 ${formatRecoveryReset(earliestReset)}`),
           'QUOTA_EXCEEDED',
+          {
+            status: 429,
+            ...(earliestReset === undefined
+              ? {}
+              : { providerRetryAfterMs: Math.max(0, earliestReset - Date.now()) }),
+          },
         )
       }
       tried.add(slot.id)
@@ -455,6 +449,7 @@ export class OpencodeAdapter extends LlmAdapter {
         }
         return
       } catch (error) {
+        lastError = error
         if (delivered || error instanceof ModelQueuedError) throw error
         if (error instanceof LlmError && error.code === 'QUOTA_EXCEEDED') throw error
 
@@ -492,7 +487,9 @@ export class OpencodeAdapter extends LlmAdapter {
         if (info.kind === 'quota') {
           // 402 / 余额不足：换槽无意义（同账号的钱包是同一个），但**换账号有意义**。
           // ⚠️ 不能当 server 处理 —— harness 会重试 5 次（约 15 秒）而永远不会成功。
-          await this.options.markLimited?.(slot.id, options.model, Date.now() + 24 * 60 * 60_000)
+          const resetAtMs = Date.now() + QUOTA_DEFAULT_MS
+          resets.push(resetAtMs)
+          await this.options.markLimited?.(slot.id, options.model, resetAtMs)
           limited.push(`${slot.id}(余额不足)`)
           continue
         }
@@ -513,6 +510,7 @@ export class OpencodeAdapter extends LlmAdapter {
         }
         // 限流 / 额度 / 认证：标记该槽后换下一个。
         const resetAtMs = Date.now() + opencodeRetryAfterMs(info.kind, info.retryAfterMs, tried.size)
+        resets.push(resetAtMs)
         await this.options.markLimited?.(slot.id, options.model, resetAtMs)
         limited.push(`${slot.id}(${info.kind})`)
       }

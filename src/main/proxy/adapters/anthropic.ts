@@ -80,6 +80,8 @@ interface AnthropicRequest {
 export interface AnthropicPromptCacheOptions {
   capability?: PromptCacheCapability
   config?: PromptCachingConfig
+  /** 入站客户端的形状头（转发 UA，见 `utils/clientShape.ts`）；provider 配置头优先于它。 */
+  clientShape?: Record<string, string>
 }
 
 export class AnthropicAdapter {
@@ -108,6 +110,7 @@ export class AnthropicAdapter {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'anthropic-version': ANTHROPIC_VERSION,
+      ...promptCache?.clientShape,
       ...this.provider.headers,
     }
     const credentials = this.account.credentials

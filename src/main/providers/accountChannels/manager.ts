@@ -494,6 +494,38 @@ class AccountChannelManager {
   }
 
   /**
+   * 同步版「pack 现在是否服务这个模型」：**只读缓存**，从不触发刷新、也绝不等 RPC。
+   *
+   * 供选路热路径（`autoRouter.collectCandidates`）在**单模型裁剪之前**剔掉
+   * 「宿主认为可路由、pack 明确不服务」的模型。`packUnservedModels` 是异步的，
+   * 只能跑在裁剪之后 —— 那时头部模型已经被定死，剔光就是一个零候选的 503
+   * （2026-11-13 实测：`codex-deepseek` 40 秒内 11 笔 `no_available_model`，
+   * `skipped` 只有一条 `opencode/OpenCode / Nemotron 3 Ultra Free:pack_not_serving`）。
+   *
+   * 口径与 {@link packUnservedModels} 完全同源（同一个缓存、同一份分档后清单、
+   * 同一个宽限期），只是调用方在同步上下文里查表：
+   * - `null` = **未知**（运行时没在跑、清单缺席、超出宽限期）⇒ 调用方必须放行；
+   * - `true` / `false` = 清单明确服务 / 明确不服务。
+   *
+   * 清单过期（仍在宽限期内）时顺带踢一次后台刷新：剔除发生在读取之前，若不在这里
+   * 踢，被剔的模型就不会再进入 `packUnservedModels` 的查询集，刷新可能永远不触发。
+   */
+  packServesModelNow(id: string, modelId: string): boolean | null {
+    if (getChannelDefinition(id) === undefined || modelId.length === 0) return null
+    if (!this.isRuntimeRunning()) return null
+    const now = Date.now()
+    const entry = this.packServedCache.get(id)
+    if (entry === undefined) {
+      this.refreshPackServedInBackground()
+      return null
+    }
+    if (now >= entry.expiresAt) this.refreshPackServedInBackground()
+    if (now >= entry.expiresAt + PACK_SERVED_STALE_GRACE_MS) return null
+    if (entry.ids === null) return null
+    return entry.ids.has(qualifyChannelModel(id, modelId))
+  }
+
+  /**
    * 某渠道 pack 侧服务清单的模型 id 全集（完整形状）；`null` = 未知。
    *
    * 走 {@link models} 的 30s 目录缓存顺带回填的 `packServedCache`：一次读目录把

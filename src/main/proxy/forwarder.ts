@@ -21,6 +21,7 @@ import {
   type RequestAttemptTrace,
 } from '../../shared/types'
 import { AnthropicAdapter } from './adapters/anthropic'
+import { clientShapeHeaders } from './utils/clientShape'
 import { loadBalancer } from './loadbalancer'
 import { autoRouter, type AutoCandidate } from './autoRouter'
 import {
@@ -108,7 +109,7 @@ export interface FailoverBudget {
 import { attemptTraceOf } from './attemptTrace.ts'
 import { accountRuntime } from './accountRuntime'
 import { dispatchLedger } from './dispatchLedger.ts'
-import { FIRST_ATTEMPT_CAP_MS, MIN_REMAINING_FOR_NEXT_ATTEMPT_MS, planAttemptDeadline, planFirstEventWait, planForwardRetries, planRecoveryWaitMs, sleep } from './retryPolicy'
+import { FIRST_ATTEMPT_CAP_MS, MIN_REMAINING_FOR_NEXT_ATTEMPT_MS, planAttemptDeadline, planFirstEventWait, planForwardRetries, planRecoveryWaitMs, SINGLE_CANDIDATE_FIRST_EVENT_CAP_MS, sleep } from './retryPolicy'
 import { stripUnsupportedForBuiltin } from './parameterPolicy'
 import { ensureAnthropicOutputCap, outputCapFallbackOf } from './utils/outputCap.ts'
 import { opencodeAffinityHeaders } from './utils/opencodeAffinity.ts'
@@ -286,7 +287,8 @@ type ProviderForwarder = {
     account: Account,
     provider: Provider,
     actualModel: string,
-    startTime: number
+    startTime: number,
+    context?: ProxyContext
   ) => Promise<ForwardResult>
 }
 
@@ -307,7 +309,7 @@ export class RequestForwarder {
     {
       name: 'anthropic-messages',
       matches: AnthropicAdapter.isAnthropicProvider,
-      forward: (request, account, provider, actualModel) => {
+      forward: (request, account, provider, actualModel, _startTime, context) => {
         const capability = promptCacheOf(
           provider.type === 'aggregate' && provider.aggregateId
             ? getAggregateEntry(provider.aggregateId)
@@ -316,14 +318,15 @@ export class RequestForwarder {
         return new AnthropicAdapter(provider, account).chatCompletion(request, actualModel, {
           capability,
           config: storeManager.getConfig().promptCaching,
+          clientShape: clientShapeHeaders(context?.clientUserAgent),
         })
       },
     },
     {
       name: 'account-channel',
       matches: (provider: Provider) => provider.type === 'account',
-      forward: (request, _account, provider, actualModel) =>
-        this.forwardAccountChannel(request, actualModel, provider.id),
+      forward: (request, account, provider, actualModel) =>
+        this.forwardAccountChannel(request, actualModel, provider.id, account.id),
     },
   ]
 
@@ -1054,7 +1057,8 @@ export class RequestForwarder {
   private async forwardAccountChannel(
     request: ChatCompletionRequest,
     actualModel: string,
-    providerId: string
+    providerId: string,
+    accountId: string
   ): Promise<ForwardResult> {
     const startTime = Date.now()
     const requestId = request.requestId ?? `channel-${startTime}`
@@ -1113,10 +1117,19 @@ export class RequestForwarder {
       // （用户报障 2026-10-30：auto 命中 cline 的 Vercel 网关 tools ≤ 128）。
       // 这里等首个事件：有首块才算成功（首块原样补发），首错转成普通
       // ForwardResult 失败，交给既有的换家 / 错误映射逻辑。
+      // 无下家时的等待上限按该账号自己的首字实测放宽：30s 是地板，不是天花板。
+      // 取近期（α=0.3）与长期（α=0.1）EWMA 的较大者 —— 最近几笔快样本不能
+      // 抹掉「这家常态就是三十秒才开口」这个长期事实（11-13 codearts 实测）。
+      const runtime = accountRuntime.snapshot(accountId, Date.now(), actualModel)
+      const measuredFirstTokenMs = Math.max(
+        runtime.ewmaFirstTokenMs ?? 0,
+        runtime.slowFirstTokenMs ?? 0,
+      ) || undefined
       const firstEventPlan = planFirstEventWait({
         firstEventMs: requestDeadlines().firstEventMs,
         deadlineMs,
         attemptDeadlineMs: request.attemptDeadlineMs,
+        ...(measuredFirstTokenMs === undefined ? {} : { measuredFirstTokenMs }),
       })
       const first = await firstStreamEvent(upstream, firstEventPlan.waitMs)
       if (first.kind === 'timeout') {
@@ -1141,7 +1154,9 @@ export class RequestForwarder {
         const explained = firstEventPlan.clampedBy === 'attempt-budget'
           ? `；${waitedSec}s 是剩余墙钟预算（出厂上限 ${Math.round(factoryFirstEventMs / 1000)}s），预算耗尽时不再换家`
           : firstEventPlan.clampedBy === 'single-candidate'
-            ? '；该模型没有可换的下家，等更久只会被客户端自己的超时截断'
+            ? measuredFirstTokenMs === undefined
+              ? '；该模型没有可换的下家，等更久只会被客户端自己的超时截断'
+              : `；该模型没有可换的下家，已按该账号实测首字 ${Math.round(measuredFirstTokenMs / 1000)}s 放宽到 ${waitedSec}s（出厂 ${SINGLE_CANDIDATE_FIRST_EVENT_CAP_MS / 1000}s）`
             : ''
         const timeoutMessage = `渠道 ${waitedSec}s 内未产出任何首块（疑似假死），已中止${explained}`
         return {
@@ -1373,19 +1388,19 @@ export class RequestForwarder {
 
     const dedicatedForwarder = this.providerForwarders.find(forwarder => forwarder.matches(provider))
     if (dedicatedForwarder) {
-      return dedicatedForwarder.forward(request, account, provider, actualModel, startTime)
+      return dedicatedForwarder.forward(request, account, provider, actualModel, startTime, context)
     }
 
     // 出向 responses：不做 chat 的请求体构建与 prompt 工具注入。
     // responses 自己就有原生 tools，把工具描述塞进 messages 会变成双重提示。
     if (provider.wire === 'openai-responses') {
-      return this.forwardResponsesWire(request, account, provider, actualModel, startTime)
+      return this.forwardResponsesWire(request, account, provider, actualModel, startTime, context)
     }
 
     try {
       const chatPath = provider.chatPath || '/chat/completions'
       const url = this.buildUrl(provider, chatPath, account)
-      const headers = this.buildHeaders(provider, account, request)
+      const headers = this.buildHeaders(provider, account, request, clientShapeHeaders(context.clientUserAgent))
       // 工具三件套原生透传，`buildRequestBody` 自己按 `request.tools` 组装。
       // 托管层（把工具描述写进 system、再把回复文本解析回 tool_calls）已于 2026-11-03
       // 退役：网关不写提示词，不支持工具的模型由能力路由（`autoRouting::hardFilterFailure`
@@ -1520,11 +1535,12 @@ export class RequestForwarder {
     account: Account,
     provider: Provider,
     actualModel: string,
-    startTime: number
+    startTime: number,
+    context: ProxyContext
   ): Promise<ForwardResult> {
     try {
       const url = this.buildUrl(provider, provider.chatPath || '/responses', account)
-      const headers = this.buildHeaders(provider, account, request)
+      const headers = this.buildHeaders(provider, account, request, clientShapeHeaders(context.clientUserAgent))
       const body = chatToResponsesRequest(request, actualModel)
 
       const modelParams = provider.modelParameters?.[actualModel]
@@ -1721,8 +1737,12 @@ export class RequestForwarder {
     provider: Provider,
     account: Account,
     request?: unknown,
+    clientShape?: Record<string, string>
   ): Record<string, string> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    // 客户端形状头（转发入站 UA）在 provider 配置头**之前**合并：registry 里显式
+    // 配置的 UA（如 kimchi）继续赢过自动转发 —— 显式配置 > 自动转发。
+    Object.assign(headers, clientShape)
     // 逐条滤而不是整串展开：`...provider.headers` 让配置里的 `Host` / `Content-Length`
     // 直接顶掉 axios 自己算出来的值，而配置可以来自导入文件或渠道包。
     for (const [name, value] of Object.entries(provider.headers ?? {})) {

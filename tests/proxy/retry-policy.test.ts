@@ -184,6 +184,40 @@ test('换家链里的首块等待沿用尝试截止，不叠 30s 上限', () => 
     planFirstEventWait({ firstEventMs: 60_000, deadlineMs: 70_000, attemptDeadlineMs: 70_000 }),
     { waitMs: 60_000, clampedBy: 'none' },
   )
+  // 链里有下家：实测再慢也不放宽 —— 换一家比等它便宜
+  assert.deepEqual(
+    planFirstEventWait({
+      firstEventMs: 60_000,
+      deadlineMs: 120_000,
+      attemptDeadlineMs: 20_000,
+      measuredFirstTokenMs: 24_600,
+    }),
+    { waitMs: 20_000, clampedBy: 'attempt-budget' },
+  )
+})
+
+test('无下家时用该账号的实测首字放宽地板：30s 不再是天花板', () => {
+  // 11-13 codearts 实测：成功首字 p50 28.5–30.4s、max 33–37s，长期均值约 24.6s。
+  // 2×≈49s 覆盖观测上界，同时仍在客户端 ~60s 耐心之内。
+  assert.deepEqual(
+    planFirstEventWait({ firstEventMs: 60_000, deadlineMs: 120_000, measuredFirstTokenMs: 24_600 }),
+    { waitMs: 49_200, clampedBy: 'single-candidate' },
+  )
+  // 快账号：2× 远低于地板，30s 仍然生效（放宽只上不下）
+  assert.deepEqual(
+    planFirstEventWait({ firstEventMs: 60_000, deadlineMs: 120_000, measuredFirstTokenMs: 2_000 }),
+    { waitMs: 30_000, clampedBy: 'single-candidate' },
+  )
+  // 实测把上限推过出厂首事件上限时，由 firstEventMs 收口，不再算被这条规则压短
+  assert.deepEqual(
+    planFirstEventWait({ firstEventMs: 60_000, deadlineMs: 120_000, measuredFirstTokenMs: 40_000 }),
+    { waitMs: 60_000, clampedBy: 'none' },
+  )
+  // 请求超时本来就短（用户设 25s）时以用户为准，实测不能把它拉长
+  assert.deepEqual(
+    planFirstEventWait({ firstEventMs: 25_000, deadlineMs: 120_000, measuredFirstTokenMs: 24_600 }),
+    { waitMs: 25_000, clampedBy: 'none' },
+  )
 })
 
 test('恢复轮的等待计划：只用剩余墙钟，受上限与解禁时刻夹住', () => {

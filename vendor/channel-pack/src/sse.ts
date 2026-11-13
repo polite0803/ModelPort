@@ -150,8 +150,20 @@ export type IncompleteStepCause =
 
 export function incompleteStep(
   cause: IncompleteStepCause,
-): { kind: 'max-tokens'; incompleteCause: IncompleteStepCause } {
-  return { kind: 'max-tokens', incompleteCause: cause }
+  /**
+   * 可读的补充说明（目前只有 `tool-args-empty` 用：工具名 + 缺失键）。
+   *
+   * 投影层会把它拼进错误帧文案：同一个成因里「空参数」与「缺任一必填键」的处置
+   * 相同，但诊断价值完全不同 —— 不带工具名时客户端与日志都只能看到「某个调用
+   * 不完整」，无法判断是模型系统性缺陷还是单次抖动（2026-11-13 Codex 报障）。
+   */
+  detail?: string,
+): { kind: 'max-tokens'; incompleteCause: IncompleteStepCause; incompleteDetail?: string } {
+  return {
+    kind: 'max-tokens',
+    incompleteCause: cause,
+    ...(detail === undefined || detail.length === 0 ? {} : { incompleteDetail: detail }),
+  }
 }
 
 /**
@@ -347,19 +359,32 @@ export function isTruncatedArguments(raw: string): boolean {
  * - 解析出 null/数组/标量 → true（非对象参数包不可能满足必填）。
  */
 export function isMissingRequiredArgs(raw: string, required: readonly string[]): boolean {
-  if (required.length === 0) return false
-  if (isTruncatedArguments(raw)) return false
+  return missingRequiredArgs(raw, required).length > 0
+}
+
+/**
+ * 同上判据，但返回**缺了哪些键**（空数组 = 通过）。
+ *
+ * 判据只有这一份实现：`isMissingRequiredArgs` 是它的布尔投影，错误文案里的
+ * 「缺 X/Y」也走它 —— 两处各写一遍就会在「非对象参数包算不算全缺」这类边界上
+ * 给出互相矛盾的答案（到底缺哪个键，客户端与日志本该读同一份结论）。
+ */
+export function missingRequiredArgs(raw: string, required: readonly string[]): string[] {
+  if (required.length === 0) return []
+  // 残缺 JSON 归 `isTruncatedArguments` 那条链路，别在这里重复归因。
+  if (isTruncatedArguments(raw)) return []
   const trimmed = raw.trim()
-  if (trimmed.length === 0) return true
+  // 空参数包：必填一个都没有。非对象（null/数组/标量）同样不可能满足必填。
+  if (trimmed.length === 0) return [...required]
   let parsed: unknown
   try {
     parsed = JSON.parse(trimmed)
   } catch {
-    return false
+    return []
   }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return true
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return [...required]
   const obj = parsed as Record<string, unknown>
-  return required.some(key => !(key in obj))
+  return required.filter(key => !(key in obj))
 }
 
 /**

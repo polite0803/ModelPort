@@ -56,8 +56,8 @@ import {
 import { installWslGateway, probeWslGateway } from './wslInstall'
 import { controlWslService, probeWslService, removeWslInstall, wslInstallDir } from './wslService'
 import type { ServiceControlAction } from './wslInstallPlan'
-import { fetchReleaseFeed } from './wslExec'
-import { parseRelease, type ReleaseInfo } from './updatePlan'
+import { fetchLatestRelease } from './wslExec'
+import type { ReleaseInfo } from './updatePlan'
 import { deployGuideHtml } from './deployGuide'
 import type { LocalGatewayView } from '../shared/localGateway'
 import type { GatewayListSnapshot } from '../shared/shellList'
@@ -1054,7 +1054,7 @@ function trayRouteCommand(command: ShellRouteCommand): void {
 
 function routeMenuModelLabel(model: RouteMenuEntry['models'][number]): string {
   const parts = [model.displayName]
-  if (model.current) parts.push('当前')
+  if (model.current) parts.push('上轮服务')
   if (model.pinned) parts.push('已固定')
   parts.push(model.accountCount > 0 ? `${model.accountCount} 账号` : '无可用账号')
   if (model.ewmaFirstTokenMs !== undefined) parts.push(`首字 ${Math.round(model.ewmaFirstTokenMs)}ms`)
@@ -1075,9 +1075,11 @@ function openRouteManager(route: string): void {
 }
 
 function routeMenuSubmenu(entry: RouteMenuEntry): MenuItemConstructorOptions[] {
+  // 「上一轮」而不是「当前」：这一格记的是已经跑完的那一轮，而下一次请求由下面的
+  // 钉子决定。混用「当前」会让用户以为钉子没生效。
   const current = entry.current === undefined
-    ? '当前：还没有服务过的模型'
-    : `当前：${entry.current.displayName}${
+    ? '还没有服务过的模型'
+    : `上一轮：${entry.current.displayName}${
         entry.current.firstTokenMs === undefined ? '' : ` · 首字 ${Math.round(entry.current.firstTokenMs)}ms`
       }`
   const pin = entry.pin === undefined
@@ -1476,7 +1478,7 @@ ipcMain.handle('shell:gateway-deploy', async (event, id: unknown) => {
   let release: ReleaseInfo | null = null
   let error: string | undefined
   try {
-    release = parseRelease(JSON.parse(await fetchReleaseFeed()) as unknown)
+    release = await fetchLatestRelease()
   } catch (cause) {
     error = cause instanceof Error ? cause.message : String(cause)
   }

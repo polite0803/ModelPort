@@ -297,6 +297,45 @@ test('第 1 条/请求级：钉子指向池外模型 → 503 pin_stale，下一�
   sm.deleteRoute('pin-stale')
 })
 
+test('第 1 条/请求级：钉住的账号在退避 → 429 可重试，钉子不退役', async () => {
+  const created = sm.createRoute({ name: 'pin-cooling', enabled: true, modelScope: 'pool' })
+  assert.equal(created.ok, true, JSON.stringify(created.error))
+  autoRouter.setPin({ route: 'pin-cooling', displayName: 'Test-B', scope: 'route', source: 'console' })
+  autoRouter.markAccountCooldown('rp2-acct', 504)
+
+  const response = await postChat('pin-cooling')
+  assert.equal(response.status, 429, '模型还在池里，只是账号在退避：这件事的形状是可重试')
+  assert.equal(response.json.error.code, 'model_temporarily_unavailable')
+  assert.equal(response.json.error.type, 'rate_limit_error')
+  const details = response.json.error.details as Record<string, unknown>
+  assert.equal(details.pin, 'Test-B')
+  assert.equal(details.scope, 'route')
+  assert.equal(details.source, 'console')
+  assert.match(String(response.headers['retry-after']), /^\d+$/)
+  assert.equal(response.headers['x-modelport-pin'], `cooling=Test-B;retry=${details.retry_after_seconds}`)
+
+  const row = sm.getRequestLogs().find(entry => entry.requestId === response.headers['x-request-id'])
+  assert.ok(row, '可重试的 429 也要有请求日志行')
+  assert.equal(row.auto.chainLength, 0)
+  assert.equal(row.auto.pinMiss, 'Test-B')
+  assert.equal(row.auto.pinStale, undefined, '退避不是失效，日志里不许写 pinStale')
+  assert.equal(row.auto.pinCooling?.displayName, 'Test-B')
+
+  // 钉子留着：冷却清掉之后下一轮还是它，而不是「已经换了一个模型继续聊」
+  autoRouter.clearAccountCooldown('rp2-acct')
+  const decision = autoRouter.select(
+    { model: 'auto', messages: [{ role: 'user', content: 'ping' }] },
+    'round-robin',
+    undefined,
+    sm.getModelRoutes()['pin-cooling'],
+  )
+  assert.equal(decision.pin?.displayName, 'Test-B')
+  assert.equal(decision.pinStale, undefined)
+  assert.equal(decision.candidates[0]?.displayName, 'Test-B')
+
+  sm.deleteRoute('pin-cooling')
+})
+
 test('A/请求级：同一请求体，把池策略清空后立刻真的转发（代理没重启过）', async () => {
   const updated = sm.updateRoute('fast', { poolStrategies: [] })
   assert.equal(updated.ok, true, JSON.stringify(updated.error))

@@ -65,7 +65,7 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { collectHarnessSystem, normalizeHarnessMessages } from './message-shape.js'
-import { resolveToolPairing, isMissingRequiredArgs, isTruncatedArguments, incompleteStep } from './sse.js'
+import { resolveToolPairing, missingRequiredArgs, isTruncatedArguments, incompleteStep } from './sse.js'
 
 /**
  * 构造 Anthropic Messages 请求体。
@@ -689,13 +689,24 @@ export async function* consumeMinimaxSse(
    * finish 上升级；残缺 JSON 归 `isMissingRequiredArgs` 内部的既有链路口径，
    * 不在这里重复归因；无必填参数的工具空参数是合法的，绝不拦。
    */
-  const emptyRequiredArgs = baseReason.kind === 'tool-calls'
-    && options.toolsRequiringArgs !== undefined && options.toolsRequiringArgs.size > 0
-    && completedToolCalls.some(call => {
-      if (call.name.length === 0) return false
-      const required = options.toolsRequiringArgs!.get(call.name)
-      return required !== undefined && isMissingRequiredArgs(call.args, required)
-    })
+  const emptyRequiredArgsOffender = baseReason.kind !== 'tool-calls'
+      || options.toolsRequiringArgs === undefined
+      || options.toolsRequiringArgs.size === 0
+    ? undefined
+    : completedToolCalls.reduce<{ name: string; missing: string[] } | undefined>((found, call) => {
+        if (found !== undefined) return found
+        if (call.name.length === 0) return undefined
+        const required = options.toolsRequiringArgs!.get(call.name)
+        if (required === undefined) return undefined
+        const missing = missingRequiredArgs(call.args, required)
+        return missing.length === 0 ? undefined : { name: call.name, missing }
+      }, undefined)
+  const emptyRequiredArgs = emptyRequiredArgsOffender !== undefined
+  // 错误帧文案的补充说明，与 `openai-compat.ts` 同一格式（工具名 + 缺失键）：
+  // 这条判据同时覆盖「空参数」与「缺任一必填键」，只说「收到空参数」会误述。
+  const emptyRequiredArgsDetail = emptyRequiredArgsOffender === undefined
+    ? undefined
+    : `${emptyRequiredArgsOffender.name} 缺 ${emptyRequiredArgsOffender.missing.join('/')}`
   /**
    * 截断判据（2026-10-31 审计补齐，与 `openai-compat.ts` 收尾发弃同口径）：
    * - `argsTruncated`：已收口调用里有残缺 JSON（上游半途被掐）；
@@ -716,5 +727,10 @@ export async function* consumeMinimaxSse(
     : emptyRequiredArgs
       ? 'tool-args-empty' as const
       : truncatedStream ? 'stream-cut' as const : undefined
-  yield { type: 'finish', reason: discardCause === undefined ? baseReason : incompleteStep(discardCause) }
+  yield {
+    type: 'finish',
+    reason: discardCause === undefined
+      ? baseReason
+      : incompleteStep(discardCause, discardCause === 'tool-args-empty' ? emptyRequiredArgsDetail : undefined),
+  }
 }

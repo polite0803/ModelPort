@@ -76,8 +76,8 @@ async function consumeFinish(
   bundle: any,
   frames: string[],
   config: Record<string, unknown> = {},
-): Promise<{ kind: string; incompleteCause?: string }> {
-  let reason: { kind: string; incompleteCause?: string } = { kind: 'none' }
+): Promise<{ kind: string; incompleteCause?: string; incompleteDetail?: string }> {
+  let reason: { kind: string; incompleteCause?: string; incompleteDetail?: string } = { kind: 'none' }
   for await (const chunk of bundle.consumeOpenAiSse(sseResponse(frames), {}, {
     label: 'test',
     firstTokenTimeoutMs: 5000,
@@ -161,7 +161,7 @@ test('工具参数 JSON 残缺：成因 tool-args-truncated，投影成 incomple
   assert.equal(error.choices.length, 0, '失败不是正文：choices 必须为空')
 })
 
-test('必填参数工具收到空参数：成因 tool-args-empty', async (t) => {
+test('必填参数工具收到空参数：成因 tool-args-empty，文案点名工具与缺键', async (t) => {
   const bundle = await loadVendorBundle(t)
   const reason = await consumeFinish(bundle, [
     toolCallDelta('exec_command', '{}'),
@@ -170,6 +170,27 @@ test('必填参数工具收到空参数：成因 tool-args-empty', async (t) => 
   ], TOOLS_REQUIRING_ARGS)
   assert.equal(reason.kind, 'max-tokens')
   assert.equal(reason.incompleteCause, 'tool-args-empty')
+  assert.equal(reason.incompleteDetail, 'exec_command 缺 cmd',
+    '补充说明要指出是哪个工具、缺哪个键 —— 只有成因时既认不出工具也认不出形态')
+
+  // 投影层：文案必须与判据同源。这条判据同时覆盖「空参数」与「缺任一必填键」，
+  // 只说「收到空参数」会把部分缺键误述成空（2026-11-13 Codex 报障原文）。
+  const { frames } = await project(bundle, [{ type: 'finish', reason }])
+  const error = frames.find(f => f.error !== undefined)
+  assert.equal(error?.error?.code, INCOMPLETE_STEP_CODE)
+  assert.match(error.error.message, /缺必填字段/)
+  assert.match(error.error.message, /exec_command 缺 cmd/)
+})
+
+test('部分参数缺必填键：同一成因，补充说明列出真实缺的键', async (t) => {
+  const bundle = await loadVendorBundle(t)
+  const reason = await consumeFinish(bundle, [
+    toolCallDelta('exec_command', '{"workdir":"/tmp"}'),
+    delta({}, 'tool_calls'),
+    'data: [DONE]\n\n',
+  ], TOOLS_REQUIRING_ARGS)
+  assert.equal(reason.incompleteCause, 'tool-args-empty')
+  assert.equal(reason.incompleteDetail, 'exec_command 缺 cmd')
 })
 
 test('连接被掐断（无 finish_reason 也无 [DONE]）：成因 stream-cut', async (t) => {

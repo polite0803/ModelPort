@@ -84,7 +84,7 @@ test('upgrade is refused for remote rows; deploy is refused for managed rows', (
     main.indexOf("ipcMain.handle('shell:gateway-list-close'"),
   )
   assert.match(deployHandler, /entry\.kind !== 'remote'/)
-  assert.match(deployHandler, /parseRelease\(JSON\.parse\(await fetchReleaseFeed\(\)\) as unknown\)/)
+  assert.match(deployHandler, /release = await fetchLatestRelease\(\)/)
 })
 
 test('the page dispatches every new action to its named method', () => {

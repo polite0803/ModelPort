@@ -71,8 +71,8 @@ test('托盘只发意图，不自己执行：每个菜单项都是一条 ShellRo
   assert.doesNotMatch(codeOnly(main), /routes:(menu|switch|unpin)/, 'shell 进程不持有管理密钥，不许直接调管理面')
 })
 
-test('模型行把四类读数写在一行里：当前 / 已固定 / 账号数 / 首字 / 熔断', () => {
-  for (const marker of ["'当前'", "'已固定'", '账号`', '首字 ', "'免费'", '熔断中 ']) {
+test('模型行把四类读数写在一行里：上轮服务 / 已固定 / 账号数 / 首字 / 熔断', () => {
+  for (const marker of ["'上轮服务'", "'已固定'", '账号`', '首字 ', "'免费'", '熔断中 ']) {
     assert.ok(main.includes(marker), `模型行少了 ${marker}`)
   }
   assert.match(main, /type: 'checkbox',\s*\n\s*checked: model\.pinned,/, '已固定那个模型要打勾')
@@ -113,4 +113,18 @@ test('页面侧做的是 RPC，不是另一份判定：menu / switchModel / unpi
   assert.match(bridge, /command\.action === 'reset'[\s\S]*?routes\.unpin\(command\.route\)/,
     '「恢复到自动排序」是撤钉，不是再点一个模型')
   assert.match(bridge, /if \(surface === null\) return \(\) => \{\}/, '纯浏览器没有桥：整块是 no-op，不是失败')
+})
+
+/**
+ * 托盘的快照只能由页面写，而页面自己切换后曾经不发布：托盘停在切换前那一份，
+ * 用户要到下次右键才看见新状态，读起来像「固定没生效」。反过来托盘点了切换，
+ * 已经打开的路由页也不会重读。两个方向都要有回灌。
+ */
+test('固定之后两侧一起刷新：控制台发布新快照，托盘命令回灌页面', () => {
+  const page = read('src/renderer/src/pages/Routes.tsx')
+  assert.match(bridge, /export function publishTrayRouteMenu/, '发布入口由桥导出，页面不另写一份 RPC')
+  assert.match(page, /publishTrayRouteMenu\(\)/, '控制台切完必须发布，否则托盘慢一拍')
+  assert.match(bridge, /dispatchEvent\(new Event\(ROUTES_CHANGED_EVENT\)\)/, '托盘命令执行完要通知页面')
+  assert.match(page, /addEventListener\(ROUTES_CHANGED_EVENT/, '已打开的路由页要跟着重读')
+  assert.match(page, /Math\.max\(1_000, pinUntil - Date\.now\(\) \+ 1_000\)/, '钉子到期按时拉一次，倒计时不能停住')
 })
