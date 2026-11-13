@@ -19,6 +19,7 @@ import type { BackupExportOptions, BackupExportResult, BackupPickResult } from '
 import type { ShellBridge } from '@shared/shellBridge'
 import { parseEventFrame } from '@shared/sseFrames'
 import { IpcChannels } from '../../../main/ipc/channels'
+import i18n from '../i18n'
 
 const SECRET_KEY = 'modelport.managementSecret'
 const UNAUTHORIZED = 'modelport:unauthorized'
@@ -159,13 +160,32 @@ async function waitForGate(key: string): Promise<void> {
   }
 }
 
+/**
+ * 连接类失败的统一标记：请求没拿到管理面应答（网络错误，或代理/重启窗口的
+ * 502/503/504 非 JSON 体）。UI 按「网关不可达」做保留旧数据 + 自动重连，
+ * 而不是把传输层故障报成某个 channel 的数据错误。
+ */
+export const GATEWAY_UNREACHABLE = 'gateway_unreachable'
+
+function unreachableError(status: number | null): Error {
+  const detail = status === null ? i18n.t('gatewayConnection.network') : `HTTP ${status}`
+  return Object.assign(new Error(i18n.t('gatewayConnection.unreachable', { status: detail })), {
+    code: GATEWAY_UNREACHABLE,
+  })
+}
+
 async function invokeOnce(channel: string, args: unknown[], key: string, retried = false): Promise<any> {
   await waitForGate(key)
-  const response = await fetch('/v1/management/rpc', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Management-Secret': secret() },
-    body: JSON.stringify({ channel, args }),
-  })
+  let response: Response
+  try {
+    response = await fetch('/v1/management/rpc', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Management-Secret': secret() },
+      body: JSON.stringify({ channel, args }),
+    })
+  } catch {
+    throw unreachableError(null)
+  }
   if (response.status === 401) {
     forgetSecret()
     throw new Error('management secret rejected')
@@ -179,7 +199,15 @@ async function invokeOnce(channel: string, args: unknown[], key: string, retried
     gateUntilByKey.set(key, Math.max(gateUntilByKey.get(key) ?? 0, Date.now() + delay))
     if (!retried) return invokeOnce(channel, args, key, true)
   }
-  if (!body) throw new Error(`rpc ${channel}: empty response (${response.status})`)
+  if (!body) {
+    // 502/503/504 且非 JSON：应答来自代理或重启窗口，不是管理面（管理面错误
+    // 永远是 JSON 信封）。2026-11-14 的 235 事故：系统代理在后端不可达时回 502
+    // 空体，旧文案把传输层故障报成某个 channel 的数据错误。
+    if (response.status === 502 || response.status === 503 || response.status === 504) {
+      throw unreachableError(response.status)
+    }
+    throw new Error(`rpc ${channel}: empty response (${response.status})`)
+  }
   if (!body.success) {
     const code = body.error?.code ?? 'rpc_failed'
     // `desktop-only` is a fact about the host, not a failure to retry: the UI can show

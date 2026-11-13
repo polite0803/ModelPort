@@ -91,6 +91,8 @@
     "refresh": "刷新",
     "browserMode": "浏览器模式",
     "browserModeDesc": "您正在浏览器中预览此应用。完整功能需要在 Electron 应用中运行。",
+    "connectionLost": "网关连接中断",
+    "connectionLostDesc": "显示上次成功获取的数据，每 5 秒自动重连；也可点「刷新」立即重试。",
     "proxyRunning": "代理服务运行中",
     "proxyStopped": "代理服务已停止",
     "runtime": "运行时间",
@@ -2075,5 +2077,9 @@
     "persistHint": "把这条路由长期固定到这个模型：写入路由配置，重启后仍然生效",
     "persistDone": "已长期固定到 {{model}}",
     "persistentBadge": "长期固定"
+  },
+  "gatewayConnection": {
+    "network": "网络错误",
+    "unreachable": "网关连接失败（{{status}}）：网关可能正在重启或网络中断，请稍后重试"
   }
 }

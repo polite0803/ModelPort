@@ -35,6 +35,7 @@ export function Dashboard() {
     modelCacheCoverage,
     isLoading,
     error,
+    connectionLost,
     lastUpdated,
     refreshData,
     setProviderWindow,
@@ -126,6 +127,16 @@ export function Dashboard() {
         <div className="alert-warning mb-4 px-4 py-3 text-body">
           <p className="font-medium">{t('dashboard.browserMode')}</p>
           <p className="mt-0.5 text-[var(--text-muted)]">{t('dashboard.browserModeDesc')}</p>
+        </div>
+      )}
+
+      {connectionLost && (
+        <div className="alert-warning mb-4 flex items-start gap-2 px-4 py-3 text-body">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div>
+            <p className="font-medium">{t('dashboard.connectionLost')}</p>
+            <p className="mt-0.5 text-[var(--text-muted)]">{t('dashboard.connectionLostDesc')}</p>
+          </div>
         </div>
       )}
 

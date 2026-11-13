@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { GATEWAY_UNREACHABLE } from '@/api/headless'
 import type { ProxyStatus, ProxyStatistics, Provider, Account, ProviderCheckResult, LogEntry, DayTokenSummary } from '@/types/electron'
 import type { DailyTrendPoint } from '@shared/types'
 import { dailyTrendPoints, differenceInPoints, percentChange } from '@shared/trendMath'
@@ -62,6 +63,9 @@ interface DashboardState {
   tokenUsage: DayTokenSummary | null
   isLoading: boolean
   error: string | null
+  /** Transport-level outage (gateway restarting / unreachable): keep the last good
+   * data, show a reconnect banner and retry fast instead of zeroing the cards. */
+  connectionLost: boolean
   lastUpdated: number | null
 
   setProxyStatus: (status: ProxyStatus | null) => void
@@ -100,6 +104,11 @@ interface ProviderCardInputs {
 }
 
 const EMPTY_PROVIDER_CARD: ProviderCardInputs = { meta: [], days: {}, tokenDays: {} }
+
+/** One pending fast reconnect at a time; the 60s poll keeps running regardless. */
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+
+const CONNECTION_RETRY_MS = 5000
 
 const providerStatsOf = (inputs: ProviderCardInputs, window: ProviderStatsWindow): ProviderStats[] => {
   const usage = aggregateProviderUsage(inputs.days, window)
@@ -267,6 +276,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
   tokenUsage: null,
   isLoading: false,
   error: null,
+  connectionLost: false,
   lastUpdated: null,
 
   setProxyStatus: (status) => set({ proxyStatus: status }),
@@ -338,6 +348,12 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
         tokenUsagePromise,
         tokenDaysPromise,
       ]) as [ProxyStatus | null, ProxyStatistics | null, any, Provider[], Account[], Record<string, ProviderCheckResult>, LogEntry[], DayTokenSummary | null, Record<string, DayTokenBucket>]
+
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer)
+        reconnectTimer = null
+      }
+      set({ connectionLost: false })
 
       // The trend is computed here, from the rollup the `statistics.get` payload
       // already carries. A second channel for the same numbers only added a way to
@@ -417,20 +433,32 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
 
       set({ lastUpdated: Date.now() })
     } catch (error) {
-      setError(error instanceof Error ? error.message : 'Failed to fetch data')
-      setStats({
-        totalRequests: 0,
-        successRate: 0,
-        avgLatency: 0,
-        activeAccounts: 0,
-        requestsTrend: null,
-        successRateTrend: null,
-        latencyTrend: null,
-        accountsTrend: null,
-      })
-      set({ windowTotals: EMPTY_WINDOW_TOTALS, tokenUsage: null })
-      setActivities([])
-      setChartData([])
+      if ((error as { code?: string } | null)?.code === GATEWAY_UNREACHABLE) {
+        // A restart window is not "zero requests": keep the last good cards and
+        // reconnect on a short timer instead of waiting out the 60s poll.
+        set({ connectionLost: true, error: null })
+        if (reconnectTimer === null) {
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null
+            if (get().connectionLost) void get().refreshData()
+          }, CONNECTION_RETRY_MS)
+        }
+      } else {
+        setError(error instanceof Error ? error.message : 'Failed to fetch data')
+        setStats({
+          totalRequests: 0,
+          successRate: 0,
+          avgLatency: 0,
+          activeAccounts: 0,
+          requestsTrend: null,
+          successRateTrend: null,
+          latencyTrend: null,
+          accountsTrend: null,
+        })
+        set({ windowTotals: EMPTY_WINDOW_TOTALS, tokenUsage: null })
+        setActivities([])
+        setChartData([])
+      }
     } finally {
       setLoading(false)
     }

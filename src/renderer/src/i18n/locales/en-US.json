@@ -91,6 +91,8 @@
     "refresh": "Refresh",
     "browserMode": "Browser Mode",
     "browserModeDesc": "You are previewing this app in a browser. Full features require running in Electron.",
+    "connectionLost": "Gateway connection lost",
+    "connectionLostDesc": "Showing the last successful data; reconnecting every 5 seconds. Use Refresh to retry now.",
     "proxyRunning": "Proxy service is running",
     "proxyStopped": "Proxy service is stopped",
     "runtime": "Runtime",
@@ -2075,5 +2077,9 @@
     "persistHint": "Pin this route to this model for good: written to the route config, still there after a restart",
     "persistDone": "Pinned permanently to {{model}}",
     "persistentBadge": "Persistent"
+  },
+  "gatewayConnection": {
+    "network": "network error",
+    "unreachable": "Gateway connection failed ({{status}}): the gateway may be restarting or the network is down. Retry shortly."
   }
 }
