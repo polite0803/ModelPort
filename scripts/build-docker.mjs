@@ -53,6 +53,8 @@ if (build.status !== 0) process.exit(build.status ?? 1)
 
 await mkdir(join(root, 'dist'), { recursive: true })
 const save = spawn('docker', ['save', tag])
+// Attach before the pipeline: docker save closes once stdout drains; a listener added after `await pipeline` misses it (exit 13).
+const closed = new Promise(resolve => save.on('close', resolve))
 try {
   await pipeline(save.stdout, createGzip(), createWriteStream(outPath))
 } catch (error) {
@@ -60,7 +62,7 @@ try {
   console.error(`::error::docker save failed: ${error instanceof Error ? error.message : String(error)}`)
   process.exit(1)
 }
-const code = await new Promise(resolve => save.on('close', resolve))
+const code = await closed
 if (code !== 0) {
   console.error(`::error::docker save exited with ${code}`)
   process.exit(1)

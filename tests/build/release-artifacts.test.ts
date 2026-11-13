@@ -108,6 +108,17 @@ test('the Docker image is built from the staged tree and verified like every oth
   assert.ok(dockerfile.includes('FROM node:24-slim'), 'the base image tracks .nvmrc')
   assert.ok(dockerfile.includes('VOLUME /data'), 'data persists outside the container layer')
   assert.equal(pkg.scripts['build:docker'], 'node scripts/build-docker.mjs')
+  // `docker save` exits as soon as its stdout is drained, so the 'close' event fires while
+  // `pipeline` is still resolving. A listener attached only after `await pipeline` misses it
+  // and the top-level await never settles (Node exit 13) - that is how 1.8.13's first run
+  // lost both ubuntu rows. The exit-code promise must be captured before the pipeline runs.
+  const dockerScript = readFileSync('scripts/build-docker.mjs', 'utf8')
+  const listenerAt = dockerScript.indexOf("save.on('close'")
+  const pipelineAt = dockerScript.indexOf('await pipeline(save.stdout')
+  assert.ok(
+    listenerAt >= 0 && pipelineAt >= 0 && listenerAt < pipelineAt,
+    'the close listener must be registered before the pipeline drains stdout',
+  )
 })
 
 test('the new feature doc and plan are registered in the index', () => {
