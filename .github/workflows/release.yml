@@ -239,13 +239,18 @@ jobs:
       contents: read
 
     steps:
+      # 这个 job 没有 actions/checkout（它不构建任何东西），而 `gh` 的仓库上下文来自
+      # cwd 里的 `.git`：不显式给 `-R`，`gh release view` 会报
+      # `failed to run git: fatal: not a git repository` 并以 1 退出 —— v1.8.10 的
+      # verify 就是因此红的，而四个平台的资产其实全都传上去了。
       - name: Every asset the console consumes is published
         shell: bash
         run: |
           set -euo pipefail
           tag="${{ github.ref_name }}"
           ver="${tag#v}"
-          names="$(gh release view "$tag" --json assets -q '.assets[].name')"
+          repo="${{ github.repository }}"
+          names="$(gh release view "$tag" -R "$repo" --json assets -q '.assets[].name')"
           missing=()
           for name in \
             "ModelPort-$ver-x64-setup.exe" \
