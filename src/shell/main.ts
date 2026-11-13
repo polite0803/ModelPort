@@ -41,6 +41,8 @@ import {
 } from './addressBook'
 import { decideWindowOpen } from './openTarget'
 import { dropSecret, getSecret, putSecret, type SecretSealer } from './secretStore'
+import { secretOriginAllowed } from './secretGatePlan'
+import { gatewayWindowTitle } from './windowTitlePlan'
 import { changeGatewayTrust, describeCertificate, gatewayTrustStatus, type TrustTarget } from './gatewayTrust'
 import {
   applySync,
@@ -133,8 +135,20 @@ function viewUrl(origin: string): string {
 const LOCAL_GATEWAY_NAME = '本机网关'
 const DEFAULT_LOCAL_ORIGIN = 'http://127.0.0.1:8080'
 
+/**
+ * The title bar names the gateway this window is pointed at - with several entries in
+ * the book, "ModelPort" alone cannot say which one answers the next click. Re-applied
+ * on every load and on `page-title-updated`, because the gateway page's own <title>
+ * would otherwise overwrite it.
+ */
+function applyWindowTitle(): void {
+  if (window === null || window.isDestroyed()) return
+  window.setTitle(gatewayWindowTitle(activeEntry(readBook())))
+}
+
 async function loadActive(): Promise<void> {
   if (!window) return
+  applyWindowTitle()
   const entry = activeEntry(readBook())
   if (!entry) {
     void window.loadURL(emptyPageUrl())
@@ -151,6 +165,8 @@ async function loadLocalGateway(entry: GatewayEntry): Promise<void> {
   // The status file is the only authority on the local port, so the window always follows
   // it rather than the URL stored in the address book.
   const view = await ensureLocalGateway(entry)
+  // ensureLocalGateway may have moved the entry to the port the gateway actually uses.
+  applyWindowTitle()
   const current = activeEntry(readBook())
   const target = current && current.id === entry.id ? current : entry
   if (view.phase === 'running' && view.origin) {
@@ -546,6 +562,14 @@ function createWindow(): void {
     // The page is the only holder of the management secret, so the tray menu can exist
     // only after the page mounts. Ask once per load; the page republishes on changes.
     requestRouteMenu()
+    applyWindowTitle()
+  })
+
+  // The gateway page's <title> is just "ModelPort": letting it through would erase which
+  // gateway this window is connected to. Keep the title bar naming the active entry.
+  window.webContents.on('page-title-updated', (event) => {
+    event.preventDefault()
+    applyWindowTitle()
   })
 
   // A page that fails to mount shows a dark rectangle and leaves nothing behind: the shell
@@ -1331,8 +1355,26 @@ const secretSealer: SecretSealer = {
   },
 }
 
-ipcMain.handle('shell:secret-get', (_event, origin: unknown) => {
+/**
+ * The secret surface is gated like the update surface, plus one rule of its own: a page
+ * may only touch its own origin's row. The preload survives cross-origin navigation, so
+ * without this any page the window lands on could read or forget every other gateway's
+ * secret - the multi-gateway case the per-origin store exists for.
+ */
+function secretGateAllows(event: IpcMainInvokeEvent, origin: string): boolean {
+  const entry = activeEntry(readBook())
+  return secretOriginAllowed({
+    senderUrl: event.senderFrame?.url ?? '',
+    requested: origin,
+    activeOrigin: entry ? normalizeOrigin(entry.url) : null,
+    devRendererUrl: process.env.ELECTRON_RENDERER_URL?.trim() || null,
+  })
+}
+
+ipcMain.handle('shell:secret-get', (event, origin: unknown) => {
   if (typeof origin !== 'string' || origin === '') return { status: 'none' }
+  // A rejected gate reads as "nothing stored": it must not leak which origins have rows.
+  if (!secretGateAllows(event, origin)) return { status: 'none' }
   return getSecret(secretsPath(), secretSealer, origin)
 })
 
@@ -1346,14 +1388,16 @@ ipcMain.on('shell:route-menu', (event, payload: unknown) => {
   buildTrayMenu()
 })
 
-ipcMain.handle('shell:secret-set', (_event, origin: unknown, secret: unknown) => {
+ipcMain.handle('shell:secret-set', (event, origin: unknown, secret: unknown) => {
   if (typeof origin !== 'string' || typeof secret !== 'string') return { stored: false, result: 'rejected' }
+  if (!secretGateAllows(event, origin)) return { stored: false, result: 'rejected' }
   const result = putSecret(secretsPath(), secretSealer, origin, secret)
   return { stored: result === 'stored', result }
 })
 
-ipcMain.handle('shell:secret-forget', (_event, origin: unknown) => {
+ipcMain.handle('shell:secret-forget', (event, origin: unknown) => {
   if (typeof origin !== 'string') return
+  if (!secretGateAllows(event, origin)) return
   dropSecret(secretsPath(), origin)
 })
 
