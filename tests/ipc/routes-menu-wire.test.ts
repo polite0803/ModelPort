@@ -85,3 +85,27 @@ test('恢复自动排序清两份：内存软钉 + 持久 preferredModel', () =>
     '只清内存的话，重启后持久偏好又把模型钉回来')
   assert.match(block, /broadcastConfigChanged\(/, '持久那一份改了要广播，页面才不会显示旧值')
 })
+
+/**
+ * 「长期固定」是同一个通道的 `persist` 档：软钉管 30 分钟，落盘管到用户自己撤销。
+ * 三处容易写错：
+ * 1. 缺省也落盘 —— 托盘每次「换下一个」都会改写用户配置；
+ * 2. 先撤钉再落盘 —— 写失败时用户看到的是「点了没反应」；
+ * 3. 落盘后不撤软钉 —— 菜单里显示的还是 30 分钟倒计时，「一直」被钉子盖住。
+ */
+test('长期固定：显式 persist 才落盘，先写配置再撤软钉，写完广播', () => {
+  const block = handlerBlock('ROUTES_SWITCH')
+  assert.match(block, /request\.persist !== true/, '缺省（托盘/软钉）不许走到落盘那一支')
+  assert.match(
+    block,
+    /preferredModel: \{ providerId: result\.providerId, displayName: result\.model \}/,
+    '写的是这次解析出来的供应商与模型，不是请求里那两个可能缺席的字段',
+  )
+
+  const writeAt = block.indexOf('updateRoute(result.route')
+  const clearAt = block.indexOf('autoRouter.clearPin(result.route)')
+  assert.ok(writeAt >= 0, 'persist 分支必须写路由配置')
+  assert.ok(clearAt > writeAt, '先落盘再撤软钉：写失败时那颗 30 分钟的钉子还在')
+  assert.match(block, /broadcastConfigChanged\(/, '配置改了要广播，路由页/托盘才会看到「一直」')
+  assert.match(block, /written\.ok/, '落盘失败要原样报错，不能回一个成功')
+})

@@ -80,6 +80,9 @@ export type CapabilityState = 'yes' | 'no' | 'unknown'
 
 export type AutoModelTier = 'fast' | 'balanced' | 'strong'
 
+/** 三档的全部取值，按能力从低到高。写入侧校验与界面下拉都从这里取。 */
+export const AUTO_MODEL_TIERS: readonly AutoModelTier[] = ['fast', 'balanced', 'strong']
+
 /** 模型声明的输入模态；模型没有声明时整个字段缺失（不是空数组）。 */
 export type InputModality = 'text' | 'image' | 'audio' | 'video' | 'pdf'
 
@@ -175,6 +178,7 @@ export type RoutePoolMissingReason =
   | 'context'
   | 'pool_strategy'
   | 'manual_filter'
+  | 'min_tier'
 
 /** 路由编辑器里「预览」用的请求画像；只影响能力硬过滤与上下文判定。 */
 export interface RoutePreviewSample {
@@ -187,9 +191,11 @@ export interface RoutePreviewSample {
 /**
  * 预览里一个模型（不是账号）的最终状态：
  * - `kept` 策略筛完仍在池里；`included` 手动加回；`excluded` 手动移除；
- * - `filtered` 被某条池策略筛掉；`unavailable` 当前画像会把它硬过滤掉。
+ * - `filtered` 被某条池策略筛掉；`unavailable` 当前画像会把它硬过滤掉；
+ * - `below-tier` 低于这条路由的能力下限（`minTier`）—— 路由自己的设置，不是策略
+ *   或画像问题，界面上必须分开说。
  */
-export type RoutePreviewStatus = 'kept' | 'included' | 'excluded' | 'filtered' | 'unavailable' | 'not-pinned'
+export type RoutePreviewStatus = 'kept' | 'included' | 'excluded' | 'filtered' | 'unavailable' | 'not-pinned' | 'below-tier'
 
 export interface RoutePreviewModel {
   providerId: string
@@ -465,8 +471,25 @@ export interface ModelRoute {
    * 与 `pinModels`（只允许集合）是两件事：那个是**允许**，这个是**优先**。
    * 命中即提到队首并取代粘性；该模型没有可用账号时**不静默**，日志与响应头
    * 写明 `pinMiss`，然后照常排序 —— 静默回退正是「不可预知」的来源。
+   *
+   * 模型根本不在池里时（=`pinMiss` 且不是冷却）这份配置不会被自动删除，但日志与
+   * 菜单会标成「已失效」：配置是用户的，撤销是 `routes:unpin` 的活。
    */
   preferredModel?: RouteModelRef
+  /**
+   * 能力下限：低于这一档的模型整条路由都不派（`fast` < `balanced` < `strong`）。
+   *
+   * 与 `poolStrategies` 的 `strong-tier` / `balanced-tier` 的区别是**语义**：那个是
+   * 「只要这一档」（等于），这个是「至少这一档」（下限），可以叠在别的策略上。
+   * 为什么需要它：一条路由的池子经常被便宜/免费模型占满，用户实际感受是「路由
+   * 模式比直连笨很多」—— 这不是打分权重能解决的问题，是池子里根本没有够档的模型。
+   * 缺省（不落键）= 不设下限，与既有行为完全一致。
+   *
+   * 应用位置：名字钉定之后、池策略之前，所以 `includeModels` 也拿不回低于下限的
+   * 模型（下限是路线级的声明，不是一次手动补救的对象）。档位未知不给默认值：
+   * `resolveCapability` 对未标注模型按名字启发式给档，因此这里总有一个确定值。
+   */
+  minTier?: AutoModelTier
 }
 
 /** 一轮请求内的模型换家范围（见 `ModelRoute.modelScope`）。 */
@@ -520,6 +543,13 @@ export interface RouteMenuEntry {
     scope: ModelPinScope
     until: number
     source: ModelPinSource
+    /**
+     * 钉子指向的模型已经不在池里（被删/被筛掉），这颗钉不会生效。
+     *
+     * 菜单必须能说出这一格：否则用户看到的是一颗「已固定」的钉子，而实际每一轮
+     * 都在用别的模型 —— 那正是「点了没反应」的形态。
+     */
+    stale?: boolean
   }
   models: RouteMenuModel[]
   /** 池内模型总数；`models` 只列前面几个。 */
@@ -555,6 +585,14 @@ export interface RouteSwitchRequest {
   providerId?: string
   scope?: ModelPinScope
   minutes?: number
+  /**
+   * 这次选择要不要**落盘**（写这条路由的 `preferredModel`）。
+   *
+   * 缺省 false = 只是这一次的软钉（30 分钟）。true = 长期固定：软钉被撤掉，
+   * 选择改写进路由配置，重启后仍然是它。两者写的是同一份「优先模型」判定，
+   * 区别只在活多久 —— 所以走同一条通道，不另开一条。
+   */
+  persist?: boolean
   /** 谁发起的：托盘 / 控制台。只用于菜单与日志回显。 */
   source?: ModelPinSource
 }
@@ -563,6 +601,8 @@ export interface RouteSwitchResult {
   ok: boolean
   route: string
   model?: string
+  /** 命中的模型在哪一家：`persist` 要把它原样写进 `preferredModel`。 */
+  providerId?: string
   /** 失败原因，可直接展示。 */
   reason?: string
   /** 切换后新的菜单快照，省一次往返。 */
@@ -1503,7 +1543,12 @@ export interface RequestLogEntry {
    */
   auto?: {
     prefer: AutoPreference
-    reason: 'only' | 'sticky' | 'cache-affinity' | 'score'
+    /**
+     * 胜负原因。`pin` = 一次显式选择（软钉/`preferredModel`）把某个模型提到了队首；
+     * `only` = **裁剪前**的池里只有一个模型（不是「链被裁到一条」——那是 `single`
+     * 作用域，池子可能很大）。
+     */
+    reason: 'only' | 'pin' | 'sticky' | 'cache-affinity' | 'score'
     attempts: number
     candidates: string[]
     /**
@@ -1546,6 +1591,14 @@ export interface RequestLogEntry {
      */
     switchedFrom?: string
     /**
+     * 本轮选路读到的会话锚点（`providerId/model`），无论最终服务者是不是它。
+     *
+     * `switchedFrom` 只在「换了」时出现，读不出「这一轮根本没锚」；而
+     * 「没锚 → 随便挑了一个」与「锚了但被延迟门/熔断让位」是两种完全不同的
+     * 现象。与 `stickyGated` / `latencyGateMs` 一起读。
+     */
+    previousHint?: string
+    /**
      * 「首字太慢」的池内门槛（毫秒，候选 EWMA 的 p75）；候选读数不足 4 个时不写。
      * 选路时它决定硬粘性还提不提前，流结束时同一格用来撤销锚点 —— 两处同源，
      * 客户端问「为什么这一轮换了模型/为什么又粘回慢模型」都要靠它。
@@ -1573,6 +1626,21 @@ export interface RequestLogEntry {
      * 与 `pin` 互斥 —— 同一轮要么钉住，要么报未命中。
      */
     pinMiss?: string
+    /**
+     * 钉子指向的模型**不在池里**（不是冷却，是真的不在）。
+     *
+     * - `retired`：内存软钉，本轮快速失败并**当场撤钉**，下一次请求回到自动排序；
+     * - `ignored`：持久 `preferredModel` 是配置，不替用户删，照常按池服务但写明。
+     *
+     * 与 `pinMiss` 的区别：`pinMiss` 只说「没命中」，这一格说「没命中的钉子被怎么
+     * 处置了」—— 「静默换个模型跑」与「告诉你钉子坏了」在客户端那一侧完全两回事。
+     */
+    pinStale?: {
+      displayName: string
+      scope: ModelPinScope
+      source: ModelPinSource
+      action: 'retired' | 'ignored'
+    }
     /** 本轮因模型级熔断被排到队尾的模型（`provider/model`），写入时截尾。 */
     circuited?: string[]
     /**

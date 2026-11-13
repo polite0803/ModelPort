@@ -94,7 +94,10 @@ registry) → `adapters/<provider>.ts` → upstream; `loadbalancer.ts` picks the
   `modelFamilyKey`; `pool` = the pre-A cross-model failover, still selectable). Trimming happens in
   `autoRouter.select()` *after* the soft pin and the circuit reorder, so a user pick or a degraded
   model changes the head of that turn; from there only accounts of that one model are tried, and the
-  wall clock is 40 s (`AUTO_SINGLE_SCOPE_BUDGET_MS`) rather than 90 s. Cross-model switching is a
+  wall clock is 40 s (`AUTO_SINGLE_SCOPE_BUDGET_MS`) rather than 90 s. `minTier` is a route **floor**
+  (`applyMinTier`, after the name pin, before pool strategies and manual includes: neither can bring
+  a model back), distinct from the `strong-tier` / `balanced-tier` equality strategies; an empty
+  result reports `missing: ['min_tier']`, and the preview status is `below-tier`. Cross-model switching is a
   **between-turn** act, never a mid-conversation one: context understanding, tool protocol and the
   prefix cache do not survive it, and a client that loses them mid-turn reads it as a crash. `pool`
   keeps the partition-as-order semantics (`forwardFirstReachable` advances to the next model on any
@@ -108,10 +111,19 @@ registry) → `adapters/<provider>.ts` → upstream; `loadbalancer.ts` picks the
   (`transientUnavailable`). Cooldown never empties the pool (the soonest-waking group is kept, so the
   client sees the real upstream 429); `todayUsed` is day-keyed (`dailyUsageOf`) - never read raw.
 - **Soft pin > `preferredModel` > sticky.** `ModelPin` lives in memory only (route or session scope,
-  30 min), and a pin is **not** vetoed by the model circuit: user intent outranks an automated
-  ticket, and the menu still marks that model as circuited. A pin naming a model absent from the
-  pool serves the ordinary order but reports `pinMiss` in the log and the response header - never
-  silently. `preferredModel` is the persistent form (`until: 0`, no countdown). The **model circuit**
+  30 min; tray-issued pins default to `TRAY_PIN_MINUTES` = 10 and the menu says they affect every
+  client of that route), and a pin is **not** vetoed by the model circuit: user intent outranks an
+  automated ticket, and the menu still marks that model as circuited. A pin naming a model absent
+  from the pool is decision-time `pinStale`, split by lifetime: a **soft pin** is retired and the
+  turn fails fast (503 `pin_stale`, zero candidates - serving the ordinary order instead was 3x 504
+  because the client kept talking to a model that never ran); **`preferredModel`** is not deleted by
+  the selector (only `routes:unpin` revokes config) - it serves the ordinary order and reports
+  `pinStale.action: 'ignored'`. Both also report `pinMiss`; the menu carries `pin.stale`. `reason` is
+  computed **before** the `single` scope trim (`pin` / `only` / `cache-affinity` / `sticky` /
+  `score`) - post-trim every single-scope row reads `only`. `preferredModel` is the persistent form (`until: 0`, no countdown), written by
+  `routes:switch` with `persist: true` (the console's 「长期」; config write + broadcast, soft pin
+  cleared so the menu reads "一直"). A **mapping alias named like a route never takes effect** - route
+  names win in `findModelRoute`, so the mapping panel refuses such a key and flags existing rows. The **model circuit**
   (`(route, model)` → 5 min, memory only) is tripped by `modelQualityDegradation` - the five classes
   where the model itself failed to finish the job (② repetition, ③ empty turn, ④ announced stop, ⑦
   prose-only fallback stop, ⑧ synthesized incomplete step) - and by nothing else: ⑤ upstream
@@ -125,6 +137,8 @@ registry) → `adapters/<provider>.ts` → upstream; `loadbalancer.ts` picks the
   come back as `shell:route-command` intents - both gate on
   `event.sender === window.webContents`. `switchModel` refuses session scope when the caller is the
   tray. Three absences stay distinct in the menu: no snapshot yet, read failed, no enabled routes.
+  `preview()` is short-cached (15 s, 64 entries, key = resolved pool) and returns a `structuredClone`
+  both ways - one menu open measured p50 4.7 s / p90 10.2 s of full-pool scans.
 - **Eight degraded classes** revoke the sticky anchor; ②③④ also count for AIMD/Bandit: ①
   unrequested `finish_reason=length`; ② the trailing-128-line dedup ratio (`repetition`); ③ tools
   offered, `done`, zero content **and** zero tool calls (`emptyTurn.empty`); ④ the same but content
@@ -151,7 +165,13 @@ registry) → `adapters/<provider>.ts` → upstream; `loadbalancer.ts` picks the
   30 s quiet. A local rejection is 429 `local_concurrency_limit`, failing over without penalizing
   the account. **Exhausted chain**: exactly one internal wait (`planRecoveryWaitMs`) =
   `min(remaining clock, upstream unlock, 15 s)`, default 5 s, after `endAttempt` (so it holds no
-  AIMD slot); arrears / not-subscribed are out.
+  AIMD slot); arrears / not-subscribed are out, and so is anything `permanentRefusalCooldownMs`
+  classifies - re-walking a permanent refusal only pays it twice. **Cooldown tiers**: account 15 s →
+  2 min, per `(account, model)` 429 60 s → 10 min, credential 5 → 30 min, plus two terminal tiers
+  maxed with the exponential and with upstream `Retry-After`: 6 h for payment/subscription refusals
+  and 1 h for quota-window exhaustion (`free_usage_limit`, daily limit, all channels throttled). The
+  classifier is narrow on purpose and never matches a bare 429 / "rate limit" / "for your
+  subscription tier".
 - **Live credit is a gate, never a number**: `creditSnapshotExhausted` is the only judgement; USD
   credit, CNY balance and the token ledger never convert, one click = one GET per key and nothing
   polls. **A witnessed quota refusal** is a fourth, non-comparable layer

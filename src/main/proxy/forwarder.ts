@@ -669,7 +669,13 @@ export class RequestForwarder {
         if (Number.isFinite(parsed)) retryAfterMs = parsed * 1000
       }
       if (!isProbe) {
-        accountRuntime.recordFailure(account.id, 429, Date.now(), actualModel, retryAfterMs)
+        // 原文一起交给冷却：裸 429 仍是分钟级指数退避，但「免费额度已尽 / 日限已到」
+        // 这类写着窗口的 429 要升成小时级（见 `permanentRefusalCooldownMs`）——
+        // 否则每一笔新请求都再撞一次同一家。
+        autoRouter.markAccountCooldown(account.id, 429, actualModel, {
+          ...(lastError === undefined ? {} : { message: lastError }),
+          ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+        })
       }
     }
 
@@ -987,9 +993,12 @@ export class RequestForwarder {
         }
 
         // 429 的冷却已由 forwardChatCompletion 记进 (账号, 模型) 档，这里只补记
-        // 5xx / 网络错误那类账号级故障
+        // 5xx / 网络错误那类账号级故障。原文一起给：403「需要升级」/402 这类终止性
+        // 拒绝要升成小时级冷却，否则每笔新请求都会把同一家再撞一遍。
         if (result.status !== 429 && !opaqueAggregateBadRequest) {
-          autoRouter.markAccountCooldown(candidate.account.id, result.status, candidate.actualModel)
+          autoRouter.markAccountCooldown(candidate.account.id, result.status, candidate.actualModel, {
+            ...(result.error === undefined ? {} : { message: result.error }),
+          })
         }
         if (!opaqueAggregateBadRequest) {
           loadBalancer.markAccountFailed(candidate.account.id)

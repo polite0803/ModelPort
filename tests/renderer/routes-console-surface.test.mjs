@@ -61,14 +61,28 @@ test('搜索作用在满额结果上，按三列匹配', () => {
   assert.match(page, /t\('routes\.noMatch'\)/, '搜不到要有自己的说法，不能显示成「这条路由没有模型」')
 })
 
-test('切换与撤钉走管理面：两条 IPC，一次也不写配置', () => {
-  assert.match(page, /await api\.switchModel\(\{[\s\S]{0,200}?source: 'console'/,
-    '固定必须是 routes:switch（内存软钉），不是改路由配置')
+test('切换与撤钉走管理面：软钉与落盘都走 routes:switch，页面从不自己写配置', () => {
+  assert.match(page, /await api\.switchModel\(\{[\s\S]{0,320}?source: 'console'/,
+    '固定必须是 routes:switch，不是页面自己拼一份配置')
   assert.match(page, /providerId: model\.providerId/, '同名模型可能来自不同供应商，必须带上 providerId')
+  // 「长期」是同一个通道的 persist 档：落盘发生在主进程（updateRoute + 广播），
+  // 页面只表达意图。页面要是自己写 routes，就又长出第二套选路。
+  assert.match(page, /action === 'persist' \? \{ persist: true \} : \{\}/,
+    '长期固定 = 同一次选择 + persist，不是另一条通道')
+  assert.doesNotMatch(page, /routes\.update\(|storeManager|saveAppConfig/,
+    '页面不碰路由配置：写盘只有主进程那一处')
   assert.match(page, /await api\.unpin\(detail\.route\)/,
     '「恢复自动排序」是另一条通道：它还要清持久 preferredModel')
   assert.match(page, /result\.reason \?\? t\('routes\.actionFailedHint'\)/,
     '选路器给了原因就显示原因，别吞掉')
+})
+
+test('软钉与持久钉在列表里长得不一样', () => {
+  assert.match(page, /detail\.pin\.until === 0/, 'until 0 = 持久偏好，其余是 30 分钟软钉')
+  assert.match(page, /const persistentPin = /)
+  assert.match(page, /model\.displayName === persistentPin[\s\S]{0,120}?routes\.persistentBadge/,
+    '点了「长期」之后 badge 必须变成「长期固定」，否则用户以为没生效')
+  assert.match(page, /model\.displayName !== persistentPin && \(/, '已经长期固定那一行不再显示「长期」按钮')
 })
 
 test('托盘的溢出提示与深链对得上：带路由名才落到那一条', () => {
@@ -103,7 +117,11 @@ test('两种语言写全，插值槽一致', () => {
     accountCount: '{{n}}',
     firstToken: '{{ms}}',
     switched: '{{model}}',
-    resetDone: '{{route}}'
+    resetDone: '{{route}}',
+    persist: '',
+    persistHint: '',
+    persistDone: '{{model}}',
+    persistentBadge: ''
   }
   for (const { name, json } of locales) {
     assert.equal(typeof json.nav.routes, 'string', `${name} 缺 nav.routes`)

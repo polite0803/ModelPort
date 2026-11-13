@@ -26,8 +26,9 @@ const FULL_LIST_LIMIT = 2000
  *
  * 这一页就是那个落点，数据来自托盘同一份 `routes:menu` 快照（`routeMenu`）——
  * 池、当前服务者、软钉、熔断都读同一处，不另算一份，否则菜单与真实选路会长期不一致。
- * 切换写的是内存软钉（`routes:switch`），恢复自动排序会连持久 `preferredModel` 一起清
- * （`routes:unpin`），与托盘完全同一条通道。
+ * 切换写内存软钉（`routes:switch`），「长期」把同一次选择落盘成路由的 `preferredModel`
+ * （`routes:switch` + `persist`），「恢复自动排序」两者一起清（`routes:unpin`），
+ * 与托盘走的是同一组通道。
  */
 export function Routes() {
   const { t } = useTranslation()
@@ -115,7 +116,10 @@ export function Routes() {
     if (target !== undefined) await loadDetail(target)
   }, [loadList, loadDetail, selectedName])
 
-  const runSwitch = async (action: 'next' | 'reset' | 'pin', model?: RouteMenuModel): Promise<void> => {
+  const runSwitch = async (
+    action: 'next' | 'reset' | 'pin' | 'persist',
+    model?: RouteMenuModel,
+  ): Promise<void> => {
     if (api === undefined || detail === null) return
     setBusy(true)
     try {
@@ -124,6 +128,8 @@ export function Routes() {
         : await api.switchModel({
             route: detail.route,
             ...(model === undefined ? {} : { model: model.displayName, providerId: model.providerId }),
+            // 软钉 30 分钟 vs 落盘：同一份「优先模型」判定，只是活多久不同。
+            ...(action === 'persist' ? { persist: true } : {}),
             source: 'console',
           })
       if (!result.ok) {
@@ -132,12 +138,12 @@ export function Routes() {
           description: result.reason ?? t('routes.actionFailedHint'),
           variant: 'destructive',
         })
+      } else if (action === 'reset') {
+        toast({ title: t('routes.resetDone', { route: detail.route }) })
+      } else if (action === 'persist') {
+        toast({ title: t('routes.persistDone', { model: result.model ?? '' }) })
       } else {
-        toast({
-          title: action === 'reset'
-            ? t('routes.resetDone', { route: detail.route })
-            : t('routes.switched', { model: result.model ?? '' }),
-        })
+        toast({ title: t('routes.switched', { model: result.model ?? '' }) })
       }
     } catch (caught) {
       toast({
@@ -161,6 +167,12 @@ export function Routes() {
       || model.providerId.toLowerCase().includes(needle)
     )
   }, [detail, search])
+
+  // `until: 0` 是持久偏好（`preferredModel`），其余是 30 分钟的软钉：两者在列表里
+  // 必须长得不一样，否则用户点「长期」之后看到的仍是倒计时，会以为没生效。
+  const persistentPin = detail?.pin !== undefined && detail.pin.until === 0
+    ? detail.pin.displayName
+    : undefined
 
   const header = (
     <div>
@@ -209,7 +221,9 @@ export function Routes() {
                   </span>
                   <span className="mt-0.5 block truncate text-xs">
                     {entry.pin !== undefined
-                      ? t('routes.listPinned', { model: entry.pin.displayName })
+                      ? entry.pin.stale
+                        ? t('routes.listPinnedStale', { model: entry.pin.displayName })
+                        : t('routes.listPinned', { model: entry.pin.displayName })
                       : entry.current !== undefined
                         ? entry.current.displayName
                         : t('routes.listNeverServed')}
@@ -266,7 +280,9 @@ export function Routes() {
                 {detail?.pin !== undefined && (
                   <Badge variant="secondary" className="gap-1">
                     <Pin className="h-3 w-3" />
-                    {detail.pin.until === 0
+                    {detail.pin.stale
+                      ? t('routes.pinStale', { model: detail.pin.displayName })
+                      : detail.pin.until === 0
                       ? t('routes.pinPersistent', { model: detail.pin.displayName })
                       : t('routes.pinUntil', {
                           model: detail.pin.displayName,
@@ -318,7 +334,13 @@ export function Routes() {
                   </span>
                   <span className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
                     {model.current && <Badge variant="secondary">{t('routes.currentBadge')}</Badge>}
-                    {model.pinned && <Badge variant="secondary">{t('routes.pinnedBadge')}</Badge>}
+                    {model.pinned && (
+                      <Badge variant="secondary">
+                        {model.displayName === persistentPin
+                          ? t('routes.persistentBadge')
+                          : t('routes.pinnedBadge')}
+                      </Badge>
+                    )}
                     {model.circuitUntil !== undefined && (
                       <Badge variant="outline">
                         {t('routes.circuit', { minutes: Math.max(1, Math.round((model.circuitUntil - Date.now()) / 60_000)) })}
@@ -340,6 +362,19 @@ export function Routes() {
                     <Pin className="mr-1.5 h-4 w-4" />
                     {model.pinned ? t('routes.pinnedBadge') : t('routes.pin')}
                   </Button>
+                  {model.displayName !== persistentPin && (
+                    // 落盘那一档：重启后还在，直到「恢复自动排序」。写的是路由配置
+                    // 里的 `preferredModel`，与软钉共用同一条「优先模型」判定。
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy || model.accountCount === 0 || !detail?.enabled}
+                      title={model.accountCount === 0 ? t('routes.noAccount') : t('routes.persistHint')}
+                      onClick={() => void runSwitch('persist', model)}
+                    >
+                      {t('routes.persist')}
+                    </Button>
+                  )}
                 </div>
               ))}
             </CardContent>

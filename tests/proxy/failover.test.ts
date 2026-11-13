@@ -932,10 +932,23 @@ test('限流退避的键必须带到模型粒度（接线门）', () => {
   // 账号渠道在宿主侧只有一个占位账号，整条线路共用它。哪一处调用漏了模型参数，
   // 那一处就退回「同渠道别的模型成功一次 → 把正在限流的模型放出去重付一遍 prefill」。
   // 语义判据本身在 tests/proxy/accountRuntime.test.ts，这里只管接线。
+  // 2026-11-13：429 的冷却改由 `autoRouter.markAccountCooldown` 统一落库（它要把原文
+  // 一并交给 `permanentRefusalCooldownMs`），所以门的落点跟着挪到那条接线——
+  // 模型键与 Retry-After 仍然是必须带到的两样。
   assert.match(
     forwarderSource,
-    /recordFailure\(\s*account\.id\s*,\s*429\s*,\s*Date\.now\(\)\s*,\s*actualModel\s*(?:,\s*retryAfterMs\s*)?\)/,
+    /autoRouter\.markAccountCooldown\(\s*account\.id\s*,\s*429\s*,\s*actualModel\s*,\s*\{/,
     'the 429 record must be keyed by the model actually sent upstream',
+  )
+  assert.match(
+    forwarderSource,
+    /retryAfterMs === undefined \? \{\} : \{ retryAfterMs \}/,
+    'the 429 cooldown must forward the parsed Retry-After',
+  )
+  assert.match(
+    autoRouterSource,
+    /accountRuntime\.recordFailure\(\s*accountId\s*,\s*status\s*,\s*Date\.now\(\)\s*,\s*model\s*,\s*details\.retryAfterMs\s*,/,
+    'markAccountCooldown must pass the model key and Retry-After through to recordFailure',
   )
   assert.match(
     forwarderSource,
@@ -997,7 +1010,7 @@ test('渠道包上报的解禁时刻必须透传到冷却（bridge → forwarder
     /Math\.ceil\(\s*failure\.retryAfterMs\s*\/\s*1000\s*\)/,
     'the channel error retryAfterMs must be surfaced as an integer-seconds Retry-After',
   )
-  // forwarder：429 记冷却处把 retryAfter 解析回毫秒，随可选尾参喂进 recordFailure。
+  // forwarder：429 记冷却处把 retryAfter 解析回毫秒，随冷却调用交给 autoRouter。
   assert.match(
     forwarderSource,
     /Number\.parseInt\(\s*lastRetryAfter\s*,\s*10\s*\)/,
@@ -1005,8 +1018,8 @@ test('渠道包上报的解禁时刻必须透传到冷却（bridge → forwarder
   )
   assert.match(
     forwarderSource,
-    /recordFailure\(\s*account\.id\s*,\s*429\s*,\s*Date\.now\(\)\s*,\s*actualModel\s*,\s*retryAfterMs\s*\)/,
-    'the parsed retryAfterMs must be the fifth argument to recordFailure',
+    /autoRouter\.markAccountCooldown\(\s*account\.id\s*,\s*429\s*,\s*actualModel\s*,\s*\{[\s\S]*?retryAfterMs\s*\}/,
+    'the parsed retryAfterMs must reach the cooldown call',
   )
 })
 
@@ -1240,7 +1253,8 @@ test('失败记录带上预算读数，没传时不造空字段', () => {
 
 test('恢复轮的准入范围：限流/额度/本地准入算，欠费与永久失败不算', () => {
   assert.equal(isRecoverableChainExhaustion({ status: 429 }), true)
-  assert.equal(isRecoverableChainExhaustion({ status: 402 }), true)
+  assert.equal(isRecoverableChainExhaustion({ status: 402 }), false,
+    '2026-11-13 第 2 条：402 是要人充值，等一轮只会把同一句拒绝再付一遍')
   assert.equal(isRecoverableChainExhaustion({ localAdmissionRejected: true }), true,
     '自家 AIMD 并发满了，等就对了')
   assert.equal(isRecoverableChainExhaustion({ status: 502, error: '该模型全部启用账号均在限流中' }), true)

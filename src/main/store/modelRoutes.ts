@@ -13,6 +13,7 @@
  *   IPC 与管理 API 共用同一套错误码。
  */
 import type {
+  AutoModelTier,
   AutoPoolStrategy,
   AutoPreference,
   AutoRoutingConfig,
@@ -21,7 +22,7 @@ import type {
   ModelScope,
   RouteModelRef,
 } from '../../shared/types.ts'
-import { isAutoPoolStrategyId, FAIRNESS_LEAD_MAX, MODEL_SCOPES } from '../../shared/types.ts'
+import { isAutoPoolStrategyId, AUTO_MODEL_TIERS, FAIRNESS_LEAD_MAX, MODEL_SCOPES } from '../../shared/types.ts'
 import { normalizeAutoRoutingConfig } from './autoRoutingConfig.ts'
 import type { ModelRouteError } from '../../shared/modelRouteName.ts'
 import {
@@ -53,6 +54,14 @@ const LOAD_BALANCE_STRATEGIES: readonly LoadBalanceStrategy[] = [
  */
 export function isRouteStrategyValue(value: unknown): value is LoadBalanceStrategy {
   return typeof value === 'string' && LOAD_BALANCE_STRATEGIES.includes(value as LoadBalanceStrategy)
+}
+
+/**
+ * 能力下限的写入侧校验。与 `strategy` 同一条理由：读侧对怪值静默按「没配」处理，
+ * 但写入侧静默回落等于「选了 strong、存下来变成不设下限」—— 用户会以为下限生效了。
+ */
+export function isRouteMinTierValue(value: unknown): value is AutoModelTier {
+  return typeof value === 'string' && (AUTO_MODEL_TIERS as readonly string[]).includes(value)
 }
 
 export interface NormalizeRoutesOptions {
@@ -174,6 +183,9 @@ function normalizeRouteFields(name: string, entry: Record<string, unknown>, opti
     && (MODEL_SCOPES as readonly string[]).includes(entry.modelScope)
     ? entry.modelScope as ModelScope
     : undefined
+  // 能力下限：只认三个档位字面量；手写的怪值按「没配」（不设下限）处理，
+  // 而不是猜一个档 —— 猜错会把整条路由的候选筛空，那是比不生效严重得多的失败。
+  const minTier = isRouteMinTierValue(entry.minTier) ? entry.minTier : undefined
   // 软钉：靠 `normalizeRouteModelRefs` 同一套引用归一，只取第一条（一条路由只有一个
   // 优先模型）。providerId 与 displayName 都要在，缺一个就是配了一半，按没配处理。
   const preferredModel = normalizeRouteModelRefs(
@@ -194,6 +206,7 @@ function normalizeRouteFields(name: string, entry: Record<string, unknown>, opti
     excludeModels: normalizeRouteModelRefs(entry.excludeModels),
     pinModels: normalizeRouteModelRefs(entry.pinModels),
     ...(modelScope === undefined ? {} : { modelScope }),
+    ...(minTier === undefined ? {} : { minTier }),
     ...(preferredModel === undefined ? {} : { preferredModel }),
     // 只在显式关掉时落键：缺省即硬钉（见 `ModelRoute.stickyHardPin`）。把「没配」也归一成
     // `true` 会让盘上每条路由多出这一格，而读侧两处判断（`!== false`）本来就同形。

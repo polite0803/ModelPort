@@ -27,6 +27,7 @@ import { useProxyStore } from '@/stores/proxyStore'
 import { useNavigationStore } from '@/stores/navigationStore'
 import { useToast } from '@/hooks/use-toast'
 import type { ModelMapping, Provider, Account } from '@/types/electron'
+import { canonicalRouteName } from '@shared/modelRouteName'
 import { ArrowRight, Plus, Pencil, Trash2, Search, Save, RotateCcw, AlertTriangle } from 'lucide-react'
 
 interface ModelMappingConfigProps {
@@ -73,6 +74,8 @@ export function ModelMappingConfig({ onConfigChange }: ModelMappingConfigProps) 
   const [originalMappings, setOriginalMappings] = useState<ModelMapping[]>([])
   const [providers, setProviders] = useState<Provider[]>([])
   const [accounts, setAccounts] = useState<Account[]>([])
+  /** 已有路由名：与映射键同名的那一行永远不会生效（请求解析里路由名优先）。 */
+  const [routeNames, setRouteNames] = useState<string[]>([])
   const [searchQuery, setSearchQuery] = useState('')
   const [isDialogOpen, setIsDialogOpen] = useState(false)
   const [editingMapping, setEditingMapping] = useState<ModelMapping | null>(null)
@@ -91,6 +94,7 @@ export function ModelMappingConfig({ onConfigChange }: ModelMappingConfigProps) 
   useEffect(() => {
     fetchProviders()
     fetchAccounts()
+    fetchRouteNames()
   }, [])
 
   useEffect(() => {
@@ -139,6 +143,31 @@ export function ModelMappingConfig({ onConfigChange }: ModelMappingConfigProps) 
     } catch (error) {
       console.error('Failed to fetch accounts:', error)
     }
+  }
+
+  const fetchRouteNames = async () => {
+    try {
+      const result = await window.electronAPI.routes.list()
+      // 读不到就当没有路由：这一层只是提示，拦不住写入时也不该把整个面板变成错误态
+      // （主进程侧的名字校验不受影响）。
+      setRouteNames(result.ok ? result.routes.map(route => route.name) : [])
+    } catch (error) {
+      console.error('Failed to fetch routes:', error)
+    }
+  }
+
+  /**
+   * 与已有路由同名的映射键（大小写不敏感，与 `canonicalRouteName` 同一口径）。
+   *
+   * `findModelRoute` 在请求解析里**先**认路由名，所以这一行永远轮不到：它既不改名、
+   * 也钉不住任何东西，客户端拿到的是那条路由的行为。界面必须把它说成「不会生效」，
+   * 而不是让它看起来像一条正常规则。停用的路由也算 —— 停用的名字仍然挡住映射键，
+   * 请求会得到 404 `route_disabled`。
+   */
+  const routeNameConflict = (requestModel: string): string | undefined => {
+    const target = canonicalRouteName(requestModel)
+    if (target.length === 0) return undefined
+    return routeNames.find(name => canonicalRouteName(name) === target)
   }
 
   const filteredMappings = mappings.filter(m =>
@@ -195,6 +224,19 @@ export function ModelMappingConfig({ onConfigChange }: ModelMappingConfigProps) 
       toast({
         title: t('proxy.validationFailed'),
         description: t('proxy.wildcardUnsupported'),
+        variant: 'destructive',
+      })
+      return
+    }
+
+    // 路由名优先于映射键：同名的这一行永远不会被任何读路径用到。新建时直接拒绝，
+    // 不让用户存下一个「看着钉住了、其实跑的是路由」的条目。编辑时不拦 —— 存量
+    // 撞名的行只能删，拦编辑只会让这个对话框变成死胡同（表里已用警告图标标出）。
+    const routeConflict = editingMapping === null ? routeNameConflict(formData.requestModel) : undefined
+    if (routeConflict !== undefined) {
+      toast({
+        title: t('proxy.validationFailed'),
+        description: t('proxy.aliasRouteCollision', { name: routeConflict }),
         variant: 'destructive',
       })
       return
@@ -461,6 +503,7 @@ export function ModelMappingConfig({ onConfigChange }: ModelMappingConfigProps) 
                   const provider = providers.find(p => p.id === mapping.preferredProviderId)
                   const account = accounts.find(a => a.id === mapping.preferredAccountId)
                   const isWildcardMapping = mapping.requestModel.includes('*')
+                  const routeConflict = routeNameConflict(mapping.requestModel)
                   
                   return (
                     <TableRow key={mapping.requestModel}>
@@ -470,6 +513,13 @@ export function ModelMappingConfig({ onConfigChange }: ModelMappingConfigProps) 
                             // 老版本界面教过用户写通配键，运行时却只按精确名查表。
                             // 存量条目照样列出（删不删由用户决定），但必须明说它到不了。
                             <span title={t('proxy.wildcardUnsupported')} className="inline-flex">
+                              <AlertTriangle className="h-4 w-4 text-warning" />
+                            </span>
+                          )}
+                          {routeConflict !== undefined && (
+                            // 同名的路由名抢在映射前面（请求解析里路由名优先，停用的路由
+                            // 也照样挡住），这一行同样到不了。
+                            <span title={t('proxy.aliasRouteCollision', { name: routeConflict })} className="inline-flex">
                               <AlertTriangle className="h-4 w-4 text-warning" />
                             </span>
                           )}

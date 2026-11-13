@@ -45,6 +45,7 @@ import type { ModelProbeRow } from '../../shared/modelProbe.ts'
 import { indexProbeRows, probeRowKey, probeRowToLayer } from '../../shared/modelProbe.ts'
 import { getProbeRowsSync } from '../providers/modelProbeStore.ts'
 import { accountRuntime } from './accountRuntime'
+import { permanentRefusalCooldownMs } from './failover.ts'
 import { clearCatalogMissCooldowns, isCatalogMissCoolingDown } from './modelCatalogCooldown'
 import { getChannelDefinition } from '../providers/accountChannels/catalogue'
 import { getAggregateEntry } from '../providers/aggregate/registry.ts'
@@ -54,6 +55,7 @@ import {
   advertisedContextTokens,
   applyContractFilter,
   applyManualModelSelection,
+  applyMinTier,
   applyModelNamePin,
   applyPoolStrategiesWithTrace,
   capabilityOfCandidate,
@@ -231,8 +233,8 @@ export interface AutoRouteDecision {
   missing: string[]
   /** 本次生效的优化目标（配置值或请求头覆盖） */
   prefer: AutoPreference
-  /** 胜负原因：只有一个候选 / 命中会话粘性 / 综合分 */
-  reason: 'only' | 'sticky' | 'cache-affinity' | 'score'
+  /** 胜负原因：显式选择 / 裁剪前只有一个模型 / 命中会话粘性 / 综合分 */
+  reason: 'only' | 'pin' | 'sticky' | 'cache-affinity' | 'score'
   /**
    * 本轮「首字太慢」的池内门槛（毫秒，候选 EWMA 的 p75）；读数不足 4 个时不出现。
    * 两个消费点同源：选路时它决定硬粘性还提不提前（`stickyGated`），流结束时
@@ -260,6 +262,16 @@ export interface AutoRouteDecision {
   }
   /** 钉子没命中（模型没有可派账号/被筛掉）：不静默回退，写明差的是哪个。 */
   pinMiss?: string
+  /**
+   * 钉子指向的模型**不在池里**（不是冷却）：软钉当场退役并让本轮快速失败，
+   * 持久 `preferredModel` 保留配置、照常服务但写明。见 `shared/types.ts`。
+   */
+  pinStale?: {
+    displayName: string
+    scope: ModelPinScope
+    source: ModelPinSource
+    action: 'retired' | 'ignored'
+  }
   /** 本轮被模型级熔断排到队尾的模型。 */
   circuited?: string[]
   /**
@@ -397,6 +409,22 @@ function promotePinned<
 
 /** 软钉默认存活 30 分钟：一个 agent 回合通常在这个窗口内结束，忘了解除也不会永久。 */
 export const DEFAULT_PIN_MINUTES = 30
+
+/**
+ * 托盘一次点击的存活时长（10 分钟）。
+ *
+ * 托盘的一颗钉是**路由级**的：它按路由生效，而一条路由背后通常同时挂着 Codex、
+ * Claude、多个编辑器 —— 也就是它会影响全部客户端。30 分钟对「顺手换一个试试」
+ * 来说太长了（实测一颗指向失效模型的钉挂了整段排查），10 分钟够一次对照试验，
+ * 又不至于让用户忘了它还在。控制台可以显式给 `minutes`，托盘这条只是缺省值。
+ */
+export const TRAY_PIN_MINUTES = 10
+
+/** 预览缓存的存活时长（毫秒）：够覆盖「打开菜单 → 点一下」这个过程，又比配置编辑的手速短。 */
+const PREVIEW_CACHE_MS = 15_000
+
+/** 预览缓存的条数上限：键里带整条池配置，每改一次多一个键。 */
+const PREVIEW_CACHE_ENTRIES = 64
 
 /** 模型级熔断默认 5 分钟：够跨过一阵额度/上游抖动，又不至于把还能用的模型锁太久。 */
 export const MODEL_CIRCUIT_MINUTES = 5
@@ -643,6 +671,15 @@ class AutoRouter {
    * 过期时间在写入时烘焙（与 `sticky` 同一口径的陈旧态边界），`sweepPins` 负责清。
    */
   private modelPins = new Map<string, ModelPin>()
+  /**
+   * 预览结果的短缓存：键 = 路由名 + **解引用后**的池配置 + 采样开关。
+   *
+   * 为什么值得缓存：`routes:menu` 逐路由调 `preview`，而 `preview` 每次都对全池
+   * 跑一遍采集/策略/手动管线（2026-11-13 实测 p50 4.7s、p90 10.2s、max 11.0s）。
+   * 预览刻意不读冷却（它回答的是配置问题），所以同一个配置在几秒内答案不变。
+   * 读到的值一律 `structuredClone` 后交出，调用方改自己的副本不会污染这里。
+   */
+  private previewCache = new Map<string, { at: number; value: RoutePreviewResult }>()
 
   /**
    * 模型级熔断：`(路由, 模型)` -> 解禁时间。
@@ -715,7 +752,9 @@ class AutoRouter {
    */
   private keptOfPool(pool: readonly PoolStrategyCandidate[], route?: ModelRoute): PoolStrategyCandidate[] {
     // 名字钉定先收基底：广告下界与选路折的是同一个基底，两处不许分叉。
-    const base = applyModelNamePin(pool, route?.pinModels)
+    // 能力下限与选路同一个位置（名字钉定之后、池策略之前）：广告出去的窗口必须
+    // 是这条路由**真的会用**的那几个模型的窗口。
+    const base = applyMinTier(applyModelNamePin(pool, route?.pinModels), route?.minTier)
     const strategies: readonly AutoPoolStrategy[] = route?.poolStrategies
       ?? storeManager.getConfig().autoRouting?.poolStrategies
       ?? []
@@ -1006,16 +1045,18 @@ class AutoRouter {
     // 时 explainMissing 自然返回空，不误报缺能力）。
     const poolStrategies = route?.poolStrategies ?? autoConfig?.poolStrategies ?? []
     // 名字钉定：基底先收到被点名的模型，`includeModels` 也只能在这个基底里取回 ——
-    // 否则一条钉死的路由会被一次手动增删绕开。
+    // 否则一条钉死的路由会被一次手动增删绕开。能力下限紧跟着收一遍（见 `applyMinTier`）：
+    // 它是路线级的声明，手动增删也拿不回低于下限的模型。
     const pinnedRankInputs = applyModelNamePin(rankInputs, route?.pinModels)
-    const strategyOutcome = applyPoolStrategiesWithTrace(pinnedRankInputs, poolStrategies)
+    const tierInputs = applyMinTier(pinnedRankInputs, route?.minTier)
+    const strategyOutcome = applyPoolStrategiesWithTrace(tierInputs, poolStrategies)
 
     // 手动增删：策略之后、契约过滤之前。exclude 赢过 include，include 只能从
     // 策略前就有资格的候选里取回模型 —— 不会复活停用的模型，也不会绕过下面
     // 的契约过滤与排序阶段的硬过滤。
     const manual = applyManualModelSelection(
       strategyOutcome.kept,
-      pinnedRankInputs,
+      tierInputs,
       route?.includeModels ?? [],
       route?.excludeModels ?? []
     )
@@ -1032,7 +1073,13 @@ class AutoRouter {
     // 空池要能区分「供应商没候选」和「配置把候选筛光了」：后两者指向用户
     // 自己刚改的设置，归成前者会让人白查供应商。
     if (pool.length === 0 && missing.length === 0 && rankInputs.length > 0) {
-      missing.push(strategyOutcome.kept.length === 0 ? 'pool_strategy' : 'manual_filter')
+      missing.push(
+        // 能力下限把整个基底筛空：这是这条路由自己的设置（`minTier`），不是用户的
+        // 池策略写错了 —— 报成 `pool_strategy` 会让人去翻那 17 个策略找一个不存在的错。
+        tierInputs.length === 0 && pinnedRankInputs.length > 0 && route?.minTier !== undefined
+          ? 'min_tier'
+          : strategyOutcome.kept.length === 0 ? 'pool_strategy' : 'manual_filter'
+      )
     }
 
     const seed = this.seed++
@@ -1155,12 +1202,36 @@ class AutoRouter {
       : promoteSticky(ranked, sticky)
 
     // 软钉优先于粘性（用户意图高于历史惯性），失配不静默：钉住的模型不在池里时
-    // 按原排序服务，但 `pinMiss` 要进日志与响应头 —— 否则托盘显示的选择与实际
-    // 行为会长期不一致而无处可查。
+    // `pinMiss` 要进日志与响应头 —— 否则托盘显示的选择与实际行为会长期不一致而无处可查。
     const pinnedOrder = pinRef === undefined
       ? { list: stickyOrdered, hit: false }
       : promotePinned(stickyOrdered, pinRef)
     const pinMiss = pinRef !== undefined && !pinnedOrder.hit ? pinRef.displayName : undefined
+
+    // 钉子失配的处置（2026-11-13 第 1 条）：`pinMiss` 只说明「没命中」，这一格说明
+    // 「这颗钉子接下来怎么办」—— 两者分开是因为处置方式取决于钉子的寿命来源。
+    //
+    // - **软钉**（托盘/控制台一次点击，内存）指向一个池子里根本没有的模型：当场退役
+    //   并让本轮**快速失败**。原先「照常按池服务」的后果实测是 3× 504：客户端以为
+    //   还在跟钉住的模型对话，实际每一轮都在换实现，而且每一轮都要先付一遍失败。
+    //   退役后下一次请求就走自动排序，钉子不会在进程里挂满 30 分钟。
+    // - **持久 `preferredModel`**（配置）：不替用户删配置（撤销是 `routes:unpin`），
+    //   照常按池服务，但把「已失效」写进日志、响应头与菜单 —— 配置错误不能让整条
+    //   路由 503，也不能让用户以为钉子生效了。
+    //
+    // 判据是「不在池里」而不是「此刻冷却」：冷却中的账号仍然留在 `ranked` 里
+    // （`coolingUntil` 只影响排序与派发），所以这里命中的一定是配置/能力层面的
+    // 失配，不会因为一次 15s 限流把用户的钉子撤掉。
+    const pinStale: AutoRouteDecision['pinStale'] = pinMiss === undefined
+      ? undefined
+      : softPin !== undefined
+        ? { displayName: pinMiss, scope: softPin.scope, source: softPin.source, action: 'retired' }
+        : { displayName: pinMiss, scope: 'route', source: 'console', action: 'ignored' }
+    if (pinStale?.action === 'retired' && softPin !== undefined) {
+      this.clearPin(routeName, softPin.scope, softPin.sessionKey)
+    }
+    // 裁剪前的模型数（同一模型的多个账号算一个）：`reason: 'only'` 的判据。
+    const poolModelCount = new Set(pinnedOrder.list.map(input => input.displayName)).size
 
     // 模型级熔断：退化过的模型排到队尾（不是删掉）。全池都在熔断时这张票不生效
     // —— 没有落脚点的跳过等于把这一轮变成空池。
@@ -1189,6 +1260,9 @@ class AutoRouter {
     // 熔断之后，所以「用户点名 / 上一轮退化」都能把队首换掉；裁剪之后，这一轮里
     // 换家只换账号 —— 中途换模型正是「客户端莫名其妙崩掉」的主要来源。
     const scoped = (() => {
+      // 退役的钉子让这一轮直接收在选号阶段：不派任何候选 = 不产生上游调用，
+      // 客户端在毫秒级拿到「钉子已失效」，而不是先跑满 40s 再换一个模型答上来。
+      if (pinStale?.action === 'retired') return []
       if (modelScope === 'pool' || circuitOrdered.length === 0) return circuitOrdered
       const head = circuitOrdered[0]!.displayName
       if (modelScope === 'single') return circuitOrdered.filter(input => input.displayName === head)
@@ -1288,6 +1362,7 @@ class AutoRouter {
             },
           }),
       ...(pinMiss === undefined ? {} : { pinMiss }),
+      ...(pinStale === undefined ? {} : { pinStale }),
       ...(transientUnavailable === undefined ? {} : { transientUnavailable }),
       ...(circuited.length === 0 ? {} : { circuited: [...circuited] }),
       // 单模型作用域的换家墙钟预算更短：链只剩同一模型的几个账号，继续等不会
@@ -1299,7 +1374,16 @@ class AutoRouter {
       skipped: [...skipped],
       missing,
       prefer,
-      reason: candidates.length <= 1 ? 'only' : cacheAffinityHit ? 'cache-affinity' : stickyHit ? 'sticky' : 'score',
+      // 胜负原因在**作用域裁剪之前**算：`single` 会把链裁到同一模型，用裁剪后的
+      // 条数判 `only` 等于永远报 `only`（29/29 行的实测），把「钉子提上来的」与
+      // 「打分选出来的」这两件事抹平。
+      reason: pinRef !== undefined && pinnedOrder.hit
+        ? 'pin'
+        : poolModelCount <= 1
+          ? 'only'
+          : cacheAffinityHit
+            ? 'cache-affinity'
+            : stickyHit ? 'sticky' : 'score',
     }
   }
 
@@ -1311,7 +1395,33 @@ class AutoRouter {
    * 契约过滤（`n` / `response_format` 是请求属性而不是路由配置）。因此预览结果
    * 是「配置层面的候选」，不是某一次请求的最终候选。
    */
-  preview(route: ModelRoute, sample: RoutePreviewSample = {}): RoutePreviewResult {
+  preview(
+    route: ModelRoute,
+    sample: RoutePreviewSample = {},
+    /** `fresh` 跳过**读**缓存（仍然写）：编辑器在保存标注/刷新后要的是当下真值。 */
+    options: { fresh?: boolean } = {},
+  ): RoutePreviewResult {
+    // 池引用先解开再折：预览显示的必须是实际会用的那个池。断掉的引用按本路由自己的字段折
+    // —— 请求路径会在 chat/completions 点名报错，这里只是编辑器辅助，不重复那套判定。
+    const resolution = resolvePoolRoute(storeManager.getConfig().routes, route)
+    const pool = resolution.ok ? resolution.route : route
+    // 短缓存（第 5 条，2026-11-13）：托盘打开一次要按路由取快照，每次都是全池扫描，
+    // 实测 p50 4.7s / p90 10.2s。预览不扣冷却（它问的是配置），所以同一个池配置在
+    // 几秒内答案不变 —— 缓存键必须含**解引用之后**的池，`basedOnRoute` 的字段改了
+    // 而调用方传进来的 route 一个字没变时，这个键才会跟着变。
+    const cacheKey = [
+      route.name,
+      JSON.stringify(pool),
+      sample.needsVision === true ? 1 : 0,
+      sample.needsTools === true ? 1 : 0,
+      sample.needsReasoning === true ? 1 : 0,
+      Math.max(0, Math.round(sample.estimatedTokens ?? 0)),
+    ].join('\u0000')
+    const cached = this.previewCache.get(cacheKey)
+    if (options.fresh !== true && cached !== undefined && Date.now() - cached.at < PREVIEW_CACHE_MS) {
+      return structuredClone(cached.value)
+    }
+
     const profile: RequestProfile = {
       needsVision: sample.needsVision === true,
       needsTools: sample.needsTools === true,
@@ -1327,16 +1437,15 @@ class AutoRouter {
     } as unknown as ChatCompletionRequest
 
     const { rankInputs, skipped } = this.collectCandidates(probe, Date.now())
-    // 池引用先解开再折：预览显示的必须是实际会用的那个池。断掉的引用按本路由自己的字段折
-    // —— 请求路径会在 chat/completions 点名报错，这里只是编辑器辅助，不重复那套判定。
-    const resolution = resolvePoolRoute(storeManager.getConfig().routes, route)
-    const pool = resolution.ok ? resolution.route : route
     // 名字钉定与选路、广告下界同一份规则：预览折的必须是实际会用的那个基底。
     const pinned = applyModelNamePin(rankInputs, pool.pinModels)
-    const strategyOutcome = applyPoolStrategiesWithTrace(pinned, pool.poolStrategies)
+    // 能力下限与选路同一位置：低于下限的模型在这里就出局，后面的策略/手动增删
+    // 都看不到它们（预览也要说清「是哪一步让它出局的」）。
+    const tierKept = applyMinTier(pinned, pool.minTier)
+    const strategyOutcome = applyPoolStrategiesWithTrace(tierKept, pool.poolStrategies)
     const manual = applyManualModelSelection(
       strategyOutcome.kept,
-      pinned,
+      tierKept,
       pool.includeModels,
       pool.excludeModels
     )
@@ -1347,6 +1456,7 @@ class AutoRouter {
     const includedKeys = new Set(manual.included.map(modelKeyOf))
     const excludedKeys = new Set(manual.excluded.map(modelKeyOf))
     const pinnedKeys = new Set(pinned.map(modelKeyOf))
+    const tierKeys = new Set(tierKept.map(modelKeyOf))
 
     const index = new Map<string, RoutePreviewModel>()
     const models: RoutePreviewModel[] = []
@@ -1373,6 +1483,9 @@ class AutoRouter {
         // 钉了名字又不在名单里：这条与「被池策略筛掉」是两种缺席，分开说才不会让人
         // 去动池策略找原因。
         status = 'not-pinned'
+      } else if (!tierKeys.has(key)) {
+        // 低于路由的能力下限：这是路由自己的设置，不是策略也不是画像问题。
+        status = 'below-tier'
       } else if (excludedKeys.has(key)) {
         status = 'excluded'
       } else if (failure !== undefined) {
@@ -1406,10 +1519,14 @@ class AutoRouter {
 
     const missing: MissingRequirement[] = []
     if (manual.kept.length === 0 && rankInputs.length > 0) {
-      missing.push(strategyOutcome.kept.length === 0 ? 'pool_strategy' : 'manual_filter')
+      missing.push(
+        tierKept.length === 0 && pinned.length > 0 && pool.minTier !== undefined
+          ? 'min_tier'
+          : strategyOutcome.kept.length === 0 ? 'pool_strategy' : 'manual_filter'
+      )
     }
 
-    return {
+    const result: RoutePreviewResult = {
       routeName: route.name,
       profile,
       strategies: strategyOutcome.steps,
@@ -1428,6 +1545,25 @@ class AutoRouter {
       },
       missing,
       skipped: [...skipped],
+    }
+    // 存一份、返回一份克隆：调用方（菜单切片、IPC 载荷）拿到的是自己的副本，
+    // 就地改一个字段不会把缓存污染成「下一批调用者看到的假池」。
+    this.rememberPreview(cacheKey, result)
+    return structuredClone(result)
+  }
+
+  /** 写预览缓存并按插入序淘汰：池配置每改一次就多一个键，不淘汰就是一张随编辑增长的表。 */
+  private rememberPreview(key: string, value: RoutePreviewResult): void {
+    const now = Date.now()
+    this.previewCache.set(key, { at: now, value })
+    if (this.previewCache.size <= PREVIEW_CACHE_ENTRIES) return
+    for (const [cachedKey, entry] of this.previewCache) {
+      if (now - entry.at >= PREVIEW_CACHE_MS) this.previewCache.delete(cachedKey)
+    }
+    while (this.previewCache.size > PREVIEW_CACHE_ENTRIES) {
+      const oldest = this.previewCache.keys().next()
+      if (oldest.done) break
+      this.previewCache.delete(oldest.value)
     }
   }
 
@@ -1599,16 +1735,27 @@ class AutoRouter {
     const { models, current, pin, preferred } = this.selectableModels(route, now)
     const routeName = route.name
     const pinnedName = pin?.displayName ?? preferred?.displayName
+    // 钉子指向的模型不在可派池里：菜单照常显示这颗钉子（配置事实），但标成失效。
+    // 不标的话，托盘与路由页都会显示「已固定 X」，而每一轮实际服务的是别人。
+    const pinStale = pinnedName !== undefined
+      && !models.some(model => model.displayName === pinnedName)
+    const pinMeta = (displayName: string, scope: ModelPinScope, until: number, source: ModelPinSource) => ({
+      displayName,
+      scope,
+      until,
+      source,
+      ...(pinStale ? { stale: true as const } : {}),
+    })
     return {
       route: routeName,
       enabled: route.enabled !== false,
       modelScope: route.modelScope ?? 'single',
       ...(current === undefined ? {} : { current }),
       ...(pin !== undefined
-        ? { pin: { displayName: pin.displayName, scope: pin.scope, until: pin.until, source: pin.source } }
+        ? { pin: pinMeta(pin.displayName, pin.scope, pin.until, pin.source) }
         : preferred !== undefined
           // 持久偏好没有到期时间：`until: 0` 在界面上读作「一直」（与软钉的倒计时区分）。
-          ? { pin: { displayName: preferred.displayName, scope: 'route' as const, until: 0, source: 'console' as const } }
+          ? { pin: pinMeta(preferred.displayName, 'route', 0, 'console') }
           : {}),
       models: models.slice(0, Math.max(1, limit)).map(model => {
         const circuitUntil = this.modelCircuitUntil(routeName, model.displayName, now)
@@ -1681,6 +1828,7 @@ class AutoRouter {
         reason: '会话级切换需要控制台内的会话上下文；托盘只能按路由切换',
       }
     }
+    const source: ModelPinSource = request.source === 'console' ? 'console' : 'tray'
     this.setPin({
       route: route.name,
       displayName: hit.displayName,
@@ -1688,13 +1836,21 @@ class AutoRouter {
       scope,
       // 来源只用于菜单与日志回显：调用方显式给的 `console` 照收，其余按托盘算。
       // 不接受线上自报 `header` —— 那一条是选路自己写的，不是一次点击。
-      source: request.source === 'console' ? 'console' : 'tray',
-      ...(request.minutes === undefined ? {} : { minutes: request.minutes }),
+      source,
+      // 托盘的缺省寿命比控制台短（见 `TRAY_PIN_MINUTES`）：路由级钉子会影响
+      // 这条路由背后的全部客户端，一次「顺手换换」不该挂半小时。
+      ...(request.minutes !== undefined
+        ? { minutes: request.minutes }
+        : source === 'tray' ? { minutes: TRAY_PIN_MINUTES } : {}),
     }, now)
     return {
       ok: true,
       route: route.name,
       model: hit.displayName,
+      // 命中的是哪个 `providerId` 由这里说了算：同名模型可能被多家服务，调用方
+      // （`routes:switch` 的 `persist` 分支）要把它原样写进 `preferredModel`，
+      // 不能拿着 `request.providerId` 反推 —— 它可能是 undefined。
+      providerId: hit.providerId,
       menu: this.routeMenu(route, ROUTE_MENU_MODELS_DEFAULT, now),
     }
   }
@@ -1793,9 +1949,29 @@ class AutoRouter {
   /**
    * 标记账号冷却：429 给了 `model` 就按 (账号, 模型) 档做分钟级指数退避，
    * 其余错误按账号级秒级退避。
+   *
+   * `details` 里的原文决定要不要升成**终止性**冷却（6h / 1h）：15 秒退避对
+   * 「没订阅 / 没钱 / 额度窗已尽」没有意义，每一笔新请求都会把同一家再撞一遍。
+   * 判据与 `Retry-After` 同源，见 `failover.ts::permanentRefusalCooldownMs`。
    */
-  markAccountCooldown(accountId: string, status?: number, model?: string): void {
-    accountRuntime.recordFailure(accountId, status, Date.now(), model)
+  markAccountCooldown(
+    accountId: string,
+    status?: number,
+    model?: string,
+    details: { message?: string; retryAfterMs?: number } = {},
+  ): void {
+    const permanentTtlMs = permanentRefusalCooldownMs({
+      status,
+      ...(details.message === undefined ? {} : { message: details.message }),
+    })
+    accountRuntime.recordFailure(
+      accountId,
+      status,
+      Date.now(),
+      model,
+      details.retryAfterMs,
+      permanentTtlMs === undefined ? {} : { permanentTtlMs },
+    )
   }
 
   /**
@@ -1828,6 +2004,7 @@ class AutoRouter {
     this.modelPins.clear()
     this.modelCircuit.clear()
     this.lastServed.clear()
+    this.previewCache.clear()
     this.seed = 0
   }
 }

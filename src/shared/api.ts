@@ -824,8 +824,12 @@ const routesAPI = {
     wire.invoke(IpcChannels.ROUTES_DELETE, name),
 
   // 只算不写：用和生产请求同一条采集/策略/手动增删管线，返回逐模型状态。
-  preview: (route: ModelRoute, sample?: RoutePreviewSample): Promise<RoutePreviewResult> =>
-    wire.invoke(IpcChannels.ROUTES_PREVIEW, route, sample),
+  preview: (
+    route: ModelRoute,
+    sample?: RoutePreviewSample,
+    options?: { fresh?: boolean },
+  ): Promise<RoutePreviewResult> =>
+    wire.invoke(IpcChannels.ROUTES_PREVIEW, route, sample, options),
 
   // 只算不写：一次采集折全表，返回每条路由的候选模型数（列表页要的是数字，不是明细）。
   poolSizes: (): Promise<RoutePoolSizesResult> =>
@@ -837,6 +841,7 @@ const routesAPI = {
   menu: (request?: RouteMenuRequest): Promise<RouteMenuResult> =>
     wire.invoke(IpcChannels.ROUTES_MENU, request),
 
+  // 缺省只写软钉；`persist: true` 落盘成路由的 `preferredModel`（见 `RouteSwitchRequest`）。
   switchModel: (request: RouteSwitchRequest): Promise<RouteSwitchResult> =>
     wire.invoke(IpcChannels.ROUTES_SWITCH, request),
 

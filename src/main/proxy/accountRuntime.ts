@@ -319,6 +319,11 @@ export class AccountRuntime {
    *
    * 429 且给了 `model` ⇒ 记进 (账号, 模型) 档；其余（含不带 model 的老调用，为了
    * 不改变既有行为）按账号档：429 用分钟级退避，其余错误用秒级退避。
+   *
+   * `options.permanentTtlMs` 是**终止性拒绝**（没订阅/没钱/额度窗已尽）的冷却长度：
+   * 与指数退避、上游 `Retry-After` 取更晚者 —— 这三者说的是同一件事（「什么时候
+   * 可以再试这个账号」），取最早的那个等于忽略最确定的一条证据。判据在
+   * `failover.ts::permanentRefusalCooldownMs`，这里只负责把它落到状态上。
    */
   recordFailure(
     accountId: string,
@@ -326,9 +331,11 @@ export class AccountRuntime {
     now: number = Date.now(),
     model?: string,
     retryAfterMs?: number,
+    options: { permanentTtlMs?: number } = {},
   ): number {
+    const permanent = options.permanentTtlMs
     if (status === 429 && model !== undefined) {
-      return this.recordRateLimitFailure(accountId, model, now, retryAfterMs)
+      return this.recordRateLimitFailure(accountId, model, now, retryAfterMs, permanent)
     }
 
     const state = this.state(accountId)
@@ -336,21 +343,28 @@ export class AccountRuntime {
 
     const base = status === 429 ? RATE_LIMIT_BASE_MS : ERROR_BASE_MS
     const max = status === 429 ? RATE_LIMIT_MAX_MS : ERROR_MAX_MS
-    const ttl = Math.min(max, base * 2 ** (state.consecutiveFailures - 1))
+    const exponential = Math.min(max, base * 2 ** (state.consecutiveFailures - 1))
+    const ttl = permanent === undefined ? exponential : Math.max(exponential, permanent)
 
     state.coolingUntil = now + ttl
     return ttl
   }
 
   /** 限流档的指数退避：与账号档同一套基数/上限，只是键多一维、清零互不影响 */
-  private recordRateLimitFailure(accountId: string, model: string, now: number, retryAfterMs?: number): number {
+  private recordRateLimitFailure(
+    accountId: string,
+    model: string,
+    now: number,
+    retryAfterMs?: number,
+    permanentTtlMs?: number,
+  ): number {
     const tiers = this.tiersOf(accountId, now)
     const previous = tiers.get(model)
     const failures = (previous?.failures ?? 0) + 1
     const baseTtl = Math.min(RATE_LIMIT_MAX_MS, RATE_LIMIT_BASE_MS * 2 ** (failures - 1))
     // 渠道包上报的上游真实解禁时刻（providerRetryAfterMs）：与自己的指数退避取更晚，
     // 避免「冷却到期→放一笔→又 429→再冷却」的自维持循环（PLAN-channel-auto-stability 第五批）。
-    const ttl = retryAfterMs !== undefined ? Math.max(baseTtl, retryAfterMs) : baseTtl
+    const ttl = Math.max(baseTtl, retryAfterMs ?? 0, permanentTtlMs ?? 0)
 
     // 重新 set 而非就地改：Map 的插入序因此跟着刷新，被摘的一定是最久没碰的模型
     tiers.set(model, { until: now + ttl, failures })

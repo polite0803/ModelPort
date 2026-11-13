@@ -4,8 +4,9 @@ import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
 import type { LoadBalanceStrategy, AutoPreference, ModelRoute } from '@/types/electron'
-import type { ModelScope } from '../../../../shared/types'
+import type { AutoModelTier, ModelScope } from '../../../../shared/types'
 import {
+  AUTO_MODEL_TIERS,
   AUTO_POOL_PRESETS,
   AUTO_POOL_STRATEGIES,
   AUTO_PREFERENCES,
@@ -37,6 +38,12 @@ export interface ModelRouteFieldValues {
    * 缺键读作 `single` —— 与主进程 `normalizeModelRoutes` 同一条兜底口径。
    */
   modelScope: ModelScope
+  /**
+   * 能力下限：低于这一档的候选整条路由都不派。与 `strong-tier` / `balanced-tier`
+   * 这类“等号”策略不同，它是“至少”，且排在策略之前 —— 策略再怎么 include 也捞不回
+   * 档位以下的模型。空 = 不设下限。
+   */
+  minTier?: AutoModelTier
   maxAttempts: number
   stickyMinutes: number
   /**
@@ -71,6 +78,9 @@ export interface ModelRouteFieldValues {
 
 /** Radix 的 SelectItem 不许用空串；「自带池（不引用）」这一档另起哨兵值。 */
 export const NO_POOL_SOURCE = '__own_pool__'
+
+/** 能力下限的「不设下限」档同样不能用空串。 */
+export const NO_MIN_TIER = '__any_tier__'
 
 /** 策略下拉的选项由父组件传入：五个策略的字面量与标签表只允许存在于 `LoadBalanceConfig.tsx`。 */
 export interface ModelRouteOption {
@@ -108,6 +118,7 @@ export function defaultRouteFieldValues(strategy: LoadBalanceStrategy): ModelRou
     prefer: DEFAULT_AUTO_ROUTING_CONFIG.prefer,
     // 架构 A 的缺省范围就是主进程读侧的缺省：一轮只服务一个模型。
     modelScope: 'single' as ModelScope,
+    minTier: undefined,
     maxAttempts: DEFAULT_AUTO_ROUTING_CONFIG.maxAttempts,
     stickyMinutes: DEFAULT_AUTO_ROUTING_CONFIG.stickyMinutes,
     // 与主进程同一条判据：缺键即硬钉（`!== false`），新路由的初值因此是开。
@@ -128,6 +139,7 @@ export function routeFieldValuesOf(route: ModelRoute): ModelRouteFieldValues {
     prefer: route.prefer,
     // 盘上缺这一格 = 一轮一个模型，与 `autoRouter` 读侧同一条兜底。
     modelScope: route.modelScope ?? 'single',
+    minTier: route.minTier,
     maxAttempts: route.maxAttempts,
     stickyMinutes: route.stickyMinutes,
     // 盘上没有这一格 = 硬钉开着，与 `autoRouter` 读侧同一条 `!== false` 判据。
@@ -262,6 +274,29 @@ export function ModelRouteFields({
           </SelectContent>
         </Select>
         <p className="text-xs text-muted-foreground">{t('proxy.autoRoutingModelScopeHelp')}</p>
+      </div>
+
+      <div className="space-y-2">
+        <Label htmlFor={`route-min-tier-${idPrefix}`}>{t('proxy.routeMinTier')}</Label>
+        <Select
+          value={values.minTier ?? NO_MIN_TIER}
+          onValueChange={(value) =>
+            onChange({ minTier: value === NO_MIN_TIER ? undefined : (value as AutoModelTier) })
+          }
+        >
+          <SelectTrigger id={`route-min-tier-${idPrefix}`}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={NO_MIN_TIER}>{t('proxy.routeMinTier_none')}</SelectItem>
+            {AUTO_MODEL_TIERS.map((tier) => (
+              <SelectItem key={tier} value={tier}>
+                {t(`proxy.routeMinTier_${tier}`)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">{t('proxy.routeMinTierHelp')}</p>
       </div>
 
       <div className="space-y-2">

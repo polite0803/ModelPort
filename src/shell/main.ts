@@ -1083,9 +1083,19 @@ function routeMenuSubmenu(entry: RouteMenuEntry): MenuItemConstructorOptions[] {
   const pin = entry.pin === undefined
     ? []
     : [{
-        label: entry.pin.until === 0
-          ? `已固定：${entry.pin.displayName}（持久）`
-          : `已固定：${entry.pin.displayName}（${Math.max(1, Math.round((entry.pin.until - Date.now()) / 60_000))} 分钟后到期）`,
+        // 钉子指向的模型不在池里时必须说出来：菜单显示「已固定」而实际每轮都在
+        // 用别的模型，是这类功能最坏的一种沉默。
+        label: entry.pin.stale
+          ? `已固定：${entry.pin.displayName}（已不在池内·不生效）`
+          : entry.pin.until === 0
+            ? `已固定：${entry.pin.displayName}（持久）`
+            : `已固定：${entry.pin.displayName}（${Math.max(1, Math.round((entry.pin.until - Date.now()) / 60_000))} 分钟后到期）`,
+        enabled: false,
+      } satisfies MenuItemConstructorOptions,
+      // 固定是路由级的：这一条路由背后的每个客户端都会跟着换模型。不写这句，
+      // 用户会以为只影响自己手上的那个客户端。
+      {
+        label: '影响这条路由的全部客户端 · 托盘固定默认 10 分钟',
         enabled: false,
       } satisfies MenuItemConstructorOptions]
   const models: MenuItemConstructorOptions[] = entry.models.map(model => ({
@@ -1141,7 +1151,7 @@ function modelMenuItems(): MenuItemConstructorOptions[] {
     ...(stale ? [{ label: '数据稍旧，正在刷新…', enabled: false } as MenuItemConstructorOptions] : []),
     ...routes.slice(0, 12).map(entry => ({
       label: entry.pin !== undefined
-        ? `${entry.pin.displayName}（${entry.route} · 已固定）`
+        ? `${entry.pin.displayName}（${entry.route} · ${entry.pin.stale ? '固定已失效' : '已固定'}）`
         : entry.current !== undefined
           ? `${entry.current.displayName}（${entry.route}）`
           : `${entry.route}（未服务过）`,

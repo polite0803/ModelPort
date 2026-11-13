@@ -364,10 +364,63 @@ export function isRecoverableChainExhaustion(input: {
   localAdmissionRejected?: boolean
 }): boolean {
   if (input.localAdmissionRejected === true) return true
+  // 「等一轮就会好」的前提是这条拒绝会自己解开。永久性拒付（没订阅/没钱/额度窗
+  // 已尽）不在这个前提里：等 5 秒再走一遍只会把同一句拒绝再付一次。
+  if (permanentRefusalCooldownMs({ status: input.status, message: input.error }) !== undefined) return false
   if (input.status === 429 || input.status === 402) return true
   if (isAccountArrearsError(input.error)) return false
   return isRecoverableChannelFailure(input.error)
 }
+
+/**
+ * 「这一家/这个账号在可预见的时间里拿不到额度」的冷却时长（2026-11-13 第 2 条）。
+ *
+ * 现网读数（11-12 20:11 → 11-13 00:21 的 223 行 + 8 笔 curl 直探）：四类终止性
+ * 拒绝都只有 15 秒账号冷却 —— opencode `free_usage_limit`、cline 402「等待不会恢复」、
+ * qodercn 403「需要升级」、workbuddy 400 风控。15 秒的真实后果是每一笔新请求都
+ * 再把同一家撞一遍，付一次完整 prefill 与排队等待，用户读到的就是「路由又慢又
+ * 莫名失败」。这里按**恢复代价**分两档，而不是按状态码：
+ *
+ * - **6 小时**：要人动手的（订阅/升级/充值/欠费）。6h 与 `modelCatalogCooldown`
+ *   同一档：用户处理完（登录、充值、改配置）会走 `clearAccountCooldown`，不会真等满。
+ * - **1 小时**：额度窗自己会复位（免费额度/日限/整池受限）。比窗口短没关系 ——
+ *   到期再撞一次只付一笔，比每 15 秒撞一次便宜得多。
+ *
+ * ⚠️ 识别必须**窄**，且**不认裸 429**：`rate limit` / `太频繁` / 本地并发闸门都不
+ * 在此列（那正是 `aggregateQuotaExhaustion` 头部第 1 条纪律）。`for your
+ * subscription tier` 这类「限流发生在订阅档里」的措辞也不命中 —— 它是限流，不是
+ * 没有订阅。
+ *
+ * 上游给了 `Retry-After` 时由调用方取更晚者（`recordFailure` 内部 max）：上游说的
+ * 解禁时刻比自家估计的更权威。
+ */
+export function permanentRefusalCooldownMs(input: {
+  status?: number
+  message?: string
+}): number | undefined {
+  // 402 是协议层面的「要钱」，不必等文案
+  if (input.status === 402) return PERMANENT_REFUSAL_COOLDOWN_MS
+  const text = input.message ?? ''
+  if (text.length === 0) return undefined
+  if (PAYMENT_REQUIRED_PATTERN.test(text)) return PERMANENT_REFUSAL_COOLDOWN_MS
+  if (SUBSCRIPTION_REQUIRED_PATTERN.test(text)) return PERMANENT_REFUSAL_COOLDOWN_MS
+  if (QUOTA_WINDOW_EXHAUSTED_PATTERN.test(text)) return QUOTA_WINDOW_COOLDOWN_MS
+  return undefined
+}
+
+/** 要人动手的那一档：6 小时（与目录缺失冷却同级）。 */
+export const PERMANENT_REFUSAL_COOLDOWN_MS = 6 * 60 * 60 * 1000
+/** 会自己复位的那一档：1 小时。 */
+export const QUOTA_WINDOW_COOLDOWN_MS = 60 * 60 * 1000
+
+const PAYMENT_REQUIRED_PATTERN =
+  /payment required|insufficient (?:credit|credits|funds|balance)|no (?:available )?balance|余额不足|余额为 ?0|等待不会恢复|欠费|arrearage|overdue[-\s]?payment/i
+
+const SUBSCRIPTION_REQUIRED_PATTERN =
+  /subscription (?:is )?required|requires? (?:an? )?(?:active |paid )?subscription|no active subscription|not subscribed|subscription (?:expired|inactive)|订阅(?:已)?(?:过期|失效|到期)|需要订阅|请先订阅|升级(?:到|至)?(?:付费|专业|Pro)/i
+
+const QUOTA_WINDOW_EXHAUSTED_PATTERN =
+  /free[ _-]?usage[ _-]?limit|daily (?:limit|quota|count) (?:exceeded|reached)|billing daily count exceeded|exceeded your current quota|quota (?:exceeded|exhausted|reached)|usage limit (?:reached|exceeded)|所有通道.*均受限|所有账号均受限|账号池中的账号当前均不可用/i
 
 /**
  * 哪些状态码值得**换下一家**。

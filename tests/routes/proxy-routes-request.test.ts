@@ -259,6 +259,44 @@ test('A/请求级：池策略把候选剔空 → 503 点名该路由，且带 X-
   assert.equal(row.auto.chainLength, 0)
 })
 
+test('第 1 条/请求级：钉子指向池外模型 → 503 pin_stale，下一笔回到正常排序', async () => {
+  const created = sm.createRoute({ name: 'pin-stale', enabled: true, modelScope: 'pool' })
+  assert.equal(created.ok, true, JSON.stringify(created.error))
+  autoRouter.setPin({ route: 'pin-stale', displayName: 'Ghost-Model', scope: 'route', source: 'tray' })
+
+  const refused = await postChat('pin-stale')
+  assert.equal(refused.status, 503)
+  assert.equal(refused.headers['x-modelport-route-name'], 'pin-stale')
+  assert.equal(refused.json.error.code, 'pin_stale')
+  assert.equal(refused.json.error.type, 'service_unavailable_error')
+  assert.deepEqual(refused.json.error.details, {
+    pin: 'Ghost-Model',
+    scope: 'route',
+    source: 'tray',
+    action: 'retired',
+  }, '退役这件事要连作用域与来源一起说，客户端才知道撤的是哪一颗钉')
+  assert.equal(refused.headers['x-modelport-pin'], 'stale=Ghost-Model;action=retired')
+
+  const row = sm.getRequestLogs().find(entry => entry.requestId === refused.headers['x-request-id'])
+  assert.ok(row, 'pin_stale 的 503 必须有请求日志行')
+  assert.equal(row.auto.chainLength, 0)
+  assert.equal(row.auto.pinMiss, 'Ghost-Model')
+  assert.deepEqual(row.auto.pinStale, {
+    displayName: 'Ghost-Model',
+    scope: 'route',
+    source: 'tray',
+    action: 'retired',
+  })
+
+  // 退役是持久的：下一笔不再命中这颗钉，真的去选号并转发（回环端口拒接 → 500）
+  const next = await postChat('pin-stale')
+  assert.equal(next.status, 500)
+  assert.notEqual(next.json.error.code, 'pin_stale')
+  assert.equal(next.headers['x-modelport-pin'], undefined)
+
+  sm.deleteRoute('pin-stale')
+})
+
 test('A/请求级：同一请求体，把池策略清空后立刻真的转发（代理没重启过）', async () => {
   const updated = sm.updateRoute('fast', { poolStrategies: [] })
   assert.equal(updated.ok, true, JSON.stringify(updated.error))

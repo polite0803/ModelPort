@@ -203,7 +203,7 @@ test('软钉优先于熔断：用户点了它，熔断票不是否决权', () =>
   assert.equal(decision.circuited, undefined, '有显式选择时熔断不参与排序')
 })
 
-test('钉不上不静默：pinMiss 写明差的是哪个模型，排序照常', () => {
+test('钉不上不静默：软钉当场退役，本轮快速失败', () => {
   const route = makeRoute({ modelScope: 'pool' })
   autoRouter.setPin({ route: route.name, displayName: 'Ghost-Not-Served', scope: 'route', source: 'tray' })
 
@@ -211,7 +211,12 @@ test('钉不上不静默：pinMiss 写明差的是哪个模型，排序照常', 
 
   assert.equal(decision.pinMiss, 'Ghost-Not-Served', '钉子没命中要能被日志与响应头读到')
   assert.equal(decision.pin?.displayName, 'Ghost-Not-Served', '「生效中的选择」如实回显，便于托盘对账')
-  assert.equal(decision.candidates[0].displayName, 'Alpha-Flash', '照常按打分服务，不虚构一个候选')
+  assert.equal(decision.pinStale?.action, 'retired', '一触即退役，不在进程里挂满 30 分钟')
+  assert.deepEqual(decision.candidates, [], '不派候选 = 不产生上游调用（第 1 条，2026-11-13）')
+
+  const next = select(route)
+  assert.equal(next.pin, undefined, '退役之后下一轮走自动排序')
+  assert.equal(next.candidates[0].displayName, 'Alpha-Flash')
 })
 
 test('持久偏好 preferredModel：与软钉同效，但价格是「不会到期」（until 0）', () => {
@@ -232,6 +237,26 @@ test('持久偏好 preferredModel：与软钉同效，但价格是「不会到�
   const menu = autoRouter.routeMenu(route)
   assert.equal(menu.pin?.until, 0)
   assert.equal(menu.models.find(model => model.displayName === 'Gamma-Mini')?.pinned, true)
+})
+
+test('持久偏好可写可清：控制台「长期」走的 updateRoute 这一来一回', () => {
+  const route = makeRoute()
+  const written = sm.updateRoute(route.name, {
+    preferredModel: { providerId: 'pc', displayName: 'Gamma-Mini' },
+  })
+  assert.equal(written.ok, true, JSON.stringify(written.error))
+
+  const pinned = sm.listModelRoutes().find(candidate => candidate.name === route.name)!
+  assert.deepEqual(pinned.preferredModel, { providerId: 'pc', displayName: 'Gamma-Mini' })
+  assert.equal(select(pinned).candidates[0].displayName, 'Gamma-Mini',
+    '写进配置就生效，不需要再点一次软钉')
+
+  const cleared = sm.updateRoute(route.name, { preferredModel: undefined })
+  assert.equal(cleared.ok, true, JSON.stringify(cleared.error))
+  const after = sm.listModelRoutes().find(candidate => candidate.name === route.name)!
+  assert.equal(after.preferredModel, undefined,
+    'undefined 要把整格从盘上去掉；留着旧值等于「恢复自动排序」没用')
+  assert.equal(select(after).candidates[0].displayName, 'Alpha-Flash', '清掉后回到打分顺序')
 })
 
 test('客户端点名（第 6 个参数）落成会话级软钉：只影响这一段会话', () => {
@@ -354,6 +379,7 @@ test('切换：点名写入软钉，下一轮就按它服务；来源记为 tray
 
   assert.equal(result.ok, true, result.reason)
   assert.equal(result.model, 'Gamma-Mini')
+  assert.equal(result.providerId, 'pc', '落盘 write（persist）要的就是这个解析结果，不是请求里的猜测')
   assert.equal(result.menu?.pin?.source, 'tray')
   assert.equal(select(route).candidates[0].displayName, 'Gamma-Mini')
 })

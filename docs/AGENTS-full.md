@@ -1276,15 +1276,44 @@ model the turn serves; nothing downstream re-expands it. A single-scope turn get
 pool clock: with only accounts left in the chain, waiting longer cannot promote a new model (that can only
 happen between turns) and only holds the client's socket.
 
+**`minTier` is a floor, not an equality.** `ModelRoute.minTier` (`fast` / `balanced` / `strong`,
+`AUTO_MODEL_TIERS`) drops every candidate below that tier via `applyMinTier`. It runs after
+`applyModelNamePin` and before `applyPoolStrategiesWithTrace`, so neither a pool strategy nor
+`includeModels` can bring a below-floor model back - that is the difference from the `strong-tier` /
+`balanced-tier` strategies, which ask for *exactly* that tier. It exists because a pool made of free /
+small models made route mode behave dumber than a direct pick. The tier is never unknown
+(`resolveCapabilityDetail` falls back to a name heuristic), so there is no third "unknown" path. An empty
+result reports `missing: ['min_tier']` (not `pool_strategy`), the preview marks those rows `below-tier`,
+the advertised context floor (`keptOfPool`) applies the same filter, and the write path rejects an
+unknown value instead of silently storing "no floor".
+
 **Fast switching, and its precedence.** `ModelPin` is the soft pin: memory only, keyed by route plus
 scope (route-wide, or a session key), 30 minutes (`DEFAULT_PIN_MINUTES`), `source: 'console' | 'tray' |
 'header'`. Precedence in `select` is **soft pin > `ModelRoute.preferredModel` > sticky**: the pin
 reorders the list before the latency gate and the circuit, so a pin is *not* vetoed by an automated
-ticket (user intent outranks it; the menu still shows the model as circuited). A pinned model that is not
-in the pool at all (disabled, no accounts) serves the ordinary order but reports `pinMiss` into the log
-and the response headers - a silently ignored choice is how "the tray says X, the traffic says Y" goes
-unnoticed. `preferredModel` is the persistent form of the same choice (one `RouteModelRef`), surfaced with
-`until: 0` so the UI can draw "一直" instead of a countdown. A client that asks for a model with
+ticket (user intent outranks it; the menu still shows the model as circuited). Tray-issued pins default
+to `TRAY_PIN_MINUTES` = 10 (a route pin affects every client behind that route, so the menu also says
+so); console pins keep 30 and an explicit `minutes` always wins.
+
+A pinned model that is not in the pool at all (disabled, no accounts) is **decision-time `pinStale`**,
+and what happens next depends on where the pin came from. A soft pin is retired on the spot and the turn
+fails fast: `candidates: []` → 503 `pin_stale` with `details {pin, scope, source, action: 'retired'}`
+and `X-ModelPort-Pin: stale=<name>;action=retired`. Serving the ordinary order instead was measured as
+3x 504 - the client believed it was still talking to the pinned model while every turn quietly changed
+implementation, and each turn first paid a failure. `preferredModel` is **not** deleted by the selector
+(only `routes:unpin` revokes config): it serves the ordinary order, keeps the config, and reports
+`action: 'ignored'`. Both also write `pinMiss`, and the menu carries `pin.stale` so it never reads
+"pinned" while another model actually runs - a silently ignored choice is how "the tray says X, the
+traffic says Y" goes unnoticed.
+
+**`auto.reason` is computed before the scope trim.** `pin` when a pin hit, `only` when the pre-trim pool
+held exactly one display name, otherwise `cache-affinity` / `sticky` / `score`. Computing it after
+`single` trimmed the list collapsed 29/29 observed rows to `only`, which says nothing about why this
+model won. `auto.previousHint` records the anchor actually read this turn (whether or not the turn
+switched) and `auto.pinStale` mirrors the decision above. `preferredModel` is the persistent form of the same choice (one `RouteModelRef`), surfaced with
+`until: 0` so the UI can draw "一直" instead of a countdown; it is written by `routes:switch` with
+`persist: true` (`updateRoute` + `CONFIG_CHANGED` broadcast, then `clearPin` - the soft pin outranks it,
+so leaving one behind would hide "一直" behind a 30-minute countdown). A client that asks for a model with
 `X-ModelPort-Model: <displayName>` (`autoModelFromHeader`) pins it for the conversation
 (`source: 'header'`, session scope when a session key exists) - the same mechanism, so the next turn does
 not "think for" the client and switch away.
@@ -1337,13 +1366,18 @@ The pool could only be sampled by luck.
 `nav.routes`). It reads the **same** `routes:menu` snapshot - one call for the left column, one
 `{ route, limit }` call for the detail, both through `autoRouter.routeMenu` - so the pool, the
 serving model, the soft pin and the circuit read exactly what the tray draws; nothing is recomputed
-from route config. The range arguments only **narrow** the query: `route` filters the route list,
+from route config. `preview()` is short-cached (15 s, 64 entries, key = `route.name` + the
+**dereferenced** pool so a `basedOnRoute` change invalidates it; `structuredClone` on the way in and
+out) because one menu open measured p50 4.7 s / p90 10.2 s / max 11.0 s of full-pool scans. The range
+arguments only **narrow** the query: `route` filters the route list,
 `limit` is clamped in the handler to `1..ROUTE_MENU_MODELS_MAX` (2000) with
 `ROUTE_MENU_MODELS_DEFAULT` (8) as the absent case, precisely so the tray keeps its short menu while
 the console asks for all of them. Search filters the full result on `displayName` / `providerName` /
-`providerId`. Pinning calls `routes:switch` with `source: 'console'` (in-memory soft pin, 30 min), and
-"back to automatic order" calls `routes:unpin` (which also clears the persistent `preferredModel`) -
-the page never writes route config, i.e. never a second routing decision. Four absences stay distinct
+`providerId`. Pinning calls `routes:switch` with `source: 'console'` (in-memory soft pin, 30 min);
+"长期" sends the same request with `persist: true`, which writes the route's `preferredModel` in the
+main process (the page still never touches route config itself - one routing decision, one writer) and
+clears the soft pin so the badge reads "长期固定" instead of a countdown. "back to automatic order"
+calls `routes:unpin` (which also clears the persistent `preferredModel`). Four absences stay distinct
 in the page: API unavailable (no bridge), read failed (with `snapshot.error`), no enabled routes,
 no switchable model right now, plus "no search match". The tray's overflow line and
 `在控制台管理路由…` both deep-link to `/routes?<URLSearchParams>` so the console opens on that route

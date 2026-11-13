@@ -158,6 +158,12 @@ function autoLogRecord(
     // 粘性键来自客户端会话标识还是内容指纹：中途换家的两种解释靠这一格分开
     sessionKeySource: decision.stickyKeySource,
     ...(switched === null ? {} : { switchedFrom: switched.from }),
+    // 这一轮**读到**的锚点（不论是否换了家）：`switchedFrom` 只在「换了」时出现，
+    // 读不出「这一轮根本没锚」。与 `stickyGated` / `latencyGateMs` 一起读，
+    // 「锚了但被让位」与「压根没锚」才不会混成一件事。
+    ...(decision.previousHint === undefined
+      ? {}
+      : { previousHint: `${decision.previousHint.providerId}/${decision.previousHint.displayName}` }),
     // 「池里几百个模型为什么只试了这几家」由这一格回答：每一次被跳过的候选
     // 都带原因（见下面的 `failures`），泳道栅栏退役后不再有「默认停在队首」。
     // 第 2 条：「这一轮为什么没粘回上一家」的答案。`latencyGateMs` 是池内 p75，
@@ -170,6 +176,7 @@ function autoLogRecord(
     ...(decision.model === undefined ? {} : { model: decision.model }),
     ...(decision.pin === undefined ? {} : { pin: decision.pin }),
     ...(decision.pinMiss === undefined ? {} : { pinMiss: decision.pinMiss }),
+    ...(decision.pinStale === undefined ? {} : { pinStale: decision.pinStale }),
     ...(decision.circuited === undefined || decision.circuited.length === 0
       ? {}
       : { circuited: decision.circuited }),
@@ -837,6 +844,47 @@ router.post('/completions', async (ctx: Context) => {
     // `skipped` 一起回答「为什么一个候选都没有」。客户端只会转述一句 503，
     // 面板上没有这一段就再也查不回来了。
     const refusalAuto = autoLogRecord(autoDecision, 0, [], null)
+    // 钉子失效（模型根本不在池里）时选路已经**把软钉撤了**并返回了空链：这一轮
+    // 快速失败，下一次请求就走自动排序。原先「照常按池服务」实测是 3× 504 ——
+    // 客户端以为还在跟钉住的模型对话，其实每一轮都在换实现。这里必须把这件事
+    // 明确说出来（503 + `pin_stale` + 模型名），沉默换模型才是更坏的失败。
+    const stalePin = autoDecision.pinStale
+    if (stalePin !== undefined && stalePin.action === 'retired') {
+      const message = `The pinned model '${stalePin.displayName}' is no longer part of route '${autoDecision.routeName}'; ` +
+        'the pin was retired - retry to use the route\'s normal order'
+      const body = {
+        error: {
+          message,
+          type: 'service_unavailable_error',
+          param: null,
+          code: 'pin_stale',
+          details: {
+            pin: stalePin.displayName,
+            scope: stalePin.scope,
+            source: stalePin.source,
+            action: stalePin.action,
+          },
+        },
+      }
+      ctx.status = 503
+      ctx.body = body
+      ctx.set('X-ModelPort-Pin', toHeaderValue(`stale=${stalePin.displayName};action=retired`))
+      const refused = {
+        ...selectionRefusalEntry(ctx, {
+          statusCode: 503,
+          code: 'pin_stale',
+          type: 'service_unavailable_error',
+          message,
+          body,
+          requestId,
+          client,
+        }),
+        ...(refusalAuto === undefined ? {} : { auto: refusalAuto }),
+      }
+      storeManager.addRequestLog(refused)
+      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+      return
+    }
     const transient = autoDecision.transientUnavailable
     if (transient) {
       const message = `All candidates for route '${autoDecision.routeName}' are temporarily unavailable (${describeTransientCause(transient.cause)}); retry in ${transient.retryAfterSeconds}s`
@@ -1013,7 +1061,14 @@ router.post('/completions', async (ctx: Context) => {
       }
       // 软钉的客户端可见形态：命中说明「这一轮是因你点名才跑的它」，失配说明
       // 「点了但没生效」。失配静默是这类功能最坏的失败方式 —— 用户会以为切换坏了。
-      if (autoDecision.pinMiss !== undefined) {
+      // 失效（模型已经不在池里）单独一种写法：它与「此刻没账号」不是一回事，
+      // 客户端据此判断该不该继续按这颗钉重试。
+      if (autoDecision.pinStale !== undefined) {
+        ctx.set(
+          'X-ModelPort-Pin',
+          toHeaderValue(`stale=${autoDecision.pinStale.displayName};action=${autoDecision.pinStale.action}`)
+        )
+      } else if (autoDecision.pinMiss !== undefined) {
         ctx.set('X-ModelPort-Pin', toHeaderValue(`miss=${autoDecision.pinMiss}`))
       } else if (autoDecision.pin !== undefined
         && chosenCandidate.displayName === autoDecision.pin.displayName) {

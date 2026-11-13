@@ -85,6 +85,7 @@ import {
   checkRouteModelRefs,
   checkRouteName,
   findModelRoute,
+  isRouteMinTierValue,
   isRouteStrategyValue,
   LEGACY_AUTO_ROUTE_NAME,
   normalizeModelRoutes,
@@ -1813,6 +1814,9 @@ class StoreManager {
     if (poolError !== undefined) return poolError
     if (input.strategy !== undefined && !isRouteStrategyValue(input.strategy)) {
       return { code: 'invalid_input', message: `Unknown route strategy: ${JSON.stringify(input.strategy)}` }
+    }
+    if (input.minTier !== undefined && !isRouteMinTierValue(input.minTier)) {
+      return { code: 'invalid_input', message: `Unknown route minTier: ${JSON.stringify(input.minTier)}` }
     }
     const includeError = checkRouteModelRefs('includeModels', input.includeModels)
     if (includeError !== undefined) return includeError

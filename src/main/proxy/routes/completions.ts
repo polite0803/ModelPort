@@ -262,6 +262,46 @@ router.post('/completions', async (ctx: Context) => {
         ? { skipped: autoDecision.skipped.slice(0, AUTO_SKIPPED_REPORT_LIMIT) }
         : {}),
       ...(autoDecision.modelScope === undefined ? {} : { modelScope: autoDecision.modelScope }),
+      ...(autoDecision.pinMiss === undefined ? {} : { pinMiss: autoDecision.pinMiss }),
+      ...(autoDecision.pinStale === undefined ? {} : { pinStale: autoDecision.pinStale }),
+    }
+    // 与 chat 路由同形：钉子指向池外模型时选路已把软钉退役并返回空链，这一轮必须
+    // 明确说出来（503 + `pin_stale`），沉默换模型才是更坏的失败。
+    const stalePin = autoDecision.pinStale
+    if (stalePin !== undefined && stalePin.action === 'retired') {
+      const message = `The pinned model '${stalePin.displayName}' is no longer part of route '${autoDecision.routeName}'; ` +
+        'the pin was retired - retry to use the route\'s normal order'
+      const body = {
+        error: {
+          message,
+          type: 'service_unavailable_error',
+          code: 'pin_stale',
+          details: {
+            pin: stalePin.displayName,
+            scope: stalePin.scope,
+            source: stalePin.source,
+            action: stalePin.action,
+          },
+        },
+      }
+      ctx.status = 503
+      ctx.body = body
+      ctx.set('X-ModelPort-Pin', toHeaderValue(`stale=${stalePin.displayName};action=retired`))
+      const refused = {
+        ...selectionRefusalEntry(ctx, {
+          statusCode: 503,
+          code: 'pin_stale',
+          type: 'service_unavailable_error',
+          message,
+          body,
+          requestId,
+          client,
+        }),
+        auto: refusalAuto,
+      }
+      storeManager.addRequestLog(refused)
+      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+      return
     }
     const transient = autoDecision.transientUnavailable
     if (transient) {

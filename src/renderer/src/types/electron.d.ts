@@ -510,10 +510,15 @@ interface RoutesAPI {
   delete: (name: string) => Promise<RouteRemovalResult>
   /**
    * 只算不写：按当前配置预览这条路由的候选池，逐模型给出最终状态
-   * （`kept` / `included` / `excluded` / `filtered` / `unavailable`）与能力来源。
-   * `sample` 是请求画像样本，缺省为纯文本、无工具、短请求。
+   * （`kept` / `included` / `excluded` / `filtered` / `below-tier` / `unavailable`）与能力来源。
+   * `sample` 是请求画像样本，缺省为纯文本、无工具、短请求。主进程按同一份配置给 15 秒
+   * 短缓存；`options.fresh` 跳过读缓存，编辑器保存标注/手动增删后必须传它。
    */
-  preview: (route: ModelRoute, sample?: RoutePreviewSample) => Promise<RoutePreviewResult>
+  preview: (
+    route: ModelRoute,
+    sample?: RoutePreviewSample,
+    options?: { fresh?: boolean },
+  ) => Promise<RoutePreviewResult>
   /**
    * 每条路由当前的候选模型数（按供应商分组后数名字）。`sizes` 的键是路由名；
    * 缺席代表「没数」，界面要显示省略而不是 0 —— 取不到与池是空的不是同一件事。
@@ -527,7 +532,10 @@ interface RoutesAPI {
    * `{ route, limit }` 要一条路由的全部可切换模型（它自带搜索）。
    */
   menu: (request?: RouteMenuRequest) => Promise<RouteMenuResult>
-  /** 点名/换下一个：写一颗内存软钉（默认 30 分钟），不落盘。 */
+  /**
+   * 点名/换下一个：缺省写一颗内存软钉（默认 30 分钟），不落盘；
+   * `persist: true` 把这次选择写进路由的 `preferredModel`（重启后仍在）。
+   */
   switchModel: (request: RouteSwitchRequest) => Promise<RouteSwitchResult>
   /** 恢复自动排序：清软钉并清掉持久 `preferredModel`。 */
   unpin: (route: string) => Promise<RouteSwitchResult>

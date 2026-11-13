@@ -441,8 +441,13 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
    */
   registerMainHandler(
     IpcChannels.ROUTES_PREVIEW,
-    async (_, route: ModelRoute, sample?: RoutePreviewSample): Promise<RoutePreviewResult> => {
-      return autoRouter.preview(route, sample ?? {})
+    async (
+      _,
+      route: ModelRoute,
+      sample?: RoutePreviewSample,
+      options?: { fresh?: boolean },
+    ): Promise<RoutePreviewResult> => {
+      return autoRouter.preview(route, sample ?? {}, options ?? {})
     },
   )
 
@@ -497,8 +502,10 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
   )
 
   /**
-   * 切换模型（点名或「换下一个」）。写的是内存软钉，不落盘 —— 一次显式选择不该
-   * 改写持久配置；「恢复自动排序」是另一条通道（`routes:unpin`），两者分开。
+   * 切换模型（点名或「换下一个」）。缺省写的是内存软钉，不落盘 —— 一次显式选择
+   * 不该改写持久配置；`persist: true` 是另一件事：用户明确要求「这条路由以后都
+   * 用它」，那就写进路由的 `preferredModel`。「恢复自动排序」是 `routes:unpin`，
+   * 它把软钉与持久偏好一起清掉，三者的边界靠这一个字段区分。
    */
   registerMainHandler(
     IpcChannels.ROUTES_SWITCH,
@@ -507,7 +514,23 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
         return { ok: false, route: '', reason: '切换请求缺少路由名' }
       }
       try {
-        return autoRouter.switchModel(request, storeManager.listModelRoutes())
+        const result = autoRouter.switchModel(request, storeManager.listModelRoutes())
+        if (!result.ok || request.persist !== true) return result
+        if (result.model === undefined || result.providerId === undefined) {
+          return { ...result, ok: false, reason: '这次选择没有命中任何供应商，无法长期固定' }
+        }
+        // 先落盘、后撤软钉：写失败时那颗 30 分钟的钉子还在，界面显示的就是用户刚
+        // 点的结果；反过来先撤钉再写，失败会表现成「点了没反应」。
+        // 软钉优先于持久偏好，必须撤掉 —— 否则「一直」会被一颗 30 分钟的钉子盖住。
+        const written = storeManager.updateRoute(result.route, {
+          preferredModel: { providerId: result.providerId, displayName: result.model },
+        })
+        if (!written.ok) {
+          return { ...result, ok: false, reason: written.error.message }
+        }
+        autoRouter.clearPin(result.route)
+        broadcastConfigChanged(storeManager.getConfig())
+        return { ...result, menu: autoRouter.routeMenu(written.route) }
       } catch (error) {
         return { ok: false, route: request.route, reason: routeStorageError(error).message }
       }

@@ -125,11 +125,13 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
     setIsLoading(true)
     setError(null)
     api
+      // `fresh`：编辑器在保存标注/手动增删之后立刻重取，走进 15 秒短缓存会显示旧结果
+      // —— 「标了视觉可用、预览还说不可用」正是这类面板最坏的失败方式。
       .preview(route, {
         needsVision,
         needsTools,
         estimatedTokens: Number.isFinite(tokens) && tokens > 0 ? tokens : 0,
-      })
+      }, { fresh: true })
       .then((result) => {
         if (!cancelled) setPreview(result)
       })
@@ -242,7 +244,7 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
     const query = search.trim().toLowerCase()
     return (preview?.models ?? []).filter((model) => {
       if (statusFilter === 'kept' && model.status !== 'kept' && model.status !== 'included') return false
-      if (statusFilter === 'dropped' && model.status !== 'filtered' && model.status !== 'excluded' && model.status !== 'not-pinned') return false
+      if (statusFilter === 'dropped' && model.status !== 'filtered' && model.status !== 'excluded' && model.status !== 'not-pinned' && model.status !== 'below-tier') return false
       if (statusFilter === 'unavailable' && model.status !== 'unavailable') return false
       if (providerFilter !== 'all' && model.providerId !== providerFilter) return false
       // 与模型管理页同一个判据：渠道报的倍率 + 是否免费（聚合侧由成本台账给出免费标记）。

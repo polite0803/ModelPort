@@ -584,6 +584,30 @@ const TIER_RANK: Record<AutoModelTier, number> = {
   strong: 2,
 }
 
+/**
+ * 能力下限（`ModelRoute.minTier`）：低于这一档的候选整条路由都不派。
+ *
+ * 与 `poolStrategies` 的 `strong-tier` / `balanced-tier` 是两种语义：那是「只要
+ * 这一档」（等于），这是「至少这一档」（下限），所以可以叠在别的策略上（例如
+ * 「免费 ∪ 低权重」再加一条「至少 balanced」）。
+ *
+ * 为什么要有它：一条路由的池子常被便宜/免费模型占满，用户感受到的是「路由模式
+ * 比直连笨」—— 这不是打分权重能修的，池子里根本没有够档的模型。下限是路线级的
+ * 声明，因此应用在**名字钉定之后、池策略之前**，`includeModels` 也拿不回低于
+ * 下限的模型（手动补救针对的是「被筛掉的可用模型」，不是「档位不够」）。
+ *
+ * 档位不会缺席：`resolveCapability` 对未标注模型按名字启发式给一档，所以这里
+ * 没有「未知档位放不放行」的第三条路。
+ */
+export function applyMinTier<T extends PoolStrategyCandidate>(
+  candidates: readonly T[],
+  floor: AutoModelTier | undefined
+): T[] {
+  if (floor === undefined) return [...candidates]
+  const min = TIER_RANK[floor]
+  return candidates.filter(candidate => TIER_RANK[capabilityOfStrategy(candidate).tier] >= min)
+}
+
 const TIER_TARGET: Record<AutoComplexity, number> = {
   simple: 0,
   standard: 1,
@@ -1050,9 +1074,9 @@ function satisfiesCapability(
 }
 
 /**
- * 候选池为空的原因。前三个是请求画像缺能力；后两个是**配置**造成的空池
- * （池策略筛光、手动排除光），必须分开报 —— 把它们归成「没有可用模型」会让
- * 用户去查供应商，而真正要改的是路由配置。
+ * 候选池为空的原因。前四个是请求画像缺能力；后三个是**配置**造成的空池
+ * （池策略筛光、手动排除光、能力下限高一档），必须分开报 —— 把它们归成
+ * 「没有可用模型」会让用户去查供应商，而真正要改的是路由配置。
  */
 export type MissingRequirement =
   | 'vision'
@@ -1061,6 +1085,7 @@ export type MissingRequirement =
   | 'context'
   | 'pool_strategy'
   | 'manual_filter'
+  | 'min_tier'
 
 /**
  * 排序结果为空时，说明到底缺哪种能力——直接说"没有可用模型"对排障没有帮助。
