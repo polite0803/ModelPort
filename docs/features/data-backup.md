@@ -1,10 +1,12 @@
 # 完整备份与迁移
 
-> 适用版本：v1.7.3 ｜ 最后核对：2026-11-04 ｜ 状态：现行
+> 适用版本：v1.7.3 ｜ 最后核对：2026-11-14 ｜ 状态：现行
 
 ## 这个功能点是什么
 
 设置 → 数据安全 → **完整备份与迁移**：把本机的全部业务数据与配置打成一个 JSON 文件，在另一台电脑（或重装后的同一台）导入，得到与导出时一致的状态。与它同页的「界面偏好同步」只搬 13 个 UI 偏好，不搬任何业务数据；两者不可互相替代。
+
+导出有两种送达方式、同一套采集/封装引擎：桌面端弹原生保存对话框写盘（`0600`）；浏览器控制台（无头网关服务的 `/ui/`）走 `delivery: 'payload'`——网关把文件内容随结果原样返回，浏览器触发下载，落在看页面这台机器的下载目录。无头宿主没有对话框，但浏览器有下载能力，所以界面不再以 `desktop-only` 拒绝导出（旧版网关仍会报，文案专门说明）。
 
 一份备份包含：
 
@@ -28,7 +30,8 @@
 
 ## 关键行为与不变量（必守约束）
 
-- **导入只认主进程读过的文件**：`backup:pick` 由主进程弹原生对话框读文件、解析、缓存，返回一次性 `token`；`backup:apply` 只接受 token。渲染层没有「把一段自定 JSON 当备份导入」的通道，否则任何能执行渲染层 JS 的东西都能绕过专用通道改账号表。
+- **导入只认主进程读过的文件**：`backup:pick` 由主进程弹原生对话框读文件、解析、缓存，返回一次性 `token`；`backup:apply` 只接受 token。渲染层没有「把一段自定 JSON 当备份导入」的通道，否则任何能执行渲染层 JS 的东西都能绕过专用通道改账号表。浏览器导入是它的镜像：`<input type=file>` 选件、字节上传 `POST /v1/management/backup/stage`，喂同一个引擎。
+- **导出只序列化一次，送达分流**：`exportBackup` 先采集、序列化（明文或口令封装），再按 `delivery` 分流。`'payload'` 不弹框、不写盘，回 `fileName` + `payload` + 摘要；缺省走对话框写盘。管理面 RPC 与桌面 IPC 共用这一条通道，鉴权不变（管理密钥）。
 - **token 单次使用、10 分钟过期**，最多缓存 4 份。`apply` 成功后立即删除；同一份件点两次「导入」不会把第一次的结果再覆盖一遍。
 - **覆盖模式先留副本**：落库前把 `data.json` 复制到 `data.pre-restore.<时间戳>.json`，路径随结果返回给界面。
 - **覆盖模式要求备份里有 `providers` 数组与 `config` 对象**，否则拒绝（`wrong-format`）。缺这两块的「备份」多半是手改件，整份覆盖会把账号表清成空。
@@ -67,12 +70,13 @@
 | 位置 | 职责 |
 | --- | --- |
 | `src/shared/backup.ts` | 格式常量、`BackupBundle` / `BackupPreview` 类型、`parseBackupDocument`、`summarizeBackup`、`mergeById`、`mergeNamedTables`（纯逻辑，主/渲染共用） |
-| `src/main/backup/service.ts` | 采集、原生对话框、写盘/读盘、token 缓存、覆盖与合并落库、重启 |
+| `src/main/backup/service.ts` | 采集、序列化、送达（对话框写盘 / payload 返回）、读盘、token 缓存、覆盖与合并落库、重启 |
 | `src/main/backup/sanitize.ts` | 供应商/账号/日志行的落库前清洗 |
 | `src/main/backup/crypto.ts` | scrypt + AES-256-GCM 封装与解封 |
 | `src/main/backup/ipc.ts` | `backup:export` / `pick` / `unlock` / `apply` / `cancel` / `restart` |
 | `src/main/store/store.ts` | `restoreConfig()`（路由取传入那份）、`replaceRequestLogs()` |
 | `src/renderer/src/components/settings/DataBackup.tsx` | 导出选项、口令、导入预览、模式选择、重启提示 |
+| `src/renderer/src/api/headless.ts` | 浏览器字节通道：`uploadBackup`（选件上传）与 `downloadBackup`（payload 触发下载） |
 
 ## 排查
 
@@ -80,3 +84,4 @@
 - 「账号都在，但全部 401」：备份导出时本机已解不开那些凭据（`credentials-unreadable`），或导入时选的是不含凭据的旧版备份。重新填一次 Key 即可。
 - 「渠道卡片变成未配置」：导出时渠道运行时不可用（`channel-unavailable`），或导入时渠道包 `backup.import` 失败（结果 `skipped` 含 `channels`）。渠道账号需要在渠道页重新登录。
 - 「想要回滚」：用结果里给的 `data.pre-restore.<时间戳>.json` 覆盖回 `~/.modelport/data.json`，重启应用。
+- 「浏览器里导出报 desktop-only」：网关版本早于 payload 导出（`delivery: 'payload'`）。升级网关；或在桌面端导出。

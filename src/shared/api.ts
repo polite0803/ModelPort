@@ -126,6 +126,13 @@ export interface ApiWire {
    * method table falls back to the IPC channel, which is the only sane desktop behaviour.
    */
   uploadBackup?: () => Promise<BackupPickResult>
+  /**
+   * Host-local override for "export a backup". A desktop wire writes through the native
+   * save dialog; a page served by the headless daemon receives the payload and lets the
+   * browser download it - the host has no dialog, but the page has a download folder.
+   * Optional: without it the method table falls back to the IPC channel.
+   */
+  downloadBackup?: (options: BackupExportOptions) => Promise<BackupExportResult>
 }
 
 export function createElectronAPI(wire: ApiWire) {
@@ -190,7 +197,7 @@ const storeAPI = {
  */
 const backupAPI = {
   export: (options: BackupExportOptions): Promise<BackupExportResult> =>
-    wire.invoke(IpcChannels.BACKUP_EXPORT, options),
+    wire.downloadBackup ? wire.downloadBackup(options) : wire.invoke(IpcChannels.BACKUP_EXPORT, options),
 
   pick: (): Promise<BackupPickResult> =>
     wire.uploadBackup ? wire.uploadBackup() : wire.invoke(IpcChannels.BACKUP_PICK),

@@ -889,6 +889,7 @@
       "plaintextWarning": "With encryption off, the file holds upstream API keys and session cookies in plaintext. Keep it somewhere trusted and delete it after importing.",
       "passwordMismatch": "The two passwords do not match",
       "exportConfirm": "Choose Location & Export",
+      "exportConfirmDownload": "Export & Download",
       "exporting": "Exporting...",
       "exportSuccess": "Backup exported",
       "exportSuccessDesc": "{{size}} - {{providers}} providers, {{accounts}} accounts",

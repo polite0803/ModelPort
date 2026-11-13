@@ -15,9 +15,10 @@
  *   secret is how "the screen shows an empty list" becomes a mystery.
  */
 import { createElectronAPI, type ApiWire } from '@shared/api'
-import type { BackupPickResult } from '@shared/backup'
+import type { BackupExportOptions, BackupExportResult, BackupPickResult } from '@shared/backup'
 import type { ShellBridge } from '@shared/shellBridge'
 import { parseEventFrame } from '@shared/sseFrames'
+import { IpcChannels } from '../../../main/ipc/channels'
 
 const SECRET_KEY = 'modelport.managementSecret'
 const UNAUTHORIZED = 'modelport:unauthorized'
@@ -273,6 +274,26 @@ async function uploadBackup(): Promise<BackupPickResult> {
   return body.data as BackupPickResult
 }
 
+/**
+ * `uploadBackup` 的导出镜像：网关用同一套引擎序列化备份（`delivery: 'payload'`），
+ * 字节由浏览器自己存——无头宿主没有保存对话框，但展示页面的这台机器有下载目录。
+ */
+async function downloadBackup(options: BackupExportOptions): Promise<BackupExportResult> {
+  const result = await invoke(IpcChannels.BACKUP_EXPORT, { ...options, delivery: 'payload' })
+  // 旧网关不认识 payload：无头守护进程仍回 desktop-only（界面有专门文案）；
+  // 无窗 Electron 网关会忽略该标志走自己的对话框，结果带 filePath 而无 payload，原样透传。
+  if (typeof result.payload !== 'string' || typeof result.fileName !== 'string') return result
+  const url = URL.createObjectURL(new Blob([result.payload], { type: 'application/json' }))
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = result.fileName
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+  return { ...result, filePath: result.fileName }
+}
+
 // ---------------------------------------------------------------- events (SSE)
 
 type Listener = (event: unknown, payload: any) => void
@@ -348,6 +369,7 @@ const wire: ApiWire = {
   // The tray window is an Electron surface; a browser client has no tray to talk to.
   send: () => undefined,
   uploadBackup,
+  downloadBackup,
 }
 
 /**

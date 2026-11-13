@@ -50,6 +50,11 @@ export interface BackupScope {
 export interface BackupExportOptions extends BackupScope {
   /** 非空即用口令封装整份备份；空串/缺省 = 明文 JSON。 */
   password?: string
+  /**
+   * 送达方式。缺省/'file' = 宿主弹保存对话框写盘（桌面）；'payload' = 文件内容随结果
+   * 原样返回，由调用方送达（浏览器控制台触发下载）。无头宿主没有对话框，界面走这条。
+   */
+  delivery?: 'file' | 'payload'
 }
 
 /**
@@ -176,6 +181,10 @@ export type BackupSkippedBlock = 'statistics' | 'logs' | 'channels'
 export interface BackupExportResult {
   canceled: boolean
   filePath?: string
+  /** payload 模式的建议文件名（浏览器下载名）；file 模式不给。 */
+  fileName?: string
+  /** payload 模式的文件内容（明文 JSON 或口令封装外层）；file 模式不给。 */
+  payload?: string
   bytes?: number
   /** 写盘成功时回一份摘要，UI 用它告诉用户「这份备份里有多少东西」。 */
   preview?: BackupPreview

@@ -15,7 +15,8 @@
  *
  * 本文件不含 electron：文件对话框走 `runtime/host` 的 `desktop` 能力袋，版本走宿主。
  * 于是无头宿主（WSL 守护进程）能调同一套采集/封装/落库引擎，只有「弹一个保存框」
- * 这件事在它那侧不存在——那条路径由命令行显式给路径。
+ * 这件事在它那侧不存在——那条路走 `delivery: 'payload'`：内容随结果原样返回，
+ * 由浏览器控制台自己触发下载。
  */
 
 import { getHost, requireSystem } from '../runtime/host'
@@ -191,7 +192,7 @@ async function collectBundle(options: BackupExportOptions): Promise<BackupBundle
   }
 }
 
-/** 导出：采集 → 选保存位置 → 写盘（可选口令封装）。 */
+/** 导出：采集 → 序列化 → 送达（桌面弹框写盘；payload 模式原样返回供浏览器下载）。 */
 export async function exportBackup(options: BackupExportOptions): Promise<BackupExportResult> {
   let bundle: BackupBundle
   try {
@@ -201,15 +202,30 @@ export async function exportBackup(options: BackupExportOptions): Promise<Backup
     return { canceled: false, error: 'storage-not-ready' }
   }
 
-  // 默认落点（下载目录，拿不到时回家目录）由宿主决定，见 electronHost 的 pickSavePath。
-  const target = await requireSystem('export-backup').pickSavePath(
-    `modelport-backup-${fileStamp()}.json`,
-  )
-  if (target === null) return { canceled: true }
-
+  const fileName = `modelport-backup-${fileStamp()}.json`
   const password = typeof options.password === 'string' ? options.password : ''
   const plaintext = JSON.stringify(bundle, null, 2)
   const payload = password === '' ? plaintext : JSON.stringify(sealBackup(plaintext, password), null, 2)
+  const bytes = Buffer.byteLength(payload, 'utf8')
+  const preview = previewOf(bundle)
+  const logData = {
+    providers: preview.counts.providers,
+    accounts: preview.counts.accounts,
+    channelAccounts: preview.counts.channelAccounts,
+    includeStatistics: bundle.scope.includeStatistics,
+    includeLogs: bundle.scope.includeLogs,
+  }
+
+  if (options.delivery === 'payload') {
+    storeManager.addLog('info', `备份已导出（${password === '' ? '明文' : '口令封装'}，浏览器下载）`, {
+      data: logData,
+    })
+    return { canceled: false, fileName, payload, bytes, preview, encrypted: password !== '' }
+  }
+
+  // 默认落点（下载目录，拿不到时回家目录）由宿主决定，见 electronHost 的 pickSavePath。
+  const target = await requireSystem('export-backup').pickSavePath(fileName)
+  if (target === null) return { canceled: true }
 
   try {
     writeFileSync(target, payload, { encoding: 'utf8', mode: 0o600 })
@@ -218,20 +234,13 @@ export async function exportBackup(options: BackupExportOptions): Promise<Backup
     return { canceled: false, error: 'write-failed' }
   }
 
-  const preview = previewOf(bundle)
   storeManager.addLog('info', `备份已导出（${password === '' ? '明文' : '口令封装'}）`, {
-    data: {
-      providers: preview.counts.providers,
-      accounts: preview.counts.accounts,
-      channelAccounts: preview.counts.channelAccounts,
-      includeStatistics: bundle.scope.includeStatistics,
-      includeLogs: bundle.scope.includeLogs,
-    },
+    data: logData,
   })
   return {
     canceled: false,
     filePath: target,
-    bytes: Buffer.byteLength(payload, 'utf8'),
+    bytes,
     preview,
     encrypted: password !== '',
   }

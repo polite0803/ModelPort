@@ -38,6 +38,7 @@ function normalizeExportOptions(raw: unknown): BackupExportOptions {
     // 统计默认在、日志默认不在：日志体量最大且含用户输入片段，必须是用户显式勾选。
     includeStatistics: source.includeStatistics !== false,
     includeLogs: source.includeLogs === true,
+    delivery: source.delivery === 'payload' ? 'payload' : 'file',
     ...(password === '' ? {} : { password }),
   }
 }

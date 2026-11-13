@@ -889,6 +889,7 @@
       "plaintextWarning": "关闭加密后，备份文件里是明文的上游 API Key 与会话 Cookie。请只存放到可信位置，导入完成后删除。",
       "passwordMismatch": "两次输入的口令不一致",
       "exportConfirm": "选择位置并导出",
+      "exportConfirmDownload": "导出并下载",
       "exporting": "导出中...",
       "exportSuccess": "备份已导出",
       "exportSuccessDesc": "{{size}}，包含 {{providers}} 个供应商、{{accounts}} 个账号",

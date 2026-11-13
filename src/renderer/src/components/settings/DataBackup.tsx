@@ -90,6 +90,10 @@ export function DataBackup() {
   const [result, setResult] = useState<BackupApplyResult | null>(null)
 
   const api = window.electronAPI?.backup
+  // 浏览器传输（headless API 安装时打的标记）：导出走下载而不是原生保存对话框，
+  // 确认按钮的文案不能再说「选择位置」。
+  const browserTransport =
+    (window as unknown as { __MODELPORT_REMOTE__?: boolean }).__MODELPORT_REMOTE__ === true
 
   const resetState = () => {
     setStep('idle')
@@ -414,7 +418,9 @@ export function DataBackup() {
               {t('common.cancel')}
             </Button>
             <Button onClick={handleExport} disabled={busy || (encrypt && password === '')}>
-              {busy ? t('settings.backup.exporting') : t('settings.backup.exportConfirm')}
+              {busy
+                ? t('settings.backup.exporting')
+                : t(browserTransport ? 'settings.backup.exportConfirmDownload' : 'settings.backup.exportConfirm')}
             </Button>
           </DialogFooter>
         </DialogContent>

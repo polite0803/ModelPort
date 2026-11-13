@@ -218,7 +218,8 @@ registry) → `adapters/<provider>.ts` → upstream; `loadbalancer.ts` picks the
   is the handler registry minus `app:installUpdate`/`app:downloadUpdate` - never a second list.
   `/ui/` serves the built renderer (public bytes, trailing slash) where `getWebRoot()` exists.
 - Backup import has three entries (dialog, `--import-backup`, `POST .../backup/stage`) and one
-  engine (`stageBackupFile`); export has no headless entry. Management secret: browser
+  engine (`stageBackupFile`); export writes through the save dialog on desktop and returns the
+  payload for a browser download on headless hosts (`delivery: 'payload'`). Management secret: browser
   `sessionStorage`, or `secrets.json` 0600 per origin sealed by the console - which refuses to write
   with no keystore (`gateways.json` stays credential-free).
 - One installer per platform plus `dist/modelport-daemon-<ver>-<arch>.tar.gz` and a Docker image
