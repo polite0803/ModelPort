@@ -303,3 +303,84 @@ test('乘性降速的 floor=2：收缩态永远留一条并行活路，恢复路
   assert.equal(runtime.snapshot('a', NOW + 63_000, model).modelLimit, 3)
 })
 
+/**
+ * 静默通道快速失败（具名单候选 2026-11-13）。
+ *
+ * 现网读数：qoder 11 笔全在 33.3s 首块超时处收尾、零成功；codearts 虽然同样大量
+ * 504，但每笔 504 之后 1–2 分钟内必有成功（同窗口 12 成功 / 6 超时交替）。
+ * 所以判据必须是「连续超时 **且** 近期无成功」，慢但活着的通道一律不碰。
+ */
+test('静默通道：连续首块超时且无成功才开窗，窗口到期放半开探测', () => {
+  const runtime = new AccountRuntime()
+
+  // 单次超时可能是排队偶发：不开窗。
+  assert.equal(runtime.recordFirstBlockTimeout('ch', 'm', NOW), undefined)
+  assert.equal(runtime.silentChannel('ch', 'm', NOW + 500), undefined)
+
+  // 第二次连续超时：60s 窗口。
+  assert.equal(runtime.recordFirstBlockTimeout('ch', 'm', NOW + 1000), 60_000)
+  assert.deepEqual(runtime.silentChannel('ch', 'm', NOW + 2000), {
+    retryAfterMs: 59_000,
+    timeouts: 2,
+  })
+
+  // 到期即摘掉窗口，请求照常发出去做探测（不是永久停用）。
+  assert.equal(runtime.silentChannel('ch', 'm', NOW + 62_000), undefined)
+  assert.equal(runtime.silentChannel('ch', 'm', NOW + 63_000), undefined)
+})
+
+test('静默通道：近期有成功就不判静默（慢但活着的通道）', () => {
+  const runtime = new AccountRuntime()
+
+  runtime.recordSuccess('ch', 'm', NOW)
+  assert.equal(runtime.recordFirstBlockTimeout('ch', 'm', NOW), undefined)
+  assert.equal(runtime.recordFirstBlockTimeout('ch', 'm', NOW + 1000), undefined)
+  assert.equal(
+    runtime.silentChannel('ch', 'm', NOW + 2000),
+    undefined,
+    '成功读数在 10 分钟静默窗内，两次超时也不该快速失败',
+  )
+
+  // 成功读数滑出静默窗后，下一次超时立即开窗。连击次数从第一次超时起连续计数
+  // （那是「自上次成功以来被截断几笔」的事实），所以这一发直接进 120s 档。
+  const stale = NOW + 11 * 60 * 1000
+  assert.equal(runtime.recordFirstBlockTimeout('ch', 'm', stale), 120_000)
+})
+
+test('静默通道：探测再超时按指数翻倍、5 分钟封顶，一次成功清零', () => {
+  const runtime = new AccountRuntime()
+
+  assert.equal(runtime.recordFirstBlockTimeout('ch', 'm', NOW), undefined)
+  assert.equal(runtime.recordFirstBlockTimeout('ch', 'm', NOW), 60_000)
+  assert.equal(runtime.recordFirstBlockTimeout('ch', 'm', NOW), 120_000)
+  assert.equal(runtime.recordFirstBlockTimeout('ch', 'm', NOW), 240_000)
+  assert.equal(runtime.recordFirstBlockTimeout('ch', 'm', NOW), 5 * 60 * 1000)
+  assert.equal(runtime.recordFirstBlockTimeout('ch', 'm', NOW), 5 * 60 * 1000)
+
+  runtime.recordSuccess('ch', 'm', NOW)
+  assert.equal(runtime.silentChannel('ch', 'm', NOW + 1000), undefined)
+  // 计数一并清零：成功读数滑出静默窗后，下一次静默重新从 2 次起步、60s 起。
+  const later = NOW + 11 * 60 * 1000
+  assert.equal(runtime.recordFirstBlockTimeout('ch', 'm', later), undefined)
+  assert.equal(runtime.recordFirstBlockTimeout('ch', 'm', later + 1000), 60_000)
+})
+
+test('静默通道：别的模型成功不解除本模型的静默档，池子/凭据变化才整体清', () => {
+  const runtime = new AccountRuntime()
+
+  runtime.recordFirstBlockTimeout('ch', 'm1', NOW)
+  runtime.recordFirstBlockTimeout('ch', 'm1', NOW)
+  assert.notEqual(runtime.silentChannel('ch', 'm1', NOW + 1000), undefined)
+
+  runtime.recordSuccess('ch', 'm2')
+  assert.notEqual(
+    runtime.silentChannel('ch', 'm1', NOW + 1000),
+    undefined,
+    'm2 的成功不该替 m1 解除静默',
+  )
+
+  // 不带 model = 重新登录/账号增删：该账号全部模型档一起清。
+  runtime.recordSuccess('ch')
+  assert.equal(runtime.silentChannel('ch', 'm1', NOW + 1000), undefined)
+})
+

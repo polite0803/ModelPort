@@ -78,7 +78,15 @@ registry) → `adapters/<provider>.ts` → upstream; `loadbalancer.ts` picks the
   `tests/proxy/gateway-authored-text.test.ts`; retired config keys are stripped in `normalizeConfig`.
 - **Failover status policy.** 400 is terminal (capability-mismatch 400s excepted); 401-407, 404,
   409-499, 5xx and network errors switch; 408/504/524 switch but are never retried against the same
-  target. 404 switches with no cooldown; client-caused 400/404/422 never penalize an account.
+  target. 404 switches with no cooldown; client-caused 400/404/422 never penalize an account. A pack
+  machine code that says the request itself cannot be served (`INVALID_REQUEST` /
+  `UNSUPPORTED_CONTENT` / `MISSING_CREDENTIAL` / `AUTH`, `isDeterministicChannelRejection`) also stops
+  in-place retries even when the pack wrapped it in a 502; switching stays allowed.
+- **A silent single-candidate channel fails fast.** Two consecutive first-block timeouts (504 carrying
+  `FIRST_BLOCK_TIMEOUT_CODE`) with no success in 10 min arm a 60 s → 5 min window per
+  `(account, model)`; the named path then answers 503 `first_block_silent_skip` + `Retry-After`
+  without dispatching, and a success (or a channel pool/credential change) clears it. Slow-but-alive
+  channels (a success between the 504s) never trip - "slow" is not the predicate, "never succeeds" is.
 - **History trimming never empties history.** Always keep the newest non-system message;
   `messages: []` is rejected upstream as "non-empty array required". **Output cap** arrives as
   `max_tokens` or `max_completion_tokens`, folded by `normalizeOutputCap` (alias wins).

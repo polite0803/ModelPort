@@ -10,7 +10,7 @@ import { ChatCompletionRequest, ChatCompletionResponse, ProxyContext } from '../
 import type { AccountSelection, ForwardResult } from '../types'
 import { loadBalancer } from '../loadbalancer'
 import { requestForwarder } from '../forwarder'
-import { isAccountFault, isSameProviderRotationStatus, isContextOverflowError } from '../failover'
+import { isAccountFault, isSameProviderRotationStatus, isContextOverflowError, SILENT_CHANNEL_SKIP_CODE } from '../failover'
 import { autoExhaustedResponse, parseRetryAfterSeconds } from '../failover'
 import { SSEParser, extractStreamErrorFrame, streamHandler, type StreamErrorFrame } from '../stream'
 import { proxyStatusManager } from '../status'
@@ -779,7 +779,9 @@ router.post('/completions', async (ctx: Context) => {
         providerId: dead.provider.id,
         accountId: dead.account.id,
         model: request.model,
+        actualModel: dead.actualModel,
         latency,
+        data: { statusCode: mapped.status, errorCode: 'pack_not_serving' },
       })
       const rejected = rejectionEntryFromContext(ctx, mapped.status, 'pack_not_serving', message)
       rejected.client = client
@@ -1156,13 +1158,32 @@ router.post('/completions', async (ctx: Context) => {
       attemptTrace = outcome.attemptTrace
       ctx.set('X-ModelPort-Aggregate-Chain', toHeaderValue(provider.id))
     } else {
-      result = await requestForwarder.forwardChatCompletion(
-        request,
-        account,
-        provider,
-        actualModel,
-        context
-      )
+      // 静默通道快速失败：具名单候选没有下家，首块超时的代价全部落在客户端这一
+      // 次等待上。连续超时且长期没有成功的 (账号, 模型) 已被运行时判为「现在不会
+      // 开口」（判据见 `accountRuntime.recordFirstBlockTimeout`），本轮直接收口成
+      // 503 + Retry-After，而不是再陪它等 30–44s 后交回同一句超时。
+      const silent = accountRuntime.silentChannel(account.id, actualModel)
+      if (silent !== undefined) {
+        const retryAfterSeconds = Math.max(1, Math.ceil(silent.retryAfterMs / 1000))
+        const message = `渠道连续 ${silent.timeouts} 次在首块前超时、近期没有任何成功，本轮不再空等（${retryAfterSeconds}s 后再试）`
+        result = {
+          success: false,
+          status: 503,
+          error: message,
+          errorDetails: { message, code: SILENT_CHANNEL_SKIP_CODE },
+          retryAfter: String(retryAfterSeconds),
+          latency: Date.now() - startTime,
+          attempts: [],
+        }
+      } else {
+        result = await requestForwarder.forwardChatCompletion(
+          request,
+          account,
+          provider,
+          actualModel,
+          context
+        )
+      }
       const firstAttempts = result.attempts ?? []
       attemptTrace = firstAttempts
 
@@ -1294,12 +1315,21 @@ router.post('/completions', async (ctx: Context) => {
       }
       ctx.body = errorBody
 
+      // 失败行的结构化字段：消息是给人读的中文散文，机读事实（状态码、上游状态、
+      // 错误码、真实模型）单独落 `data` —— 否则「40s 没首块」与「上游 504」在
+      // 日志里只差一句话，统计脚本只能去解析散文。
       storeManager.addLog('error', `Request failed: ${message}`, {
         requestId,
         providerId: provider.id,
         accountId: account.id,
         model: request.model,
+        actualModel,
         latency,
+        data: {
+          statusCode: mapped.status,
+          ...(result.status === undefined ? {} : { upstreamStatus: result.status }),
+          ...(mapped.code === null ? {} : { errorCode: mapped.code }),
+        },
       })
 
       const userInput = extractUserInput(request.messages)

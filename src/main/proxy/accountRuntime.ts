@@ -88,6 +88,16 @@ interface ModelFlowState {
   fastFirstTokenMs?: number
   slowFirstTokenMs?: number
   firstTokenSamples: number
+  /**
+   * 连续「首块前零字节超时」次数；任何一次成功清零。与 `windowTimeouts` 的区别：
+   * 那个是 60s 窗口的拥塞读数（含首块之后的块间静默），这个是「这家到底会不会
+   * 开口」的长期事实，不随窗口滑动归零。
+   */
+  silentTimeouts: number
+  /** 最近一次真实成功（首块到达）的时间；用于「近期没有任何成功」这条窄判据。 */
+  lastSuccessAt?: number
+  /** 静默通道的快速失败窗口截止时刻（到期后放一发半开探测）。 */
+  silentUntil?: number
 }
 
 const FLOW_WINDOW_MS = 60 * 1000
@@ -139,6 +149,26 @@ const ERROR_MAX_MS = 2 * 60 * 1000
  */
 const CREDENTIAL_BASE_MS = 5 * 60 * 1000
 const CREDENTIAL_MAX_MS = 30 * 60 * 1000
+
+/**
+ * 静默通道快速失败的三个门槛（具名单候选专用）。
+ *
+ * 现网事实（11-13 17:04–17:58）：qoder 11 笔全部在 33.3s 首块超时处收尾、零成功；
+ * 与之对照的 codearts 虽然也大量 504，但**每一笔 504 之后 1–2 分钟内必有成功**
+ * （同一窗口 12 成功 / 6 超时交替）。所以「慢」不是判据，「一直没有成功」才是。
+ *
+ * - `SILENT_MIN_TIMEOUTS = 2`：一次超时可能是排队偶发；连续两次、且期间没有任何
+ *   成功，才值得认定这条 (账号, 模型) 现在不会开口。
+ * - `SILENT_QUIET_MS = 10 分钟`：成功读数比 10 分钟还旧就不算「近期」——codearts
+ *   的交替周期约 45–90s，慢账号也远短于这个窗口。
+ * - 快速失败窗口 60s 起、逐次翻倍、5 分钟封顶：到期放一发半开探测，探测成功即
+ *   解除（`recordSuccess`），再超时则翻倍。目的是把「每个回合白等 30–44s」换成
+ *   「每 1–5 分钟白等一次」，而不是把这条模型永久停掉。
+ */
+const SILENT_MIN_TIMEOUTS = 2
+const SILENT_QUIET_MS = 10 * 60 * 1000
+const SILENT_BASE_MS = 60 * 1000
+const SILENT_MAX_MS = 5 * 60 * 1000
 
 interface AccountRuntimeState {
   inFlight: number
@@ -304,19 +334,81 @@ export class AccountRuntime {
    * 反过来写就是本文件头部记的那条缺陷：同渠道别的模型成功一次，把这个模型的
    * 退避连同连击计数一起抹掉，限流就永远只是 60s 一轮。
    */
-  recordSuccess(accountId: string, model?: string): void {
+  recordSuccess(accountId: string, model?: string, now: number = Date.now()): void {
     const state = this.state(accountId)
     state.consecutiveFailures = 0
     state.coolingUntil = undefined
 
     if (model === undefined) {
       this.rateLimits.delete(accountId)
+      this.clearSilent(accountId)
       return
     }
+    // 有真实成功就意味着这条通道不是静默的；半开探测成功也走这里。
+    this.clearSilent(accountId, model, now)
+
     const tiers = this.rateLimits.get(accountId)
     if (tiers === undefined) return
     tiers.delete(model)
     if (tiers.size === 0) this.rateLimits.delete(accountId)
+  }
+
+  /**
+   * 记一次「首块前零字节超时」（渠道 30–44s 一个字节都没吐）。
+   *
+   * 只在具名单候选的流式路径上使用：那条路径没有下家可换，超时的代价全部落在
+   * 客户端的一次等待上。连续两次且近期没有任何成功 ⇒ 开一个快速失败窗口，
+   * 下一回合不再陪它等。返回窗口长度；还没到门槛时返回 `undefined`。
+   */
+  recordFirstBlockTimeout(accountId: string, model: string, now: number = Date.now()): number | undefined {
+    const flow = this.flowOf(accountId, model, now)
+    flow.silentTimeouts += 1
+    if (flow.silentTimeouts < SILENT_MIN_TIMEOUTS) return undefined
+    const quiet = flow.lastSuccessAt === undefined || now - flow.lastSuccessAt >= SILENT_QUIET_MS
+    if (!quiet) return undefined
+    const ttl = Math.min(
+      SILENT_MAX_MS,
+      SILENT_BASE_MS * 2 ** (flow.silentTimeouts - SILENT_MIN_TIMEOUTS),
+    )
+    flow.silentUntil = now + ttl
+    return ttl
+  }
+
+  /**
+   * 这条 (账号, 模型) 是否处于静默通道的快速失败窗口。到期即摘掉窗口，让请求
+   * 照常发出去做半开探测 —— 判据不自己决定「永久停用」，那是账号停用的语义。
+   */
+  silentChannel(
+    accountId: string,
+    model: string,
+    now: number = Date.now(),
+  ): { retryAfterMs: number; timeouts: number } | undefined {
+    const flow = this.flows.get(this.flowKey(accountId, model))
+    if (flow === undefined || flow.silentUntil === undefined) return undefined
+    if (flow.silentUntil <= now) {
+      flow.silentUntil = undefined
+      return undefined
+    }
+    return { retryAfterMs: flow.silentUntil - now, timeouts: flow.silentTimeouts }
+  }
+
+  /** 不带 `model` = 池子/凭据变了（重新登录、账号增删），清该账号全部静默档。 */
+  private clearSilent(accountId: string, model?: string, now: number = Date.now()): void {
+    if (model !== undefined) {
+      // 用 flowOf 而不是 get：成功可能发生在这一档还没有任何流控记录之前，
+      // 而「最近成功时刻」本身就是要记下的事实（没有它就无法区分慢账号与死账号）。
+      const flow = this.flowOf(accountId, model, now)
+      flow.silentTimeouts = 0
+      flow.silentUntil = undefined
+      flow.lastSuccessAt = now
+      return
+    }
+    const prefix = `${accountId}\u0000`
+    for (const [key, flow] of this.flows) {
+      if (!key.startsWith(prefix)) continue
+      flow.silentTimeouts = 0
+      flow.silentUntil = undefined
+    }
   }
 
   /**
@@ -429,6 +521,7 @@ export class AccountRuntime {
         windowTimeouts: 0,
         windowDegraded: 0,
         firstTokenSamples: 0,
+        silentTimeouts: 0,
       }
       this.flows.set(key, flow)
     } else {

@@ -150,10 +150,12 @@ import { conversationKey } from './autoRouting.ts'
 // 再导出，chat 路由的既有 import 路径不变。
 import {
   AUTO_WALL_CLOCK_BUDGET_MS,
+  FIRST_BLOCK_TIMEOUT_CODE,
   createIdleWatchdog,
   describeAttemptFailure,
   firstStreamEvent,
   isChannelHumanRequiredFailure,
+  isDeterministicChannelRejection,
   isChannelModelUnavailableError,
   isContextOverflowError,
   isFailoverEligibleStatus,
@@ -622,6 +624,14 @@ export class RequestForwarder {
           clientAborted: request.signal?.aborted === true,
           degraded: false,
         })
+        // 静默通道的长期读数只数「首块前零字节超时」：块间静默（首块之后的
+        // 504）说明这家会开口，只是中途卡住，那是另一类故障。
+        if (
+          result.status === 504
+          && result.errorDetails?.code === FIRST_BLOCK_TIMEOUT_CODE
+        ) {
+          accountRuntime.recordFirstBlockTimeout(account.id, actualModel)
+        }
       }
 
       attempts.push(attemptTraceOf({
@@ -655,6 +665,13 @@ export class RequestForwarder {
       // 好」，而是「要人来处理」（重新登录 / 补 Key / 换出口 IP）。重试等于把同一
       // 笔等待再付一遍 —— 宿主截止时间 60s 时，一次多余重试就是把 60s 变成 120s。
       if (isChannelHumanRequiredFailure(result.error)) {
+        break
+      }
+
+      // 渠道包已经用机读码说明「这笔请求按现在这个样子不能服务」：状态码被它
+      // 兜成 502，按状态码判会白打一发（comate 每笔重试都要重建会话与任务）。
+      // 只停原地重试；换下一家的合法性不变。
+      if (isDeterministicChannelRejection(result.errorDetails?.code)) {
         break
       }
     }
@@ -1163,7 +1180,9 @@ export class RequestForwarder {
           success: false,
           status: 504,
           error: timeoutMessage,
-          errorDetails: errorDetailsOf(timeoutMessage),
+          // 机读码：这一笔的失败事实是「首块前零字节超时」，不是泛化的 504。
+          // 日志行、客户端错误体与静默通道判定都按它识别，别再从中文文案里猜。
+          errorDetails: { message: timeoutMessage, code: FIRST_BLOCK_TIMEOUT_CODE },
           latency: Date.now() - startTime,
         }
       }

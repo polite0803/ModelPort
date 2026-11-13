@@ -44,6 +44,7 @@ import {
   isChannelHumanRequiredFailure,
   isChannelRiskControlFailure,
   isChannelModelUnavailableError,
+  isDeterministicChannelRejection,
   isFailoverEligibleStatus,
   isSameProviderRotationStatus,
   isForcedToolChoiceUnsupported,
@@ -427,6 +428,37 @@ test('forwarder 的换家判据必须接上：超限 400 参与换家，普通 4
   assert.equal(isSameTargetRetryableStatus(429), false)
   assert.equal(isSameTargetRetryableStatus(502), true)
   assert.equal(isSameTargetRetryableStatus(undefined), true)
+})
+
+/**
+ * 渠道包的机读码里「同一目标再发一次必然原样再被拒」的那一批（2026-11-13 comate）。
+ *
+ * 包把这些拒绝兜成 502，按状态码判会白打一发：comate 每笔都要重新建会话与任务。
+ * 判据只看包自己的大写码，聚合/自定义上游的业务码不在其中。
+ */
+test('确定性渠道拒绝码停原地重试、仍允许换一家', () => {
+  assert.equal(isDeterministicChannelRejection('INVALID_REQUEST'), true)
+  assert.equal(isDeterministicChannelRejection('UNSUPPORTED_CONTENT'), true)
+  assert.equal(isDeterministicChannelRejection('MISSING_CREDENTIAL'), true)
+  assert.equal(isDeterministicChannelRejection('AUTH'), true)
+
+  // 排队/额度/传输类不是「请求本身不能服务」：仍按各自路径处理（429 走限流档，
+  // 传输类属于同目标可重试）。
+  assert.equal(isDeterministicChannelRejection('QUOTA_EXCEEDED'), false)
+  assert.equal(isDeterministicChannelRejection('RATE_LIMIT'), false)
+  assert.equal(isDeterministicChannelRejection('TRANSPORT'), false)
+  assert.equal(isDeterministicChannelRejection(undefined), false)
+
+  // 换家判定不受影响：502/429 仍可换下一家。
+  assert.equal(isFailoverEligibleStatus(502), true)
+
+  // 接线：502 能通过状态码那一关，所以循环里必须再看这个码并 break，
+  // 否则同一笔请求会被原地重打一次。
+  assert.match(
+    forwarderSource,
+    /if \(isDeterministicChannelRejection\(result\.errorDetails\?\.code\)\) \{\s*break/,
+    'retry loop must stop in-place retries on deterministic channel rejections',
+  )
 })
 
 test('账号记账只收渠道级故障：客户端 400/404/422 不把健康账号打进失败池', () => {

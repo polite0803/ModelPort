@@ -462,6 +462,42 @@ export function isSameTargetRetryableStatus(status?: number): boolean {
 }
 
 /**
+ * 网关自己产出的两个机读错误码，`errorDetails.code` 上生效（不是上游给的）。
+ *
+ * 有了码，三类消费点才不用猜中文散文：`attempts[]`/请求行的 `errorCode`、
+ * 客户端的错误体、以及「静默通道」快速失败的同源判定。
+ */
+/** 渠道在首块前零字节超时（30–44s 没开口）。 */
+export const FIRST_BLOCK_TIMEOUT_CODE = 'first_block_timeout'
+/** 静默通道快速失败：本轮根本没发出去（尚未探测过的那一档）。 */
+export const SILENT_CHANNEL_SKIP_CODE = 'first_block_silent_skip'
+
+/**
+ * 渠道包的机读码里，**同一目标再发一次一定原样再被拒**的那一批。
+ *
+ * 这些码描述的是「这笔请求按现在这个样子不能服务」或「这个凭据不能用」，
+ * 与排队/拥塞无关：`isSameTargetRetryableStatus` 只看状态码，所以包把它们
+ * 兜成 502 之后，宿主会白打第二发（comate 2026-11-13：`INVALID_REQUEST`
+ * 每笔多打一次，每次都重新建会话/任务）。重试仍然是「换一家」的合法动作，
+ * 所以只停原地重试，不改状态码、不改换家判定。
+ *
+ * ⚠️ 只认渠道包自己的大写码。聚合/自定义上游的业务码（`invalid_request_error`
+ * 等）不在此列：那一路的 4xx 本来就不会在原地重试。
+ */
+const DETERMINISTIC_CHANNEL_REJECTION_CODES = new Set([
+  'INVALID_REQUEST',
+  'UNSUPPORTED_CONTENT',
+  'MISSING_CREDENTIAL',
+  'AUTH',
+])
+
+export function isDeterministicChannelRejection(
+  code: string | number | null | undefined,
+): boolean {
+  return typeof code === 'string' && DETERMINISTIC_CHANNEL_REJECTION_CODES.has(code)
+}
+
+/**
  * 这次失败是否该记到**账号**头上。
  *
  * 旧实现（`chat.ts`）对任何 `>=400` 都 `markAccountFailed`：客户端自己写错一个
