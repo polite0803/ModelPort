@@ -88,7 +88,11 @@ docker volume create modelport-data
 # 一次性初始化：非回环监听 + API Key + 管理口令，打印 MODELPORT_HANDSHAKE 一行
 docker run --rm -v modelport-data:/data modelport-daemon:<ver> --init-host --port 8080
 
-# 常驻；宿主 8080 被占时换映射（如 -p 18080:8080）
+# 常驻；宿主发布端口与容器监听端口保持相同（恒等映射）。
+# 宿主 8080 被占时，把监听端口改成同一个空闲端口（--init-host --port 18080，
+# 或管理 RPC config:update proxyPort），再 -p 18080:18080。不要做 18080:8080 这类
+# 非恒等映射：控制台「监听端口」显示的是网关进程自己的端口，非恒等映射会让它
+# 与客户端可达端口不一致（235 首装踩过，界面显示 8080 而可达的是 18080）。
 docker run -d --name modelport --restart unless-stopped \
   -p 8080:8080 -p 8443:8443 -v modelport-data:/data modelport-daemon:<ver>
 ```
