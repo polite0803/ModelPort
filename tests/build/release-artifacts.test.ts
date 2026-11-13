@@ -94,6 +94,22 @@ test('the artifacts match the place the updater looks for them', () => {
   )
 })
 
+test('the Docker image is built from the staged tree and verified like every other asset', () => {
+  assert.ok(release.includes('name: Package and upload the Docker image'), 'the image needs its own upload step')
+  assert.ok(release.includes('npm run build:docker'))
+  const verify = release.slice(release.indexOf('Every asset the console consumes is published'))
+  for (const arch of ['x64', 'arm64']) {
+    assert.ok(
+      verify.includes(`modelport-daemon-$ver-docker-${arch}.tar.gz`),
+      `verify must require the docker ${arch} asset`,
+    )
+  }
+  const dockerfile = readFileSync('docker/Dockerfile', 'utf8')
+  assert.ok(dockerfile.includes('FROM node:24-slim'), 'the base image tracks .nvmrc')
+  assert.ok(dockerfile.includes('VOLUME /data'), 'data persists outside the container layer')
+  assert.equal(pkg.scripts['build:docker'], 'node scripts/build-docker.mjs')
+})
+
 test('the new feature doc and plan are registered in the index', () => {
   assert.ok(existsSync('docs/features/wsl-daemon.md'), 'the WSL/headless behaviour must be documented')
   const index = readFileSync('docs/README.md', 'utf8')

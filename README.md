@@ -100,6 +100,7 @@ Download the latest release from [GitHub Releases](https://github.com/polite0803
 | Linux (x64) | `ModelPort-<version>-x64.AppImage`, `.deb`, or `.tar.gz` |
 | Linux (arm64) | `ModelPort-<version>-arm64.AppImage` |
 | WSL / headless Linux | `modelport-daemon-<version>-<arch>.tar.gz` |
+| Docker | `modelport-daemon-<version>-docker-<arch>.tar.gz` (`docker load` ready) |
 
 The installer is a **console**, not just a gateway. It runs the gateway on this machine
 (local mode), installs and upgrades one inside WSL, or connects to a gateway on another
@@ -179,6 +180,7 @@ unencrypted and a warning is logged, so restrict access to `~/.modelport/` in th
 | Windows | x64, arm64 | NSIS installer, portable executable |
 | Linux | x64, arm64 | AppImage; x64 also `.deb` and `.tar.gz` |
 | WSL / headless Linux | x64, arm64 | `modelport-daemon-<ver>-<arch>.tar.gz`: the gateway without Electron (bundle + resources + UI + a systemd unit template) |
+| Docker | x64, arm64 | `modelport-daemon-<ver>-docker-<arch>.tar.gz`: the same daemon on `node:24-slim`, `docker load` ready; data persists in a named volume |
 | Gateway modes | Windows: local, WSL, remote; macOS/Linux: local, remote | The console starts a windowless local gateway, installs one inside WSL, or connects to a remote gateway. A WSL/headless host runs the daemon tarball instead of the console. |
 
 ## Development and verification
@@ -190,6 +192,7 @@ npm run build:mac          # dmg only
 npm run build:win          # NSIS + portable
 npm run build:linux        # AppImage, deb, tar.gz
 npm run build:daemon       # headless Node bundle (out/daemon) + dist/modelport-daemon-<ver>-<arch>.tar.gz
+npm run build:docker       # Docker image tarball from the staged daemon tree (needs a Docker daemon)
 ```
 
 Windows installers are packaged by CI, not locally: to write the uninstaller, electron-builder

@@ -203,7 +203,7 @@ test('atom 只取第一条 entry 的 tag，正文里的旧 tag 链接不算数',
   assert.equal(parseLatestTagFromAtom('<entry><link href="https://github.com/polite0803/ModelPort/releases"/></entry>'), null)
 })
 
-test('按 tag 合成的发布与实际下载地址同形：四个资产各带 .sha256', () => {
+test('按 tag 合成的发布与实际下载地址同形：六个资产各带 .sha256', () => {
   const release = releaseFromTag('v1.8.11')
   assert.equal(release.version, '1.8.11')
   assert.equal(release.tag, 'v1.8.11')

@@ -75,6 +75,7 @@
 | [`plan/PLAN-wsl-headless-daemon-and-shell.md`](plan/PLAN-wsl-headless-daemon-and-shell.md) | WSL 无头守护进程、管理面走网络与 Windows 原生壳的四阶段改造 | v1.8.0 | 实施中 | 2026-11-05 |
 | [`plan/PLAN-shell-three-modes.md`](plan/PLAN-shell-three-modes.md) | 控制台三形态（本地 / WSL / 远程）与网关按需安装；取消主应用发布形态 | v1.8.0 | 实施中 | 2026-11-07 |
 | [`plan/PLAN-prompt-cache.md`](plan/PLAN-prompt-cache.md) | Prompt 缓存命中：DeepSeek 优先（亲和 + 缓存优先压缩）、Anthropic 显式断点、按模型缓存仪表盘与压缩净收益门 | v1.7.9 | 实施中 | 2026-11-08 |
+| [`plan/PLAN-docker-release-and-235-deploy.md`](plan/PLAN-docker-release-and-235-deploy.md) | Docker 发布形态（镜像 tar.gz 资产 + CI + 部署指南）与 192.168.0.235 容器部署 | v1.8.12 | 实施中 | 2026-11-14 |
 | [`plan/2026-05-26-in-app-update.md`](plan/2026-05-26-in-app-update.md) | 应用内更新的任务拆解与测试计划 | v1.3.0 | 历史记录 | 2026-05-26 |
 | [`plan/2026-05-27-modelport-tool-testing-skills.md`](plan/2026-05-27-modelport-tool-testing-skills.md) | 工具调用测试技能集的目录、脚本与验收计划 | v1.3.0 | 历史记录 | 2026-05-27 |
 

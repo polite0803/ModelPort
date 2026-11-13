@@ -184,6 +184,28 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Docker 镜像：与 daemon tarball 同一份 staged 树，基础镜像 node:24-slim。
+      # 资产是 `docker save` 的 tar.gz（docker load 即用），不推 registry；
+      # build:docker 已写同名 .sha256，这里只上传。
+      - name: Package and upload the Docker image
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          DAEMON_ARCH="${{ matrix.arch }}" npm run build:docker
+          file=$(ls dist/modelport-daemon-*-docker-${{ matrix.arch }}.tar.gz | head -n 1)
+          test -n "$file"
+          for attempt in 1 2 3; do
+            if gh release upload "${{ github.ref_name }}" "$file" "$file.sha256" --clobber; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::uploading $file failed after 3 attempts"
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       # 安装包本体 + 同名校验文件：控制台的在线升级要求 `<asset>.sha256`，缺了会拒绝安装。
       # daemon tarball 由上一行单独上传，这一步的 find 明确排除它，避免同一资产传两次。
       - name: Upload installers with checksums
@@ -255,7 +277,9 @@ jobs:
           for name in \
             "ModelPort-$ver-x64-setup.exe" \
             "modelport-daemon-$ver-x64.tar.gz" \
-            "modelport-daemon-$ver-arm64.tar.gz"; do
+            "modelport-daemon-$ver-arm64.tar.gz" \
+            "modelport-daemon-$ver-docker-x64.tar.gz" \
+            "modelport-daemon-$ver-docker-arm64.tar.gz"; do
             for suffix in "" ".sha256"; do
               if ! grep -qxF -- "$name$suffix" <<< "$names"; then
                 missing+=("$name$suffix")

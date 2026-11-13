@@ -221,7 +221,8 @@ registry) → `adapters/<provider>.ts` → upstream; `loadbalancer.ts` picks the
   engine (`stageBackupFile`); export has no headless entry. Management secret: browser
   `sessionStorage`, or `secrets.json` 0600 per origin sealed by the console - which refuses to write
   with no keystore (`gateways.json` stays credential-free).
-- One installer per platform plus `dist/modelport-daemon-<ver>-<arch>.tar.gz`; the console is a thin
+- One installer per platform plus `dist/modelport-daemon-<ver>-<arch>.tar.gz` and a Docker image
+  tarball (`modelport-daemon-<ver>-docker-<arch>.tar.gz`, `docker load` ready); the console is a thin
   argv orchestrator (dynamic imports only - `tests/build/shell-entries.test.ts`), no `latest.yml` is
   published (updates use release assets + `.sha256`), and headless persistence needs a
   **system-scope** unit (`systemctl --user` dies with the login session). The update check reads

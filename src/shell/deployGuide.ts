@@ -57,11 +57,50 @@ function commandsBlock(release: ReleaseInfo): string {
   return `<h2>部署命令</h2><pre>${escapeHtml(script)}</pre>`
 }
 
+function dockerCommandsBlock(release: ReleaseInfo): string {
+  const name = `modelport-daemon-${release.version}-docker-x64.tar.gz`
+  const pair = selectAsset(release, name)
+  if (!pair) return ''
+  const tag = `modelport-daemon:${release.version}`
+  const script = [
+    '# 在远程主机上执行（需要 Docker；arm64 机器把两处 x64 换成 arm64）',
+    `curl -fLO ${pair.url}`,
+    `curl -fLO ${pair.checksumUrl}`,
+    `sha256sum -c ${name}.sha256`,
+    `docker load -i ${name}`,
+    'docker volume create modelport-data',
+    '',
+    '# 一次性初始化：非回环监听 + API Key + 管理口令；记下打印的 MODELPORT_HANDSHAKE 一行',
+    `docker run --rm -v modelport-data:/data ${tag} --init-host --port 8080`,
+    '',
+    '# 常驻；宿主 8080 被占时换映射（如 -p 18080:8080）。数据在卷里，升级重建容器不丢',
+    'docker run -d --name modelport --restart unless-stopped \\',
+    `  -p 8080:8080 -p 8443:8443 -v modelport-data:/data ${tag}`,
+  ].join('\n')
+  return `<pre>${escapeHtml(script)}</pre>`
+}
+
+function dockerSection(release: ReleaseInfo): string {
+  const names = (['x64', 'arm64'] as const).map(arch => `modelport-daemon-${release.version}-docker-${arch}.tar.gz`)
+  // Releases before the Docker form carry no such asset at all: say so instead of
+  // printing two "undeployable" lines for an artifact that was never shipped.
+  if (!names.some(name => release.assets.some(asset => asset.name === name))) {
+    return '<h2>Docker 部署</h2><p class="hint">这个发布没有 Docker 镜像资产，请用上面的 systemd 路径。</p>'
+  }
+  const links = names.map(name => {
+    const pair = selectAsset(release, name)
+    if (!pair) return `<li>${escapeHtml(name)}：缺资产或 .sha256，不能部署。</li>`
+    return `<li><a href="${escapeHtml(pair.url)}">${escapeHtml(pair.name)}</a>` +
+      `（<a href="${escapeHtml(pair.checksumUrl)}">SHA-256</a>）</li>`
+  }).join('')
+  return `<h2>Docker 部署（替代 systemd）</h2><ul>${links}</ul>${dockerCommandsBlock(release)}`
+}
+
 export function deployGuideHtml(input: DeployGuideInput): string {
   const release = input.release
   const downloads = release
     ? `<h2>下载（版本 ${escapeHtml(release.version)}）</h2><ul>${assetLinks(release, 'x64')}${assetLinks(release, 'arm64')}</ul>` +
-      commandsBlock(release)
+      commandsBlock(release) + dockerSection(release)
     : `<p style="color:#f87171">读取发布失败${input.error ? `：${escapeHtml(input.error)}` : ''}。` +
       `可直接到 <a href="${RELEASES_PAGE}">Release 页面</a>下载 modelport-daemon-&lt;版本&gt;-&lt;架构&gt;.tar.gz 与同名 .sha256。</p>`
   const html = `<!doctype html><meta charset="utf-8"><title>部署指南</title>
@@ -85,6 +124,7 @@ ${downloads}
   <li>常驻必须用 system 作用域单元并 <code>enable</code>：<code>--user</code> 单元会随登录会话结束。</li>
   <li>防火墙放行监听端口；控制台所在机器要能访问它。</li>
   <li>缺 <code>.sha256</code> 的包不要装：校验只防传输损坏，发布物没有代码签名。</li>
+  <li>Docker 形态的数据在命名卷 <code>modelport-data</code> 里；升级 = <code>docker load</code> 新镜像后重建容器，卷不动。</li>
   <li>WSL 主机不用手动做这些：新增网关时选 WSL，控制台会自动安装。</li>
 </ul>`
   return html

@@ -90,6 +90,7 @@ Base URL 含 `{placeholders}` 的条目（Azure、Vertex）必须先覆盖端点
 | Linux（x64） | `ModelPort-<version>-x64.AppImage`、`.deb` 或 `.tar.gz` |
 | Linux（arm64） | `ModelPort-<version>-arm64.AppImage` |
 | WSL / 无头 Linux | `modelport-daemon-<version>-<arch>.tar.gz` |
+| Docker | `modelport-daemon-<version>-docker-<arch>.tar.gz`（`docker load` 即用） |
 
 安装包是一个**控制台**，不只是网关：它可以在这台机器上运行网关（本地形态）、在 WSL
 里安装并升级网关（WSL 形态），或者连接另一台机器上的网关（远程形态）。本地与 WSL

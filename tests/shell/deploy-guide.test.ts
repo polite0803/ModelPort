@@ -4,13 +4,20 @@ import assert from 'node:assert/strict'
 import { deployGuideHtml } from '../../src/shell/deployGuide.ts'
 import { parseRelease, type ReleaseInfo } from '../../src/shell/updatePlan.ts'
 
-function releaseFixture(options: { checksums?: boolean } = {}): ReleaseInfo {
+function releaseFixture(options: { checksums?: boolean; docker?: boolean } = {}): ReleaseInfo {
   const assets: { name: string; browser_download_url: string; size: number }[] = []
   for (const arch of ['x64', 'arm64']) {
     const name = `modelport-daemon-1.7.6-${arch}.tar.gz`
     assets.push({ name, browser_download_url: `https://downloads.example.com/${name}`, size: 1024 })
     if (options.checksums !== false) {
       assets.push({ name: `${name}.sha256`, browser_download_url: `https://downloads.example.com/${name}.sha256`, size: 80 })
+    }
+    if (options.docker !== false) {
+      const dockerName = `modelport-daemon-1.7.6-docker-${arch}.tar.gz`
+      assets.push({ name: dockerName, browser_download_url: `https://downloads.example.com/${dockerName}`, size: 2048 })
+      if (options.checksums !== false) {
+        assets.push({ name: `${dockerName}.sha256`, browser_download_url: `https://downloads.example.com/${dockerName}.sha256`, size: 80 })
+      }
     }
   }
   return parseRelease({
@@ -32,6 +39,24 @@ test('the guide hands over both architectures, their checksums and the full comm
   assert.ok(html.includes('systemctl enable modelport'))
   assert.ok(html.includes('--init-host --port 8080'))
   assert.ok(html.includes('MODELPORT_HANDSHAKE'))
+  assert.ok(html.includes('https://downloads.example.com/modelport-daemon-1.7.6-docker-x64.tar.gz'))
+  assert.ok(html.includes('modelport-daemon-1.7.6-docker-arm64.tar.gz.sha256'))
+  assert.ok(html.includes('docker load -i modelport-daemon-1.7.6-docker-x64.tar.gz'))
+  assert.ok(html.includes('docker volume create modelport-data'))
+  assert.ok(html.includes('docker run --rm -v modelport-data:/data modelport-daemon:1.7.6 --init-host --port 8080'))
+  assert.ok(html.includes('--restart unless-stopped'))
+})
+
+test('a release without Docker assets points at the systemd path instead', () => {
+  const html = deployGuideHtml({ name: 'g', url: 'https://gw.example.com', release: releaseFixture({ docker: false }) })
+  assert.ok(html.includes('这个发布没有 Docker 镜像资产'))
+  assert.equal(html.includes('docker load -i'), false)
+})
+
+test('Docker artifacts without checksums are named as undeployable, with no docker commands', () => {
+  const html = deployGuideHtml({ name: 'g', url: 'https://gw.example.com', release: releaseFixture({ checksums: false }) })
+  assert.ok(html.includes('modelport-daemon-1.7.6-docker-x64.tar.gz：缺资产或 .sha256，不能部署'))
+  assert.equal(html.includes('docker load -i'), false)
 })
 
 test('entry text is HTML-escaped, never interpolated raw', () => {

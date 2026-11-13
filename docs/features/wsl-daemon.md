@@ -13,6 +13,7 @@
 | 本地 | 本机 `ModelPort --gateway` 子进程（同一二进制、无窗口） | 控制台首启 `--init-local`：建数据目录、写管理口令、起监听 | 控制台窗口 `loadURL` 到 `http://127.0.0.1:<port>/ui/` |
 | WSL | WSL 内 systemd（`modelport-daemon-<ver>-<arch>.tar.gz`） | 控制台探测到不存在时全自动安装（含 Node），见下节 | 同上（NAT localhost forwarding） |
 | 远程 | 另一台主机 | **控制台不安装**，只连接；面板行的「部署指南」给出 daemon 包 + `.sha256` 与部署命令 | 同上，地址由用户填写 |
+| Docker | 有 Docker 的主机上的容器 | **控制台不安装**，只连接；「部署指南」给出镜像包 + `.sha256` 与 `docker load`/`run` 命令 | 同上 |
 
 控制台本体是 `src/shell/main.ts`；本地网关入口是 `src/main/gateway/entry.ts`（Electron 无窗口，
 因为 `store.key` 由 `safeStorage` 封装，纯 Node 宿主没有密钥库）。WSL 与 headless Linux 用
@@ -70,6 +71,35 @@ sudo systemctl enable --now modelport
 `systemctl --user` 的单元会跟着启动它的那次登录会话一起结束；而发行版本身会在最后一个
 WSL 客户端退出后被回收（`wsl -l --running` 能看到「没有正在运行的分发」）。两者叠加的结果
 是「服务昨天还在，今天连不上」。`enable` 之后 `wsl --shutdown` 冷启动回来会自己起来。
+
+## Docker 部署
+
+与 systemd 形态同一份 daemon，只是跑在容器里。发布资产
+`modelport-daemon-<ver>-docker-<arch>.tar.gz` 是 `docker save` 导出的镜像归档
+（基础镜像 `node:24-slim`，与 `.nvmrc` 同基线），`docker load` 即用，不依赖 registry。
+镜像由 `npm run build:docker` 构建（消费 `build:daemon` 的 staged 树，构建机要有
+Docker daemon；CI 在 ubuntu runner 上构建并上传，WSL 开发机没有 docker 时该脚本明确报错）。
+
+```bash
+sha256sum -c modelport-daemon-<ver>-docker-x64.tar.gz.sha256
+docker load -i modelport-daemon-<ver>-docker-x64.tar.gz
+docker volume create modelport-data
+
+# 一次性初始化：非回环监听 + API Key + 管理口令，打印 MODELPORT_HANDSHAKE 一行
+docker run --rm -v modelport-data:/data modelport-daemon:<ver> --init-host --port 8080
+
+# 常驻；宿主 8080 被占时换映射（如 -p 18080:8080）
+docker run -d --name modelport --restart unless-stopped \
+  -p 8080:8080 -p 8443:8443 -v modelport-data:/data modelport-daemon:<ver>
+```
+
+- **数据在卷里**：daemon 的数据目录跟 `homedir()`，容器里 `HOME=/data`，于是
+  `data.json`、TLS 证书、ccr、日志全落在 `/data/.modelport`。命名卷升级重建容器不丢数据；
+  换 bind mount 要先 `chown 1000:1000`（容器以 node 用户运行）。
+- **升级** = `docker load` 新镜像 → `docker stop modelport && docker rm modelport` →
+  用新 tag 重跑上面的常驻命令；卷不动。控制台不自动安装/升级 Docker 形态（与远程同档）。
+- 管理口令在 `--init-host` 打印的 `MODELPORT_HANDSHAKE` 行里；重跑 init 会再打印同一行
+  （只补缺失项，不覆盖已有 Key 与口令）。
 
 ## WSL 首装（控制台自动，v1.7.6 起）
 

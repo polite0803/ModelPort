@@ -81,13 +81,15 @@ const RELEASE_PAGE_BASE = 'https://github.com/polite0803/ModelPort/releases/tag'
 const RELEASE_DOWNLOAD_BASE = 'https://github.com/polite0803/ModelPort/releases/download'
 
 /**
- * 一次发布里控制台会消费的四个资产。名字是**约定**，不是读出来的：发布工作流按这个
- * 形状上传，CI 末尾的 verify 步骤校验这四个名字都在。
+ * 一次发布按约定上传的资产名（不是读出来的）：发布工作流按这个形状上传，CI 末尾的
+ * verify 步骤校验控制台消费的那几对都在。更新器只装 shell + daemon 两对；Docker 镜像
+ * 那对由远程「部署指南」链接，是手动部署形态，不进自动安装。
  */
 export function releaseAssetNames(version: string): string[] {
   return ['x64', 'arm64'].flatMap(arch => [
     `ModelPort-${version}-${arch}-setup.exe`,
     `modelport-daemon-${version}-${arch}.tar.gz`,
+    `modelport-daemon-${version}-docker-${arch}.tar.gz`,
   ])
 }
 
