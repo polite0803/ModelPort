@@ -6,6 +6,7 @@ import ErrorBoundary from './components/ErrorBoundary'
 import ConnectGate from './components/ConnectGate'
 import { ThemeProvider } from './components/ThemeProvider'
 import { installHeadlessApi } from './api/headless'
+import { subscribeConfigMirror } from './stores/proxyStore'
 import './i18n'
 import './index.css'
 
@@ -13,6 +14,8 @@ import './index.css'
 // a headless daemon (WSL) gets the same object over HTTP + SSE instead. Must happen
 // before anything calls into it.
 const isRemoteGateway = installHeadlessApi()
+// 远程页的 electronAPI 刚装好：模块顶层那次订阅在远程页被跳过，这里补上。
+subscribeConfigMirror()
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

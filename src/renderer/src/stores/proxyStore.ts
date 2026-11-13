@@ -273,13 +273,23 @@ export const useProxyStore = create<ProxyState>((set, get) => ({
 // 挂载那一刻的整份镜像去写 `store:set('config')`。主进程的 `setConfig` 如今把 routes 键
 // 收归专用通道（盘上现表说了算），本订阅再把其余字段也对齐盘上真值：陈旧镜像既删不掉
 // 路由，也不会再把别的配置写回旧值。载荷是主进程归一后的完整 AppConfig，与盘上同形。
-if (typeof window !== 'undefined') {
-  window.electronAPI?.config?.onConfigChanged?.((config) => {
+//
+// 远程页的 `electronAPI` 由 installHeadlessApi() 在 main.tsx 里安装，晚于本模块求值：
+// 模块顶层订阅在远程页会被静默跳过，镜像永远停在挂载值。故订阅做成可重入函数，
+// 桌面（preload 先于模块存在）在顶层调一次，远程在安装后再调一次。
+let configMirrorSubscribed = false
+export function subscribeConfigMirror(): void {
+  if (configMirrorSubscribed || typeof window === 'undefined') return
+  const api = window.electronAPI?.config
+  if (!api?.onConfigChanged) return
+  configMirrorSubscribed = true
+  api.onConfigChanged((config) => {
     useProxyStore.setState({
       appConfig: config,
       proxyConfig: proxyConfigFromAppConfig(config),
     })
   })
 }
+subscribeConfigMirror()
 
 export default useProxyStore
