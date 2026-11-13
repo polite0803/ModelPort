@@ -74,3 +74,13 @@
   8443 才监听（文档「默认值」表已列 httpsPort，此处补记开关事实）。
 - 探活（Windows 侧）：HTTP 18080 /health、/v1/models（带 Key）、管理 RPC 带口令 200 / 无口令 401、
   HTTPS 8443 /health 全通。
+- 端口对齐（用户反馈「界面仍显示 8080」）：根因是首装用了非恒等映射 `-p 18080:8080`，界面读的是
+  网关进程自己的监听端口。经 RPC `config:update proxyPort=18080` + 重建容器 `-p 18080:18080`
+  对齐；手册与页内部署指南改教恒等映射（宿主端口被占 ⇒ 监听端口改同一个空闲端口）。
+- ConnectGate 中文（用户反馈「这个页面没有中文」）：store 默认语言硬编码 en-US 覆盖浏览器检测 ⇒
+  改跟随 `i18n.language`；登录前加 中文/English 切换（只写本地偏好，不碰网关配置）。
+- 数据刷新不彻底（用户反馈）：先疑 SSE 登录前 401 死流，235 实测证伪（window 标记排除重载、
+  RPC 改配置表单跟新 ⇒ 流活着），headless.ts 该轮改动撤回。真缺陷：proxyStore 的
+  CONFIG_CHANGED 镜像订阅在模块顶层，远程页 electronAPI 安装晚于模块求值 ⇒ 订阅被跳过，
+  表单等 appConfig 派生面冻结在挂载值。订阅改可重入 subscribeConfigMirror()，main.tsx
+  安装后补调。切换特有的残余陈旧面待用户截图定位。
