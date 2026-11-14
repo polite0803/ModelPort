@@ -26,7 +26,7 @@ const UPSTREAM_PORT = 18972
 type Payload = Record<string, any>
 
 let seenBodies: Payload[] = []
-let upstreamMode: 'ok' | 'stream' | 'tool' | 'patch' = 'ok'
+let upstreamMode: 'ok' | 'stream' | 'tool' | 'patch' | 'error' = 'ok'
 
 const upstream = createServer((req, res) => {
   const chunks: Buffer[] = []
@@ -34,6 +34,12 @@ const upstream = createServer((req, res) => {
   req.on('end', () => {
     const body = JSON.parse(Buffer.concat(chunks).toString('utf-8')) as Payload
     seenBodies.push(body)
+
+    if (upstreamMode === 'error') {
+      res.writeHead(502, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: { message: 'upstream exploded', type: 'api_error', param: null, code: null } }))
+      return
+    }
 
     if (upstreamMode === 'stream') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream' })
@@ -381,6 +387,40 @@ test('previous_response_id 点名拒绝，并且这条拒绝进请求日志', as
   assert.equal(logged.length, 1, '到不了供应商的拒绝必须留痕，否则面板读作「无流量」')
   assert.equal(logged[0].statusCode, 400)
   assert.equal(logged[0].model, 'auto')
+  assert.equal(logged[0].requestId, response.headers['x-request-id'], '拒绝行必须带响应头那把 id，否则客户端拿着 id 查不到')
+})
+
+test('上游报错：错误体里的 request_id 是有日志行的那把，不是认领前的外层 id', async () => {
+  upstreamMode = 'error'
+  const response = await proxy.request('POST', '/v1/responses', { body: responsesBody('Test-Model') })
+
+  assert.equal(response.status, 502)
+  const headerId = response.headers['x-request-id'] ?? ''
+  assert.match(headerId, /^chatcmpl-/, '日志行归回环那笔 chat，响应头必须是它的 id')
+  const ids = [...response.json.error.message.matchAll(/\[request_id: ([^\]]+)\]/g)].map(m => m[1])
+  assert.deepEqual(ids, [headerId], '错误体里的 id 必须唯一且等于响应头那把')
+  const row = await findLogRow(entry => entry.requestId === headerId)
+  assert.ok(row, '客户端引用的 id 必须在请求日志里查得到')
+  assert.equal(row.statusCode, 502)
+})
+
+test('回环不可达：本入口自己的 502 也落日志行，行 id 就是响应头那把', async () => {
+  const live = sm.getConfig()
+  sm.setConfig({ ...live, proxyPort: 18999 })
+  try {
+    const response = await proxy.request('POST', '/v1/responses', { body: responsesBody('Test-Model') })
+
+    assert.equal(response.status, 502)
+    const headerId = response.headers['x-request-id'] ?? ''
+    assert.match(headerId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+    assert.equal(response.json.error.code, 'internal_relay_failed')
+    const row = await findLogRow(entry => entry.requestId === headerId)
+    assert.ok(row, '到不了 chat 泳道的拒绝必须自己留痕')
+    assert.equal(row.statusCode, 502)
+    assert.match(row.errorMessage ?? '', /^internal_relay_failed:/)
+  } finally {
+    sm.setConfig(live)
+  }
 })
 
 test('background 与 item_reference 同样拒绝，各点名自己的参数', async () => {

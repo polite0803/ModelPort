@@ -117,10 +117,18 @@ export async function upstreamErrorMessage(response: Response): Promise<string> 
  * 回环那笔 chat 请求才是日志行的归属（它的 `X-Request-Id` 与请求日志同一条），
  * 拿到就把外层响应头换成它 —— 对不上就等于客户端报错时查不到现场。
  * 拿不到时保留调用方自己先挂上的 id，保证「任何一条 `/v1/*` 出口都有 id」。
+ *
+ * 返回值是这条响应最终携带的 id：客户端可见的引用（错误体里的 `[request_id: …]`、
+ * 载荷缺 id 时的兜底 id）都必须用它，而不是认领前的外层 id —— 外层 id 没有
+ * 日志行，印出去等于交给客户端一条查不到的线索。
  */
-export function adoptInnerRequestId(ctx: HeaderSetter, response: Response): void {
+export function adoptInnerRequestId(ctx: HeaderSetter, response: Response, ownRequestId: string): string {
   const innerRequestId = response.headers.get('x-request-id')
-  if (innerRequestId) ctx.set('X-Request-Id', innerRequestId)
+  if (innerRequestId) {
+    ctx.set('X-Request-Id', innerRequestId)
+    return innerRequestId
+  }
+  return ownRequestId
 }
 
 /**

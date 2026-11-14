@@ -17,6 +17,7 @@ import type { Context } from 'koa'
 import { PassThrough } from 'node:stream'
 import { randomUUID } from 'node:crypto'
 import { storeManager } from '../../store/store'
+import { rejectionEntryFromContext } from '../rejectionLog'
 import { toHeaderValue } from '../utils/headerValue'
 import {
   adoptInnerRequestId,
@@ -204,6 +205,17 @@ function failWithUpstream(ctx: Context, error: InboundUpstreamError, requestId: 
   }
 }
 
+/**
+ * 本入口自己拒掉的请求（名字解析失败、回环不可达）到不了 chat 泳道，也就没有
+ * 任何路由会记它。不写这行，客户端报错里携带的 id 在请求日志里查不到现场。
+ * 行上的 id 取响应头已挂的那把，与 `/v1/responses` 同一口径。
+ */
+function recordRejection(ctx: Context, status: number, code: string, message: string): void {
+  const entry = rejectionEntryFromContext(ctx, status, code, message, ctx.response.get('X-Request-Id'))
+  storeManager.addRequestLog(entry)
+  storeManager.recordRequestInStats(false, entry.latency, entry.model || undefined)
+}
+
 router.post('/messages', async (ctx: Context) => {
   const requestId = randomUUID()
   const started = Date.now()
@@ -222,7 +234,9 @@ router.post('/messages', async (ctx: Context) => {
   try {
     resolved = resolveAnthropicModel(requestedModel, config)
   } catch (error) {
-    failWith(ctx, 400, error instanceof Error ? error.message : 'Model cannot be resolved')
+    const message = error instanceof Error ? error.message : 'Model cannot be resolved'
+    failWith(ctx, 400, message)
+    recordRejection(ctx, 400, 'model_not_resolved', message)
     return
   }
 
@@ -290,19 +304,22 @@ router.post('/messages', async (ctx: Context) => {
     })
   } catch (error) {
     if (abort.signal.aborted) return
-    failWith(ctx, 502, `Cannot reach internal chat endpoint: ${error instanceof Error ? error.message : String(error)}`)
+    const message = `Cannot reach internal chat endpoint: ${error instanceof Error ? error.message : String(error)}`
+    failWith(ctx, 502, message)
+    recordRejection(ctx, 502, 'internal_relay_failed', message)
     return
   }
 
   // 回环那笔 chat 请求才是日志行的归属（`chatcmpl-*`），拿到就把头换成它。
-  adoptInnerRequestId(ctx, response)
+  // 之后客户端可见的 id 引用一律用认领后的这把：外层 id 没有日志行。
+  const relayRequestId = adoptInnerRequestId(ctx, response, requestId)
   // chat 那条链算好的诊断头（路由名、被剔除的渠道、降级说明、压缩读数、client）在这里
   // 透出去。不透的话，走 anthropic 的客户端只看得见回答、看不见依据，而
   // `/v1/responses` 那半边已经透 —— 同一份机制不该差这一格。
   copyModelPortHeaders(ctx, response)
 
   if (!response.ok) {
-    failWithUpstream(ctx, await readUpstreamError(response), requestId)
+    failWithUpstream(ctx, await readUpstreamError(response), relayRequestId)
     return
   }
 
@@ -319,7 +336,7 @@ router.post('/messages', async (ctx: Context) => {
     ctx.set('Content-Type', 'application/json')
     ctx.body = chatResponseToAnthropicMessage(payload, {
       model: requestedModel || resolved.model,
-      fallbackId: requestId,
+      fallbackId: relayRequestId,
     })
     return
   }
@@ -335,7 +352,7 @@ router.post('/messages', async (ctx: Context) => {
   const estimatedInputTokens = estimateAnthropicInputTokens(body)
   const translator = createAnthropicStreamTranslator({
     model: requestedModel || resolved.model,
-    fallbackId: requestId,
+    fallbackId: relayRequestId,
     estimatedInputTokens,
   })
   ctx.set('X-ModelPort-Usage-Estimated', 'message_start.input_tokens')
@@ -358,7 +375,7 @@ router.post('/messages', async (ctx: Context) => {
       const frame = translator.fail(message)
       if (frame !== '') out.write(frame)
       storeManager.addLog('error', `Anthropic stream error: ${message}`, {
-        requestId,
+        requestId: relayRequestId,
         data: { requestedModel, resolvedModel: resolved.model, latency: Date.now() - started },
       })
     } finally {

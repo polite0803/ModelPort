@@ -75,9 +75,10 @@ function failWith(ctx: Context, status: number, message: string, code: string, p
 /**
  * 本入口自己拒掉的请求到不了任何供应商，也就没有任何路由会记它。
  * 不写这行，客户端狂打一个错误参数在面板上读作「无流量」，而它自己看到的是错误。
+ * 行上的 id 取响应头已挂的那把，否则客户端拿着 id 也查不到这条行。
  */
 function recordRejection(ctx: Context, status: number, code: string, message: string): void {
-  const entry = rejectionEntryFromContext(ctx, status, code, message)
+  const entry = rejectionEntryFromContext(ctx, status, code, message, ctx.response.get('X-Request-Id'))
   storeManager.addRequestLog(entry)
   storeManager.recordRequestInStats(false, entry.latency, entry.model || undefined)
 }
@@ -162,11 +163,14 @@ router.post('/responses', async (ctx: Context) => {
     })
   } catch (error) {
     if (abort.signal.aborted) return
-    failWith(ctx, 502, `Cannot reach internal chat endpoint: ${error instanceof Error ? error.message : String(error)}`, 'internal_relay_failed')
+    const message = `Cannot reach internal chat endpoint: ${error instanceof Error ? error.message : String(error)}`
+    failWith(ctx, 502, message, 'internal_relay_failed')
+    recordRejection(ctx, 502, 'internal_relay_failed', message)
     return
   }
 
-  adoptInnerRequestId(ctx, response)
+  // 之后客户端可见的 id 引用一律用认领后的这把：外层 id 没有日志行。
+  const relayRequestId = adoptInnerRequestId(ctx, response, requestId)
   // 路由名、被剔除的渠道、降级说明都是 chat 那条链算好的，不透出去这个入口就成了
   // 「看得见答案、看不见依据」。
   copyModelPortHeaders(ctx, response)
@@ -188,7 +192,7 @@ router.post('/responses', async (ctx: Context) => {
     }
     ctx.body = {
       error: {
-        message: withRequestId(mapped.message, requestId),
+        message: withRequestId(mapped.message, relayRequestId),
         type: mapped.type,
         param: mapped.param,
         code: mapped.code,
@@ -211,7 +215,7 @@ router.post('/responses', async (ctx: Context) => {
     ctx.set('Content-Type', 'application/json')
     ctx.body = chatResponseToResponseBody(payload, {
       model: requestedModel,
-      fallbackId: requestId,
+      fallbackId: relayRequestId,
       clientPlatform: process.platform,
       freeformTools,
     })
@@ -227,7 +231,7 @@ router.post('/responses', async (ctx: Context) => {
   // 「`message_start` 必须给数字」的坑，所以这里不需要估算，也不需要估算声明头。
   const translator = createResponsesStreamTranslator({
     model: requestedModel,
-    fallbackId: requestId,
+    fallbackId: relayRequestId,
     clientPlatform: process.platform,
     freeformTools,
   })
@@ -250,7 +254,7 @@ router.post('/responses', async (ctx: Context) => {
       const frame = translator.fail(message)
       if (frame !== '') out.write(frame)
       storeManager.addLog('error', `Responses stream error: ${message}`, {
-        requestId,
+        requestId: relayRequestId,
         data: { requestedModel, latency: Date.now() - started },
       })
     } finally {

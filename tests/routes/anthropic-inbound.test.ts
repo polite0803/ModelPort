@@ -40,6 +40,7 @@ const PORT = 18951
 const UPSTREAM_PORT = 18952
 
 let seenBodies: Array<Payload> = []
+let upstreamMode: 'ok' | 'error' = 'ok'
 type Payload = Record<string, any>
 
 const upstream = createServer((req, res) => {
@@ -48,6 +49,12 @@ const upstream = createServer((req, res) => {
   req.on('end', () => {
     const body = JSON.parse(Buffer.concat(chunks).toString('utf-8')) as Payload
     seenBodies.push(body)
+
+    if (upstreamMode === 'error') {
+      res.writeHead(502, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: { message: 'upstream exploded', type: 'api_error', param: null, code: null } }))
+      return
+    }
 
     if (body.stream === true) {
       res.writeHead(200, { 'Content-Type': 'text/event-stream' })
@@ -133,6 +140,7 @@ const messagesBody = (model: string, extra: Payload = {}): Payload => ({
 
 beforeEach(() => {
   seenBodies = []
+  upstreamMode = 'ok'
 })
 
 after(async () => {
@@ -156,6 +164,61 @@ test('非流式：200 返回 anthropic message，并带上 X-Request-Id', async 
   // （回环那笔 chat 才是日志行的归属，上游 body 里的 id 不作数）。
   assert.match(response.headers['x-request-id'] ?? '', /^chatcmpl-[0-9a-z]+-[0-9a-z]+$/)
   assert.deepEqual(seenBodies[0].model, 'antp-upstream')
+})
+
+test('上游报错：错误体里的 request_id 是有日志行的那把，不是认领前的外层 id', async () => {
+  upstreamMode = 'error'
+  const response = await proxy.request('POST', '/v1/messages', { body: messagesBody('auto') })
+
+  assert.equal(response.status, 502)
+  const headerId = response.headers['x-request-id'] ?? ''
+  assert.match(headerId, /^chatcmpl-/, '日志行归回环那笔 chat，响应头必须是它的 id')
+  // 客户端只会引用错误体里的 id。外层 id 没有日志行，印出去就是查不到的线索。
+  const ids = [...response.json.error.message.matchAll(/\[request_id: ([^\]]+)\]/g)].map(m => m[1])
+  assert.deepEqual(ids, [headerId], '错误体里的 id 必须唯一且等于响应头那把')
+  const row = await findLogRow(entry => entry.requestId === headerId)
+  assert.ok(row, '客户端引用的 id 必须在请求日志里查得到')
+  assert.equal(row.statusCode, 502)
+})
+
+test('回环不可达：本入口自己的 502 也落日志行，行 id 就是响应头那把', async () => {
+  const live = sm.getConfig()
+  sm.setConfig({ ...live, proxyPort: 18999 })
+  try {
+    const response = await proxy.request('POST', '/v1/messages', { body: messagesBody('auto') })
+
+    assert.equal(response.status, 502)
+    const headerId = response.headers['x-request-id'] ?? ''
+    assert.match(headerId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, '没有内层 id 时响应携带本路由自己的 id')
+    assert.match(response.json.error.message, /Cannot reach internal chat endpoint/)
+    const row = await findLogRow(entry => entry.requestId === headerId)
+    assert.ok(row, '到不了 chat 泳道的拒绝必须自己留痕，否则客户端拿着 id 查不到')
+    assert.equal(row.statusCode, 502)
+    assert.match(row.errorMessage ?? '', /^internal_relay_failed:/)
+  } finally {
+    sm.setConfig(live)
+  }
+})
+
+test('名字解析失败：400 拒绝进请求日志，行 id 就是响应头那把', async () => {
+  const live = sm.getConfig()
+  // routes 键存在且为空 = 删光了路由，读取侧不会把 auto 迁移回来；
+  // 供应商只认识 Test-Model，于是四条解析来源全部落空。
+  sm.updateConfig({ routes: {} })
+  try {
+    const response = await proxy.request('POST', '/v1/messages', { body: messagesBody('claude-x') })
+
+    assert.equal(response.status, 400)
+    assert.match(response.json.error.message, /cannot be resolved/)
+    const headerId = response.headers['x-request-id'] ?? ''
+    assert.match(headerId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+    const row = await findLogRow(entry => entry.requestId === headerId)
+    assert.ok(row, '解析失败也是客户端看得见的错误，必须留痕')
+    assert.equal(row.statusCode, 400)
+    assert.match(row.errorMessage ?? '', /^model_not_resolved:/)
+  } finally {
+    sm.updateConfig({ routes: live.routes })
+  }
 })
 
 test('客户端点名的模型在网关里不存在时落到 auto，且这件事必须看得见', async () => {
