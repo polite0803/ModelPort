@@ -17,6 +17,7 @@ import type { GatewayEntry } from './addressBook.ts'
 import { normalizeOrigin } from './addressBook.ts'
 import type { ApiKey } from '../shared/types.ts'
 import type { ClientSyncModel, KeyDistributionRow } from '../shared/clientSync.ts'
+import { buildHttpsUrl } from '../shared/httpsConfig.ts'
 
 /** Same budget as the certificate panel: a hung gateway must not hang the console. */
 const TIMEOUT_MS = 8000
@@ -53,6 +54,24 @@ export function managementCall<T>(origin: string, secret: string, channel: strin
 export async function readGatewayKeys(origin: string, secret: string): Promise<ApiKey[]> {
   const config = await managementCall<{ apiKeys?: ApiKey[] }>(origin, secret, 'config:get')
   return Array.isArray(config.apiKeys) ? config.apiKeys.filter(item => typeof item?.key === 'string' && item.enabled !== false) : []
+}
+
+/**
+ * One-shot form prober for the add/edit gateway dialog: suggests the https origin of the
+ * same gateway (`httpsPort`, its own TLS listener) so the user can store it on the entry.
+ * The suggestion is access-path-blind - it assumes the entry reaches the gateway directly,
+ * which is false for a domain behind a proxy - so it must never feed a client switch.
+ * Switching reads the entry's stored `clientHttpsUrl`; null here means "no suggestion",
+ * not "the gateway has no https".
+ */
+export async function readGatewayHttpsOrigin(origin: string, secret: string): Promise<string | null> {
+  try {
+    const config = await managementCall<{ httpsEnabled?: boolean; httpsPort?: number }>(origin, secret, 'config:get')
+    if (config.httpsEnabled !== true || typeof config.httpsPort !== 'number' || config.httpsPort <= 0) return null
+    return buildHttpsUrl(new URL(origin).hostname, config.httpsPort)
+  } catch {
+    return null
+  }
 }
 
 /**

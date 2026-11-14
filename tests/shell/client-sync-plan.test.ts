@@ -4,10 +4,12 @@ import { join } from 'node:path'
 
 import {
   catalogSlugs,
+  claudeDesktopEndpoint,
   clientPaths,
   detectIndent,
   endpointFor,
   isClientId,
+  isLoopbackHostname,
   maskSecret,
   planClaudeSettings,
   planCodeBuddySettings,
@@ -462,4 +464,40 @@ test('no planner ever emits a plaintext key', () => {
     // The only key-shaped token allowed in a plan is the placeholder itself.
     assert.ok(!/sk-[A-Za-z0-9]{16,}/.test(output.content))
   }
+})
+
+// ---------------------------------------------------------------------------
+// Claude Desktop endpoint: https, or http only on loopback
+// ---------------------------------------------------------------------------
+
+test('loopback hostnames are the ones Desktop still accepts over http', () => {
+  assert.equal(isLoopbackHostname('127.0.0.1'), true)
+  assert.equal(isLoopbackHostname('127.0.0.53'), true)
+  assert.equal(isLoopbackHostname('localhost'), true)
+  assert.equal(isLoopbackHostname('LOCALHOST'), true)
+  assert.equal(isLoopbackHostname('::1'), true)
+  assert.equal(isLoopbackHostname('[::1]'), true)
+  assert.equal(isLoopbackHostname('192.168.0.235'), false)
+  assert.equal(isLoopbackHostname('gw.example.test'), false)
+})
+
+test('claudeDesktopEndpoint keeps https and loopback http, uses the entry value for the rest', () => {
+  assert.deepEqual(claudeDesktopEndpoint('https://gw.example.test:8443', null), { url: 'https://gw.example.test:8443' })
+  assert.deepEqual(claudeDesktopEndpoint('https://modelport.bgnone.cn', null), { url: 'https://modelport.bgnone.cn' })
+  assert.deepEqual(claudeDesktopEndpoint('http://127.0.0.1:8080', null), { url: 'http://127.0.0.1:8080' })
+  assert.deepEqual(claudeDesktopEndpoint('http://localhost:8080', null), { url: 'http://localhost:8080' })
+  assert.deepEqual(claudeDesktopEndpoint('http://192.168.0.235:18080', 'https://192.168.0.235:8443'), { url: 'https://192.168.0.235:8443' })
+  assert.deepEqual(claudeDesktopEndpoint('http://192.168.0.235:18080', 'https://modelport.bgnone.cn'), { url: 'https://modelport.bgnone.cn' })
+})
+
+test('claudeDesktopEndpoint blocks a non-loopback http origin with no stored entry value', () => {
+  const result = claudeDesktopEndpoint('http://192.168.0.235:18080', null)
+  assert.ok('blocked' in result)
+  assert.match(result.blocked, /https/)
+  assert.match(result.blocked, /网关条目/, 'the way out is filling the entry, not the gateway settings')
+  const invalid = claudeDesktopEndpoint('not a url', null)
+  assert.ok('blocked' in invalid)
+  // A stored value that is not https cannot satisfy the client either: block, never emit.
+  const badValue = claudeDesktopEndpoint('http://192.168.0.235:18080', 'http://192.168.0.235:8443')
+  assert.ok('blocked' in badValue)
 })

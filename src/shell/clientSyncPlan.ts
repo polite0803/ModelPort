@@ -16,7 +16,7 @@
  *   measured. Names the target does not serve are reported (`unservedModels`) instead of
  *   silently renamed or dropped.
  */
-import { dirname, isAbsolute, join } from 'node:path'
+import path from 'node:path'
 import { KEY_PLACEHOLDER } from '../shared/clientSync.ts'
 import type { ClientChange, ClientId } from '../shared/clientSync.ts'
 import { detectIndent, parseJsonObject } from './clientFormats.ts'
@@ -123,6 +123,10 @@ export function clientPaths(
 ): ClientPaths {
   const platform = context.platform ?? process.platform
   const env = context.env ?? process.env
+  // Path arithmetic follows the injected platform, not the host: a layout computed for
+  // `linux` must read the same on a Windows CI runner, or every fixture keyed by these
+  // paths misses there.
+  const { join, dirname, isAbsolute } = platform === 'win32' ? path.win32 : path.posix
   const localAppData = context.localAppData ?? nonEmpty(env.LOCALAPPDATA) ?? join(home, 'AppData', 'Local')
   const xdg = nonEmpty(env.XDG_CONFIG_HOME) ?? join(home, '.config')
   const claudeBase = claudeConfigDir && claudeConfigDir.trim() !== '' ? claudeConfigDir.trim() : join(home, '.claude')
@@ -207,6 +211,39 @@ export function endpointFor(origin: string, shape: EndpointShape): string {
   if (shape === 'origin') return base
   if (shape === 'chat-completions') return `${base}/v1/chat/completions`
   return `${base}/v1`
+}
+
+/** Hostnames Claude Desktop counts as loopback, where it still accepts plain http. */
+export function isLoopbackHostname(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  return host === 'localhost' || host === '::1' || host === '0:0:0:0:0:0:0:1' || /^127(\.\d+){3}$/.test(host)
+}
+
+export type DesktopEndpoint = { url: string } | { blocked: string }
+
+/**
+ * Claude Desktop validates `inferenceGatewayBaseUrl` as "https, or http only on loopback".
+ * A remote gateway reached over plain http therefore cannot be handed its http origin: the
+ * config is rejected before a single request. The way out is the address-book entry's own
+ * client https endpoint (`clientHttpsUrl`) - access-path data lives on the shell entry,
+ * never derived from the gateway, which cannot know whether it is reached by IP or by a
+ * domain behind a proxy. With no stored value there is nothing valid to write, so say so
+ * rather than emit a bad URL.
+ */
+export function claudeDesktopEndpoint(origin: string, clientHttpsUrl: string | null): DesktopEndpoint {
+  let parsed: URL
+  try {
+    parsed = new URL(origin)
+  } catch {
+    return { blocked: '网关地址无效，无法为 Claude Desktop 生成端点' }
+  }
+  const base = origin.replace(/\/+$/, '')
+  if (parsed.protocol === 'https:') return { url: base }
+  if (parsed.protocol === 'http:' && isLoopbackHostname(parsed.hostname)) return { url: base }
+  if (clientHttpsUrl !== null && clientHttpsUrl.startsWith('https:')) return { url: clientHttpsUrl }
+  return {
+    blocked: 'Claude Desktop 只接受 https（回环地址除外）：当前网关走 http，请在网关条目填「客户端 HTTPS 地址」（可用「从网关探测」）再切换',
+  }
 }
 
 function parseObject(raw: string): Record<string, unknown> | null {

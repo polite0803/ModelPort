@@ -7,7 +7,6 @@
  * section it touches and which field carries the key. Field names come from the clients
  * themselves; a wrong name is a setting nobody reads.
  */
-import { dirname, join } from 'node:path'
 import { KEY_PLACEHOLDER } from '../shared/clientSync.ts'
 import type { ClientChange } from '../shared/clientSync.ts'
 import { endpointFor, maskSecret } from './clientSyncPlan.ts'
@@ -36,6 +35,7 @@ import {
   setNestedBlock,
   setSeqItem,
 } from './clientYaml.ts'
+import { pathOps } from './clientApps.ts'
 import type { AppPlan, AppPlanInput, ClientAppPlanner } from './clientApps.ts'
 import type { PlannedFile } from './clientLiveWrite.ts'
 
@@ -171,6 +171,7 @@ export function planHermes(input: AppPlanInput): AppPlan {
  * `[providers.<id>.oauth]` login survives the table rewrite.
  */
 export function planKimi(input: AppPlanInput): AppPlan {
+  const { dirname } = pathOps(input)
   const path = input.paths.kimiConfig
   const raw = input.read(path)
   if (raw === null && !input.exists(dirname(path))) {
@@ -296,6 +297,7 @@ export function planMcode(input: AppPlanInput): AppPlan {
  * the client's job, and writing the new file would hide the old providers.
  */
 export function planOmp(input: AppPlanInput): AppPlan {
+  const { join, dirname } = pathOps(input)
   const yml = join(dirname(input.paths.ompModels), 'models.yaml')
   const path = input.exists(yml) ? yml : input.paths.ompModels
   if (input.exists(join(dirname(path), 'models.json')) && !input.exists(path)) {
@@ -340,6 +342,7 @@ export function planOmp(input: AppPlanInput): AppPlan {
 
 /** Pi's `models.json`: one `providers.<id>` node. The default selection stays the client's. */
 export function planPi(input: AppPlanInput): AppPlan {
+  const { dirname } = pathOps(input)
   const path = input.paths.piModels
   const raw = input.read(path)
   if (raw === null && !input.exists(dirname(path))) {
@@ -386,6 +389,7 @@ export function planPi(input: AppPlanInput): AppPlan {
  * written: removing the model the user is on would break the running session.
  */
 export function planCopilot(input: AppPlanInput): AppPlan {
+  const { dirname } = pathOps(input)
   const path = input.paths.copilotProviders
   const raw = input.read(path)
   if (raw === null && !input.exists(dirname(path))) {
@@ -472,6 +476,7 @@ function indentItem(document: string): string[] {
  *   is ours to know, and overwriting the other discards the user's edit.
  */
 export function planDsh(input: AppPlanInput): AppPlan {
+  const { join } = pathOps(input)
   const home = input.paths.dshHome
   const found = DSH_PROFILES.filter(name => input.exists(join(home, 'profiles', name)))
   if (found.length === 0) {
@@ -569,6 +574,7 @@ export function planDsh(input: AppPlanInput): AppPlan {
  * says exactly that instead of pretending the client was switched.
  */
 export function planAgy(input: AppPlanInput): AppPlan {
+  const { dirname } = pathOps(input)
   const path = input.paths.agySettings
   if (!input.exists(dirname(path))) return row('not-installed', [path], { reason: '没有 Antigravity CLI 的配置目录' })
   return row('no-entry', [path], {

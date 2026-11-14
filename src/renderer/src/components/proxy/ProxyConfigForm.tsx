@@ -719,6 +719,9 @@ export function ProxyConfigForm({ onConfigChange }: ProxyConfigFormProps) {
                               ? t('proxy.httpsCertTrusted')
                               : t('proxy.httpsCertUntrusted')}
                         </div>
+                        {machineTrust.trusted === true && !machineTrust.certPath && (
+                          <div>{t('proxy.httpsMachineTrustPublic')}</div>
+                        )}
                         {machineTrust.fingerprint256 && (
                           <div>
                             {t('proxy.httpsMachineFingerprint')}:{' '}

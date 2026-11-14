@@ -9,42 +9,47 @@
  * certificate has to be trusted on the machine that runs the client, so the console reads
  * the PEM itself and writes it into its own OS store.
  *
- * Two ways to obtain that PEM, and the order matters:
- * - `GET /v1/management/tls/ca` with the sealed management secret, over the same origin the
- *   window is showing. `net.fetch` is Chromium's stack, so it consults the OS store the way
- *   Claude Desktop and the browser do - after a successful install this call starts working
- *   over HTTPS without a special case;
- * - the certificate the TLS layer refused while loading that page (kept by
- *   `main.ts` from `certificate-error`). This is the bootstrap case: the management
- *   endpoint is unreachable *because* the certificate is untrusted, so the only copy
- *   available is the one the handshake already presented. It is also why the console's
- *   failure page carries the install button - an untrusted HTTPS gateway has no page to
- *   click a button on.
+ * Which certificate is the question: the one the CLIENT actually handshakes with on this
+ * access path, never the gateway's own CA. The same gateway presents its self-signed cert
+ * when reached by IP but a public edge cert (Let's Encrypt behind Cloudflare) when reached
+ * by domain, and the gateway cannot tell those apart - asking its management endpoint for
+ * "the certificate" answers a question about the wrong path. So the evidence order is:
+ * - probe the entry's client https endpoint with Chromium's TLS stack (`net.fetch`), which
+ *   consults the OS store exactly like Claude Desktop and the browser do. Any HTTP answer,
+ *   even 401, means the handshake succeeded: the certificate is public or already
+ *   installed, and there is nothing to install;
+ * - a refused handshake means the machine does not trust what this path presents. Read the
+ *   leaf the endpoint presents right now (a plain TLS connect that does not judge - the
+ *   probe already judged) and offer it for install;
+ * - the certificate the window's TLS layer refused while loading the page (kept by
+ *   `main.ts` from `certificate-error`) is the bootstrap fallback: it is the only copy
+ *   available when even the leaf read fails, and it is why the console's failure page
+ *   carries the install button - an untrusted HTTPS gateway has no page to click one on.
  *
  * Nothing here takes a path or a PEM from the page: letting a remote document name the file
  * that gets installed into the user's root store is not a capability anyone intended to ship.
  */
-import { net } from 'electron'
 import { X509Certificate } from 'node:crypto'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { connect as tlsConnect } from 'node:tls'
 import {
   defaultTrustRuntime,
   installCertificateTrust,
   isCertificateTrusted,
   sha1Thumbprint,
   uninstallCertificateTrust,
-} from '../shared/certificateTrust'
-import type { TrustRuntime } from '../shared/certificateTrust'
-import type { ShellCertificateTrustResult, ShellCertificateTrustStatus } from '../shared/shellBridge'
+} from '../shared/certificateTrust.ts'
+import type { TrustRuntime } from '../shared/certificateTrust.ts'
+import type { ShellCertificateTrustResult, ShellCertificateTrustStatus } from '../shared/shellBridge.ts'
 
-/** The management endpoint is a local call; a hung gateway must not hang the panel. */
+/** A hung endpoint must not hang the panel. */
 const FETCH_TIMEOUT_MS = 8000
 
 /**
- * A resolved status fetch is reused for a moment: the panel re-reads it on every proxy
- * state change and after each action, and re-downloading the same PEM 4 times a minute
- * buys nothing. The trust probe itself is never cached - it is the reading that changes
+ * A resolved status is reused for a moment: the panel re-reads it on every proxy state
+ * change and after each action, and re-probing the same endpoint 4 times a minute buys
+ * nothing. The trust-store probe itself is never cached - it is the reading that changes
  * right after an install.
  */
 const RESOLVE_CACHE_MS = 10_000
@@ -66,22 +71,43 @@ export interface GatewayCertificate extends CertificateDescription {
   cert: string
   /** Path on this machine, where the PEM was just written. */
   certPath: string
-  source: 'gateway' | 'handshake'
+  source: 'handshake'
 }
 
 export interface TrustTarget {
   /** Normalized origin of the active gateway entry. */
   origin: string
+  /**
+   * The client-facing https endpoint of THIS access path: the entry's url when it is
+   * already https, otherwise the entry's stored `clientHttpsUrl`. null = this entry has
+   * no https client path (loopback http needs no trust; a remote http entry must store
+   * one first). Access-path data lives on the entry, never derived from the gateway.
+   */
+  clientOrigin: string | null
   /** Where this file writes the PEM, under the console's own userData. */
   cachePath: string
-  secret: string | null
   /** PEM captured when the TLS layer refused this gateway's certificate. */
   captured: string | null
+}
+
+/**
+ * The handshake verdict, in the client's own TLS stack. 'trusted' = any HTTP answer (the
+ * certificate was accepted); certError = the TLS layer refused it; unreachable = no TLS
+ * conversation happened at all (offline, wrong port), which is not a trust judgement.
+ */
+export type ProbeOutcome = 'trusted' | { certError: string } | { unreachable: string }
+
+export interface HandshakeProbe {
+  handshake(clientOrigin: string): Promise<ProbeOutcome>
+  /** The leaf presented right now, read without verifying (the handshake already judged). */
+  presentedLeaf(clientOrigin: string): Promise<string | null>
 }
 
 export interface ResolvedCertificate {
   certificate: GatewayCertificate | null
   error: string | null
+  /** The client handshake succeeded: public or already-installed certificate, nothing to install. */
+  pathTrusted: boolean
 }
 
 /** Parses a PEM into the fields both the failure page and the panel show. */
@@ -106,61 +132,99 @@ function isTrustPlatform(platform: string): boolean {
   return platform === 'win32' || platform === 'darwin'
 }
 
-function materialize(
-  pem: string,
-  cachePath: string,
-  origin: string,
-  source: GatewayCertificate['source'],
-): GatewayCertificate | null {
+function materialize(pem: string, cachePath: string, origin: string): GatewayCertificate | null {
   const described = describeCertificate(pem)
   if (!described) return null
   // The trust tools read a file, not a string, so the copy has to land on disk first.
   mkdirSync(dirname(cachePath), { recursive: true })
   writeFileSync(cachePath, pem.endsWith('\n') ? pem : `${pem}\n`, { encoding: 'utf8', mode: 0o600 })
-  return { ...described, origin, cert: pem, certPath: cachePath, source }
+  return { ...described, origin, cert: pem, certPath: cachePath, source: 'handshake' }
 }
 
-async function fetchFromGateway(origin: string, secret: string): Promise<{ pem: string } | { error: string }> {
-  let response: Response
-  try {
-    response = await net.fetch(`${origin}/v1/management/tls/ca`, {
-      headers: { 'X-Management-Secret': secret },
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    })
-  } catch (cause) {
-    return {
-      error:
-        `Could not reach ${origin}/v1/management/tls/ca: ${cause instanceof Error ? cause.message : String(cause)}`,
-    }
+function isCertErrorMessage(message: string): boolean {
+  return /ERR_CERT_|ERR_SSL|SELF_SIGNED|UNABLE_TO_VERIFY|DEPTH_ZERO|CERTIFICATE/i.test(message)
+}
+
+/**
+ * The real probe. `net` is imported lazily so this module stays importable by plain-Node
+ * tests, which inject their own probe; in the console the import resolves to Electron.
+ */
+export function defaultHandshakeProbe(): HandshakeProbe {
+  return {
+    async handshake(clientOrigin) {
+      const { net } = await import('electron')
+      try {
+        await net.fetch(`${clientOrigin}/v1/models`, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
+        return 'trusted'
+      } catch (cause) {
+        const message = cause instanceof Error
+          ? `${cause.message}${cause.cause instanceof Error ? ` ${cause.cause.message}` : ''}`
+          : String(cause)
+        return isCertErrorMessage(message) ? { certError: message } : { unreachable: message }
+      }
+    },
+    presentedLeaf(clientOrigin) {
+      return new Promise(resolve => {
+        let settled = false
+        const done = (pem: string | null): void => {
+          if (!settled) {
+            settled = true
+            resolve(pem)
+          }
+        }
+        let url: URL
+        try {
+          url = new URL(clientOrigin)
+        } catch {
+          done(null)
+          return
+        }
+        const hostname = url.hostname.replace(/^\[|\]$/g, '')
+        const isIp = /^[\d.]+$/.test(hostname) || hostname.includes(':')
+        const socket = tlsConnect(
+          {
+            host: hostname,
+            port: url.port === '' ? 443 : Number(url.port),
+            // SNI is a DNS-name extension; an IP literal must not be sent as one.
+            ...(isIp ? {} : { servername: hostname }),
+            rejectUnauthorized: false,
+            timeout: FETCH_TIMEOUT_MS,
+          },
+          () => {
+            const cert = socket.getPeerCertificate()
+            socket.end()
+            if (!cert || !cert.raw) {
+              done(null)
+              return
+            }
+            const lines = cert.raw.toString('base64').match(/.{1,64}/g) ?? []
+            done(`-----BEGIN CERTIFICATE-----\n${lines.join('\n')}\n-----END CERTIFICATE-----\n`)
+          },
+        )
+        socket.on('error', () => done(null))
+        socket.on('timeout', () => {
+          socket.destroy()
+          done(null)
+        })
+      })
+    },
   }
-  if (response.status === 404) {
-    return { error: 'The gateway has not generated a certificate yet: start it once with HTTPS enabled.' }
-  }
-  if (response.status === 401 || response.status === 403) {
-    return { error: 'The gateway rejected the management secret this console remembered.' }
-  }
-  if (!response.ok) return { error: `The gateway responded ${response.status}.` }
-  const body = (await response.json().catch(() => null)) as { data?: { pem?: unknown } } | null
-  if (typeof body?.data?.pem !== 'string' || body.data.pem === '') {
-    return { error: 'The gateway answered without a certificate.' }
-  }
-  return { pem: body.data.pem }
 }
 
 let resolvedCache: { key: string; at: number; value: ResolvedCertificate } | null = null
 
 /**
- * The certificate of the active gateway, on disk, on this machine.
+ * The certificate of the active entry's client https path, on disk, on this machine.
  *
- * The refused-handshake copy wins over a failed endpoint call but not over a successful
- * one: the handshake certificate is what the listener presented a moment ago, while the
- * endpoint also reports which file the gateway itself uses, and after a SAN change the
- * captured copy can be the older of the two.
+ * The handshake verdict comes first; the presented leaf (or the window's captured copy as
+ * bootstrap) is only materialized when the machine refused it. A reissued certificate must
+ * not be served from the cache, so the captured PEM is part of the key - guarded, because
+ * an unparsable one is reported by the resolution below rather than thrown out of a lookup.
  */
-export async function resolveGatewayCertificate(target: TrustTarget): Promise<ResolvedCertificate> {
-  // A reissued certificate (a SAN change) must not be served from the cache, so the
-  // captured PEM is part of the key - guarded, because an unparsable one is reported by
-  // the resolution below rather than thrown out of a cache lookup.
+export async function resolveGatewayCertificate(
+  target: TrustTarget,
+  probe: HandshakeProbe = defaultHandshakeProbe(),
+): Promise<ResolvedCertificate> {
   let capturedKey = ''
   if (target.captured !== null) {
     try {
@@ -171,53 +235,79 @@ export async function resolveGatewayCertificate(target: TrustTarget): Promise<Re
   }
   const key = [
     target.origin,
+    target.clientOrigin ?? 'nohttps',
     target.cachePath,
-    target.secret === null ? 'nosecret' : 'secret',
     capturedKey,
   ].join('\u0000')
   if (resolvedCache && resolvedCache.key === key && Date.now() - resolvedCache.at < RESOLVE_CACHE_MS) {
     return resolvedCache.value
   }
 
-  const value = await resolveUncached(target)
+  const value = await resolveUncached(target, probe)
   resolvedCache = { key, at: Date.now(), value }
   return value
 }
 
-async function resolveUncached(target: TrustTarget): Promise<ResolvedCertificate> {
-  let endpointError: string | null = null
-
-  if (target.secret !== null) {
-    const fetched = await fetchFromGateway(target.origin, target.secret)
-    if ('pem' in fetched) {
-      const certificate = materialize(fetched.pem, target.cachePath, target.origin, 'gateway')
-      if (certificate) return { certificate, error: null }
-      endpointError = 'The gateway returned something that is not a readable certificate.'
-    } else {
-      endpointError = fetched.error
+async function resolveUncached(target: TrustTarget, probe: HandshakeProbe): Promise<ResolvedCertificate> {
+  if (target.clientOrigin === null) {
+    return {
+      certificate: null,
+      error: '这条入口没有客户端 HTTPS 地址：回环 http 无需证书信任；远程网关请先在网关条目填「客户端 HTTPS 地址」（可用「从网关探测」）。',
+      pathTrusted: false,
     }
-  } else {
-    endpointError = 'This console has no management secret for this gateway.'
   }
 
-  if (target.captured !== null) {
-    const certificate = materialize(target.captured, target.cachePath, target.origin, 'handshake')
-    if (certificate) return { certificate, error: null }
-    return { certificate: null, error: `The certificate refused during the handshake could not be parsed. ${endpointError ?? ''}`.trim() }
+  const outcome = await probe.handshake(target.clientOrigin)
+  if (outcome === 'trusted') {
+    return { certificate: null, error: null, pathTrusted: true }
   }
 
+  // Refused (or unreachable): the certificate the client actually sees is the evidence.
+  // Read what this endpoint presents now; the window's captured copy is the bootstrap
+  // fallback for when even that read fails.
+  const presented = 'certError' in outcome ? await probe.presentedLeaf(target.clientOrigin) : null
+  const pem = presented ?? target.captured
+  if (pem !== null) {
+    const certificate = materialize(pem, target.cachePath, target.clientOrigin)
+    if (certificate) {
+      return {
+        certificate,
+        error: 'certError' in outcome ? `客户端握手被拒：${outcome.certError}` : null,
+        pathTrusted: false,
+      }
+    }
+  }
+
+  const reason = 'certError' in outcome ? outcome.certError : outcome.unreachable
   return {
     certificate: null,
-    error: `${endpointError ?? 'The gateway certificate is unavailable.'} Load the gateway page once over HTTPS so the console can capture the certificate it presents.`,
+    error: `无法取得客户端证书（${reason}）。请先让这条入口的客户端 HTTPS 地址可达，再打开本页。`,
+    pathTrusted: false,
   }
 }
 
 export async function gatewayTrustStatus(
   target: TrustTarget,
   runtime: TrustRuntime = defaultTrustRuntime(),
+  probe: HandshakeProbe = defaultHandshakeProbe(),
 ): Promise<ShellCertificateTrustStatus> {
-  const { certificate, error } = await resolveGatewayCertificate(target)
+  const { certificate, error, pathTrusted } = await resolveGatewayCertificate(target, probe)
   const supported = isTrustPlatform(runtime.platform)
+  if (pathTrusted) {
+    return {
+      supported,
+      trusted: true,
+      fingerprint256: null,
+      sha1: null,
+      subject: null,
+      issuer: null,
+      validTo: null,
+      subjectAltName: null,
+      selfSigned: null,
+      source: null,
+      certPath: null,
+    }
+  }
   if (!certificate) {
     return {
       supported,
@@ -246,6 +336,7 @@ export async function gatewayTrustStatus(
     selfSigned: certificate.selfSigned,
     source: certificate.source,
     certPath: certificate.certPath,
+    ...(error ? { error } : {}),
   }
 }
 
@@ -253,12 +344,22 @@ export async function changeGatewayTrust(
   target: TrustTarget,
   action: 'install' | 'uninstall',
   runtime: TrustRuntime = defaultTrustRuntime(),
+  probe: HandshakeProbe = defaultHandshakeProbe(),
 ): Promise<ShellCertificateTrustResult> {
-  const { certificate, error } = await resolveGatewayCertificate(target)
+  const { certificate, error, pathTrusted } = await resolveGatewayCertificate(target, probe)
+  if (pathTrusted) {
+    return {
+      ok: true,
+      message: 'The client https handshake succeeds: the certificate is publicly trusted or already installed. Nothing to install.',
+      trusted: true,
+      fingerprint256: null,
+      certPath: null,
+    }
+  }
   if (!certificate) {
     return {
       ok: false,
-      message: error ?? 'The console could not read the gateway certificate.',
+      message: error ?? 'The console could not read the client certificate.',
       trusted: null,
       fingerprint256: null,
       certPath: null,

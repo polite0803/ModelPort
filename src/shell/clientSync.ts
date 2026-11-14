@@ -229,6 +229,13 @@ export async function gather(input: GatherInput): Promise<Gathered> {
 
   const canonical = await ensureCanonicalKey(input.gateways, origin)
   const key = canonical.key
+  // Claude Desktop refuses a non-loopback http origin. The way out is access-path data
+  // stored on the shell entry itself: an https entry is its own url, an http entry carries
+  // the client https endpoint the user filled (or probed once). Never ask the gateway -
+  // it cannot know whether this entry reaches it by IP or by a domain behind a proxy.
+  const clientHttpsUrl = origin.startsWith('https:')
+    ? origin
+    : (typeof input.active.clientHttpsUrl === 'string' ? input.active.clientHttpsUrl : null)
   let models: ClientSyncModel[] = []
   let routeError: string | null = null
   try {
@@ -350,6 +357,7 @@ export async function gather(input: GatherInput): Promise<Gathered> {
   {
     const appInput: AppPlanInput = {
       origin,
+      clientHttpsUrl,
       routeNames,
       hasKey: key !== null,
       keyValue: key,

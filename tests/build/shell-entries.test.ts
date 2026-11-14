@@ -173,7 +173,7 @@ test('certificate trust is the console machine\'s action, gated and argument-fre
   const preload = readFileSync('src/shell/preload.ts', 'utf8')
 
   // 1. The OS commands are the shared ones; a second implementation would drift.
-  assert.match(trust, /from '\.\.\/shared\/certificateTrust'/)
+  assert.match(trust, /from '\.\.\/shared\/certificateTrust(\.ts)?'/)
   for (const command of ['certutil', 'add-trusted-cert', 'delete-certificate', 'powershell']) {
     assert.ok(!trust.includes(command), `gatewayTrust must not re-implement ${command}`)
   }
@@ -198,7 +198,12 @@ test('certificate trust is the console machine\'s action, gated and argument-fre
   // make the console the one thing that ignores certificate errors on the user's machine.
   assert.match(shellMain, /webContents\.on\('certificate-error'/)
   assert.doesNotMatch(shellMain, /callback\(true\)/, 'the console must not accept an invalid certificate')
-  assert.match(trust, /\/v1\/management\/tls\/ca/, 'the PEM comes from the gateway, over the sealed secret')
+  // The evidence is the client's own handshake on the entry's access path, never the
+  // gateway's own CA: the same gateway presents its self-signed cert by IP but a public
+  // edge cert by domain, and the management endpoint cannot tell those paths apart.
+  assert.doesNotMatch(trust, /\/v1\/management\/tls\/ca/, 'the gateway CA endpoint is access-path-blind and retired from trust')
+  assert.match(trust, /clientOrigin/, 'the trust target carries the entry client endpoint')
+  assert.match(trust, /pathTrusted/, 'a successful client handshake means nothing to install')
   assert.match(trust, /mode: 0o600/, 'the cached certificate still lands in the console profile')
 })
 

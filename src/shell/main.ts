@@ -53,7 +53,7 @@ import {
 } from './clientSync'
 import { clientPaths } from './clientSyncPlan'
 import { recoverClientWrites } from './clientLiveWrite'
-import type { GatewayCredential } from './clientSyncRpc'
+import { readGatewayHttpsOrigin, type GatewayCredential } from './clientSyncRpc'
 import { checkForUpdates, runUpgrade } from './updater'
 import {
   adoptLocalHandshake,
@@ -619,6 +619,7 @@ type GatewayPromptResult = {
   url: string
   kind: GatewayKind
   wslDistro: string
+  clientHttpsUrl?: string
 }
 
 function promptForGateway(existing?: GatewayEntry): Promise<GatewayPromptResult | null> {
@@ -628,7 +629,7 @@ function promptForGateway(existing?: GatewayEntry): Promise<GatewayPromptResult 
   return new Promise(resolve => {
     const dialog = new BrowserWindow({
       width: 480,
-      height: 410,
+      height: 490,
       parent: window ?? undefined,
       modal: !!window,
       resizable: false,
@@ -644,6 +645,7 @@ function promptForGateway(existing?: GatewayEntry): Promise<GatewayPromptResult 
     const settle = (result: GatewayPromptResult | null): void => {
       ipcMain.removeAllListeners('shell:prompt-submit')
       ipcMain.removeAllListeners('shell:prompt-cancel')
+      ipcMain.removeHandler('shell:prompt-probe-https')
       if (!dialog.isDestroyed()) dialog.close()
       resolve(result)
     }
@@ -653,6 +655,7 @@ function promptForGateway(existing?: GatewayEntry): Promise<GatewayPromptResult 
       url?: string
       kind?: string
       wslDistro?: string
+      clientHttpsUrl?: string
     }) => {
       const kind: GatewayKind =
         values?.kind === 'local' || values?.kind === 'wsl' || values?.kind === 'remote'
@@ -676,20 +679,55 @@ function promptForGateway(existing?: GatewayEntry): Promise<GatewayPromptResult 
         ).catch(() => undefined)
         return
       }
+      const rawClientHttps = typeof values?.clientHttpsUrl === 'string' ? values.clientHttpsUrl.trim() : ''
+      let clientHttpsUrl: string | undefined
+      if (rawClientHttps !== '') {
+        const httpsOrigin = normalizeOrigin(rawClientHttps)
+        if (httpsOrigin === null || !httpsOrigin.startsWith('https:')) {
+          dialog.webContents.executeJavaScript(
+            `document.getElementById('err').textContent='客户端 HTTPS 地址要写成完整 https origin，例如 https://192.168.0.235:8443'`,
+          ).catch(() => undefined)
+          return
+        }
+        clientHttpsUrl = httpsOrigin
+      }
       settle({
         name: typeof values?.name === 'string' ? values.name : '',
         url,
         kind,
         wslDistro,
+        ...(clientHttpsUrl !== undefined ? { clientHttpsUrl } : {}),
       })
     })
     ipcMain.once('shell:prompt-cancel', () => settle(null))
+    // One-shot suggestion only: the probe result still has to be submitted and is stored
+    // on the entry, never re-derived from the gateway at switch time.
+    ipcMain.handle('shell:prompt-probe-https', async (_event, rawUrl: unknown) => {
+      const origin = typeof rawUrl === 'string' ? normalizeOrigin(rawUrl.trim()) : null
+      if (origin === null) return { url: null, error: '先填写网关地址（完整 http(s) origin）' }
+      // An https entry is its own client endpoint; the gateway's httpsPort would suggest
+      // a wrong port for a path that terminates TLS elsewhere (a domain behind a proxy).
+      if (origin.startsWith('https:')) return { url: null, error: 'https 条目无需探测：客户端 HTTPS 地址留空即用上方地址' }
+      const found = getSecret(secretsPath(), secretSealer, origin)
+      if (found.status !== 'found') return { url: null, error: '这台网关还没有保存管理密钥，先在控制台连接一次再探测' }
+      const suggestion = await readGatewayHttpsOrigin(origin, found.secret ?? '')
+      if (suggestion === null) return { url: null, error: '网关未开启 https 监听或读取失败' }
+      return { url: suggestion, error: null }
+    })
     // The window's own X button fires no IPC: without this the promise never settles and the
     // two `once` listeners stay behind, so the *next* dialog's submit resolves the old caller.
     dialog.on('closed', () => settle(null))
 
     void dialog.loadURL(gatewayPromptPageUrl({
-      ...(existing ? { existing: { name: existing.name, url: existing.url, kind: existing.kind, wslDistro: existing.wslDistro } } : {}),
+      ...(existing ? {
+        existing: {
+          name: existing.name,
+          url: existing.url,
+          kind: existing.kind,
+          wslDistro: existing.wslDistro,
+          ...(existing.clientHttpsUrl !== undefined ? { clientHttpsUrl: existing.clientHttpsUrl } : {}),
+        },
+      } : {}),
       canUseWsl: process.platform === 'win32',
     }))
 
@@ -1618,12 +1656,17 @@ function trustTargetFor(event: IpcMainInvokeEvent): TrustTarget {
   const entry = activeGatewayForTrust(event)
   const origin = normalizeOrigin(entry.url)
   if (origin === null) throw new Error('网关地址无效')
-  const found = getSecret(secretsPath(), secretSealer, origin)
+  // The client-facing endpoint is entry data: an https entry is its own url, an http
+  // entry carries the stored client https endpoint. The gateway's own listener is not
+  // evidence for what a client sees on this path.
+  const clientOrigin = origin.startsWith('https:') ? origin : (entry.clientHttpsUrl ?? null)
   return {
     origin,
+    clientOrigin,
     cachePath: gatewayTlsCachePath(),
-    secret: found.status === 'found' ? (found.secret ?? null) : null,
-    captured: refusedCertificate !== null && refusedCertificate.origin === origin ? refusedCertificate.pem : null,
+    captured: refusedCertificate !== null && clientOrigin !== null && refusedCertificate.origin === clientOrigin
+      ? refusedCertificate.pem
+      : null,
   }
 }
 

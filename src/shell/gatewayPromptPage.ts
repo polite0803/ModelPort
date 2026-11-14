@@ -20,6 +20,7 @@ export interface GatewayPromptDraft {
   url: string
   kind: GatewayKind
   wslDistro?: string
+  clientHttpsUrl?: string
 }
 
 export function gatewayPromptPageUrl(input: {
@@ -31,6 +32,7 @@ export function gatewayPromptPageUrl(input: {
   const nameValue = existing ? ` value="${escapeHtml(existing.name)}"` : ''
   const urlValue = existing ? ` value="${escapeHtml(existing.url)}"` : ''
   const distroValue = existing?.wslDistro ? ` value="${escapeHtml(existing.wslDistro)}"` : ''
+  const clientHttpsValue = existing?.clientHttpsUrl ? ` value="${escapeHtml(existing.clientHttpsUrl)}"` : ''
   const kind: GatewayKind = existing?.kind === 'wsl' && !input.canUseWsl
     ? 'remote'
     : (existing?.kind ?? 'local')
@@ -49,6 +51,9 @@ export function gatewayPromptPageUrl(input: {
 </select></label>
 <label id="urlRow" style="display:block;margin-bottom:10px">地址<input id="url"${urlValue} placeholder="http://127.0.0.1:8080"
   style="display:block;width:100%;margin-top:4px;padding:6px;box-sizing:border-box"></label>
+<label id="clientHttpsRow" style="display:block;margin-bottom:10px">客户端 HTTPS 地址（Claude Desktop 等拒 http 的客户端用；https 网关留空即用上方地址）
+  <span style="display:flex;gap:6px;margin-top:4px"><input id="clientHttpsUrl"${clientHttpsValue} placeholder="https://192.168.0.235:8443"
+    style="flex:1;padding:6px;box-sizing:border-box"><button id="probeHttps" type="button" style="padding:6px 10px;white-space:nowrap">从网关探测</button></span></label>
 <label id="wslRow" style="display:block;margin-bottom:10px">WSL 发行版（留空使用默认）<input id="wslDistro"${distroValue} placeholder="Ubuntu-24.04"
   style="display:block;width:100%;margin-top:4px;padding:6px;box-sizing:border-box"></label>
 <p id="err" style="color:#f87171;min-height:1.2em;margin:0"></p>
@@ -59,18 +64,28 @@ export function gatewayPromptPageUrl(input: {
 const mode = document.getElementById('kind')
 const sync = function () {
   document.getElementById('urlRow').style.display = mode.value === 'local' ? 'none' : 'block'
+  document.getElementById('clientHttpsRow').style.display = mode.value === 'local' ? 'none' : 'block'
   document.getElementById('wslRow').style.display = mode.value === 'wsl' ? 'block' : 'none'
 }
 mode.onchange = sync
 sync()
 const send = function (name, values) { window.promptHost[name](values) }
 const cancel = function () { send('cancel') }
+document.getElementById('probeHttps').onclick = function () {
+  const err = document.getElementById('err')
+  err.textContent = ''
+  window.promptHost.probeHttps(document.getElementById('url').value).then(function (res) {
+    if (res && res.url) document.getElementById('clientHttpsUrl').value = res.url
+    else err.textContent = (res && res.error) || '探测失败'
+  }).catch(function (e) { err.textContent = '探测失败：' + (e && e.message ? e.message : e) })
+}
 document.getElementById('ok').onclick = function () {
   send('submit', {
     name: document.getElementById('name').value,
     url: document.getElementById('url').value,
     kind: mode.value,
     wslDistro: document.getElementById('wslDistro').value,
+    clientHttpsUrl: document.getElementById('clientHttpsUrl').value,
   })
 }
 document.getElementById('cancel').onclick = cancel

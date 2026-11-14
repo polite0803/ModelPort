@@ -41,6 +41,16 @@ export interface GatewayEntry {
   manageWsl?: boolean
   /** Distro name for `wsl.exe -d`; absent = the Windows default distro. */
   wslDistro?: string
+  /**
+   * The client-facing https endpoint of THIS access path, for clients that refuse plain
+   * http (Claude Desktop). Access-path data lives on the entry, not the gateway: the same
+   * gateway is `https://<ip>:8443` when reached directly but `https://<domain>` (port 443,
+   * a public edge cert) through a proxy, and the gateway cannot tell those apart. Absent =
+   * fall back to `url` when it is already https; a non-loopback http entry with no value
+   * blocks the switch honestly instead of guessing a port the gateway never advertised
+   * for this path.
+   */
+  clientHttpsUrl?: string
 }
 
 export interface AddressBook {
@@ -78,6 +88,13 @@ function readKind(entry: GatewayEntry): GatewayKind {
   return entry.manageWsl === true ? 'wsl' : 'remote'
 }
 
+/** Only an https origin is a usable client endpoint; anything else is dropped, not guessed. */
+function readClientHttpsUrl(entry: GatewayEntry): string | undefined {
+  if (typeof entry.clientHttpsUrl !== 'string') return undefined
+  const origin = normalizeOrigin(entry.clientHttpsUrl)
+  return origin !== null && origin.startsWith('https:') ? origin : undefined
+}
+
 export function readBook(): AddressBook {
   const path = bookPath()
   if (!existsSync(path)) return { ...EMPTY }
@@ -88,6 +105,7 @@ export function readBook(): AddressBook {
           .filter((entry): entry is GatewayEntry => !!entry && typeof entry.url === 'string' && typeof entry.name === 'string')
           .map(entry => {
             const kind = readKind(entry)
+            const clientHttpsUrl = readClientHttpsUrl(entry)
             return {
               id: entry.id ?? randomUUID(),
               name: entry.name,
@@ -97,6 +115,7 @@ export function readBook(): AddressBook {
               ...(typeof entry.wslDistro === 'string' && entry.wslDistro.trim() !== ''
                 ? { wslDistro: entry.wslDistro.trim() }
                 : {}),
+              ...(clientHttpsUrl !== undefined ? { clientHttpsUrl } : {}),
             }
           })
       : []
@@ -122,12 +141,14 @@ export function activeEntry(book: AddressBook): GatewayEntry | null {
 
 export function upsertEntry(
   book: AddressBook,
-  input: { id?: string; name: string; url: string; kind: GatewayKind; wslDistro?: string },
+  input: { id?: string; name: string; url: string; kind: GatewayKind; wslDistro?: string; clientHttpsUrl?: string },
 ): AddressBook {
   const origin = normalizeOrigin(input.url)
   if (origin === null) throw new Error(`"${input.url}" is not an http(s) origin`)
   const kind = input.kind
   const wslDistro = kind === 'wsl' && typeof input.wslDistro === 'string' ? input.wslDistro.trim() : ''
+  const httpsOrigin = typeof input.clientHttpsUrl === 'string' ? normalizeOrigin(input.clientHttpsUrl) : null
+  const clientHttpsUrl = httpsOrigin !== null && httpsOrigin.startsWith('https:') ? httpsOrigin : undefined
 
   if (input.id) {
     return {
@@ -142,6 +163,7 @@ export function upsertEntry(
         }
         if (kind === 'wsl') next.manageWsl = true
         if (wslDistro !== '') next.wslDistro = wslDistro
+        if (clientHttpsUrl !== undefined) next.clientHttpsUrl = clientHttpsUrl
         return next
       }),
     }
@@ -155,6 +177,7 @@ export function upsertEntry(
   }
   if (kind === 'wsl') created.manageWsl = true
   if (wslDistro !== '') created.wslDistro = wslDistro
+  if (clientHttpsUrl !== undefined) created.clientHttpsUrl = clientHttpsUrl
   return { entries: [...book.entries, created], activeId: book.activeId ?? created.id }
 }
 

@@ -65,3 +65,23 @@ test('the selected mode is the stored one, and the rows follow it', () => {
   assert.match(local, /mode\.value === 'local' \? 'none' : 'block'/)
   assert.match(local, /mode\.value === 'wsl' \? 'block' : 'none'/)
 })
+
+test('the client https field submits, prefills escaped, and follows the mode', () => {
+  const page = decodePage(gatewayPromptPageUrl({
+    existing: { name: 'nas', url: 'http://192.168.0.235:18080', kind: 'remote', clientHttpsUrl: 'https://192.168.0.235:8443' },
+    canUseWsl: true,
+  }))
+  assert.ok(page.includes('clientHttpsUrl: document.getElementById'), 'form must submit clientHttpsUrl')
+  assert.ok(page.includes('value="https://192.168.0.235:8443"'), 'the stored endpoint must prefill as a real origin')
+  assert.match(page, /id="clientHttpsRow"/)
+  // Local gateways are loopback: the field hides with the address row, never shown alone.
+  const rowToggles = page.match(/mode\.value === 'local' \? 'none' : 'block'/g) ?? []
+  assert.ok(rowToggles.length >= 2, 'both urlRow and clientHttpsRow must hide for local')
+})
+
+test('the probe button is a click handler, never called at load', () => {
+  const page = decodePage(gatewayPromptPageUrl({ canUseWsl: true }))
+  assert.match(page, /document\.getElementById\('probeHttps'\)\.onclick = function \(\)/)
+  assert.match(page, /window\.promptHost\.probeHttps\(/)
+  assert.doesNotMatch(page, /onclick = window\.promptHost/)
+})

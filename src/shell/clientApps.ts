@@ -15,10 +15,10 @@
  *   selector or a top-level base URL keeps serving the client and the new endpoint is
  *   never used - the "looks configured, 401s on arrival" failure.
  */
-import { basename, dirname, join } from 'node:path'
+import path from 'node:path'
 import { KEY_PLACEHOLDER } from '../shared/clientSync.ts'
 import type { ClientChange, ClientSyncState } from '../shared/clientSync.ts'
-import { CLAUDE_DESKTOP_PROFILE_ID, endpointFor, maskSecret, unservedModels } from './clientSyncPlan.ts'
+import { CLAUDE_DESKTOP_PROFILE_ID, claudeDesktopEndpoint, endpointFor, maskSecret, unservedModels } from './clientSyncPlan.ts'
 import {
   detectIndent,
   ensureJsonObject,
@@ -58,6 +58,12 @@ import type { PlannedFile } from './clientLiveWrite.ts'
 export interface AppPlanInput {
   /** Normalized origin of the gateway every client is pointed at. */
   origin: string
+  /**
+   * The address-book entry's client https endpoint (`clientHttpsUrl`), or null when the
+   * entry stores none. Access-path data lives on the shell entry, never derived from the
+   * gateway. Only clients that refuse plain http (Claude Desktop) consult it.
+   */
+  clientHttpsUrl: string | null
   /** Route names the target serves (`GET /v1/models`). */
   routeNames: string[]
   /** False when no canonical key could be established: address moves, key does not. */
@@ -70,6 +76,12 @@ export interface AppPlanInput {
    */
   keyValue: string | null
   paths: ClientPaths
+  /**
+   * Separator style of `paths`, for the joins and dirnames done here. Defaults to the
+   * host; a caller that computed the layout for another platform (tests) names it, so
+   * the derived paths stay in the same style as the ones handed in.
+   */
+  pathPlatform?: string
   read(path: string): string | null
   exists(path: string): boolean
 }
@@ -114,6 +126,11 @@ function row(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/** Path arithmetic in the style of the handed-in layout, never the host's. */
+export function pathOps(input: AppPlanInput) {
+  return (input.pathPlatform ?? process.platform) === 'win32' ? path.win32 : path.posix
 }
 
 /** `source[a][b]` when both levels exist and the leaf is a string. */
@@ -227,6 +244,7 @@ const CLAUDE_MODEL_NAME = /^(?:anthropic\/)?claude-/
  * variable nor an auth file, so without a canonical key there is nothing to write.
  */
 export function planClaudeDesktop(input: AppPlanInput): AppPlan {
+  const { dirname, basename } = pathOps(input)
   const paths = input.paths
   const configs = [paths.claudeDesktopConfig, paths.claudeDesktop3pConfig]
   if (!input.exists(dirname(paths.claudeDesktopConfig)) && !input.exists(dirname(paths.claudeDesktop3pConfig))) {
@@ -237,6 +255,11 @@ export function planClaudeDesktop(input: AppPlanInput): AppPlan {
       reason: '没有规范 key：Claude Desktop 只从它的 profile 里读密钥，不读环境变量，也没有可以手动填的界面',
     })
   }
+
+  // Desktop rejects a non-loopback http origin outright; decide the endpoint before any
+  // file is built so an unsatisfiable gateway is a blocked row, not a half-write.
+  const endpoint = claudeDesktopEndpoint(input.origin, input.clientHttpsUrl)
+  if ('blocked' in endpoint) return row('blocked', configs, { reason: endpoint.blocked })
 
   const files: PlannedFile[] = []
   const changes: ClientChange[] = []
@@ -253,7 +276,7 @@ export function planClaudeDesktop(input: AppPlanInput): AppPlan {
   const profileRaw = input.read(paths.claudeDesktopProfile)
   const profile = profileRaw === null ? {} : parseJsonObject(profileRaw)
   if (!isRecord(profile)) return row('error', [paths.claudeDesktopProfile], { reason: 'profile 不是可解析的 JSON 对象' })
-  const url = endpointFor(input.origin, 'origin')
+  const url = endpoint.url
   const servedModels = input.routeNames.filter(name => CLAUDE_MODEL_NAME.test(name)).slice(0, 200)
   const next: Record<string, unknown> = { ...profile }
   const written: Record<string, unknown> = {
@@ -290,13 +313,16 @@ export function planClaudeDesktop(input: AppPlanInput): AppPlan {
   // Desktop's own model list is not readable from these files, so nothing here can say
   // "the client lists a model the target does not serve" - the reason line says which
   // routes could not be advertised instead.
+  const switchedToHttps = url.startsWith('https:') && input.origin.startsWith('http:')
   return finalize(input, row('ready', [...configs, paths.claudeDesktopProfile, paths.claudeDesktopMeta], {
     files,
     changes,
     reason: servedModels.length === 0 && input.routeNames.length > 0
       ? '目标网关的路由名不是 claude-*：Desktop 的选择器仍列它内置的 Claude 模型名，网关按默认模型接住'
       : null,
-    manualStep: '重启 Claude Desktop 让新的部署模式生效',
+    manualStep: switchedToHttps
+      ? '重启 Claude Desktop 让新的部署模式生效；若该 https 地址的证书不是公共可信（如网关自签名），还需在网关 HTTPS 设置里「安装到系统信任」，否则 Desktop 会拒绝连接'
+      : '重启 Claude Desktop 让新的部署模式生效',
   }))
 }
 
@@ -313,6 +339,7 @@ export function planClaudeDesktop(input: AppPlanInput): AppPlan {
  * unrelated `GEMINI_*` settings (sandbox, CLI home, telemetry) stay as the user set them.
  */
 export function planGemini(input: AppPlanInput): AppPlan {
+  const { dirname } = pathOps(input)
   const paths = input.paths
   const envRaw = input.read(paths.geminiEnv)
   const settingsRaw = input.read(paths.geminiSettings)
@@ -428,6 +455,7 @@ export function planGrokBuild(input: AppPlanInput): AppPlan {
  * valid native declaration would be ignored by the client.
  */
 export function planOpenCode(input: AppPlanInput): AppPlan {
+  const { join } = pathOps(input)
   const dir = input.paths.opencodeDir
   if (!input.exists(dir)) return row('not-installed', [join(dir, 'opencode.json')], { reason: '没有 ~/.config/opencode 目录' })
   const candidates = [join(dir, 'opencode.jsonc'), join(dir, 'opencode.json')]

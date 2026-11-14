@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import path from 'node:path'
 
 import { clientPaths, CLAUDE_DESKTOP_PROFILE_ID } from '../../src/shell/clientSyncPlan.ts'
 import type { ClientPaths } from '../../src/shell/clientSyncPlan.ts'
@@ -29,16 +30,21 @@ const WIN = clientPaths('C:/Users/u', 'C:/Users/u/AppData/Roaming', undefined, {
   localAppData: 'C:/Users/u/AppData/Local',
   env: {},
 })
+const WIN_CLAUDE_DIR = path.win32.join('C:/Users/u/AppData/Local', 'Claude')
 
 function harness(docs: Record<string, string>, dirs: string[] = [], input: Partial<AppPlanInput> = {}): AppPlanInput {
   const files = new Map(Object.entries(docs))
   const known = new Set(dirs)
   const merged: AppPlanInput = {
     origin: ORIGIN,
+    clientHttpsUrl: null,
     routeNames: ROUTES,
     hasKey: true,
     keyValue: FAKE_KEY,
     paths: P,
+    // The fixture keys below are POSIX strings on every host, so the planners must join
+    // in that style too - on a Windows runner the host's `\` would miss every lookup.
+    pathPlatform: 'linux',
     read: path => files.get(path) ?? null,
     exists: path => known.has(path) || files.has(path),
     ...input,
@@ -59,9 +65,11 @@ test('the layout is the clients own, not one guess per platform', () => {
   assert.equal(P.ompModels, '/root/.omp/agent/models.yml')
   assert.equal(P.piModels, '/root/.pi/agent/models.json')
   assert.equal(P.copilotProviders, '/root/.copilot/providers.json')
-  assert.equal(WIN.claudeDesktopConfig, 'C:/Users/u/AppData/Local/Claude/claude_desktop_config.json')
-  assert.equal(WIN.claudeDesktop3pConfig, 'C:/Users/u/AppData/Local/Claude-3p/claude_desktop_config.json')
-  assert.equal(WIN.claudeDesktopProfile, `C:/Users/u/AppData/Local/Claude-3p/configLibrary/${CLAUDE_DESKTOP_PROFILE_ID}.json`)
+  // The win32 layout is computed with win32 arithmetic on every host: the separator is
+  // the platform's, not the runner's.
+  assert.equal(WIN.claudeDesktopConfig, path.win32.join('C:/Users/u/AppData/Local', 'Claude', 'claude_desktop_config.json'))
+  assert.equal(WIN.claudeDesktop3pConfig, path.win32.join('C:/Users/u/AppData/Local', 'Claude-3p', 'claude_desktop_config.json'))
+  assert.equal(WIN.claudeDesktopProfile, path.win32.join('C:/Users/u/AppData/Local', 'Claude-3p', 'configLibrary', `${CLAUDE_DESKTOP_PROFILE_ID}.json`))
   // Env overrides the clients document.
   const custom = clientPaths('/root', '/root/.config', undefined, { platform: 'linux', env: { KIMI_CODE_HOME: '/data/kimi', DSH_HOME: '/data/dsh' } })
   assert.equal(custom.kimiConfig, '/data/kimi/config.toml')
@@ -79,7 +87,7 @@ test('Claude Desktop: deploymentMode 3p in both configs plus the gateway profile
     [WIN.claudeDesktopConfig]: config,
     [WIN.claudeDesktopMeta]: meta,
   }
-  const plan = CLI_APP_PLANNERS['claude-desktop'](harness(docs, ['C:/Users/u/AppData/Local/Claude'], { paths: WIN }))
+  const plan = CLI_APP_PLANNERS['claude-desktop'](harness(docs, [WIN_CLAUDE_DIR], { paths: WIN, pathPlatform: 'win32' }))
   assert.equal(plan.state, 'ready')
   const written = new Map(plan.files.map(file => [file.path, file.content]))
   const nextConfig = JSON.parse(String(written.get(WIN.claudeDesktopConfig))) as Record<string, unknown>
@@ -106,9 +114,9 @@ test('Claude Desktop: deploymentMode 3p in both configs plus the gateway profile
 })
 
 test('Claude Desktop: a claude-* route is advertised, and a second switch writes nothing', () => {
-  const dirs = ['C:/Users/u/AppData/Local/Claude']
+  const dirs = [WIN_CLAUDE_DIR]
   const first = CLI_APP_PLANNERS['claude-desktop'](
-    harness({ [WIN.claudeDesktopConfig]: '{}\n' }, dirs, { paths: WIN, routeNames: ['claude-sonnet-4-5', 'auto'] }),
+    harness({ [WIN.claudeDesktopConfig]: '{}\n' }, dirs, { paths: WIN, pathPlatform: 'win32', routeNames: ['claude-sonnet-4-5', 'auto'] }),
   )
   const written = new Map<string, string>()
   for (const file of first.files) {
@@ -120,18 +128,89 @@ test('Claude Desktop: a claude-* route is advertised, and a second switch writes
 
   const docs: Record<string, string> = {}
   for (const [path, content] of written) docs[path] = content
-  const second = CLI_APP_PLANNERS['claude-desktop'](harness(docs, dirs, { paths: WIN, routeNames: ['claude-sonnet-4-5', 'auto'] }))
+  const second = CLI_APP_PLANNERS['claude-desktop'](harness(docs, dirs, { paths: WIN, pathPlatform: 'win32', routeNames: ['claude-sonnet-4-5', 'auto'] }))
   assert.equal(second.state, 'unchanged', 'already pointed at the target writes nothing')
   assert.deepEqual(second.changes, [])
 })
 
 test('Claude Desktop: no canonical key is blocked, not a half-write', () => {
   const plan = CLI_APP_PLANNERS['claude-desktop'](
-    harness({ [WIN.claudeDesktopConfig]: '{}\n' }, ['C:/Users/u/AppData/Local/Claude'], { paths: WIN, hasKey: false }),
+    harness({ [WIN.claudeDesktopConfig]: '{}\n' }, [WIN_CLAUDE_DIR], { paths: WIN, pathPlatform: 'win32', hasKey: false }),
   )
   assert.equal(plan.state, 'blocked')
   assert.equal(plan.files.length, 0)
   assert.match(plan.reason ?? '', /没有规范 key/)
+})
+
+test('Claude Desktop: a non-loopback http gateway uses the entry-stored client https endpoint', () => {
+  const plan = CLI_APP_PLANNERS['claude-desktop'](
+    harness({ [WIN.claudeDesktopConfig]: '{}\n' }, [WIN_CLAUDE_DIR], {
+      paths: WIN, pathPlatform: 'win32',
+      origin: 'http://192.168.0.235:18080',
+      clientHttpsUrl: 'https://192.168.0.235:8443',
+    }),
+  )
+  assert.equal(plan.state, 'ready')
+  const written = new Map(plan.files.map(file => [file.path, file.content]))
+  const profile = JSON.parse(String(written.get(WIN.claudeDesktopProfile))) as Record<string, unknown>
+  assert.equal(profile.inferenceGatewayBaseUrl, 'https://192.168.0.235:8443', 'Desktop refuses non-loopback http')
+  assert.match(plan.manualStep ?? '', /安装到系统信任/, 'self-signed https needs the CA trusted')
+})
+
+test('Claude Desktop: non-loopback http with no stored client https endpoint is blocked, not a bad URL', () => {
+  const plan = CLI_APP_PLANNERS['claude-desktop'](
+    harness({ [WIN.claudeDesktopConfig]: '{}\n' }, [WIN_CLAUDE_DIR], {
+      paths: WIN, pathPlatform: 'win32',
+      origin: 'http://192.168.0.235:18080',
+      clientHttpsUrl: null,
+    }),
+  )
+  assert.equal(plan.state, 'blocked')
+  assert.equal(plan.files.length, 0)
+  assert.match(plan.reason ?? '', /https/)
+})
+
+test('Claude Desktop: a loopback http gateway keeps http (no https needed)', () => {
+  const plan = CLI_APP_PLANNERS['claude-desktop'](
+    harness({ [WIN.claudeDesktopConfig]: '{}\n' }, [WIN_CLAUDE_DIR], {
+      paths: WIN, pathPlatform: 'win32',
+      origin: 'http://127.0.0.1:8080',
+      clientHttpsUrl: null,
+    }),
+  )
+  assert.equal(plan.state, 'ready')
+  const written = new Map(plan.files.map(file => [file.path, file.content]))
+  const profile = JSON.parse(String(written.get(WIN.claudeDesktopProfile))) as Record<string, unknown>
+  assert.equal(profile.inferenceGatewayBaseUrl, 'http://127.0.0.1:8080')
+})
+
+test('Claude Desktop: an https entry keeps its own url (domain path, no gateway derivation)', () => {
+  const plan = CLI_APP_PLANNERS['claude-desktop'](
+    harness({ [WIN.claudeDesktopConfig]: '{}\n' }, [WIN_CLAUDE_DIR], {
+      paths: WIN, pathPlatform: 'win32',
+      origin: 'https://modelport.bgnone.cn',
+      clientHttpsUrl: null,
+    }),
+  )
+  assert.equal(plan.state, 'ready')
+  const written = new Map(plan.files.map(file => [file.path, file.content]))
+  const profile = JSON.parse(String(written.get(WIN.claudeDesktopProfile))) as Record<string, unknown>
+  assert.equal(profile.inferenceGatewayBaseUrl, 'https://modelport.bgnone.cn', 'the domain entry is its own endpoint, port 443 not the gateway listener')
+  assert.doesNotMatch(plan.manualStep ?? '', /安装到系统信任/, 'a public-cert path must not demand a trust install')
+})
+
+test('Claude Desktop: the entry value wins even when it is another host (proxy path)', () => {
+  const plan = CLI_APP_PLANNERS['claude-desktop'](
+    harness({ [WIN.claudeDesktopConfig]: '{}\n' }, [WIN_CLAUDE_DIR], {
+      paths: WIN, pathPlatform: 'win32',
+      origin: 'http://192.168.0.235:18080',
+      clientHttpsUrl: 'https://modelport.bgnone.cn',
+    }),
+  )
+  assert.equal(plan.state, 'ready')
+  const written = new Map(plan.files.map(file => [file.path, file.content]))
+  const profile = JSON.parse(String(written.get(WIN.claudeDesktopProfile))) as Record<string, unknown>
+  assert.equal(profile.inferenceGatewayBaseUrl, 'https://modelport.bgnone.cn', 'stored entry data, not a hostname:httpsPort guess')
 })
 
 // ---------------------------------------------------------------------------

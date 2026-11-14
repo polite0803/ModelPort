@@ -11,8 +11,11 @@ contextBridge.exposeInMainWorld('promptHost', {
   submit: (values: {
     name: string
     url: string
-    manageWsl: boolean
+    kind: string
     wslDistro: string
+    clientHttpsUrl: string
   }): void => ipcRenderer.send('shell:prompt-submit', values),
   cancel: (): void => ipcRenderer.send('shell:prompt-cancel'),
+  probeHttps: (url: string): Promise<{ url: string | null; error: string | null }> =>
+    ipcRenderer.invoke('shell:prompt-probe-https', url),
 })
