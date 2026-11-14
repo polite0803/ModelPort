@@ -89,9 +89,9 @@ const exhaustedRow = (asOfMs: number) => ({
 
 test('a fresh "no credit left" row pushes the entry to the exhausted slot and blocks its accounts', () => {
   minuteUsage('m-gate', 10)
-  // 先确认基线：半满的账本给 0.5，账号不被任何理由挡下。
-  assert.equal(gate.aggregateHeadroom('open_router', 'm-gate'), 0.5)
-  assert.equal(legacyHeadroom('m-gate'), 0.5)
+  // 基线与旧算法就地重算对拍（半满账本通常是 0.5）：不写死小数，录制与断言之间
+  // 跨过分钟边界时 rpm 桶掉出 60s 窗口，值会随账本变，期望必须跟着同一判据走。
+  assert.equal(gate.aggregateHeadroom('open_router', 'm-gate'), legacyHeadroom('m-gate'))
   assert.equal(gate.quotaBlockReason(ENTRY, KEY_ID, 'm-gate'), undefined)
 
   harness.storeManager.setAggregateCreditSnapshot('open_router', exhaustedRow(Date.now()))
@@ -108,8 +108,9 @@ test('a fresh "no credit left" row pushes the entry to the exhausted slot and bl
 test('the same row 16 minutes old stops being ordering evidence on both functions', () => {
   // 上一条留下的那行，只把时刻挪旧。
   harness.storeManager.setAggregateCreditSnapshot('open_router', exhaustedRow(Date.now() - 16 * 60_000))
-  assert.equal(gate.aggregateHeadroom('open_router', 'm-gate'), 0.5, 'back to the token math exactly')
-  assert.equal(gate.aggregateHeadroom('open_router', 'm-gate'), legacyHeadroom('m-gate'))
+  // 与旧算法就地重算的值对拍，不写死 0.5：rpm 窗口按整分钟取桶，录制与断言之间
+  // 跨过分钟边界时旧桶掉出 60s 窗口，这一格会变成 0.8（rpd 10/50 还在）。
+  assert.equal(gate.aggregateHeadroom('open_router', 'm-gate'), legacyHeadroom('m-gate'), 'back to the token math exactly')
   assert.equal(gate.quotaBlockReason(ENTRY, KEY_ID, 'm-gate'), undefined, 'a stale row unblocks the account')
 })
 
