@@ -26,6 +26,12 @@ import type { AggregateEntry } from '../../../shared/aggregate'
  * mention that host, and its only model (`codestral-latest`) is already covered
  * by the `mistral` entry. Do not re-add it either.
  *
+ * Two modelscope rows were dropped on 2026-11-15: `MiniMax/MiniMax-M3` and
+ * `stepfun-ai/Step-3.7-Flash`. Upstream answered 400 'Model id : ... , has no
+ * provider supported' for both on 2026-11-14 live traffic (x3 / x1 in the
+ * gateway request log; the same wording class hit 11 times on 2026-11-06).
+ * Do not re-add them when re-transcribing.
+ *
  * `agnes` points at the China host (`https://api.agnes-ai.cn/v1`) rather than
  * the international `apihub.agnes-ai.com` one: the CN wiki is the vendor's own
  * documentation and declares that base URL, `agnes-2.0-flash` is marked 已废弃
@@ -3280,20 +3286,12 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     "wire": "openai-chat",
     "models": [
       {
-        "id": "MiniMax/MiniMax-M3",
-        "name": "MiniMax M3"
-      },
-      {
         "id": "Qwen/Qwen3.5-27B",
         "name": "Qwen3.5 27B"
       },
       {
         "id": "Qwen/Qwen3.5-35B-A3B",
         "name": "Qwen3.5 35B A3B"
-      },
-      {
-        "id": "stepfun-ai/Step-3.7-Flash",
-        "name": "Step 3.7 Flash"
       },
       {
         "id": "Tencent-Hunyuan/Hy3",
@@ -3306,13 +3304,11 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     ],
     "authUrl": "https://modelscope.cn/my/myaccesstoken",
     "envVar": "MODELSCOPE_API_KEY",
-    "notes": "ModelScope (魔搭) API-Inference: 2,000 free calls/day total and up to 200 calls/day for one model; the free quota is dynamic with platform capacity (freellmpool port, official free-tier docs checked 2026-07-19). The key is the long-lived ModelScope access token. Domestic CN network friendly. deepseek-ai/DeepSeek-V4-Flash rows are disabled upstream and stay out of the baseline; discovery merges the rest.",
+    "notes": "ModelScope (魔搭) API-Inference: 2,000 free calls/day total and up to 200 calls/day for one model; the free quota is dynamic with platform capacity (freellmpool port, official free-tier docs checked 2026-07-19). The key is the long-lived ModelScope access token. Domestic CN network friendly. deepseek-ai/DeepSeek-V4-Flash rows are disabled upstream and stay out of the baseline; discovery merges the rest. MiniMax/MiniMax-M3 and stepfun-ai/Step-3.7-Flash were dropped on 2026-11-15: upstream answered 400 'Model id : ... , has no provider supported' for both on 2026-11-14 live traffic (x3 / x1 in the gateway request log; the same wording class hit 11 times on 2026-11-06).",
     "website": "https://www.modelscope.cn/",
     "freeModelsHint": [
-      "MiniMax/MiniMax-M3",
       "Qwen/Qwen3.5-27B",
       "Qwen/Qwen3.5-35B-A3B",
-      "stepfun-ai/Step-3.7-Flash",
       "Tencent-Hunyuan/Hy3",
       "ZhipuAI/GLM-5.2"
     ]

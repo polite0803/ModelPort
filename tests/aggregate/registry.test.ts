@@ -31,7 +31,11 @@ test('the catalogue carries the entries that can actually be wired', () => {
   // Astron Coding and Token; JD Cloud Coding and Token). Empty or single-"latest"
   // baselines are deliberate - those vendors publish model ids only in their
   // console, and inventing slugs would turn "unknown" into a wrong answer.
-  assert.equal(AGGREGATE_REGISTRY.reduce((sum, entry) => sum + entry.models.length, 0), 623)
+  // minus 2 on 2026-11-15: modelscope dropped MiniMax/MiniMax-M3 and
+  // stepfun-ai/Step-3.7-Flash - upstream answered 400 'Model id : ... , has no
+  // provider supported' for both on 2026-11-14 live traffic (x3 / x1; the
+  // 2026-11-06 window had 11 hits of the same wording class).
+  assert.equal(AGGREGATE_REGISTRY.reduce((sum, entry) => sum + entry.models.length, 0), 621)
 
   // Browser-login account channels are retired; the responses-only relay is not wired.
   for (const excluded of ['openai', 'github_copilot', 'fleetrelay_t1']) {

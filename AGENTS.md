@@ -5,8 +5,8 @@ Short rulebook: what changes how you work, plus pointers. Full reference:
 [`docs/README.md`](docs/README.md). When docs and code disagree, code wins and the doc is updated in
 the same change. Keep this file under 200 lines: new detail goes into the full reference.
 
-ModelPort: a desktop console for an OpenAI-compatible proxy gateway (local / WSL / remote) - 92
-aggregate entries / 580 models, 15 account channels, custom providers.
+ModelPort: a desktop console for an OpenAI-compatible proxy gateway (local / WSL / remote) - 102
+aggregate entries / 621 models, 15 account channels, custom providers.
 
 ## Build and gate
 
