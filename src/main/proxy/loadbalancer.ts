@@ -9,11 +9,12 @@ import { storeManager } from '../store/store'
 import { isMappingActive, isModelRoutable } from '../store/modelServing'
 import { AGGREGATE_REGISTRY } from '../providers/aggregate/registry'
 import { resolveAggregateChain } from '../../shared/aggregateRouting'
-import { aggregateHeadroom, quotaBlockReason } from './quota/gate'
+import { aggregateHeadroom, createQuotaGateContext, quotaBlockReason } from './quota/gate'
 import { resolveCaps } from './quota/limits'
 import { dailyUsageOf } from '../../shared/dailyUsage.ts'
 import { pickBestPace, pickSoonestReset, type AccountQuotaFacts } from '../../shared/quotaPacing'
 import { debugLog } from '../logging/debugLog'
+import type { TransientSkip } from './autoRouter'
 
 /**
  * Load Balancer
@@ -181,18 +182,65 @@ export class LoadBalancer {
   }
 
   /**
-   * Get available accounts list
+   * 具名模型空池的瞬时成因：与 `getAvailableAccounts` 同一套判据重走一遍，只有当
+   * 空池**完全**由会自己复位的状态（额度窗口/上游亲口拒/当日上限）造成时返回剔除
+   * 清单，调用方据此把 503 翻成 429 + Retry-After（与 auto 路径的
+   * `transientUnavailable` 同口径）。掺了别的成因（失败冷却、或本该进池的账号 ——
+   * 两次读取之间状态变了）返回 undefined，调用方保持 503。
+   * 停用账号与 auto 同口径：不进池，也不算跳过。
    */
-  private getAvailableAccounts(
+  transientEmptyPoolSkips(
     model: string,
     preferredProviderId?: string,
     excludeFailed: boolean = false
-  ): AccountSelection[] {
-    const providers = storeManager.getProviders().filter(p => p.enabled)
-    const candidates: AccountSelection[] = []
+  ): TransientSkip[] | undefined {
+    const chain = this.namedChain(model, preferredProviderId)
+    const gateContext = createQuotaGateContext()
+    const skips: TransientSkip[] = []
+    let allTransient = true
 
-    // 裸模型名（不带 `<entry>/` 前缀）可能同时被多家聚合条目服务。先解析成一条按额度余量排序的链，
-    // 后面按条目改用它在目录里的显示名，顺序也沿用链的顺序。写明了前缀的名字不走这条路。
+    for (const provider of storeManager.getProviders().filter(p => p.enabled)) {
+      if (preferredProviderId && provider.id !== preferredProviderId) {
+        continue
+      }
+      const chained = chain.get(provider.id)
+      if (!this.providerSupportsModel(provider, chained?.displayName ?? model)) {
+        continue
+      }
+      const actualModel = chained?.actualModelId ?? this.mapModel(model, provider)
+      for (const account of storeManager.getAccountsByProviderId(provider.id, true)) {
+        if (account.status !== 'active') {
+          continue
+        }
+        if (account.dailyLimit && dailyUsageOf(account) >= account.dailyLimit) {
+          skips.push({ providerId: provider.id, accountId: account.id, model: actualModel, reason: 'daily_limit' })
+          continue
+        }
+        if (excludeFailed && this.isAccountInFailure(account.id)) {
+          allTransient = false
+          continue
+        }
+        const reason = quotaBlockReason(provider, account.id, actualModel, gateContext)
+        if (reason !== undefined) {
+          skips.push({ providerId: provider.id, accountId: account.id, model: actualModel, reason })
+          continue
+        }
+        // 走到这里 = 这个账号本该进池：空池不是瞬时状态造成的
+        allTransient = false
+      }
+    }
+
+    return allTransient && skips.length > 0 ? skips : undefined
+  }
+
+  /**
+   * 裸名的跨家链（按额度余量排序）。选号与空池诊断共用这一份：两处若各解析一遍，
+   * 「诊断说的模型」与「选号用的模型」迟早漂移。带前缀或点名了供应商时没有链。
+   */
+  private namedChain(
+    model: string,
+    preferredProviderId?: string
+  ): Map<string, { displayName: string; actualModelId: string; index: number }> {
     const chain = new Map<string, { displayName: string; actualModelId: string; index: number }>()
     if (!preferredProviderId && !model.includes('/')) {
       resolveAggregateChain(AGGREGATE_REGISTRY, model, { headroom: aggregateHeadroom }).forEach(
@@ -205,6 +253,23 @@ export class LoadBalancer {
         }
       )
     }
+    return chain
+  }
+
+  /**
+   * Get available accounts list
+   */
+  private getAvailableAccounts(
+    model: string,
+    preferredProviderId?: string,
+    excludeFailed: boolean = false
+  ): AccountSelection[] {
+    const providers = storeManager.getProviders().filter(p => p.enabled)
+    const candidates: AccountSelection[] = []
+
+    // 裸模型名（不带 `<entry>/` 前缀）可能同时被多家聚合条目服务。先解析成一条按额度余量排序的链，
+    // 后面按条目改用它在目录里的显示名，顺序也沿用链的顺序。写明了前缀的名字不走这条路。
+    const chain = this.namedChain(model, preferredProviderId)
 
     for (const provider of providers) {
       if (preferredProviderId && provider.id !== preferredProviderId) {

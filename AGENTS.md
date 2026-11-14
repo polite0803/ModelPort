@@ -116,8 +116,11 @@ registry) → `adapters/<provider>.ts` → upstream; `loadbalancer.ts` picks the
 - **An empty pool names its cause.** Config pruning and capability mismatch stay 503
   `no_available_model` + `details.missing`; a pool emptied only by self-resetting state (quota window,
   exhaustion mark, daily limit) is 429 `model_temporarily_unavailable` + `Retry-After`
-  (`transientUnavailable`). Cooldown never empties the pool (the soonest-waking group is kept, so the
-  client sees the real upstream 429); `todayUsed` is day-keyed (`dailyUsageOf`) - never read raw.
+  (`transientUnavailable`). The named-model path shares the projection: `loadBalancer.transientEmptyPoolSkips`
+  re-walks the selection filters, and only a purely transient empty pool flips its 503
+  `no_available_account` to the same 429 (permanent causes keep 503). Cooldown never empties the pool
+  (the soonest-waking group is kept, so the client sees the real upstream 429); `todayUsed` is day-keyed
+  (`dailyUsageOf`) - never read raw.
 - **Soft pin > `preferredModel` > sticky.** `ModelPin` lives in memory only (route or session scope,
   30 min; tray-issued pins default to `TRAY_PIN_MINUTES` = 10 and the menu says they affect every
   client of that route), and a pin is **not** vetoed by the model circuit: user intent outranks an

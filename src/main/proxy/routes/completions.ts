@@ -11,7 +11,7 @@ import { requestForwarder } from '../forwarder'
 import { streamHandler } from '../stream'
 import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
-import { autoRouter, AUTO_SKIPPED_REPORT_LIMIT, describeTransientCause } from '../autoRouter'
+import { autoRouter, AUTO_SKIPPED_REPORT_LIMIT, describeTransientCause, summarizeTransientSkips } from '../autoRouter'
 import type { AutoCandidate } from '../autoRouter'
 import type { AccountSelection, ForwardResult } from '../types'
 import { storeManager } from '../../store/store'
@@ -218,6 +218,46 @@ router.post('/completions', async (ctx: Context) => {
     )
 
     if (!selection) {
+      // 与 chat 路由同因同形：空池完全由瞬时状态造成时 429 + Retry-After，
+      // 永久成因（诊断返回 undefined）仍走下面的 503。
+      const transientSkips = loadBalancer.transientEmptyPoolSkips(
+        request.model,
+        preferredProviderId,
+        config.loadBalanceStrategy === 'failover'
+      )
+      const transient = transientSkips === undefined
+        ? undefined
+        : summarizeTransientSkips(transientSkips, Date.now())
+      if (transient) {
+        const message = `All accounts for model '${request.model}' are temporarily unavailable (${describeTransientCause(transient.cause)}); retry in ${transient.retryAfterSeconds}s`
+        const body = {
+          error: {
+            message,
+            type: 'rate_limit_error',
+            code: 'model_temporarily_unavailable',
+            details: {
+              cause: transient.cause,
+              skipped: transient.skipped,
+              retry_after_seconds: transient.retryAfterSeconds,
+            },
+          },
+        }
+        ctx.set('Retry-After', String(transient.retryAfterSeconds))
+        ctx.status = 429
+        ctx.body = body
+        const refused = selectionRefusalEntry(ctx, {
+          statusCode: 429,
+          code: 'model_temporarily_unavailable',
+          type: 'rate_limit_error',
+          message,
+          body,
+          requestId,
+          client,
+        })
+        storeManager.addRequestLog(refused)
+        storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+        return
+      }
       ctx.status = 503
       ctx.body = {
         error: {

@@ -1456,7 +1456,12 @@ Three prunes could empty it, and none of them is a configuration fact:
    themselves. `collectCandidates` now records them as `TransientSkip[]`; when those are the *only*
    reasons the pool is empty, `AutoRouteDecision.transientUnavailable` carries
    `{ cause: 'quota' | 'daily_limit' | 'mixed', skipped, retryAfterSeconds }` and both routes project
-   429 `model_temporarily_unavailable` + `Retry-After` (see §Public API Contract). `retryAfterSeconds`
+   429 `model_temporarily_unavailable` + `Retry-After` (see §Public API Contract). The named-model path
+   (no route matched) shares the projection: `loadBalancer.transientEmptyPoolSkips` re-walks the
+   `getAvailableAccounts` filters with the same predicates, and chat/completions flip their 503
+   `no_available_account` to the same 429 only when every exclusion is transient - disabled accounts,
+   failure cooldowns and unknown names keep the 503, and the 429 writes a request-log row
+   (`selectionRefusalEntry`) like the route path. `retryAfterSeconds`
    is derived where a fact exists - an exhaustion mark's `until` (30 min TTL when absent) or the next
    local midnight for a daily limit - and falls back to 60 s for window reasons, whose reset instant the
    local ledger does not track.

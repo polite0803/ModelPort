@@ -154,7 +154,7 @@ export interface AutoCandidate {
  * 与账号当日上限——都会自己复位，复位前这一轮确实无人可派，但**不是**「这条
  * 路由没有模型」。
  */
-interface TransientSkip {
+export interface TransientSkip {
   providerId: string
   accountId: string
   /** 上游真实模型名：额度耗尽标记按这个键记（不是 displayName）。 */
@@ -623,8 +623,11 @@ function nextLocalMidnight(now: number): number {
  * 原因（rpm/tpm/…）本地账本没有复位时刻，退回一分钟 —— 给一个短的重试间隔，
  * 比编一个精确到毫秒的假时刻好。一次取最早解禁的那一个：那一刻起池子里就重新
  * 有人了。
+ *
+ * 两个消费点共用这一份：auto 路由的空池投影，与具名模型的空池诊断
+ * （`loadBalancer.transientEmptyPoolSkips` → chat/completions 的 429）。
  */
-function summarizeTransientSkips(
+export function summarizeTransientSkips(
   skips: readonly TransientSkip[],
   now: number
 ): NonNullable<AutoRouteDecision['transientUnavailable']> | undefined {

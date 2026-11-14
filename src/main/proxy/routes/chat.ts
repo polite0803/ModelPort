@@ -15,7 +15,7 @@ import { autoExhaustedResponse, parseRetryAfterSeconds } from '../failover'
 import { SSEParser, extractStreamErrorFrame, streamHandler, type StreamErrorFrame } from '../stream'
 import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
-import { autoRouter, AUTO_SKIPPED_REPORT_LIMIT, describeTransientCause } from '../autoRouter'
+import { autoRouter, AUTO_SKIPPED_REPORT_LIMIT, describeTransientCause, summarizeTransientSkips } from '../autoRouter'
 import type { AutoCandidate, AutoRouteDecision } from '../autoRouter'
 import { resolveRouteRequest, routePoolBreakMessage } from '../../store/modelRoutes'
 import type {
@@ -705,6 +705,49 @@ router.post('/completions', async (ctx: Context) => {
       : loadBalancer.selectChainCandidates(request.model, preferredAccountId)
 
     if (!selection) {
+      // 空池完全由会自己复位的状态（额度窗口/上游亲口拒/当日上限）造成时，与 auto
+      // 路径同口径：429 + Retry-After。原先一律 503 `no_available_account` 实测让
+      // 客户端把「等窗口复位」读成配置问题，硬重试 11 次后弹错误窗口。永久成因
+      // （没有账号/模型不支持/失败冷却）诊断返回 undefined，仍走下面的 503。
+      const transientSkips = loadBalancer.transientEmptyPoolSkips(
+        request.model,
+        preferredProviderId,
+        config.loadBalanceStrategy === 'failover'
+      )
+      const transient = transientSkips === undefined
+        ? undefined
+        : summarizeTransientSkips(transientSkips, Date.now())
+      if (transient) {
+        const message = `All accounts for model '${request.model}' are temporarily unavailable (${describeTransientCause(transient.cause)}); retry in ${transient.retryAfterSeconds}s`
+        const body = {
+          error: {
+            message,
+            type: 'rate_limit_error',
+            param: null,
+            code: 'model_temporarily_unavailable',
+            details: {
+              cause: transient.cause,
+              skipped: transient.skipped,
+              retry_after_seconds: transient.retryAfterSeconds,
+            },
+          },
+        }
+        ctx.set('Retry-After', String(transient.retryAfterSeconds))
+        ctx.status = 429
+        ctx.body = body
+        const refused = selectionRefusalEntry(ctx, {
+          statusCode: 429,
+          code: 'model_temporarily_unavailable',
+          type: 'rate_limit_error',
+          message,
+          body,
+          requestId,
+          client,
+        })
+        storeManager.addRequestLog(refused)
+        storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+        return
+      }
       ctx.status = 503
       ctx.body = {
         error: {
