@@ -229,6 +229,86 @@ test('Qoder: already pointing at the target is unchanged, not a rewrite', () => 
   assert.deepEqual(second.changes.map(change => change.label.endsWith('.apiKey')), [true, true])
 })
 
+const ROUTE_SET = [
+  { name: 'auto', displayName: 'auto', contextWindow: 200000 },
+  { name: 'daily', displayName: 'daily', contextWindow: 200000 },
+  { name: 'performance', displayName: 'performance', contextWindow: 131072 },
+]
+
+test('Qoder: given the gateway routes the custom models are rebuilt to exactly those routes', () => {
+  const result = planQoderSettings(QODER_SETTINGS, { origin: ORIGIN, writeKey: true, routes: ROUTE_SET })
+  assert.equal(result.kind, 'changed')
+  if (result.kind !== 'changed') return
+  const parsed = JSON.parse(result.content)
+  const providers = parsed.providers as Record<string, Record<string, any>>
+  const custom = Object.entries(providers).filter(([, p]) => p.type === 'openai-compatible')
+  assert.equal(custom.length, ROUTE_SET.length, 'one provider per route')
+  const byModel = new Map(custom.map(([, p]) => [p.model as string, p]))
+  for (const route of ROUTE_SET) {
+    const entry = byModel.get(route.name)
+    assert.ok(entry, `missing route ${route.name}`)
+    assert.equal(entry.baseUrl, `${ORIGIN}/v1`)
+    assert.equal(entry.apiKey, KEY_PLACEHOLDER)
+    assert.equal(entry.models.length, 1)
+    assert.equal(entry.models[0].model, route.name)
+    assert.equal(entry.models[0].contextWindow, route.contextWindow)
+    assert.equal(entry.displayName, `ModelPort ${route.name}`)
+  }
+  // The user's manual providers are replaced; unrelated settings are untouched.
+  assert.equal('qoder-custom-f50bdb45-6287-4ba2-bf7e-e644627bdf69' in providers, false)
+  assert.equal('qoder-custom-6d0a65b8-52a4-4203-8d27-52cf906eabff' in providers, false)
+  assert.equal(parsed.enabledPlugins['qoder-context@qoderapp-bundler'], true)
+  assert.ok(!result.content.includes('sk-old'))
+})
+
+test('Qoder: rebuilding keeps non-openai-compatible providers intact', () => {
+  const raw = JSON.stringify({
+    providers: {
+      'builtin-x': { type: 'anthropic', baseUrl: 'https://x' },
+      'qoder-custom-old': { type: 'openai-compatible', baseUrl: 'http://old/v1', apiKey: 'sk-old', models: [{ model: 'daily' }] },
+    },
+  }, null, 2)
+  const result = planQoderSettings(raw, {
+    origin: ORIGIN,
+    writeKey: true,
+    routes: [{ name: 'auto', displayName: 'auto', contextWindow: 100 }],
+  })
+  assert.equal(result.kind, 'changed')
+  if (result.kind !== 'changed') return
+  const parsed = JSON.parse(result.content)
+  assert.deepEqual(parsed.providers['builtin-x'], { type: 'anthropic', baseUrl: 'https://x' })
+  const custom = Object.values(parsed.providers as Record<string, Record<string, unknown>>)
+    .filter(p => p.type === 'openai-compatible')
+  assert.equal(custom.length, 1)
+  assert.equal(custom[0].model, 'auto')
+})
+
+test('Qoder: an identical route set re-plans as unchanged (idempotent)', () => {
+  const routes = [{ name: 'auto', displayName: 'auto', contextWindow: 200000 }]
+  const first = planQoderSettings(QODER_SETTINGS, { origin: ORIGIN, writeKey: true, routes })
+  assert.equal(first.kind, 'changed')
+  if (first.kind !== 'changed') return
+  const written = first.content.split(KEY_PLACEHOLDER).join('sk-canonical')
+  const second = planQoderSettings(written, {
+    origin: ORIGIN,
+    writeKey: true,
+    routes,
+    keyPreview: maskSecret('sk-canonical'),
+  })
+  assert.equal(second.kind, 'unchanged')
+})
+
+test('Qoder: without routes it only repoints, never wipes the model list', () => {
+  const result = planQoderSettings(QODER_SETTINGS, { origin: ORIGIN, writeKey: true, routes: [] })
+  assert.equal(result.kind, 'changed')
+  if (result.kind !== 'changed') return
+  const parsed = JSON.parse(result.content)
+  assert.deepEqual(Object.keys(parsed.providers), [
+    'qoder-custom-f50bdb45-6287-4ba2-bf7e-e644627bdf69',
+    'qoder-custom-6d0a65b8-52a4-4203-8d27-52cf906eabff',
+  ])
+})
+
 // ---------------------------------------------------------------------------
 // WorkBuddy
 // ---------------------------------------------------------------------------
@@ -265,6 +345,29 @@ test('WorkBuddy: only Custom rows move; the direct DeepSeek row is untouched', (
 test('WorkBuddy: no Custom row is "no-entry"', () => {
   const result = planWorkBuddyModels('[{"id":"x","vendor":"DeepSeek"}]', { origin: ORIGIN, writeKey: true })
   assert.equal(result.kind, 'no-entry')
+})
+
+test('WorkBuddy: with routes the Custom rows are rebuilt to exactly those routes', () => {
+  const routes = [
+    { name: 'auto', displayName: 'auto', contextWindow: 200000 },
+    { name: 'performance', displayName: 'performance', contextWindow: 131072 },
+  ]
+  const result = planWorkBuddyModels(WORKBUDDY_MODELS, { origin: ORIGIN, writeKey: true, routes })
+  assert.equal(result.kind, 'changed')
+  if (result.kind !== 'changed') return
+  const parsed = JSON.parse(result.content)
+  const custom = parsed.filter((row: any) => row.vendor === 'Custom')
+  assert.equal(custom.length, routes.length)
+  assert.deepEqual(custom.map((row: any) => row.id), ['auto', 'performance'])
+  for (const row of custom) {
+    assert.equal(row.url, `${ORIGIN}/v1`)
+    assert.equal(row.apiKey, KEY_PLACEHOLDER)
+    assert.equal(row.supportsToolCall, true) // capability copied from the existing Custom row
+  }
+  // The direct DeepSeek row is never touched.
+  const direct = parsed.find((row: any) => row.vendor === 'DeepSeek')
+  assert.equal(direct.url, 'https://api.deepseek.com/chat/completions')
+  assert.equal(direct.apiKey, 'sk-direct')
 })
 
 // ---------------------------------------------------------------------------
@@ -330,6 +433,28 @@ test('CodeBuddy CN: baseUrl moves, models and retry policy stay', () => {
 
 test('CodeBuddy CN: no oaicopilot.baseUrl is "no-entry"', () => {
   assert.equal(planCodeBuddySettings('{"locale":"zh-cn"}', { origin: ORIGIN, writeKey: false }).kind, 'no-entry')
+})
+
+test('CodeBuddy CN: with routes the model list is rebuilt from the gateway routes', () => {
+  const routes = [
+    { name: 'auto', displayName: 'auto', contextWindow: 200000 },
+    { name: 'stable', displayName: 'stable', contextWindow: 131072 },
+  ]
+  const result = planCodeBuddySettings(CODEBUDDY_SETTINGS, { origin: ORIGIN, writeKey: false, routes })
+  assert.equal(result.kind, 'changed')
+  if (result.kind !== 'changed') return
+  const parsed = JSON.parse(result.content)
+  assert.equal(parsed['oaicopilot.baseUrl'], `${ORIGIN}/v1`)
+  const models = parsed['oaicopilot.models']
+  assert.equal(models.length, routes.length)
+  assert.deepEqual(models.map((model: any) => model.id), ['auto', 'stable'])
+  assert.equal(models[0].context_length, 200000)
+  assert.equal(models[1].context_length, 131072)
+  assert.equal(models[0].owned_by, 'volcengine') // template field carried over
+  // Unrelated settings survive; the key is never emitted (it is in encrypted storage).
+  assert.deepEqual(parsed['oaicopilot.retry'], { enabled: true, max_attempts: 5, interval_ms: 2000 })
+  assert.equal(parsed.locale, 'zh-cn')
+  assert.ok(!result.content.includes(KEY_PLACEHOLDER))
 })
 
 // ---------------------------------------------------------------------------

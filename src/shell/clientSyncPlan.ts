@@ -387,29 +387,174 @@ export interface JsonPlanInput {
   writeKey: boolean
   /** Masked canonical key, for the "already on this key" comparison. */
   keyPreview?: string | null
+  /**
+   * The connected gateway's routes (`GET /v1/models`). Planners that own a static model
+   * list rebuild it to exactly these (replacing the existing entries); absent/empty means
+   * the route fetch failed, so they fall back to repointing in place.
+   */
+  routes?: { name: string; displayName: string; contextWindow: number | null }[]
+}
+
+export interface QoderPlanInput extends JsonPlanInput {
+  /**
+   * The connected gateway's routes (`GET /v1/models`). When non-empty, the client's custom
+   * model list is rebuilt to exactly these; empty (route fetch failed) falls back to
+   * repointing the existing entries in place.
+   */
+  routes?: { name: string; displayName: string; contextWindow: number | null }[]
+}
+
+/** The observed Qoder custom-model shape, used when no existing entry can serve as template. */
+const QODER_MODEL_DEFAULT = {
+  maxOutputTokens: 8192,
+  capabilities: {
+    vision: false,
+    thinking: { modes: ['enabled'], supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high'] },
+  },
+}
+
+/** Deterministic id from the route name, so preview and apply agree and re-syncs are idempotent. */
+function qoderProviderId(route: string): string {
+  let h1 = 0x811c9dc5
+  let h2 = 0x9e3779b9
+  for (let i = 0; i < route.length; i += 1) {
+    const code = route.charCodeAt(i)
+    h1 = Math.imul(h1 ^ code, 0x01000193) >>> 0
+    h2 = Math.imul(h2 ^ code, 0x85ebca6b) >>> 0
+  }
+  const hex = (n: number): string => (n >>> 0).toString(16).padStart(8, '0')
+  const s = hex(h1) + hex(h2) + hex(h1 + h2) + hex(h1 ^ h2)
+  return `qoder-custom-${s.slice(0, 8)}-${s.slice(8, 12)}-${s.slice(12, 16)}-${s.slice(16, 20)}-${s.slice(20, 32)}`
+}
+
+/** Non-model fields (limits/capabilities) to copy onto rebuilt entries, from an existing one. */
+function qoderModelTemplate(providers: Record<string, unknown>): { maxOutputTokens: number; capabilities: unknown } {
+  for (const value of Object.values(providers)) {
+    if (value === null || typeof value !== 'object') continue
+    const entry = value as { type?: unknown; models?: unknown }
+    if (entry.type !== 'openai-compatible' || !Array.isArray(entry.models)) continue
+    const model = entry.models[0]
+    if (model === null || typeof model !== 'object') continue
+    const record = model as { maxOutputTokens?: unknown; capabilities?: unknown }
+    return {
+      maxOutputTokens: typeof record.maxOutputTokens === 'number' ? record.maxOutputTokens : QODER_MODEL_DEFAULT.maxOutputTokens,
+      capabilities: record.capabilities ?? QODER_MODEL_DEFAULT.capabilities,
+    }
+  }
+  return QODER_MODEL_DEFAULT
+}
+
+/** Deep copy with every `apiKey` string replaced by a sentinel, so keys compare separately. */
+function maskKeysDeep(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(maskKeysDeep)
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = key === 'apiKey' && typeof inner === 'string' ? '<key>' : maskKeysDeep(inner)
+    }
+    return out
+  }
+  return value
+}
+
+/** Structural fingerprint with apiKey normalised, so the key is compared separately. */
+function qoderFingerprint(providers: Record<string, unknown>): string {
+  return JSON.stringify(maskKeysDeep(providers))
 }
 
 /**
- * Qoder / Qoder CN: `providers` is an object keyed by `qoder-custom-<uuid>`, one model
- * per entry. Every OpenAI-compatible entry is repointed; the uuid, display name, model
- * list and the user's own `contextWindow` are left exactly as they were, because
- * replacing the key would drop the client's selection state.
+ * Replace the OpenAI-compatible providers with one entry per gateway route.
+ *
+ * This is "the client's custom models follow the connected gateway": after a switch the
+ * model list becomes the gateway's routes, each pointing at that gateway with the canonical
+ * key. Non-OpenAI-compatible providers and every other top-level key stay untouched.
  */
-export function planQoderSettings(raw: string, input: JsonPlanInput): PlanResult {
+function rebuildQoderProviders(
+  providers: Record<string, unknown>,
+  routes: NonNullable<QoderPlanInput['routes']>,
+  url: string,
+): { next: Record<string, unknown>; replaced: number } {
+  const template = qoderModelTemplate(providers)
+  const next: Record<string, unknown> = {}
+  let replaced = 0
+  for (const [id, value] of Object.entries(providers)) {
+    if (value !== null && typeof value === 'object' && (value as { type?: unknown }).type === 'openai-compatible') {
+      replaced += 1
+      continue
+    }
+    next[id] = value
+  }
+  for (const route of routes) {
+    next[qoderProviderId(route.name)] = {
+      baseUrl: url,
+      apiKey: KEY_PLACEHOLDER,
+      type: 'openai-compatible',
+      protocol: 'openai',
+      authType: 'bearer',
+      model: route.name,
+      models: [
+        {
+          model: route.name,
+          displayName: route.displayName === '' ? route.name : route.displayName,
+          ...(route.contextWindow !== null ? { contextWindow: route.contextWindow } : {}),
+          maxOutputTokens: template.maxOutputTokens,
+          capabilities: template.capabilities,
+        },
+      ],
+      displayName: `ModelPort ${route.name}`,
+    }
+  }
+  return { next, replaced }
+}
+
+/**
+ * Qoder / Qoder CN: `providers` is an object keyed by `qoder-custom-<uuid>`.
+ *
+ * With the gateway's routes in hand the custom model list is **rebuilt to exactly those
+ * routes** - that is what keeps the client's model names matching the gateway it is
+ * connected to across switches. Without routes (fetch failed) or without a canonical key it
+ * falls back to repointing existing entries in place, which deletes nothing it cannot replace.
+ */
+export function planQoderSettings(raw: string, input: QoderPlanInput): PlanResult {
   const parsed = parseObject(raw)
   if (!parsed) return { kind: 'bad-input', reason: 'settings.json 不是可解析的 JSON 对象' }
   const providers = parsed.providers
   if (providers === null || typeof providers !== 'object' || Array.isArray(providers)) {
     return { kind: 'no-entry', reason: 'settings.json 里没有 providers' }
   }
-  const entries = Object.entries(providers as Record<string, unknown>).filter(
+  const map = providers as Record<string, unknown>
+  const url = endpointFor(input.origin, 'v1')
+
+  if (input.writeKey && input.routes !== undefined && input.routes.length > 0) {
+    const { next, replaced } = rebuildQoderProviders(map, input.routes, url)
+    let keysMatch = true
+    if (input.keyPreview !== undefined && input.keyPreview !== null) {
+      for (const route of input.routes) {
+        const current = map[qoderProviderId(route.name)]
+        const masked = current && typeof (current as { apiKey?: unknown }).apiKey === 'string'
+          ? maskSecret((current as { apiKey: string }).apiKey)
+          : null
+        if (masked !== input.keyPreview) {
+          keysMatch = false
+          break
+        }
+      }
+    }
+    if (keysMatch && qoderFingerprint(next) === qoderFingerprint(map)) return { kind: 'unchanged' }
+    const names = input.routes.map(route => route.name).join(', ')
+    return changed(
+      JSON.stringify({ ...parsed, providers: next }, null, detectIndent(raw)) + '\n',
+      [{ label: '自定义模型（按当前网关路由重建）', before: `${replaced} 条`, after: `${input.routes.length} 条：${names}` }],
+    )
+  }
+
+  const entries = Object.entries(map).filter(
     ([, value]) => value !== null && typeof value === 'object' && (value as { type?: unknown }).type === 'openai-compatible',
   )
   if (entries.length === 0) return { kind: 'no-entry', reason: 'providers 里没有 openai-compatible 条目' }
 
   const changes: ClientChange[] = []
-  const url = endpointFor(input.origin, 'v1')
-  const next: Record<string, unknown> = { ...(providers as Record<string, unknown>) }
+  const next: Record<string, unknown> = { ...map }
   for (const [id, value] of entries) {
     const entry = { ...(value as Record<string, unknown>) }
     const short = id.replace(/^qoder-custom-/, '').slice(0, 8)
@@ -429,7 +574,10 @@ export function planQoderSettings(raw: string, input: JsonPlanInput): PlanResult
 
 /**
  * WorkBuddy: `models.json` is an array. Only `vendor: "Custom"` rows are ours - the
- * direct DeepSeek row keeps its own URL and its own 35-char key.
+ * direct DeepSeek row keeps its own URL and its own key.
+ *
+ * With the gateway's routes in hand the Custom rows are rebuilt to exactly one per route
+ * (capability booleans copied from an existing Custom row); every other row is kept.
  */
 export function planWorkBuddyModels(raw: string, input: JsonPlanInput): PlanResult {
   let parsed: unknown
@@ -439,19 +587,47 @@ export function planWorkBuddyModels(raw: string, input: JsonPlanInput): PlanResu
     return { kind: 'bad-input', reason: 'models.json 不是可解析的 JSON' }
   }
   if (!Array.isArray(parsed)) return { kind: 'bad-input', reason: 'models.json 不是数组' }
-  const changes: ClientChange[] = []
   const url = endpointFor(input.origin, 'v1')
+  const isCustom = (value: unknown): value is Record<string, unknown> =>
+    value !== null && typeof value === 'object' && (value as Record<string, unknown>).vendor === 'Custom'
+  const customRows = parsed.filter(isCustom)
+
+  if (input.writeKey && input.routes !== undefined && input.routes.length > 0) {
+    const template = customRows[0] ?? {
+      supportsToolCall: true,
+      supportsImages: false,
+      supportsReasoning: true,
+      useCustomProtocol: true,
+    }
+    const next: unknown[] = parsed.filter(value => !isCustom(value))
+    for (const route of input.routes) {
+      next.push({ ...template, id: route.name, name: route.name, vendor: 'Custom', url, apiKey: KEY_PLACEHOLDER })
+    }
+    const keysMatch = input.keyPreview === undefined || input.keyPreview === null
+      ? true
+      : input.routes.every(route => {
+          const row = customRows.find(entry => entry.id === route.name)
+          return row !== undefined && typeof row.apiKey === 'string' && maskSecret(row.apiKey) === input.keyPreview
+        })
+    if (keysMatch && JSON.stringify(maskKeysDeep(next)) === JSON.stringify(maskKeysDeep(parsed))) {
+      return { kind: 'unchanged' }
+    }
+    const names = input.routes.map(route => route.name).join(', ')
+    return changed(JSON.stringify(next, null, detectIndent(raw)) + '\n', [
+      { label: 'WorkBuddy 自定义模型（按网关路由重建）', before: `${customRows.length} 条`, after: `${input.routes.length} 条：${names}` },
+    ])
+  }
+
+  const changes: ClientChange[] = []
   let touched = 0
   const next = parsed.map(value => {
-    if (value === null || typeof value !== 'object') return value
-    const entry = value as Record<string, unknown>
-    if (entry.vendor !== 'Custom') return value
+    if (!isCustom(value)) return value
     touched += 1
-    const copy = { ...entry }
-    const label = typeof entry.id === 'string' ? entry.id : `#${touched}`
-    if (field(changes, `${label}.url`, entry.url, url)) copy.url = url
+    const copy = { ...value }
+    const label = typeof value.id === 'string' ? value.id : `#${touched}`
+    if (field(changes, `${label}.url`, value.url, url)) copy.url = url
     if (input.writeKey) {
-      keyField(changes, `${label}.apiKey`, entry.apiKey, input)
+      keyField(changes, `${label}.apiKey`, value.apiKey, input)
       copy.apiKey = KEY_PLACEHOLDER
     }
     return copy
@@ -573,9 +749,37 @@ export function planCodeBuddySettings(raw: string, input: JsonPlanInput): PlanRe
   if (!('oaicopilot.baseUrl' in parsed)) {
     return { kind: 'no-entry', reason: 'settings.json 里没有 oaicopilot.baseUrl' }
   }
-  const changes: ClientChange[] = []
   const url = endpointFor(input.origin, 'v1')
-  const next = { ...parsed }
+  const changes: ClientChange[] = []
+  const next: Record<string, unknown> = { ...parsed }
+  const currentModels = Array.isArray(parsed['oaicopilot.models']) ? (parsed['oaicopilot.models'] as unknown[]) : null
+
+  // Rebuild the custom model list from the gateway's routes; the apiKey is not here (it
+  // lives in the fork's encrypted secret storage), so the endpoint/names move but the key
+  // stays the operator's manual step.
+  if (input.routes !== undefined && input.routes.length > 0) {
+    const template = currentModels?.find(
+      (model): model is Record<string, unknown> => model !== null && typeof model === 'object',
+    ) ?? {}
+    const base: Record<string, unknown> = { ...template }
+    delete base.id
+    delete base.context_length
+    next['oaicopilot.baseUrl'] = url
+    next['oaicopilot.models'] = input.routes.map(route => ({
+      ...base,
+      id: route.name,
+      ...(route.contextWindow !== null ? { context_length: route.contextWindow } : {}),
+    }))
+    if (JSON.stringify(next) === JSON.stringify(parsed)) return { kind: 'unchanged' }
+    return changed(JSON.stringify(next, null, detectIndent(raw)) + '\n', [
+      {
+        label: 'CodeBuddy CN 自定义模型（按网关路由重建）',
+        before: `${currentModels?.length ?? 0} 条`,
+        after: `${input.routes.length} 条：${input.routes.map(route => route.name).join(', ')}`,
+      },
+    ])
+  }
+
   if (field(changes, 'oaicopilot.baseUrl', parsed['oaicopilot.baseUrl'], url)) next['oaicopilot.baseUrl'] = url
   return changed(JSON.stringify(next, null, detectIndent(raw)) + '\n', changes)
 }

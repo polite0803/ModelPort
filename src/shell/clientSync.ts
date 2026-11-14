@@ -229,6 +229,7 @@ export async function gather(input: GatherInput): Promise<Gathered> {
 
   const canonical = await ensureCanonicalKey(input.gateways, origin)
   const key = canonical.key
+  const keyPreview = key === null ? null : maskSecret(key)
   // Claude Desktop refuses a non-loopback http origin. The way out is access-path data
   // stored on the shell entry itself: an https entry is its own url, an http entry carries
   // the client https endpoint the user filled (or probed once). Never ask the gateway -
@@ -288,13 +289,18 @@ export async function gather(input: GatherInput): Promise<Gathered> {
       plans.push(row(id, 'not-installed', [path], [], `没有 ${path}`))
       continue
     }
-    const result = planQoderSettings(raw, { origin, writeKey: key !== null })
-    const current = qoderModelNames(raw)
-    const plan = filePlan(id, path, result, unservedModels(current, routeNames))
+    // With a canonical key and the gateway's routes, the custom model list is rebuilt to
+    // exactly those routes (see planQoderSettings); the old model names are replaced, so
+    // there is nothing left "unserved" to warn about.
+    const rebuild = key !== null && models.length > 0
+    const result = planQoderSettings(raw, { origin, writeKey: key !== null, routes: models, keyPreview })
+    const plan = filePlan(id, path, result, rebuild ? [] : unservedModels(qoderModelNames(raw), routeNames))
     if (plan.row.state === 'no-entry') {
       plan.row.manualStep = '先在客户端里添加一个自定义模型（OpenAI 兼容），之后控制台才能代它改地址'
     } else if (key === null && (plan.row.state === 'ready' || plan.row.state === 'unchanged')) {
       plan.row.manualStep = NO_KEY_MANUAL_STEP
+    } else if (rebuild && (plan.row.state === 'ready' || plan.row.state === 'unchanged')) {
+      plan.row.manualStep = '写入后若客户端未显示新建的自定义模型，重启它重新读取 settings.json 即可'
     }
     plans.push(plan)
   }
@@ -305,8 +311,13 @@ export async function gather(input: GatherInput): Promise<Gathered> {
     if (raw === null) {
       plans.push(row('workbuddy', 'not-installed', [input.paths.workbuddy], [], '没有 ~/.workbuddy/models.json'))
     } else {
-      const result = planWorkBuddyModels(raw, { origin, writeKey: key !== null })
-      const plan = filePlan('workbuddy', input.paths.workbuddy, result, unservedModels(workBuddyModelNames(raw), routeNames))
+      const result = planWorkBuddyModels(raw, { origin, writeKey: key !== null, routes: models, keyPreview })
+      const plan = filePlan(
+        'workbuddy',
+        input.paths.workbuddy,
+        result,
+        key !== null && models.length > 0 ? [] : unservedModels(workBuddyModelNames(raw), routeNames),
+      )
       if (key === null && (plan.row.state === 'ready' || plan.row.state === 'unchanged')) {
         plan.row.manualStep = NO_KEY_MANUAL_STEP
       }
@@ -321,8 +332,13 @@ export async function gather(input: GatherInput): Promise<Gathered> {
     if (raw === null) {
       plans.push(row('codebuddy-cn', 'not-installed', [path], [], '没有 CodeBuddy CN 的 User/settings.json'))
     } else {
-      const result = planCodeBuddySettings(raw, { origin, writeKey: false })
-      const plan = filePlan('codebuddy-cn', path, result, unservedModels(codeBuddyModelNames(raw), routeNames))
+      const result = planCodeBuddySettings(raw, { origin, writeKey: false, routes: models })
+      const plan = filePlan(
+        'codebuddy-cn',
+        path,
+        result,
+        models.length > 0 ? [] : unservedModels(codeBuddyModelNames(raw), routeNames),
+      )
       // The key lives in the fork's encrypted secret storage, so it cannot be minted
       // here - same boundary as TRAE, and it has to be said out loud.
       plan.row.manualStep = '在 CodeBuddy 的自定义端点里把 API Key 改成目标网关的 key（一次即可，之后切换不用再改）'
@@ -374,7 +390,7 @@ export async function gather(input: GatherInput): Promise<Gathered> {
   const preview: ClientSyncPreview = {
     origin,
     gatewayName: input.active.name,
-    keyPreview: key === null ? null : maskSecret(key),
+    keyPreview,
     models,
     rows: plans.map(plan => displayRow(plan.row, key === null ? '目标网关的 key' : maskSecret(key))),
     keyDistribution: canonical.distribution,
