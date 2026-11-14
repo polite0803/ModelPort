@@ -6,6 +6,9 @@ WORKDIR /app
 COPY modelport-daemon.cjs ./
 COPY resources ./resources
 COPY renderer ./renderer
+# One-shot swap helper for the in-UI online update; the daemon spawns a short-lived
+# container from this same image with the entrypoint overridden to this file.
+COPY update-swap.cjs ./
 
 # The daemon resolves its data directory from homedir(), so HOME is the persistence
 # knob: data.json, tls, ccr and logs all land in the /data volume.

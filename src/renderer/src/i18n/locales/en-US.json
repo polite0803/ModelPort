@@ -1446,6 +1446,32 @@
     "upgradeDone": "Upgrade complete",
     "upgradeFailed": "Upgrade failed",
     "openReleasePage": "Open release page",
+    "gatewayUpdate": {
+      "title": "Docker gateway online update",
+      "desc": "Downloads the official release image, verifies SHA-256, then a one-shot helper container performs stop-old → start-new → probe → rollback-on-failure. Requires docker.sock mounted at deploy time.",
+      "check": "Check for updates",
+      "apply": "Update now",
+      "current": "Current version",
+      "latest": "Latest version",
+      "upToDate": "Up to date",
+      "newer": "New version available",
+      "checking": "Checking…",
+      "applying": "Updating…",
+      "restarting": "Gateway restarting, waiting for the new container…",
+      "done": "Updated to v{{version}}",
+      "failed": "Update failed",
+      "retry": "Retry",
+      "notDocker": "This gateway is not a Docker container; online update only applies to the Docker form. For other deployments run scripts/upgrade-docker.sh on the host.",
+      "noSocket": "The container has no /var/run/docker.sock mount, so online update is unavailable. Redeploy with -v /var/run/docker.sock:/var/run/docker.sock and --group-add <docker group GID>, or use scripts/upgrade-docker.sh.",
+      "socketDenied": "docker.sock is mounted but the current user cannot read/write it. Redeploy with --group-add <docker group GID> (find it via getent group docker on the host).",
+      "phase": {
+        "downloading": "Downloading image",
+        "verifying": "Verifying SHA-256",
+        "loading": "Loading image",
+        "staging": "Staging new container",
+        "swapping": "Swapping containers"
+      }
+    },
     "stages": {
       "checking": "Checking for updates",
       "downloading-daemon": "Downloading daemon",

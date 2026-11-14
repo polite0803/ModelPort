@@ -54,6 +54,7 @@ import type {
   AggregateSaveInput,
 } from '../../../shared/aggregate'
 import type { AggregateCreditQueryResult } from '../../../shared/aggregateCredit'
+import type { DockerUpdateCheck, DockerUpdateStatus } from '../../../shared/dockerUpdate'
 import type {
   BackupApplyResult,
   BackupExportOptions,
@@ -463,6 +464,9 @@ interface AppAPI {
   downloadUpdate: () => Promise<void>
   installUpdate: () => Promise<void>
   getUpdateStatus: () => Promise<UpdateStatus>
+  gatewayCheckUpdate: () => Promise<DockerUpdateCheck>
+  gatewayApplyUpdate: (version?: string) => Promise<DockerUpdateStatus>
+  gatewayUpdateStatus: () => Promise<DockerUpdateStatus>
   onUpdateChecking: (callback: () => void) => () => void
   onUpdateAvailable: (callback: (info: UpdateDownloadedInfo) => void) => () => void
   onUpdateNotAvailable: (callback: (info: UpdateDownloadedInfo) => void) => () => void

@@ -47,6 +47,7 @@ import type { ProbeJobSnapshot, ProbeProgressEvent, ProbeScope } from '../../sha
 import { PROBE_TOTAL_TIMEOUT_MS } from '../../shared/modelProbe.ts'
 import { schedulerStatus, triggerModelListRefreshNow, configureModelListRefresh } from '../scheduler/modelListRefresh'
 import { proxyServer } from '../proxy/server'
+import { applyDockerUpdate, checkDockerUpdate, getDockerUpdateStatus } from '../gateway/dockerUpdate'
 import {
   getTlsStatus,
   installCertificateTrust,
@@ -1888,6 +1889,21 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
 
   registerMainHandler(IpcChannels.APP_GET_UPDATE_STATUS, async () => {
     return requireDesktop('get-update-status').getUpdateStatus()
+  })
+
+  // Docker 网关在线更新：与上面那组桌面安装器相反，这组在 headless 宿主上才有意义
+  // （容器里挂 docker.sock 的形态）。不加 requireDesktop；RPC 桥按注册表自动暴露，
+  // 它们不在 NOT_EXPOSED 里——替换的是容器镜像，不是控制台自身的安装。
+  registerMainHandler(IpcChannels.GATEWAY_CHECK_UPDATE, async () => {
+    return checkDockerUpdate()
+  })
+
+  registerMainHandler(IpcChannels.GATEWAY_APPLY_UPDATE, async (_, version?: string) => {
+    return applyDockerUpdate(typeof version === 'string' ? version : undefined)
+  })
+
+  registerMainHandler(IpcChannels.GATEWAY_UPDATE_STATUS, async () => {
+    return getDockerUpdateStatus()
   })
 
   registerMainHandler(IpcChannels.APP_MINIMIZE, async (): Promise<void> => {

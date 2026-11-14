@@ -73,6 +73,29 @@ export interface RollbackScriptInput {
   service: string
 }
 
+/**
+ * 更新检查走**网页端点**，不走 REST API：匿名 `api.github.com` 是每 IP 每小时 60 次，
+ * 这个配额被同网段的任何工具烧光之后，控制台的「检查更新」就只剩一个 403。
+ * `releases.atom` 是同一个仓库的公开 feed，不占 API 配额；资产名与下载地址由 tag
+ * 按约定拼出（`releaseFromTag`），所以这里只需要一个 tag。
+ */
+export const RELEASES_ATOM = 'https://github.com/polite0803/ModelPort/releases.atom'
+
+/**
+ * `MODELPORT_UPDATE_FEED` 只为测试与企业镜像存在：给的是**完整 release JSON**。
+ * 返回 `null` 表示没有覆盖，按 atom feed 走。
+ */
+export function releaseFeedUrl(): string | null {
+  const override = process.env.MODELPORT_UPDATE_FEED?.trim()
+  if (!override) return null
+  const url = new URL(override)
+  const local = url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '::1'
+  if (url.protocol !== 'https:' && !local) {
+    throw new Error('MODELPORT_UPDATE_FEED must be https (localhost is allowed for tests)')
+  }
+  return url.toString()
+}
+
 export function normalizeVersion(tag: string): string {
   return tag.trim().replace(/^v/i, '')
 }

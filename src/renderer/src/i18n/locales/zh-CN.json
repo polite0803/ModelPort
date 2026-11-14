@@ -1446,6 +1446,32 @@
     "upgradeDone": "升级完成",
     "upgradeFailed": "升级失败",
     "openReleasePage": "打开发布页",
+    "gatewayUpdate": {
+      "title": "Docker 网关在线更新",
+      "desc": "下载官方 Release 镜像包，校验 SHA-256 后由一次性 helper 容器完成「停旧→起新→探活→失败回滚」。需要部署时挂载 docker.sock。",
+      "check": "检查更新",
+      "apply": "立即更新",
+      "current": "当前版本",
+      "latest": "最新版本",
+      "upToDate": "已是最新版本",
+      "newer": "发现新版本",
+      "checking": "正在检查…",
+      "applying": "正在更新…",
+      "restarting": "网关重启中，正在等待新容器就绪…",
+      "done": "已更新到 v{{version}}",
+      "failed": "更新失败",
+      "retry": "重试",
+      "notDocker": "此网关不是 Docker 容器部署，在线更新仅适用于 Docker 形态。其他部署请在宿主机执行 scripts/upgrade-docker.sh。",
+      "noSocket": "容器未挂载 /var/run/docker.sock，无法在线更新。重新部署时加 -v /var/run/docker.sock:/var/run/docker.sock 并 --group-add <docker 组 GID>；或改用 scripts/upgrade-docker.sh。",
+      "socketDenied": "docker.sock 已挂载但当前用户无权读写。重新部署时加 --group-add <docker 组 GID>（宿主机 getent group docker 查询）。",
+      "phase": {
+        "downloading": "下载镜像包",
+        "verifying": "校验 SHA-256",
+        "loading": "载入镜像",
+        "staging": "准备新容器",
+        "swapping": "切换容器"
+      }
+    },
     "stages": {
       "checking": "检查更新",
       "downloading-daemon": "下载 daemon",

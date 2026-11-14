@@ -13,6 +13,7 @@ import {
 } from 'lucide-react'
 import logoIcon from '@/assets/icons/icons.png'
 import type { ShellBridge, ShellUpdateCheck, ShellUpdateProgress } from '@shared/shellBridge'
+import { GatewayUpdateCard } from '@/components/GatewayUpdateCard'
 
 type UpdatePhase = 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error'
 
@@ -498,6 +499,8 @@ export function About() {
             )}
           </div>
         )}
+
+        {isRemotePage && <GatewayUpdateCard />}
 
         <div className={`glass-card p-6 relative overflow-hidden group${isDesktopApp ? '' : ' hidden'}`}>
           <div className="absolute top-0 right-0 w-64 h-64 bg-[var(--accent-primary)]/5 rounded-full blur-3xl -translate-y-1/2 translate-x-1/2 pointer-events-none transition-opacity opacity-50 group-hover:opacity-100" />

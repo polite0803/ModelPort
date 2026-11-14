@@ -33,6 +33,11 @@ router.use(managementAuthMiddleware)
 /**
  * Actions that replace or restart the installed program. They stay on IPC: a network
  * caller must not be able to quit-and-install while an operator is mid-session.
+ *
+ * The Docker gateway's `gateway:*Update` channels are deliberately NOT here: they
+ * replace the container image, not the console install, and the whole point is that
+ * a browser operator can trigger them. They are management-auth gated like every
+ * other channel, and the swap itself runs in a one-shot helper container.
  */
 const NOT_EXPOSED: readonly string[] = [
   IpcChannels.APP_INSTALL_UPDATE,

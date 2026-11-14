@@ -103,6 +103,7 @@ import type {
   ChannelView,
 } from './channels'
 import type { DayTokenBucket, DayTokenSummary } from './tokenAccounting'
+import type { DockerUpdateCheck, DockerUpdateStatus } from './dockerUpdate'
 
 
 /** How this object reaches the main process: IPC in the shell, HTTP against a daemon. */
@@ -742,6 +743,16 @@ const appAPI = {
 
   getUpdateStatus: (): Promise<UpdateStatus> =>
     wire.invoke(IpcChannels.APP_GET_UPDATE_STATUS),
+
+  // Docker 网关在线更新（headless 容器形态）。与上面桌面安装器那组互不消费。
+  gatewayCheckUpdate: (): Promise<DockerUpdateCheck> =>
+    wire.invoke(IpcChannels.GATEWAY_CHECK_UPDATE),
+
+  gatewayApplyUpdate: (version?: string): Promise<DockerUpdateStatus> =>
+    wire.invoke(IpcChannels.GATEWAY_APPLY_UPDATE, version),
+
+  gatewayUpdateStatus: (): Promise<DockerUpdateStatus> =>
+    wire.invoke(IpcChannels.GATEWAY_UPDATE_STATUS),
 
   onUpdateChecking: (callback: () => void) => {
     const listener = (_event: unknown) => callback()

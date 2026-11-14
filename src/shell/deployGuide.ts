@@ -76,6 +76,8 @@ function dockerCommandsBlock(release: ReleaseInfo): string {
     '# 常驻；宿主发布端口与容器监听端口保持相同（恒等映射）。数据在卷里，升级重建容器不丢',
     '# 宿主 8080 被占：监听端口改同一个空闲端口（--init-host --port 18080 或 config:update',
     '#   proxyPort），再 -p 18080:18080；不要 18080:8080，界面监听端口会与可达端口不一致',
+    '# 可选：启用「关于」页的在线更新——挂载 docker.sock 并让容器用户能访问它（docker 组 GID）：',
+    '#   -v /var/run/docker.sock:/var/run/docker.sock --group-add $(getent group docker | cut -d: -f3)',
     'docker run -d --name modelport --restart unless-stopped \\',
     `  -p 8080:8080 -p 8443:8443 -v modelport-data:/data ${tag}`,
   ].join('\n')
@@ -127,6 +129,7 @@ ${downloads}
   <li>防火墙放行监听端口；控制台所在机器要能访问它。</li>
   <li>缺 <code>.sha256</code> 的包不要装：校验只防传输损坏，发布物没有代码签名。</li>
   <li>Docker 形态的数据在命名卷 <code>modelport-data</code> 里；升级 = <code>docker load</code> 新镜像后重建容器，卷不动。</li>
+  <li>挂了 <code>docker.sock</code> 的 Docker 网关可在「关于」页在线更新（下载→校验→helper 容器切换→失败回滚）；没挂则只能用 <code>scripts/upgrade-docker.sh</code>。</li>
   <li>WSL 主机不用手动做这些：新增网关时选 WSL，控制台会自动安装。</li>
 </ul>`
   return html

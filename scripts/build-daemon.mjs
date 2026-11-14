@@ -104,6 +104,16 @@ if (existsSync(join(outDir, 'renderer'))) {
   cpSync(join(outDir, 'renderer'), join(stageDir, 'renderer'), { recursive: true })
 }
 
+// The Docker image's one-shot swap helper (docker/Dockerfile COPYs it). Staged here so
+// `build-docker.mjs` finds it in the build context; a missing file is a broken update
+// surface, so fail loudly rather than ship an image without it.
+const swapHelper = join(root, 'docker', 'update-swap.cjs')
+if (!existsSync(swapHelper)) {
+  console.error('::error::docker/update-swap.cjs is missing - the Docker online-update helper cannot be staged')
+  process.exit(1)
+}
+cpSync(swapHelper, join(stageDir, 'update-swap.cjs'))
+
 mkdirSync(join(stageDir, 'bin'), { recursive: true })
 writeFileSync(
   join(stageDir, 'bin', 'modelport'),

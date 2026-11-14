@@ -31,6 +31,7 @@ const required = [
   'modelport-daemon.cjs',
   join('resources', 'channel-pack', 'worker.mjs'),
   join('renderer', 'index.html'),
+  'update-swap.cjs',
 ]
 for (const item of required) {
   if (!existsSync(join(stageDir, item))) {

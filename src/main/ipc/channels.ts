@@ -201,6 +201,10 @@ export const IpcChannels = {
   APP_UPDATE_DOWNLOADED: 'app:updateDownloaded',
   APP_UPDATE_ERROR: 'app:updateError',
   APP_GET_UPDATE_STATUS: 'app:getUpdateStatus',
+  // Docker 网关的在线更新（headless 也可用，与桌面安装器那组互不消费）。
+  GATEWAY_CHECK_UPDATE: 'gateway:checkUpdate',
+  GATEWAY_APPLY_UPDATE: 'gateway:applyUpdate',
+  GATEWAY_UPDATE_STATUS: 'gateway:updateStatus',
   APP_MINIMIZE: 'app:minimize',
   APP_MAXIMIZE: 'app:maximize',
   APP_CLOSE: 'app:close',
