@@ -6,6 +6,42 @@
 条目按"为什么改、影响什么"描述；每条末尾括号里的短哈希指向产生该变更的提交，可在 `git show <哈希>` 中核对。
 版本边界与溯源说明见文末。
 
+## [1.8.15] - 2026-11-14
+
+版本边界：tag `v1.8.15`（相对 1.8.14）。主题是**客户端接入面按参照实现整体移植**：一键切换从 7 家
+扩到 20 家，Claude Desktop 此前「写入无效」的问题定位到根因并修掉，所有客户端配置写入改走同一套
+原子写引擎。
+
+### Fixed（修复）
+
+- **Claude Desktop 切换无效**：控制台此前写的是 `~/.claude/settings.json` 的 `env.ANTHROPIC_*`，
+  那是 Claude Code 读的面，Desktop 从不读它——它读 `%LOCALAPPDATA%\Claude[-3p]\claude_desktop_config.json`
+  的 `deploymentMode` 与 `Claude-3p\configLibrary\<profile>.json` 的 gateway 四键。现在按 Desktop 自己的面写
+  两份配置加 profile 与 `_meta.json`，密钥有规范值才写、取不到就报 `blocked` 而不是画一个绿行。
+  面板此前显示成功而客户端第一条请求仍走旧端点；`1291dd5`
+- **写入不再用普通 writeFileSync**：改为暂存＋fsync、发布前重读比哈希（外部改过就拒写）、
+  首份原文备份到 `<userData>/client-backups/live-first-write/`、崩溃后按 journal 前进式恢复
+  （目标仍是写前字节才补完，已被别人改过就丢弃暂存）。`1291dd5`
+
+### Added（新增）
+
+- **13 家客户端接入**：Codex、Gemini CLI、Grok Build、OpenCode（V1 与原生两形）、OpenClaw（JSON5）、
+  Hermes、Kimi Code、MiniMax Code、Oh My Pi、Pi、GitHub Copilot CLI、DeepSeek Harness（多 profile 合并、
+  密钥走 `.credentials.yaml` 引用而非明文）、Antigravity CLI（无持久端点可写，如实报 no-entry 并给出启动前
+  要设的两个变量）。「未安装 / 没有我方条目 / 归属别人」各家分别判定，不合并成一条灰行。`1291dd5`
+
+### Changed（变化）
+
+- **Codex 免重启**：密钥改写入 `[model_providers.custom].experimental_bearer_token`，不再依赖 Windows
+  用户环境变量（旧环境变量只在进程启动时读，改完必须重启客户端才生效）；顺带清掉表内 `env_key` 与
+  `requires_openai_auth`，否则旧间接写法会盖过新 token。`auth.json` 有意不删（本仓没有可还原的 stash）。`1291dd5`
+- **Claude Code 先清上一家的地板键**：`ANTHROPIC_*`/`AWS_*`/`VERTEX_REGION_*` 前缀、协议选择器与顶层
+  连接键先清后写，残留的 Bedrock/Vertex 开关否则会让新地址形同没改。`1291dd5`
+- **呈现层围栏不再写死客户端条数**：改为与主进程 `CLIENT_LABELS` 现推对账，加 id 少标签当场红。`1291dd5`
+
+边界：被改写节点**内部**的注释会丢（与参照实现的 hermes/mcode 同口径），节点外逐字节不变；
+`inferenceModels` 只写 `claude-*` 形状的路由名，其余省略，不伪造模型清单。
+
 ## [1.8.14] - 2026-11-14
 
 版本边界：tag `v1.8.14`（相对 1.8.13）。主题是**客户端一键接入网关，远程控制台断连仍可用**：
