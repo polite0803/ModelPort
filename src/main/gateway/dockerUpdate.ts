@@ -12,13 +12,11 @@
  * no-socket / socket-denied) and points at scripts/upgrade-docker.sh - never a
  * button that pretends to work.
  */
-import { accessSync, constants, createReadStream, createWriteStream, existsSync, readFileSync, statSync } from 'node:fs'
+import { accessSync, constants, createReadStream, existsSync, readFileSync, statSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { Readable } from 'node:stream'
-import { pipeline } from 'node:stream/promises'
 import { getHost } from '../runtime/host'
 import { storeManager } from '../store/store'
 import { isNewer, parseSha256, releaseFromTag, selectAsset } from '../../shell/updatePlan'
@@ -34,6 +32,7 @@ import {
   type ContainerInspect,
 } from './dockerUpdatePlan'
 import { DOCKER_SOCKET, dockerApi, dockerLoadImage } from './dockerSocket'
+import { downloadTo, DOWNLOAD_STALL_MS } from './download'
 import { fetchLatestDockerRelease } from './updateFeed'
 
 const HELPER_NAME = 'modelport-update-swap'
@@ -97,17 +96,6 @@ export async function checkDockerUpdate(): Promise<DockerUpdateCheck> {
   }
 }
 
-async function downloadTo(url: string, path: string): Promise<void> {
-  const response = await fetch(url, { redirect: 'follow', headers: { 'user-agent': 'ModelPort' } })
-  if (!response.ok || response.body === null) {
-    throw new Error(`下载失败 HTTP ${response.status}: ${url}`)
-  }
-  await pipeline(
-    Readable.fromWeb(response.body as unknown as import('node:stream/web').ReadableStream),
-    createWriteStream(path),
-  )
-}
-
 async function sha256Of(path: string): Promise<string> {
   const hash = createHash('sha256')
   for await (const chunk of createReadStream(path)) hash.update(chunk)
@@ -117,10 +105,12 @@ async function sha256Of(path: string): Promise<string> {
 interface DockerCreateResult { Id: string; Warnings?: string[] }
 
 /**
- * Runs the whole update. Returns once the helper container is started (phase
- * 'swapping'); the daemon dies seconds later and the new one comes up on the same
- * ports. Every pre-swap failure restores the old container's name and removes any
- * staged replacement, so a failed attempt leaves the running gateway untouched.
+ * Launches the update and returns immediately (phase 'downloading'). The download,
+ * verify, load and swap run detached in `runUpdate`: they can take minutes (GitHub
+ * from some hosts is slow), far longer than a tunnel's ~100s origin timeout, so a
+ * synchronous RPC here would be cut into a 524 empty response. The UI polls
+ * `gateway:updateStatus` for progress instead. The fast guards below still throw
+ * synchronously so an absent capability / busy / bad arch is reported at once.
  */
 export async function applyDockerUpdate(version?: string): Promise<DockerUpdateStatus> {
   const capability = dockerUpdateCapabilityNow()
@@ -132,6 +122,18 @@ export async function applyDockerUpdate(version?: string): Promise<DockerUpdateS
   running = true
   const current = getHost().getVersion()
   state = { phase: 'downloading', capability, current, targetVersion: null, error: null }
+  void runUpdate(version, arch, current).catch(() => undefined)
+  return { ...state }
+}
+
+/**
+ * The detached update body. Runs to phase 'swapping' (helper started; the daemon
+ * dies seconds later and the new one comes up on the same ports) or 'failed'. Every
+ * pre-swap failure restores the old container's name and removes any staged
+ * replacement, so a failed attempt leaves the running gateway untouched. Errors are
+ * recorded in `state` for the status poll, never thrown - nobody awaits this.
+ */
+async function runUpdate(version: string | undefined, arch: 'x64' | 'arm64', current: string): Promise<void> {
   let workDir: string | null = null
   let renamed = false
   let createdNewId: string | null = null
@@ -153,7 +155,7 @@ export async function applyDockerUpdate(version?: string): Promise<DockerUpdateS
     const tarPath = join(workDir, assetName)
     await downloadTo(pair.url, tarPath)
     state = { ...state, phase: 'verifying' }
-    const checksumText = await (await fetch(pair.checksumUrl, { headers: { 'user-agent': 'ModelPort' } })).text()
+    const checksumText = await (await fetch(pair.checksumUrl, { headers: { 'user-agent': 'ModelPort' }, signal: AbortSignal.timeout(DOWNLOAD_STALL_MS) })).text()
     const expected = parseSha256(checksumText, assetName)
     if (expected === null) throw new Error(`${pair.checksumName} 不是合法的 sha256 清单`)
     const actual = await sha256Of(tarPath)
@@ -211,7 +213,6 @@ export async function applyDockerUpdate(version?: string): Promise<DockerUpdateS
     }))
     await dockerApi('POST', `/containers/${helper.Id}/start`)
     state = { ...state, phase: 'swapping' }
-    return { ...state }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     // Undo the staging so a failed attempt leaves the running gateway untouched.
@@ -228,7 +229,6 @@ export async function applyDockerUpdate(version?: string): Promise<DockerUpdateS
       }
     }
     state = { ...state, phase: 'failed', error: message }
-    throw error
   } finally {
     running = false
     if (workDir !== null) await rm(workDir, { recursive: true, force: true }).catch(() => undefined)

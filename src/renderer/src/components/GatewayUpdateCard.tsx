@@ -50,7 +50,12 @@ export function GatewayUpdateCard() {
 
   const beginPolling = useCallback((target: string) => {
     targetRef.current = target
-    deadlineRef.current = Date.now() + 150_000
+    // Polling now covers the whole detached update (download + verify + load + swap),
+    // not just the restart. GitHub from the Docker host can be ~100KB/s, so an 83MB
+    // pull alone may take ~15min. A truly dead download fails fast via the server's
+    // stall guard (phase 'failed'), so this upper bound only guards the alive-but-slow
+    // + swap window and must outlast a slow full pull.
+    deadlineRef.current = Date.now() + 1_200_000
     setRestarting(true)
     stopPolling()
     pollRef.current = setInterval(() => {
@@ -198,9 +203,9 @@ export function GatewayUpdateCard() {
         <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]">
           <Loader2 className="w-4 h-4 animate-spin" />
           <span>
-            {restarting
+            {phaseLabel ?? (restarting
               ? t('about.gatewayUpdate.restarting')
-              : phaseLabel ?? t('about.gatewayUpdate.applying')}
+              : t('about.gatewayUpdate.applying'))}
           </span>
         </div>
       )}
