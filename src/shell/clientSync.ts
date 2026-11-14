@@ -39,6 +39,8 @@ import type { PlannedFile } from './clientLiveWrite.ts'
 import { CLI_APP_PLANNERS } from './clientApps.ts'
 import { TOOL_APP_PLANNERS } from './clientAppsTools.ts'
 import type { AppPlan, AppPlanInput } from './clientApps.ts'
+import { applyQoderNative, findQoderInstalls, planQoderNative, QODER_NATIVE_MAX_MODELS } from './qoderNative.ts'
+import type { QoderNativeInput } from './qoderNative.ts'
 import { KEY_PLACEHOLDER } from '../shared/clientSync.ts'
 import type {
   ClientApplyResult,
@@ -56,6 +58,10 @@ const run = promisify(execFile)
 /** Image names whose presence means "this fork will flush its state over our write". */
 const SQLITE_GUARDS: Partial<Record<ClientId, string[]>> = {
   'trae-cn': ['Trae CN.exe', 'Trae CN'],
+  // Qoder is not a flush-on-exit clobber risk but a single-instance-lock risk: a second
+  // spawn exits at once, so the same running check gates a different failure mode.
+  qoder: ['Qoder.exe', 'Qoder'],
+  'qoder-cn': ['Qoder CN.exe', 'Qoder CN'],
 }
 
 /**
@@ -114,6 +120,8 @@ interface ClientPlan {
   writes: Write[]
   /** Files this plan writes through the live-write engine (staged, journaled, backed up). */
   files: PlannedFile[]
+  /** Qoder is not a file or table write: it carries the whole native action instead. */
+  qoder?: QoderNativeInput
 }
 
 function row(
@@ -282,16 +290,26 @@ export async function gather(input: GatherInput): Promise<Gathered> {
   }
 
   // --- Qoder / Qoder CN --------------------------------------------------
-  // The GUI's custom models live in Qoder's own encrypted daemon store; settings.json is
-  // only a derived export for the CLI/agent SDK, so editing it never changes the model
-  // picker. The console does not pretend to switch Qoder: an installed client is a
-  // permanent `unsupported` row that names where the models are actually managed.
-  for (const [id, path] of [['qoder', input.paths.qoder], ['qoder-cn', input.paths.qoderCn]] as [ClientId, string][]) {
-    if (!existsSync(dirname(path))) {
-      plans.push(row(id, 'not-installed', [path], [], `没有 ${dirname(path)}`))
-      continue
+  // The GUI's custom models live in Qoder's encrypted daemon store, but the app itself
+  // serves the same management over its own preload bridge - driven here over a debug
+  // pipe, with the app's own interface doing the encrypted write. The preview never
+  // launches Qoder, so the create-vs-update split happens at apply time, verified by
+  // read-back; the row only states what can be known without spawning the app.
+  {
+    const installs = findQoderInstalls()
+    for (const id of ['qoder', 'qoder-cn'] as const) {
+      const path = id === 'qoder' ? input.paths.qoder : input.paths.qoderCn
+      const install = installs.find(item => item.id === id) ?? null
+      // An unknown process state must read as "running": spawning into a live app is
+      // the one mistake this writer cannot undo.
+      const running = input.runningKnown ? isClientRunning(id, input.running) : true
+      const plan = planQoderNative({ id, install, running, hasKey: key !== null, origin, models })
+      const qoderPlan = row(id, plan.state, [path], plan.changes, plan.reason, plan.manualStep, plan.unserved)
+      if (plan.state === 'ready' && install !== null) {
+        qoderPlan.qoder = { install, origin, key, models: models.slice(0, QODER_NATIVE_MAX_MODELS) }
+      }
+      plans.push(qoderPlan)
     }
-    plans.push(row(id, 'unsupported', [path], [], QODER_UNSUPPORTED_REASON, QODER_UNSUPPORTED_MANUAL))
   }
 
   // --- WorkBuddy ---------------------------------------------------------
@@ -459,14 +477,6 @@ const TRAE_MANUAL_STEP = '在 Trae 的自定义模型里把 API Key 改成目标
  */
 const NO_KEY_MANUAL_STEP = '没有规范 key：地址已改，但 API Key 仍是旧的，请自己在客户端里填成目标网关的 key'
 
-/**
- * Qoder keeps its GUI custom models in its own encrypted daemon store; the settings.json on
- * disk is only a derived export for the CLI/agent SDK. No file the console can edit changes
- * the model picker, so the row says so instead of writing a no-op that looks like a switch.
- */
-const QODER_UNSUPPORTED_REASON = 'Qoder 的自定义模型由它自己的守护进程加密保管，settings.json 只是给 CLI/SDK 的导出副本——改它不影响模型选择器，控制台无法外部写入。'
-const QODER_UNSUPPORTED_MANUAL = '在 Qoder 的「设置 → 模型」里添加/切换自定义模型（OpenAI 兼容：填网关地址与 key）；这一项不支持控制台一键切换。'
-
 function traeModelNames(raw: string): string[] {
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>
@@ -543,6 +553,26 @@ export async function applySync(input: GatherInput, clientIds: string[]): Promis
         const items = write.items.map(item => ({ key: item.key, value: materialize(item.value, key) }))
         const { backup } = await writeSqliteItems(write.dbPath, items)
         if (backup !== '') backups.push(backup)
+      }
+      // Qoder's native path reports its own counts instead of a generic "wrote N files".
+      if (plan.qoder) {
+        const native = await applyQoderNative(plan.qoder)
+        const parts = [native.createdConfig
+          ? `已在 Qoder 新建端点 ${native.endpointUrl}，回读确认 ${native.verifiedModels.length} 个模型`
+          : `已更新 Qoder 同端点配置，回读确认 ${native.verifiedModels.length} 个模型`]
+        if (native.failedModels.length > 0) {
+          const names = native.failedModels.slice(0, 3).map(item => item.model).join('、')
+          parts.push(`未确认 ${native.failedModels.length} 个（${names}${native.failedModels.length > 3 ? ' 等' : ''}）：请在 Qoder 的模型设置里手动添加`)
+        }
+        parts.push('模型由 Qoder 自己的加密存储保管，无本地文件备份')
+        const manual = plan.row.manualStep === null ? '' : `；还需你手动：${plan.row.manualStep}`
+        results.push({
+          id,
+          ok: native.verifiedModels.length > 0,
+          message: `${parts.join('；')}${manual}`,
+          backups,
+        })
+        continue
       }
       const manual = plan.row.manualStep === null ? '' : `；还需你手动：${plan.row.manualStep}`
       const touched = files.length + plan.writes.length

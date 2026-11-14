@@ -64,13 +64,6 @@ export type ClientSyncState =
   | 'blocked'
   /** The config store exists but could not be read or parsed. */
   | 'error'
-  /**
-   * The console cannot write this client's model config at all: it lives in the app's own
-   * encrypted store (Qoder's daemon), and the file on disk is only a derived export. No edit
-   * effects a switch, so the row names where the models are actually managed rather than
-   * look ready or ask for a prerequisite that would not help.
-   */
-  | 'unsupported'
 
 /** One field's before/after, already masked. `before: null` = the field is being added. */
 export interface ClientChange {

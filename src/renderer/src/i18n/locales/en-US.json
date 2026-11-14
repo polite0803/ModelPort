@@ -680,8 +680,7 @@
       "no-entry": "No entry to update",
       "app-running": "App is running",
       "blocked": "Prerequisite missing",
-      "error": "Read failed",
-      "unsupported": "Not externally writable"
+      "error": "Read failed"
     },
     "changesTitle": "Will change",
     "added": "(new)",
