@@ -16,19 +16,49 @@
  *   measured. Names the target does not serve are reported (`unservedModels`) instead of
  *   silently renamed or dropped.
  */
-import { join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { KEY_PLACEHOLDER } from '../shared/clientSync.ts'
 import type { ClientChange, ClientId } from '../shared/clientSync.ts'
+import { detectIndent, parseJsonObject } from './clientFormats.ts'
+import {
+  appendTomlTable,
+  hasTomlTable,
+  joinToml,
+  readTomlString,
+  removeTomlKey,
+  setTomlString,
+  splitToml,
+  tomlStringLiteral,
+} from './clientToml.ts'
+
+export { detectIndent } from './clientFormats.ts'
+export { readTomlString } from './clientToml.ts'
 
 export const CLIENT_LABELS: Record<ClientId, string> = {
   codex: 'Codex',
-  claude: 'Claude Code / Claude Desktop',
+  claude: 'Claude Code',
+  'claude-desktop': 'Claude Desktop',
+  gemini: 'Gemini CLI',
+  grokbuild: 'Grok Build',
+  opencode: 'OpenCode',
+  openclaw: 'OpenClaw',
+  hermes: 'Hermes',
+  kimi: 'Kimi Code',
+  mcode: 'MiniMax Code',
+  dsh: 'DeepSeek Harness',
+  omp: 'Oh My Pi',
+  pi: 'Pi',
+  copilot: 'GitHub Copilot CLI',
+  agy: 'Antigravity CLI',
   qoder: 'Qoder（国际）',
   'qoder-cn': 'Qoder CN',
   workbuddy: 'WorkBuddy（国际）',
   'codebuddy-cn': 'CodeBuddy CN（国内）',
   'trae-cn': 'Trae CN',
 }
+
+/** The profile Claude Desktop is given by this console; stable so re-runs update it. */
+export const CLAUDE_DESKTOP_PROFILE_ID = '3f0a5c62-9c1e-4d7b-9a55-6d6f64656c70'
 
 const CLIENT_IDS = Object.keys(CLIENT_LABELS) as ClientId[]
 
@@ -40,12 +70,43 @@ export function isClientId(value: string): value is ClientId {
 export interface ClientPaths {
   codexConfig: string
   codexCatalog: string
+  codexAuth: string
   claudeSettings: string
+  claudeDesktopConfig: string
+  claudeDesktop3pConfig: string
+  claudeDesktopProfile: string
+  claudeDesktopMeta: string
+  geminiEnv: string
+  geminiSettings: string
+  grokConfig: string
+  opencodeDir: string
+  openclawConfig: string
+  hermesConfig: string
+  kimiConfig: string
+  mcodeConfig: string
+  ompModels: string
+  ompConfig: string
+  piModels: string
+  piSettings: string
+  copilotProviders: string
+  copilotSettings: string
+  dshHome: string
+  agySettings: string
   qoder: string
   qoderCn: string
   workbuddy: string
   codeBuddyCn: string
   traeCn: string
+}
+
+export interface ClientPathContext {
+  localAppData?: string
+  platform?: string
+  env?: Record<string, string | undefined>
+}
+
+function nonEmpty(value: string | undefined): string | null {
+  return value !== undefined && value.trim() !== '' ? value.trim() : null
 }
 
 /**
@@ -54,12 +115,63 @@ export interface ClientPaths {
  * environment contract read out of Claude Desktop's own bundle
  * (`process.env.CLAUDE_CONFIG_DIR || homedir()`).
  */
-export function clientPaths(home: string, appData: string, claudeConfigDir: string | undefined): ClientPaths {
+export function clientPaths(
+  home: string,
+  appData: string,
+  claudeConfigDir: string | undefined,
+  context: ClientPathContext = {},
+): ClientPaths {
+  const platform = context.platform ?? process.platform
+  const env = context.env ?? process.env
+  const localAppData = context.localAppData ?? nonEmpty(env.LOCALAPPDATA) ?? join(home, 'AppData', 'Local')
+  const xdg = nonEmpty(env.XDG_CONFIG_HOME) ?? join(home, '.config')
   const claudeBase = claudeConfigDir && claudeConfigDir.trim() !== '' ? claudeConfigDir.trim() : join(home, '.claude')
+
+  const desktopBase =
+    platform === 'win32'
+      ? join(localAppData, 'Claude')
+      : platform === 'darwin'
+        ? join(home, 'Library', 'Application Support', 'Claude')
+        : join(xdg, 'Claude')
+  const desktop3p = join(dirname(desktopBase), 'Claude-3p')
+  const desktopLibrary = join(desktop3p, 'configLibrary')
+
+  const ompProfile = nonEmpty(env.OMP_PROFILE) ?? nonEmpty(env.PI_PROFILE)
+  const ompBase = nonEmpty(env.PI_CONFIG_DIR) ?? join(home, '.omp')
+  const ompDir = ompProfile === null ? join(ompBase, 'agent') : join(ompBase, 'profiles', ompProfile, 'agent')
+  const ompAgent = nonEmpty(env.PI_CODING_AGENT_DIR)
+  const ompRoot = ompAgent !== null && isAbsolute(ompAgent) ? ompAgent : ompDir
+  const piAgent = nonEmpty(env.PI_CODING_AGENT_DIR)
+  const piRoot = piAgent !== null && isAbsolute(piAgent) ? piAgent : join(home, '.pi', 'agent')
+
   return {
     codexConfig: join(home, '.codex', 'config.toml'),
     codexCatalog: join(home, '.codex', 'modelport-catalog.json'),
+    codexAuth: join(home, '.codex', 'auth.json'),
     claudeSettings: join(claudeBase, 'settings.json'),
+    claudeDesktopConfig: join(desktopBase, 'claude_desktop_config.json'),
+    claudeDesktop3pConfig: join(desktop3p, 'claude_desktop_config.json'),
+    claudeDesktopProfile: join(desktopLibrary, `${CLAUDE_DESKTOP_PROFILE_ID}.json`),
+    claudeDesktopMeta: join(desktopLibrary, '_meta.json'),
+    geminiEnv: join(home, '.gemini', '.env'),
+    geminiSettings: join(home, '.gemini', 'settings.json'),
+    grokConfig: join(home, '.grok', 'config.toml'),
+    opencodeDir: join(xdg, 'opencode'),
+    openclawConfig: join(home, '.openclaw', 'openclaw.json'),
+    hermesConfig: platform === 'win32' ? join(localAppData, 'hermes', 'config.yaml') : join(home, '.hermes', 'config.yaml'),
+    kimiConfig: join(nonEmpty(env.KIMI_CODE_HOME) ?? join(home, '.kimi-code'), 'config.toml'),
+    mcodeConfig: join(
+      nonEmpty(env.MINIMAX_DATA_DIR) ?? nonEmpty(env.MAVIS_DATA_DIR) ?? join(home, '.minimax'),
+      'config.yaml',
+    ),
+    ompModels: join(ompRoot, 'models.yml'),
+    ompConfig: join(ompRoot, 'config.yml'),
+    piModels: join(piRoot, 'models.json'),
+    piSettings: join(piRoot, 'settings.json'),
+    copilotProviders: join(nonEmpty(env.COPILOT_HOME) ?? join(home, '.copilot'), 'providers.json'),
+    copilotSettings: join(nonEmpty(env.COPILOT_HOME) ?? join(home, '.copilot'), 'settings.json'),
+    dshHome: nonEmpty(env.DSH_HOME) ?? join(home, '.dsh'),
+    agySettings: join(home, '.gemini', 'antigravity-cli', 'settings.json'),
     qoder: join(home, '.qoder', 'settings.json'),
     qoderCn: join(home, '.qoder-cn', 'settings.json'),
     workbuddy: join(home, '.workbuddy', 'models.json'),
@@ -97,21 +209,8 @@ export function endpointFor(origin: string, shape: EndpointShape): string {
   return `${base}/v1`
 }
 
-/** Keeps a JSON edit from reformatting the whole file: match the indent already in use. */
-export function detectIndent(raw: string): string {
-  const match = /\n([ \t]+)\S/.exec(raw)
-  return match ? match[1] : '  '
-}
-
 function parseObject(raw: string): Record<string, unknown> | null {
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null
-  } catch {
-    return null
-  }
+  return parseJsonObject(raw)
 }
 
 function changed(content: string, changes: ClientChange[]): PlanResult {
@@ -126,83 +225,25 @@ function field(changes: ClientChange[], label: string, before: unknown, after: s
   return true
 }
 
-// ---------------------------------------------------------------------------
-// TOML (Codex)
-// ---------------------------------------------------------------------------
-
-/** A table header line, `[x]` or `[[x]]`, with optional trailing comment. */
-function isHeader(line: string): boolean {
-  return /^\s*\[\[?[^\]]+\]\]?\s*(#.*)?$/.test(line)
-}
-
-function headerName(line: string): string {
-  const match = /^\s*\[\[?([^\]]+)\]\]?/.exec(line)
-  return match ? match[1].trim() : ''
-}
-
-/** `[start, end)` of a table's body; `null` for the top level means "before the first header". */
-function tableRange(lines: string[], table: string | null): [number, number] | null {
-  if (table === null) {
-    const first = lines.findIndex(isHeader)
-    return [0, first === -1 ? lines.length : first]
-  }
-  const start = lines.findIndex(line => isHeader(line) && headerName(line) === table)
-  if (start === -1) return null
-  let end = start + 1
-  while (end < lines.length && !isHeader(lines[end])) end += 1
-  return [start + 1, end]
-}
-
-function keyLineIndex(lines: string[], start: number, end: number, key: string): number {
-  const pattern = new RegExp(`^\\s*${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*=`)
-  for (let i = start; i < end; i += 1) if (pattern.test(lines[i])) return i
-  return -1
-}
-
-/** The value of a single-line `key = "…"` / `key = '…'`; null when absent or multi-line. */
-export function readTomlString(lines: string[], table: string | null, key: string): string | null {
-  const range = tableRange(lines, table)
-  if (!range) return null
-  const index = keyLineIndex(lines, range[0], range[1], key)
-  if (index === -1) return null
-  const match = /=\s*("([^"]*)"|'([^']*)')\s*(#.*)?$/.exec(lines[index])
-  if (!match) return null
-  return match[2] ?? match[3] ?? null
-}
-
 /**
- * Sets one single-line string key inside a table, inserting it when absent.
- *
- * Only single-line values are touched: a multi-line array (`notify = [ … ]` spanning
- * lines) would be corrupted by a line replacement, so the caller is told instead.
+ * Records a key edit the same way, comparing **masked** values: the plan never carries the
+ * canonical key, so the only comparison available is the mask the caller already has.
+ * Without this, a client that is already on the canonical key would read as "will change"
+ * on every run, because a masked key never equals the placeholder.
  */
-function setTomlString(
-  lines: string[],
-  table: string | null,
-  key: string,
-  value: string,
-): { ok: boolean; before: string | null } {
-  const range = tableRange(lines, table)
-  if (!range) return { ok: false, before: null }
-  const [start, end] = range
-  const index = keyLineIndex(lines, start, end, key)
-  const literal = `${key} = "${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
-  if (index === -1) {
-    // Insert at the end of the table body, before the blank line that separates tables.
-    let at = end
-    while (at > start && lines[at - 1].trim() === '') at -= 1
-    lines.splice(at, 0, literal)
-    return { ok: true, before: null }
-  }
-  const before = readTomlString(lines, table, key)
-  if (before === null) {
-    // Present but not a single-line string: refuse rather than mangle it.
-    return { ok: false, before: null }
-  }
-  if (before === value) return { ok: true, before }
-  const indent = /^\s*/.exec(lines[index])?.[0] ?? ''
-  lines[index] = `${indent}${literal}`
-  return { ok: true, before }
+function keyField(
+  changes: ClientChange[],
+  label: string,
+  before: unknown,
+  input: { writeKey?: boolean; keyPreview?: string | null },
+): boolean {
+  if (input.writeKey === false) return false
+  const previous = typeof before === 'string' ? before : null
+  const masked = previous === null ? null : maskSecret(previous)
+  const wanted = input.keyPreview ?? null
+  if (masked !== null && masked === wanted) return false
+  changes.push({ label, before: masked, after: KEY_PLACEHOLDER })
+  return true
 }
 
 export interface CodexPlanInput {
@@ -211,10 +252,20 @@ export interface CodexPlanInput {
   routeNames: string[]
   /** The provider table this console owns. */
   providerTable?: string
+  /** False when no canonical key exists: the address still moves, the token is left alone. */
+  writeKey?: boolean
+  /** Masked canonical key, for the "already on this key" comparison. */
+  keyPreview?: string | null
 }
 
 /**
- * Codex: repoint `[model_providers.modelport]` and keep the selected model servable.
+ * Codex: write `[model_providers.custom]` and point `model_provider` at it.
+ *
+ * The key travels **inside** the table (`experimental_bearer_token`), not through a User
+ * environment variable - that is the shape Codex reads today, and it removes the "restart
+ * the client so it sees the new env var" step entirely. `auth.json` is left alone: an
+ * official login there is not ours to delete, and an explicit bearer token in the provider
+ * table wins over it for this provider.
  *
  * `model_catalog_json` is deliberately untouched. It must stay a bare file name resolved
  * against CODEX_HOME (measured 2026-11-12: a `C:\…` path breaks the WSL-mode core, a
@@ -222,20 +273,49 @@ export interface CodexPlanInput {
  * `comp_hash` whose derivation is not public - cloning one would be a guess.
  */
 export function planCodexToml(raw: string, input: CodexPlanInput): PlanResult {
-  const table = input.providerTable ?? 'model_providers.modelport'
-  const eol = raw.includes('\r\n') ? '\r\n' : '\n'
-  const lines = raw.split(/\r?\n/)
-  if (!tableRange(lines, table)) {
-    return { kind: 'no-entry', reason: `config.toml 里没有 [${table}] 这一段` }
-  }
+  const table = input.providerTable ?? 'model_providers.custom'
+  const writeKey = input.writeKey !== false
+  const document = splitToml(raw)
+  const lines = document.lines
   const changes: ClientChange[] = []
   const url = endpointFor(input.origin, 'v1')
-  const urlEdit = setTomlString(lines, table, 'base_url', url)
-  if (!urlEdit.ok) return { kind: 'bad-input', reason: `[${table}] 的 base_url 不是单行字符串，拒绝改写` }
-  field(changes, `${table}.base_url`, urlEdit.before, url)
 
-  const providerEdit = setTomlString(lines, null, 'model_provider', 'modelport')
-  if (providerEdit.ok) field(changes, 'model_provider', providerEdit.before, 'modelport')
+  if (!hasTomlTable(lines, table)) {
+    appendTomlTable(lines, [
+      `[${table}]`,
+      tomlStringLiteral('name', 'ModelPort'),
+      tomlStringLiteral('base_url', url),
+      tomlStringLiteral('wire_api', 'responses'),
+      ...(writeKey ? [tomlStringLiteral('experimental_bearer_token', KEY_PLACEHOLDER)] : []),
+    ])
+    field(changes, `[${table}]`, null, '新建')
+  } else {
+    const urlEdit = setTomlString(lines, table, 'base_url', url)
+    if (!urlEdit.ok) return { kind: 'bad-input', reason: `[${table}] 的 base_url 不是单行字符串，拒绝改写` }
+    field(changes, `${table}.base_url`, urlEdit.before, url)
+
+    const nameEdit = setTomlString(lines, table, 'name', 'ModelPort')
+    if (nameEdit.ok) field(changes, `${table}.name`, nameEdit.before, 'ModelPort')
+
+    const wireEdit = setTomlString(lines, table, 'wire_api', 'responses')
+    if (wireEdit.ok) field(changes, `${table}.wire_api`, wireEdit.before, 'responses')
+
+    if (writeKey) {
+      const tokenEdit = setTomlString(lines, table, 'experimental_bearer_token', KEY_PLACEHOLDER)
+      if (tokenEdit.ok) keyField(changes, `${table}.experimental_bearer_token`, tokenEdit.before, input)
+    }
+    // Old shapes: an env-var indirection or an auth flag would override the token above.
+    removeTomlKey(lines, table, 'env_key')
+    removeTomlKey(lines, table, 'requires_openai_auth')
+  }
+
+  const providerEdit = setTomlString(lines, null, 'model_provider', 'custom')
+  if (providerEdit.ok) field(changes, 'model_provider', providerEdit.before, 'custom')
+
+  // A top-level endpoint or token would shadow the provider table (older Codex shapes).
+  for (const key of ['openai_base_url', 'experimental_bearer_token', 'base_url', 'wire_api']) {
+    removeTomlKey(lines, null, key)
+  }
 
   // A model the target does not serve would 503 on the first turn, so the selection has
   // to move with the endpoint. `auto` is preferred because it is the gateway's own
@@ -247,7 +327,7 @@ export function planCodexToml(raw: string, input: CodexPlanInput): PlanResult {
     if (edit.ok) field(changes, 'model', current, next)
   }
 
-  return changed(lines.join(eol), changes)
+  return changed(joinToml(document), changes)
 }
 
 /** The catalog's slugs, for reporting which of them the target actually serves. */
@@ -268,6 +348,8 @@ export interface JsonPlanInput {
   origin: string
   /** False for clients whose key lives in encrypted storage (TRAE, CodeBuddy). */
   writeKey: boolean
+  /** Masked canonical key, for the "already on this key" comparison. */
+  keyPreview?: string | null
 }
 
 /**
@@ -295,7 +377,8 @@ export function planQoderSettings(raw: string, input: JsonPlanInput): PlanResult
     const entry = { ...(value as Record<string, unknown>) }
     const short = id.replace(/^qoder-custom-/, '').slice(0, 8)
     if (field(changes, `${short}.baseUrl`, entry.baseUrl, url)) entry.baseUrl = url
-    if (input.writeKey && field(changes, `${short}.apiKey`, maskSecret(String(entry.apiKey ?? '')), KEY_PLACEHOLDER)) {
+    if (input.writeKey) {
+      keyField(changes, `${short}.apiKey`, entry.apiKey, input)
       entry.apiKey = KEY_PLACEHOLDER
     }
     next[id] = entry
@@ -330,7 +413,8 @@ export function planWorkBuddyModels(raw: string, input: JsonPlanInput): PlanResu
     const copy = { ...entry }
     const label = typeof entry.id === 'string' ? entry.id : `#${touched}`
     if (field(changes, `${label}.url`, entry.url, url)) copy.url = url
-    if (input.writeKey && field(changes, `${label}.apiKey`, maskSecret(String(entry.apiKey ?? '')), KEY_PLACEHOLDER)) {
+    if (input.writeKey) {
+      keyField(changes, `${label}.apiKey`, entry.apiKey, input)
       copy.apiKey = KEY_PLACEHOLDER
     }
     return copy
@@ -359,14 +443,82 @@ export function planClaudeSettings(raw: string | null, input: JsonPlanInput): Pl
   const env: Record<string, unknown> =
     envRaw !== null && typeof envRaw === 'object' && !Array.isArray(envRaw) ? { ...(envRaw as Record<string, unknown>) } : {}
   const changes: ClientChange[] = []
+
+  // The connection keys belong to whoever served this client last. Leaving a Bedrock or
+  // Vertex selector behind would keep Claude Code on that transport no matter what the
+  // base URL says, so the floor is cleared before the target's values go in.
+  let cleared = 0
+  for (const key of Object.keys(env)) {
+    if (!claudeFloorEnv(key)) continue
+    delete env[key]
+    cleared += 1
+  }
+  for (const key of CLAUDE_FLOOR_TOP) {
+    if (key in parsed) {
+      delete parsed[key]
+      cleared += 1
+    }
+  }
+
   const url = endpointFor(input.origin, 'origin')
   if (field(changes, 'env.ANTHROPIC_BASE_URL', env.ANTHROPIC_BASE_URL, url)) env.ANTHROPIC_BASE_URL = url
-  if (input.writeKey && field(changes, 'env.ANTHROPIC_AUTH_TOKEN', maskSecret(String(env.ANTHROPIC_AUTH_TOKEN ?? '')), KEY_PLACEHOLDER)) {
+  if (
+    field(changes, 'env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY', env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, '1')
+  ) {
+    env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = '1'
+  }
+  if (input.writeKey) {
+    keyField(changes, 'env.ANTHROPIC_AUTH_TOKEN', env.ANTHROPIC_AUTH_TOKEN, input)
     env.ANTHROPIC_AUTH_TOKEN = KEY_PLACEHOLDER
   }
+  if (cleared > 0) changes.push({ label: '上一家的连接键', before: `${cleared} 个`, after: '已清空' })
   if (changes.length === 0) return { kind: 'unchanged' }
   const indent = raw === null ? '  ' : detectIndent(raw)
   return changed(JSON.stringify({ ...parsed, env }, null, indent) + '\n', changes)
+}
+
+/** Claude Code's protocol selectors: same prefix family as feature switches, so list them. */
+const CLAUDE_PROTOCOL_SELECTORS = [
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_USE_GATEWAY',
+  'CLAUDE_CODE_USE_MANTLE',
+  'CLAUDE_CODE_USE_ANTHROPIC_AWS',
+  'CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD',
+]
+
+const CLAUDE_FLOOR_ENV_KEYS = [
+  'CLAUDE_CODE_SUBAGENT_MODEL',
+  'CLOUD_ML_REGION',
+  'GOOGLE_APPLICATION_CREDENTIALS',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'CLAUDE_CODE_OAUTH_REFRESH_TOKEN',
+  'CLAUDE_CODE_OAUTH_SCOPES',
+  'CLAUDE_CODE_API_KEY_HELPER_TTL_MS',
+]
+
+const CLAUDE_FLOOR_TOP = [
+  'apiKeyHelper',
+  'apiBaseUrl',
+  'primaryModel',
+  'smallFastModel',
+  'apiKey',
+  'model',
+  'fallbackModel',
+  'modelOverrides',
+  'modelPicker',
+  'advisorModel',
+  'awsAuthRefresh',
+  'awsCredentialExport',
+  'gcpAuthRefresh',
+]
+
+/** `ANTHROPIC_*`, `AWS_*`, `VERTEX_REGION_*` are connection/auth as a whole; `CLAUDE_CODE_*` is not. */
+export function claudeFloorEnv(key: string): boolean {
+  if (key.startsWith('ANTHROPIC_') || key.startsWith('AWS_') || key.startsWith('VERTEX_REGION_')) return true
+  if (CLAUDE_PROTOCOL_SELECTORS.includes(key) || CLAUDE_FLOOR_ENV_KEYS.includes(key)) return true
+  return key.startsWith('CLAUDE_CODE_SKIP_') && key.endsWith('_AUTH')
 }
 
 /**

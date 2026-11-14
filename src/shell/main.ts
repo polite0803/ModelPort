@@ -48,13 +48,12 @@ import {
   applySync,
   buildPreview,
   claudeClientInstalled,
-  readUserEnv,
   runningImageNames,
   type GatherInput,
 } from './clientSync'
 import { clientPaths } from './clientSyncPlan'
+import { recoverClientWrites } from './clientLiveWrite'
 import type { GatewayCredential } from './clientSyncRpc'
-import { CODEX_ENV_KEY } from '../shared/clientSync'
 import { checkForUpdates, runUpgrade } from './updater'
 import {
   adoptLocalHandshake,
@@ -88,6 +87,10 @@ app.setAppUserModelId('com.modelport.shell')
 // `console.error` / `console.warn` - refused certificate, unreadable address book, a gateway
 // child that never came up - goes to a stream nobody reads. See `consoleLogSink.ts`.
 installShellConsoleLog(app.getPath('userData'))
+// A client-config write that was interrupted by a crash or a kill finishes here: the
+// journal names the staged files, and each one is adopted only if it still holds the bytes
+// read before the write. Nothing is overwritten when the user edited the file meanwhile.
+recoverClientWrites(app.getPath('userData'))
 
 if (!app.requestSingleInstanceLock()) {
   app.quit()
@@ -1651,7 +1654,11 @@ async function clientSyncInputFor(event: IpcMainInvokeEvent): Promise<GatherInpu
     const found = origin === null ? null : getSecret(secretsPath(), secretSealer, origin)
     return { entry, secret: found !== null && found.status === 'found' ? (found.secret ?? null) : null }
   })
-  const paths = clientPaths(app.getPath('home'), app.getPath('appData'), process.env.CLAUDE_CONFIG_DIR)
+  const paths = clientPaths(app.getPath('home'), app.getPath('appData'), process.env.CLAUDE_CONFIG_DIR, {
+    localAppData: process.env.LOCALAPPDATA,
+    platform: process.platform,
+    env: process.env,
+  })
   const running = await runningImageNames()
   return {
     active,
@@ -1659,8 +1666,8 @@ async function clientSyncInputFor(event: IpcMainInvokeEvent): Promise<GatherInpu
     paths,
     running: running.names,
     runningKnown: running.known,
-    codexEnv: await readUserEnv(CODEX_ENV_KEY),
     claudeInstalled: claudeClientInstalled(paths, process.env.LOCALAPPDATA),
+    dataDir: app.getPath('userData'),
   }
 }
 

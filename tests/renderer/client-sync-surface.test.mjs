@@ -85,7 +85,14 @@ test('七种状态各有说法，标签从联合类型枚举、两种语言都�
   const states = unionMembers('ClientSyncState')
   assert.equal(states.length, 7, `状态联合解析到 ${states.length} 个成员 —— 形状变了`)
   const ids = unionMembers('ClientId')
-  assert.equal(ids.length, 7, `客户端联合解析到 ${ids.length} 个成员 —— 形状变了`)
+  // 条数不写死（移植后是 20 个），改成与主进程标签表现推对账：
+  // 加一个 id 少一个标签，页面就会画出空白行，这条必须当场红。
+  const planSource = read('src/shell/clientSyncPlan.ts')
+  const labelsStart = planSource.indexOf('export const CLIENT_LABELS: Record<ClientId, string> = {')
+  assert.ok(labelsStart >= 0, 'CLIENT_LABELS 不见了')
+  const labelsBlock = planSource.slice(labelsStart, planSource.indexOf('\n}', labelsStart))
+  const labelIds = [...labelsBlock.matchAll(/^ {2}'?([\w-]+)'?:/gm)].map(match => match[1])
+  assert.deepEqual([...ids].sort(), [...labelIds].sort(), '客户端联合类型与标签表必须一字不差地对上')
 
   // 页面用动态键取标签，所以缺键会原样显示成 clientSync.state.xxx。
   assert.match(page, /t\(`clientSync\.state\.\$\{row\.state\}`\)/)

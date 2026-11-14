@@ -12,7 +12,7 @@
  * placeholder is refused rather than written.
  */
 import { execFile } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import type { GatewayEntry } from './addressBook.ts'
@@ -35,7 +35,12 @@ import { ensureCanonicalKey, fetchRoutes } from './clientSyncRpc.ts'
 import type { GatewayCredential } from './clientSyncRpc.ts'
 import { readSqliteItemsLike, sqliteSidecar, writeSqliteItems } from './clientSqlite.ts'
 import type { SqliteItem } from './clientSqlite.ts'
-import { CODEX_ENV_KEY, KEY_PLACEHOLDER } from '../shared/clientSync.ts'
+import { applyPlannedFiles } from './clientLiveWrite.ts'
+import type { PlannedFile } from './clientLiveWrite.ts'
+import { CLI_APP_PLANNERS } from './clientApps.ts'
+import { TOOL_APP_PLANNERS } from './clientAppsTools.ts'
+import type { AppPlan, AppPlanInput } from './clientApps.ts'
+import { KEY_PLACEHOLDER } from '../shared/clientSync.ts'
 import type {
   ClientApplyResult,
   ClientChange,
@@ -99,51 +104,17 @@ export function isClientRunning(id: ClientId, running: Set<string>): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Windows user environment (Codex `env_key`)
-// ---------------------------------------------------------------------------
-
-const POWERSHELL = 'powershell.exe'
-
-/**
- * Reads a User environment variable. The name travels in the child's environment, not on
- * the command line, so neither the name nor a value shows up in a process listing.
- */
-export async function readUserEnv(name: string): Promise<string | null> {
-  if (process.platform !== 'win32') return null
-  try {
-    const { stdout } = await run(
-      POWERSHELL,
-      ['-NoProfile', '-NonInteractive', '-Command', "[Environment]::GetEnvironmentVariable($env:MP_ENV_NAME,'User')"],
-      { windowsHide: true, env: { ...process.env, MP_ENV_NAME: name } },
-    )
-    const value = stdout.trim()
-    return value === '' ? null : value
-  } catch {
-    return null
-  }
-}
-
-export async function writeUserEnv(name: string, value: string): Promise<void> {
-  if (process.platform !== 'win32') throw new Error('这个平台不支持由控制台写入用户环境变量')
-  await run(
-    POWERSHELL,
-    ['-NoProfile', '-NonInteractive', '-Command', "[Environment]::SetEnvironmentVariable($env:MP_ENV_NAME,$env:MP_ENV_VALUE,'User')"],
-    { windowsHide: true, env: { ...process.env, MP_ENV_NAME: name, MP_ENV_VALUE: value } },
-  )
-}
-
-// ---------------------------------------------------------------------------
 // Planning
 // ---------------------------------------------------------------------------
 
-type Write =
-  | { kind: 'file'; path: string; content: string }
-  | { kind: 'sqlite'; dbPath: string; items: SqliteItem[] }
-  | { kind: 'env'; name: string; value: string }
+/** Trae keeps its model list inside a SQLite table; every other client has a file. */
+type Write = { kind: 'sqlite'; dbPath: string; items: SqliteItem[] }
 
 interface ClientPlan {
   row: ClientSyncRow
   writes: Write[]
+  /** Files this plan writes through the live-write engine (staged, journaled, backed up). */
+  files: PlannedFile[]
 }
 
 function row(
@@ -158,6 +129,30 @@ function row(
   return {
     row: { id, label: CLIENT_LABELS[id], state, paths, changes, reason, manualStep, unservedModels: unserved },
     writes: [],
+    files: [],
+  }
+}
+
+/** Turns a ported app planner's outcome into the row + files shape the page renders. */
+function appPlan(id: ClientId, plan: AppPlan): ClientPlan {
+  const result = row(id, plan.state, plan.paths, plan.changes, plan.reason, plan.manualStep, plan.unserved)
+  result.files = plan.files
+  return result
+}
+
+/**
+ * The placeholder is what the plan carries; the panel must show something a person can
+ * read. Swapped on the way out only, so the page never sees the token and `apply` still
+ * substitutes the real value.
+ */
+function displayRow(item: ClientSyncRow, keyLabel: string): ClientSyncRow {
+  return {
+    ...item,
+    changes: item.changes.map(change => ({
+      ...change,
+      before: change.before === KEY_PLACEHOLDER ? keyLabel : change.before,
+      after: change.after === KEY_PLACEHOLDER ? keyLabel : change.after,
+    })),
   }
 }
 
@@ -181,7 +176,7 @@ function filePlan(
   if (result.kind === 'bad-input') return row(id, 'error', [path], [], result.reason, null, unserved)
   if (result.kind === 'unchanged') return row(id, 'unchanged', [path], [], null, manualStep, unserved)
   const plan = row(id, 'ready', [path], result.changes, null, manualStep, unserved)
-  plan.writes.push({ kind: 'file', path, content: result.content })
+  plan.files.push({ path, content: result.content, private: result.content.includes(KEY_PLACEHOLDER) })
   return plan
 }
 
@@ -190,8 +185,6 @@ export interface GatherInput {
   gateways: GatewayCredential[]
   paths: ClientPaths
   running: Set<string>
-  /** Current value of the Codex User env var, or null when absent / not Windows. */
-  codexEnv: string | null
   /** False when the platform query failed - never read as "nothing is running". */
   runningKnown: boolean
   /**
@@ -201,6 +194,8 @@ export interface GatherInput {
    * file for a client that may not be there.
    */
   claudeInstalled: boolean
+  /** Where first-write backups and the write journal live (Electron `userData`). */
+  dataDir: string
 }
 
 export interface Gathered {
@@ -250,33 +245,21 @@ export async function gather(input: GatherInput): Promise<Gathered> {
     if (raw === null) {
       plans.push(row('codex', 'not-installed', [input.paths.codexConfig], [], '没有 ~/.codex/config.toml'))
     } else {
-      const result = planCodexToml(raw, { origin, routeNames })
+      const result = planCodexToml(raw, { origin, routeNames, writeKey: key !== null })
       const catalogRaw = readText(input.paths.codexCatalog)
       const slugs = catalogRaw === null ? [] : (catalogSlugs(catalogRaw) ?? [])
       const plan = filePlan('codex', input.paths.codexConfig, result, unservedModels(slugs, routeNames))
-      if (plan.row.state === 'ready' || plan.row.state === 'unchanged') {
-        if (process.platform !== 'win32') {
-          plan.row.manualStep = `把用户环境变量 ${CODEX_ENV_KEY} 设成目标网关的 key（本平台控制台不能代写）`
-        } else if (key !== null && input.codexEnv !== key) {
-          plan.writes.push({ kind: 'env', name: CODEX_ENV_KEY, value: KEY_PLACEHOLDER })
-          plan.row.changes.push({
-            label: `用户环境变量 ${CODEX_ENV_KEY}`,
-            before: input.codexEnv === null ? null : maskSecret(input.codexEnv),
-            after: maskSecret(key),
-          })
-          plan.row.state = 'ready'
-        } else if (key === null) {
-          plan.row.manualStep = `没有规范 key：地址已改，但用户环境变量 ${CODEX_ENV_KEY} 未更新，请自己把它设成目标网关的 key`
-        }
-        if (catalogRaw === null) {
-          plan.row.reason = '没有 modelport-catalog.json：Codex 选择器仍会用内置模型名'
-        }
+      if (key === null && (plan.row.state === 'ready' || plan.row.state === 'unchanged')) {
+        plan.row.manualStep = '没有规范 key：地址已改，但 provider 表里没写密钥，请把 experimental_bearer_token 设成目标网关的 key'
+      }
+      if (catalogRaw === null && (plan.row.state === 'ready' || plan.row.state === 'unchanged')) {
+        plan.row.reason = '没有 modelport-catalog.json：Codex 选择器仍会用内置模型名'
       }
       plans.push(plan)
     }
   }
 
-  // --- Claude ------------------------------------------------------------
+  // --- Claude Code -------------------------------------------------------
   {
     const raw = readText(input.paths.claudeSettings)
     if (raw === null && !input.claudeInstalled) {
@@ -359,12 +342,33 @@ export async function gather(input: GatherInput): Promise<Gathered> {
     }
   }
 
+  // --- The ported client integrations -----------------------------------
+  //
+  // Registry-driven on purpose: adding a client is a planner plus one id, not another
+  // block in this function. Each planner decides its own install / no-entry / blocked
+  // state, because "no such file" means something different for every one of them.
+  {
+    const appInput: AppPlanInput = {
+      origin,
+      routeNames,
+      hasKey: key !== null,
+      keyValue: key,
+      paths: input.paths,
+      read: readText,
+      exists: path => existsSync(path),
+    }
+    for (const [id, planner] of Object.entries({ ...CLI_APP_PLANNERS, ...TOOL_APP_PLANNERS })) {
+      if (!isClientId(id)) continue
+      plans.push(appPlan(id, planner(appInput)))
+    }
+  }
+
   const preview: ClientSyncPreview = {
     origin,
     gatewayName: input.active.name,
     keyPreview: key === null ? null : maskSecret(key),
     models,
-    rows: plans.map(plan => plan.row),
+    rows: plans.map(plan => displayRow(plan.row, key === null ? '目标网关的 key' : maskSecret(key))),
     keyDistribution: canonical.distribution,
     ...(canonical.error !== null || routeError !== null
       ? { error: [canonical.error, routeError === null ? null : `读取目标网关模型清单失败：${routeError}`].filter(Boolean).join('；') }
@@ -479,10 +483,6 @@ function traeModelNames(raw: string): string[] {
 // Applying
 // ---------------------------------------------------------------------------
 
-function stamp(): string {
-  return new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-')
-}
-
 /** Substitutes the key and refuses to write a plan that still contains the placeholder. */
 function materialize(content: string, key: string | null): string {
   if (key === null) {
@@ -492,16 +492,6 @@ function materialize(content: string, key: string | null): string {
   const written = content.split(KEY_PLACEHOLDER).join(key)
   if (written.includes(KEY_PLACEHOLDER)) throw new Error('密钥占位符未被替换，拒绝写入')
   return written
-}
-
-function writeFileBackup(path: string, content: string): string {
-  const backup = `${path}.bak-${stamp()}`
-  if (existsSync(path)) copyFileSync(path, backup)
-  mkdirSync(dirname(path), { recursive: true })
-  const temp = `${path}.tmp-${process.pid}`
-  writeFileSync(temp, content, { encoding: 'utf8', mode: 0o600 })
-  renameSync(temp, path)
-  return existsSync(backup) ? backup : ''
 }
 
 export async function buildPreview(input: GatherInput): Promise<ClientSyncPreview> {
@@ -533,19 +523,22 @@ export async function applySync(input: GatherInput, clientIds: string[]): Promis
     }
     const backups: string[] = []
     try {
+      const files = plan.files.map(file => ({
+        ...file,
+        content: file.content === null ? null : materialize(file.content, key),
+      }))
+      if (files.length > 0) {
+        const written = await applyPlannedFiles(files, input.dataDir)
+        backups.push(...written.backups)
+      }
       for (const write of plan.writes) {
-        if (write.kind === 'file') {
-          backups.push(writeFileBackup(write.path, materialize(write.content, key)))
-        } else if (write.kind === 'env') {
-          await writeUserEnv(write.name, materialize(write.value, key))
-        } else {
-          const items = write.items.map(item => ({ key: item.key, value: materialize(item.value, key) }))
-          const { backup } = await writeSqliteItems(write.dbPath, items)
-          if (backup !== '') backups.push(backup)
-        }
+        const items = write.items.map(item => ({ key: item.key, value: materialize(item.value, key) }))
+        const { backup } = await writeSqliteItems(write.dbPath, items)
+        if (backup !== '') backups.push(backup)
       }
       const manual = plan.row.manualStep === null ? '' : `；还需你手动：${plan.row.manualStep}`
-      results.push({ id, ok: true, message: `已写入 ${plan.writes.length} 处${manual}`, backups: backups.filter(item => item !== '') })
+      const touched = files.length + plan.writes.length
+      results.push({ id, ok: true, message: `已写入 ${touched} 处${manual}`, backups: backups.filter(item => item !== '') })
     } catch (error) {
       results.push({ id, ok: false, message: error instanceof Error ? error.message : String(error), backups })
     }

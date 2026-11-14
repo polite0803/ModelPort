@@ -74,16 +74,20 @@ test('maskSecret keeps enough to recognize a key and never enough to use one', (
 // Codex
 // ---------------------------------------------------------------------------
 
-test('Codex: base_url moves and every unrelated table survives', () => {
-  const result = planCodexToml(CODEX_TOML, { origin: ORIGIN, routeNames: ['codex-deepseek', 'auto'] })
+test('Codex: the legacy env_key shape migrates into the provider table', () => {
+  const result = planCodexToml(CODEX_TOML, { origin: ORIGIN, routeNames: ['codex-deepseek', 'auto'], writeKey: true })
   assert.equal(result.kind, 'changed')
   if (result.kind !== 'changed') return
   const lines = result.content.split('\n')
-  assert.equal(readTomlString(lines, 'model_providers.modelport', 'base_url'), `${ORIGIN}/v1`)
-  // Untouched: the catalog file name must stay bare, and env_key names a variable.
+  assert.equal(readTomlString(lines, 'model_providers.custom', 'base_url'), `${ORIGIN}/v1`)
+  assert.equal(readTomlString(lines, 'model_providers.custom', 'experimental_bearer_token'), KEY_PLACEHOLDER)
+  assert.equal(readTomlString(lines, 'model_providers.custom', 'wire_api'), 'responses')
+  // The env-var indirection is gone: leaving it would outrank the token we just wrote.
+  assert.equal(readTomlString(lines, 'model_providers.custom', 'env_key'), null)
+  assert.equal(readTomlString(lines, null, 'model_provider'), 'custom')
+  // Untouched: the catalog file name stays bare, and the legacy table is not ours to delete.
   assert.equal(readTomlString(lines, null, 'model_catalog_json'), 'modelport-catalog.json')
-  assert.equal(readTomlString(lines, 'model_providers.modelport', 'env_key'), 'MODELPORT_CODEX_API_KEY')
-  assert.equal(readTomlString(lines, 'model_providers.modelport', 'wire_api'), 'responses')
+  assert.ok(result.content.includes('[model_providers.modelport]'))
   assert.equal(readTomlString(lines, 'desktop', 'appearanceTheme'), 'dark')
   assert.equal(readTomlString(lines, 'projects."/home/polit/projects/ModelPort"', 'trust_level'), 'trusted')
   assert.ok(result.content.includes('notify = [ "C:\\\\Users\\\\polit\\\\codex-computer-use.exe", "turn-ended" ]'))
@@ -93,37 +97,51 @@ test('Codex: base_url moves and every unrelated table survives', () => {
 })
 
 test('Codex: a model the target does not serve moves to auto, not to a stale name', () => {
-  const result = planCodexToml(CODEX_TOML, { origin: ORIGIN, routeNames: ['daily', 'auto'] })
+  const result = planCodexToml(CODEX_TOML, { origin: ORIGIN, routeNames: ['daily', 'auto'], writeKey: true })
   assert.equal(result.kind, 'changed')
   if (result.kind !== 'changed') return
   assert.equal(readTomlString(result.content.split('\n'), null, 'model'), 'auto')
 })
 
 test('Codex: without auto the first advertised route is used', () => {
-  const result = planCodexToml(CODEX_TOML, { origin: ORIGIN, routeNames: ['daily', 'stable'] })
+  const result = planCodexToml(CODEX_TOML, { origin: ORIGIN, routeNames: ['daily', 'stable'], writeKey: true })
   assert.equal(result.kind, 'changed')
   if (result.kind !== 'changed') return
   assert.equal(readTomlString(result.content.split('\n'), null, 'model'), 'daily')
 })
 
 test('Codex: an empty route list never rewrites the selection', () => {
-  const result = planCodexToml(CODEX_TOML, { origin: ORIGIN, routeNames: [] })
+  const result = planCodexToml(CODEX_TOML, { origin: ORIGIN, routeNames: [], writeKey: true })
   assert.equal(result.kind, 'changed')
   if (result.kind !== 'changed') return
   assert.equal(readTomlString(result.content.split('\n'), null, 'model'), 'codex-deepseek')
 })
 
 test('Codex: re-running on the written file is a no-op', () => {
-  const first = planCodexToml(CODEX_TOML, { origin: ORIGIN, routeNames: ['codex-deepseek'] })
+  const key = `sk-${'b'.repeat(48)}`
+  const first = planCodexToml(CODEX_TOML, { origin: ORIGIN, routeNames: ['codex-deepseek'], writeKey: true, keyPreview: maskSecret(key) })
   assert.equal(first.kind, 'changed')
   if (first.kind !== 'changed') return
-  const second = planCodexToml(first.content, { origin: ORIGIN, routeNames: ['codex-deepseek'] })
+  const written = first.content.split(KEY_PLACEHOLDER).join(key)
+  const second = planCodexToml(written, { origin: ORIGIN, routeNames: ['codex-deepseek'], writeKey: true, keyPreview: maskSecret(key) })
   assert.equal(second.kind, 'unchanged')
 })
 
-test('Codex: no provider table is "no-entry", not a silently created one', () => {
-  const result = planCodexToml('model = "gpt-5"\n', { origin: ORIGIN, routeNames: ['auto'] })
-  assert.equal(result.kind, 'no-entry')
+test('Codex: no provider table means one is created, not a manual step', () => {
+  const result = planCodexToml('model = "gpt-5"\n', { origin: ORIGIN, routeNames: ['auto'], writeKey: true })
+  assert.equal(result.kind, 'changed')
+  if (result.kind !== 'changed') return
+  const lines = result.content.split('\n')
+  assert.equal(readTomlString(lines, 'model_providers.custom', 'base_url'), `${ORIGIN}/v1`)
+  assert.equal(readTomlString(lines, null, 'model_provider'), 'custom')
+})
+
+test('Codex: without a canonical key the address moves and no token is invented', () => {
+  const result = planCodexToml(CODEX_TOML, { origin: ORIGIN, routeNames: ['codex-deepseek'], writeKey: false })
+  assert.equal(result.kind, 'changed')
+  if (result.kind !== 'changed') return
+  assert.ok(!result.content.includes(KEY_PLACEHOLDER))
+  assert.equal(readTomlString(result.content.split('\n'), 'model_providers.custom', 'base_url'), `${ORIGIN}/v1`)
 })
 
 test('Codex: CRLF is preserved', () => {

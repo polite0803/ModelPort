@@ -313,3 +313,35 @@ M2–M5 每家独立可交付，不互相阻塞。M4/M5 依赖 4.2 的差分取�
 还有一处措辞缺口（同一类，但只在文案上）：TRAE / CodeBuddy / 非 Windows 的 Codex 这三格**永远**要手动填 key，原文案无条件写「改成规范 key」，而没有规范 key 时页面顶部恰恰显示「取不到密钥」。改成「目标网关的 key」后两种情形都成立，不需要加分支（`clientSync.ts:259/338/450`）。
 
 新门 `tests/shell/client-sync-key.test.ts`（7 条）把这些不变量钉住：归一、目标不可达不出 key、目标拒收不出 key、分发追加且幂等、Qoder/WorkBuddy 无 key 必挂手动步骤、Codex 无 key 时点名环境变量、任何手动步骤不得无条件点名「规范 key」、`applySync` 守卫口径。6 个坏样本各自红在对应那条上（读数见 §8.4）。
+
+## 9. 移植 cc-switch 的客户端接入（11-14，按「不要自己分析，参考它的实现」执行）
+
+来源 <https://github.com/farion1231/cc-switch>（MIT，Copyright (c) 2025 Jason Young），
+克隆后逐个读取写入面，按本仓的分层落地（纯决策 / IO 分离，`node --test`）。
+
+### 9.1 共享底座
+
+| 本仓文件 | 移植自 | 职责 |
+|---|---|---|
+| `src/shell/clientLiveWrite.ts` | `live/engine.rs`、`mode/operation.rs` | 暂存＋fsync、首份备份（`<userData>/client-backups/live-first-write/` 加 `.source` 标记）、发布前重读比哈希、`client-write-journal.json` 与前进式恢复（`main.ts` 启动时 `recoverClientWrites`）、按路径加锁 |
+| `src/shell/clientToml.ts` | `live/patch/toml.rs` | 行级 TOML：改/删键、整表替换、追加、按段引用的表名 |
+| `src/shell/clientYaml.ts` | `live/patch/` 的 YAML 侧 | 缩进块级替换/插入、序列条目 upsert、`setNestedBlock` 嵌套路径；块外逐字节不变 |
+| `src/shell/clientFormats.ts` | `live/patch/{json,dotenv}.rs`、`jsonc_document.rs` | dotenv 保行保 `export ` 前缀并去重、JSON5/JSONC 带注释的跨度定位与拼接、严格 JSON 整体重写 |
+
+### 9.2 新增 13 个写入器
+
+`claude-desktop`：两份配置写 `deploymentMode` 为 3p，profile 写 gateway 四键，`_meta.json` upsert 与 `appliedId`。**这就是「实测 Claude Desktop 写入无效」的根因**：原先写的 `~/.claude/settings.json` 是 Claude Code 的面，Desktop 不读它。
+其余：`gemini`（`.env` 两个变量加 `security.auth.selectedType`）、`grokbuild`（整张模型表加 `models.default`）、`opencode`（V1 与原生两形）、`openclaw`（JSON5 的 `models.providers.<id>`）、`hermes`（`custom_providers` 列表项加 `model.provider/default`）、`kimi`（provider 表加按归属重建的 `[models.*]`）、`mcode`（`custom_provider.<id>`，`kind` 不是 custom 就让位）、`omp`（`models.yml` 的 `providers.<id>`，只有 `models.json` 时拒写）、`pi`、`copilot`（两个数组、`wireApi` 枚举）、`dsh`（各 profile 合并 `llm-pi-ai`，密钥进 `.credentials.yaml` 的 refs，profile 之间不一致就拒写）、`agy`（无持久端点可写，如实呈现 no-entry）。
+同时 Codex 改为 `experimental_bearer_token`（不再写 Windows 用户环境变量，因此省掉「重启客户端」那一条），Claude Code 补「先清上一家的地板键」。
+
+### 9.3 有意偏离与代价
+
+1. 不删 Codex `auth.json`：cc-switch 删它并另存 stash，本仓没有 stash，删了不可逆；保留，靠 provider 表内显式 token 生效。
+2. 注释保留按块生效：被改写的那个节点内部注释会丢（与 cc-switch 的 hermes/mcode 同口径），节点外逐字节不变。
+3. `inferenceModels` 只写 `claude-*` 形状的路由名，其余省略，不伪造模型清单。
+4. 密钥不进计划：计划里只有占位符；判 `unchanged` 需要真值时由主进程用 `keyValue` 现场比，页面永远拿不到。
+
+### 9.4 门禁
+
+`tests/shell/client-apps.test.ts`（21 条：逐家断言非目标字节不变、无 key 路径、幂等）、
+`tests/shell/client-live-write.test.ts`（4 条：首份备份只一次、no-op 不动 mtime、删除留副本、journal 两种分岔的前进式恢复）。
