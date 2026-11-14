@@ -39,14 +39,16 @@ test('a live process that answers is "running"', () => {
   assert.equal(view.origin, 'http://127.0.0.1:8099')
 })
 
-test('install and serve argv differ only by the init flags', () => {
+test('install and serve argv differ only by the role flag', () => {
+  // Both carry the handshake file: the gateway re-emits it on every start so the console
+  // can re-adopt a rotated secret without opening data.json.
   const serve = localGatewayArgs({
     mode: 'serve',
     statusFile: 'S',
     handshakeFile: 'H',
     appPath: null,
   })
-  assert.deepEqual(serve, ['--gateway', '--status-file', 'S'])
+  assert.deepEqual(serve, ['--gateway', '--status-file', 'S', '--handshake-file', 'H'])
 
   const init = localGatewayArgs({
     mode: 'init',
@@ -66,5 +68,5 @@ test('in development the app path precedes the role flags', () => {
     handshakeFile: 'H',
     appPath: 'C:/app',
   })
-  assert.deepEqual(args, ['C:/app', '--gateway', '--status-file', 'S'])
+  assert.deepEqual(args, ['C:/app', '--gateway', '--status-file', 'S', '--handshake-file', 'H'])
 })

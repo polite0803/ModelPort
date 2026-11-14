@@ -45,7 +45,9 @@ export function localGatewayArgs(input: LocalGatewayArgvInput): string[] {
   if (input.appPath) args.push(input.appPath)
   args.push(input.mode === 'init' ? '--init-local' : '--gateway')
   args.push('--status-file', input.statusFile)
-  if (input.mode === 'init') args.push('--handshake-file', input.handshakeFile)
+  // Serve carries it too: the gateway re-emits the handshake on every start so a console
+  // whose sealed copy went stale (restore/rebuild rotated the secret) can re-adopt silently.
+  args.push('--handshake-file', input.handshakeFile)
   return args
 }
 

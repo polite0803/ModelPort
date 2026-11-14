@@ -75,6 +75,13 @@ async function run(): Promise<void> {
   const result = await bootstrapGateway({
     onListening: (listening) => {
       writeStatus(listening)
+      // Re-emit the handshake on every start, not just init: a restore/rebuild can rotate
+      // the secret while the console's sealed copy goes stale. The console re-adopts from
+      // this file instead of opening data.json, so the shell stays a client.
+      if (HANDSHAKE_FILE) {
+        const secret = storeManager.getConfig().managementApi?.managementApiSecret
+        if (secret) writeLocalGatewayHandshake(HANDSHAKE_FILE, { secret })
+      }
       console.log(`[Gateway] ModelPort ${listening.version} listening on ${listening.host}:${listening.port}`)
     },
     onWarning: (line) => console.warn(`[Gateway] ${line}`),

@@ -69,14 +69,14 @@ test('开发模式放行 vite 渲染 origin，且只在设置了渲染地址时'
   })), false)
 })
 
-test('三个密钥 IPC 都经过门，门拒绝时 get 不泄露行存在', () => {
+test('密钥 IPC 都经过门，门拒绝时读取不泄露行存在', () => {
   const main = readFileSync('src/shell/main.ts', 'utf8').replace(/\r\n/g, '\n')
-  for (const channel of ['shell:secret-get', 'shell:secret-set', 'shell:secret-forget']) {
+  for (const channel of ['shell:secret-get', 'shell:secret-set', 'shell:secret-forget', 'shell:secret-refresh']) {
     const start = main.indexOf(`ipcMain.handle('${channel}'`)
     assert.ok(start >= 0, `missing handler ${channel}`)
     const body = main.slice(start, main.indexOf('})', start))
     assert.ok(body.includes('secretGateAllows(event, origin)'), `${channel} must gate on the sender`)
-    if (channel === 'shell:secret-get') {
+    if (channel === 'shell:secret-get' || channel === 'shell:secret-refresh') {
       assert.ok(body.includes("return { status: 'none' }"), 'a rejected read must look like no row')
     }
   }

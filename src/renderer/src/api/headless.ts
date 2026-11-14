@@ -37,7 +37,12 @@ function secret(): string {
   return sessionStorage.getItem(SECRET_KEY) ?? ''
 }
 
+// A rewrite of data.json without a daemon restart leaves disk and listener disagreeing;
+// re-adopting the disk value would then re-offer the very secret that just 401'd.
+let lastRejectedSecret: string | null = null
+
 function forgetSecret(): void {
+  lastRejectedSecret = secret()
   sessionStorage.removeItem(SECRET_KEY)
   // Inside the shell, the remembered copy is what just failed: dropping only the tab copy
   // would make every start re-offer a secret the gateway already rejected.
@@ -77,7 +82,31 @@ export async function loadRememberedSecret(): Promise<boolean> {
   }
 }
 
+/**
+ * A restore/rebuild can rotate the gateway secret, leaving the sealed copy dead. Managed
+ * gateways (local / console-installed WSL) can hand the shell a fresh one over their own
+ * trusted channel; remote origins answer none and the connect form stays.
+ */
+export async function refreshRememberedSecret(): Promise<boolean> {
+  const bridge = shellBridge()
+  if (!bridge || typeof bridge.refreshGatewaySecret !== 'function') return false
+  try {
+    const found = await bridge.refreshGatewaySecret(location.origin)
+    if (found.status !== 'found' || !found.secret) return false
+    if (found.secret === lastRejectedSecret) return false
+    lastRejectedSecret = null
+    setManagementSecret(found.secret)
+    // A mid-session refresh must also wake the event stream: the 401 cleared its handle,
+    // and no remount happens when the page was already ready.
+    ensureStream()
+    return true
+  } catch {
+    return false
+  }
+}
+
 export function rememberSecret(secret: string): void {
+  lastRejectedSecret = null
   void shellBridge()?.setGatewaySecret(location.origin, secret)
 }
 
@@ -340,6 +369,10 @@ async function readEvents(signal: AbortSignal): Promise<void> {
       })
       if (response.status === 401) {
         forgetSecret()
+        // The reader is done; clearing the handle lets ensureStream start a fresh one
+        // once a new secret lands, instead of staying deaf for the rest of the session.
+        streamReader = null
+        streamAbort = null
         return
       }
       if (!response.ok || !response.body) throw new Error(`events ${response.status}`)

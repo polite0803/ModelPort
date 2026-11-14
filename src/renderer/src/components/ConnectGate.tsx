@@ -6,6 +6,7 @@ import {
   hasManagementSecret,
   loadRememberedSecret,
   probeGateway,
+  refreshRememberedSecret,
   rememberSecret,
   secretCanRemember,
   setManagementSecret,
@@ -46,18 +47,27 @@ export default function ConnectGate({
   useEffect(() => {
     if (!retrieving) return
     void (async () => {
-      const found = await loadRememberedSecret()
+      const found = (await loadRememberedSecret()) || (await refreshRememberedSecret())
       setRetrieving(false)
       if (found) setReady(true)
     })()
   }, [retrieving])
 
   // A 401 from any call (rpc or the event stream) lands back here with the secret gone.
+  // Managed gateways can re-adopt the rotated secret silently; only a remote origin (or
+  // a host that cannot read it) falls back to the form.
   useEffect(() => {
     if (!remote) return
     const onUnauthorized = (): void => {
-      setReady(false)
-      setError(t('connect.unauthorized'))
+      void (async () => {
+        if (await refreshRememberedSecret()) {
+          setError(null)
+          setReady(true)
+          return
+        }
+        setReady(false)
+        setError(t('connect.unauthorized'))
+      })()
     }
     window.addEventListener(unauthorizedEventName, onUnauthorized)
     return () => window.removeEventListener(unauthorizedEventName, onUnauthorized)

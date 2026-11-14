@@ -83,6 +83,8 @@ const bridge: ShellBridge = {
     ipcRenderer.invoke('shell:secret-set', origin, secret),
   forgetGatewaySecret: (origin: string): Promise<void> =>
     ipcRenderer.invoke('shell:secret-forget', origin),
+  refreshGatewaySecret: (origin: string): Promise<{ status: string; secret?: string }> =>
+    ipcRenderer.invoke('shell:secret-refresh', origin),
   // Argument-free on purpose: the page may ask the console to trust *its* gateway, but it
   // cannot name a file or hand over a PEM for `certutil` to install.
   getGatewayCertificate: (): Promise<ShellCertificateTrustStatus> => ipcRenderer.invoke('shell:tls-status'),

@@ -214,6 +214,12 @@ export interface ShellBridge {
   getGatewaySecret(origin: string): Promise<{ status: string; secret?: string }>
   setGatewaySecret(origin: string, secret: string): Promise<{ stored: boolean; result: string }>
   forgetGatewaySecret(origin: string): Promise<void>
+  /**
+   * Re-read the current secret of a managed gateway (local data dir / root WSL) after a
+   * restore or rebuild rotated it, and re-seal it. Optional: older shells lack it, and a
+   * remote origin always answers `none` - the page then keeps the connect form.
+   */
+  refreshGatewaySecret?(origin: string): Promise<{ status: string; secret?: string }>
 
   /**
    * Certificate trust for the console machine. Optional - a page in a plain browser has

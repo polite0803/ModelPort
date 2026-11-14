@@ -42,6 +42,7 @@ import {
 import { decideWindowOpen } from './openTarget'
 import { dropSecret, getSecret, putSecret, type SecretSealer } from './secretStore'
 import { secretOriginAllowed } from './secretGatePlan'
+import { buildWslInitHostCommand, refreshChannelFor } from './secretRefreshPlan'
 import { gatewayWindowTitle } from './windowTitlePlan'
 import { changeGatewayTrust, describeCertificate, gatewayTrustStatus, resolveClientOrigin, type TrustTarget } from './gatewayTrust'
 import {
@@ -54,7 +55,7 @@ import {
 import { clientPaths } from './clientSyncPlan'
 import { recoverClientWrites } from './clientLiveWrite'
 import { readGatewayHttpsOrigin, type GatewayCredential } from './clientSyncRpc'
-import { checkForUpdates, runUpgrade } from './updater'
+import { checkForUpdates, readServiceUnit, runUpgrade } from './updater'
 import {
   adoptLocalHandshake,
   isPidAlive,
@@ -67,8 +68,8 @@ import {
 } from './localGateway'
 import { installWslGateway, probeWslGateway } from './wslInstall'
 import { controlWslService, probeWslService, removeWslInstall, wslInstallDir } from './wslService'
-import type { ServiceControlAction } from './wslInstallPlan'
-import { fetchLatestRelease } from './wslExec'
+import { parseInitHostHandshake, type ServiceControlAction } from './wslInstallPlan'
+import { fetchLatestRelease, runWsl } from './wslExec'
 import type { ReleaseInfo } from './updatePlan'
 import { deployGuideHtml } from './deployGuide'
 import type { LocalGatewayView } from '../shared/localGateway'
@@ -1440,6 +1441,36 @@ ipcMain.handle('shell:secret-forget', (event, origin: unknown) => {
   if (typeof origin !== 'string') return
   if (!secretGateAllows(event, origin)) return
   dropSecret(secretsPath(), origin)
+})
+
+/**
+ * Re-adopt the current secret of a managed gateway after a restore/rebuild rotated it,
+ * through the sanctioned handoff channels only - the shell never opens the gateway's
+ * data.json. Local adopts the handshake the gateway re-emits on start; managed WSL re-runs
+ * the idempotent `--init-host`. A remote origin gets `none` and keeps the fail-closed form.
+ * Same sender gate as the other secret surfaces; the fresh copy is sealed before return.
+ */
+ipcMain.handle('shell:secret-refresh', async (event, origin: unknown) => {
+  if (typeof origin !== 'string' || origin === '') return { status: 'none' }
+  if (!secretGateAllows(event, origin)) return { status: 'none' }
+  const entry = readBook().entries.find(candidate => normalizeOrigin(candidate.url) === origin) ?? null
+  const channel = refreshChannelFor(entry)
+  if (channel === null) return { status: 'none' }
+  let secret: string | null = null
+  if (channel === 'local-handshake') {
+    secret = adoptLocalHandshake()?.secret ?? null
+  } else {
+    try {
+      const unit = await readServiceUnit(entry?.wslDistro)
+      const result = await runWsl(entry?.wslDistro, true, buildWslInitHostCommand(unit), 60_000)
+      secret = parseInitHostHandshake(result.stdout)?.secret ?? null
+    } catch {
+      secret = null
+    }
+  }
+  if (secret === null) return { status: 'none' }
+  putSecret(secretsPath(), secretSealer, origin, secret)
+  return { status: 'found', secret }
 })
 
 ipcMain.handle('shell:openInBrowser', async () => {
