@@ -201,6 +201,7 @@ export interface RoutePreviewModel {
   providerId: string
   providerName: string
   displayName: string
+  /** 本机账号表口径的候选数；账号渠道只是那条占位账号（菜单行另行改读 Worker 池）。 */
   accountCount: number
   status: RoutePreviewStatus
   /** status='filtered'：第一条把它筛掉的池策略 */
@@ -519,7 +520,10 @@ export interface RouteMenuModel {
   providerId: string
   providerName: string
   displayName: string
-  /** 当前可派发的账号数（已扣冷却）。 */
+  /**
+   * 当前可派发的账号数。账号渠道行取 Worker 池的启用账号数（池读不到时退回本机
+   * 占位账号数）；预览不扣冷却，只扣日限/额度这类瞬时剔除。
+   */
   accountCount: number
   /** 该模型各账号 EWMA 首字里的最小值；没有读数时不写。 */
   ewmaFirstTokenMs?: number

@@ -57,6 +57,27 @@ test('菜单读失败带回原因：托盘才能把「读不到」与「没有�
 })
 
 /**
+ * 渠道行的「账号：N」必须来自 Worker 池：宿主侧每家渠道只有一条空凭据占位账号，
+ * 照本机表数永远是 1（池里可能挂了两个号）。Worker 读不到时退回占位计数而不是 0
+ * —— 与供应商卡片同一条原则。
+ */
+test('账号渠道行改读 Worker 池计数：读不到退回占位账号数，不是 0', () => {
+  assert.match(handlers, /async function channelAccountCounts\(\): Promise<ChannelAccountCounts \| undefined>/)
+  assert.match(handlers, /await accountChannelManager\.accountCounts\(\)/)
+  assert.match(handlers, /catch \{\s*\n\s*return undefined/, 'Worker 未起 = 保留占位计数')
+
+  const menuBlock = handlerBlock('ROUTES_MENU')
+  assert.match(menuBlock, /const channelAccounts = await channelAccountCounts\(\)/)
+  assert.match(
+    menuBlock,
+    /autoRouter\.routeMenu\(route, limit \?\? ROUTE_MENU_MODELS_DEFAULT, generatedAt, channelAccounts\)/,
+    '菜单每一行都要拿到池计数，否则渠道行又退回占位 1',
+  )
+  assert.match(handlerBlock('ROUTES_SWITCH'), /channelAccounts,/, '切换回灌的菜单同样要带池计数')
+  assert.match(handlerBlock('ROUTES_UNPIN'), /channelAccounts/, '撤销后的菜单同样要带池计数')
+})
+
+/**
  * 托盘只画得下前几个模型，剩下的必须能在控制台里点 —— 那条通路就是同一个通道的
  * 范围参数（`{ route, limit }`）。它只能**收窄**取数，不许长出第二套取数逻辑：
  * 一旦过滤器自己算模型列表，托盘与页面就会长期显示不同的事实。
@@ -75,7 +96,10 @@ test('切换请求先验形状：缺路由名直接给可读原因', () => {
   const block = handlerBlock('ROUTES_SWITCH')
   assert.match(block, /typeof request\.route !== 'string'/, '非字符串的路由名不许进选路器')
   assert.match(block, /切换请求缺少路由名/)
-  assert.match(block, /autoRouter\.switchModel\(request, storeManager\.listModelRoutes\(\)\)/)
+  assert.match(
+    block,
+    /autoRouter\.switchModel\(\s*\n\s*request,\s*\n\s*storeManager\.listModelRoutes\(\),/,
+  )
 })
 
 test('恢复自动排序清两份：内存软钉 + 持久 preferredModel', () => {

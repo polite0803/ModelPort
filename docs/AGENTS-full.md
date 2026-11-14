@@ -1376,9 +1376,13 @@ disabled entirely when every model is circuited (an empty pool serves nobody), a
 successful turn on that model in `rememberRoute`. Account-level AIMD stays a separate domain: three
 accounts of one model rate-limited say nothing about whether the model can work.
 
-**One menu, three wires.** `autoRouter::routeMenu(route, limit = 8, now)` returns per route: `enabled`,
-`modelScope`, `current` (what the next turn would serve), `pin`, the model list with `pinned` /
-`circuitUntil`, and `totalModels` so a truncated menu does not read as the whole pool.
+**One menu, three wires.** `autoRouter::routeMenu(route, limit = 8, now, channelAccounts?)` returns per
+route: `enabled`, `modelScope`, `current` (what the next turn would serve), `pin`, the model list with
+`pinned` / `circuitUntil`, and `totalModels` so a truncated menu does not read as the whole pool. A
+channel row's account count comes from the Worker pool (`accountChannelManager.accountCounts()`, passed
+in by all three handlers): the local table only ever holds one placeholder account per channel, so
+counting it printed `1` for a pool of two. When the Worker is unreachable the placeholder count is kept,
+never `0`.
 `routes:menu` / `routes:switch` / `routes:unpin` are the channels; `switchModel` validates
 (unknown route, disabled route, empty pool, session scope from the tray) and returns the refreshed menu
 entry even on a refusal, so a refused click still repaints the truth. The shell's tray cannot call them: it
@@ -1390,9 +1394,10 @@ distinct - no snapshot yet (console not opened), read failed (`snapshot.error`),
 the tooltip names the route and the model that would serve, because an icon with a menu nobody opens
 answers nothing.
 
-Tests: `tests/routes/model-scope-pin-circuit.test.ts` (18 cases: trimming per scope, wall clock, pin vs
+Tests: `tests/routes/model-scope-pin-circuit.test.ts` (19 cases: trimming per scope, wall clock, pin vs
 sticky, pin vs circuit, `pinMiss`, persistent preference, header pin, circuit trip/expiry/clear on the
-*next* turn, all-circuited disabled, menu order and limit, switch reasons, tray session-scope refusal),
+*next* turn, all-circuited disabled, menu order and limit, channel account counts per pool state,
+switch reasons, tray session-scope refusal),
 `tests/shell/tray-model-menu.test.ts` (artifact-level: menu shape, the three channels on both sides, sender
 gate, the four label markers, three absences), `tests/ipc/routes-menu-wire.test.ts` (channel strings, the
 `error` shape, unpin clearing both the pin and `preferredModel`). The older pool tests declare

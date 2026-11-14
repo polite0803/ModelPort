@@ -145,7 +145,9 @@ registry) → `adapters/<provider>.ts` → upstream; `loadbalancer.ts` picks the
   A trip demotes it to the tail instead of deleting it, switches itself off when every model is
   circuited, and is cleared by the first success in `rememberRoute`.
 - **The switching surface is one menu, three wires.** `routes:menu` / `routes:switch` /
-  `routes:unpin` are served by `autoRouter.routeMenu()` / `switchModel()` / `clearPin()`. The tray
+  `routes:unpin` are served by `autoRouter.routeMenu()` / `switchModel()` / `clearPin()`. A channel
+  row's account count comes from the Worker pool (`accountChannelManager.accountCounts()`), never the
+  one local placeholder account; an unreachable pool keeps the placeholder, never 0. The tray
   never calls them: the shell does not hold the management secret, so it asks the page
   (`shell:route-menu-request`), the page runs the RPC and publishes `shell:route-menu`, and clicks
   come back as `shell:route-command` intents - both gate on

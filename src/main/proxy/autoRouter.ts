@@ -129,6 +129,14 @@ export const ROUTE_MENU_MODELS_DEFAULT = 8
 export const ROUTE_MENU_MODELS_MAX = 2_000
 
 /**
+ * 账号渠道的池内计数（`accountChannelManager.accountCounts()` 的形状）。
+ *
+ * 宿主侧每家渠道只有一条空凭据占位账号（`manager.ensureLocalAccount`），照本机表
+ * 数永远是 1；真实池在渠道 Worker 里。菜单的「账号：N」对渠道行改用这里的 `enabled`。
+ */
+export type ChannelAccountCounts = Readonly<Record<string, { total: number; enabled: number }>>
+
+/**
  * Whether this candidate's upstream has a documented cache behaviour.
  *
  * Only aggregate entries carry the capability table; builtin/custom endpoints
@@ -1814,8 +1822,17 @@ class AutoRouter {
    * 池来自 `preview` —— 与生产请求同一条采集/策略/手动增删管线，菜单里列的就是
    * 选路真的会用的那几个。这里不重新排序、也不另算一份池：两处各算一次，菜单与
    * 真实行为迟早会不一致。
+   *
+   * `channelAccounts` 是账号渠道 Worker 池的计数：宿主侧每家渠道只有一条空凭据
+   * 占位账号，照本机表数永远是 1，而池里可能挂了几个号。读不到（Worker 未起）时
+   * 调用方传 `undefined`，渠道行保留占位计数 —— 不把已连上的渠道显示成 0 个账号。
    */
-  routeMenu(route: ModelRoute, limit = ROUTE_MENU_MODELS_DEFAULT, now = Date.now()): RouteMenuEntry {
+  routeMenu(
+    route: ModelRoute,
+    limit = ROUTE_MENU_MODELS_DEFAULT,
+    now = Date.now(),
+    channelAccounts?: ChannelAccountCounts,
+  ): RouteMenuEntry {
     this.sweepCircuits(now)
     const { models, current, pin, preferred } = this.selectableModels(route, now)
     const routeName = route.name
@@ -1844,11 +1861,18 @@ class AutoRouter {
           : {}),
       models: models.slice(0, Math.max(1, limit)).map(model => {
         const circuitUntil = this.modelCircuitUntil(routeName, model.displayName, now)
+        // 渠道行的账号数取自 Worker 池：本机表里只有那条占位账号。池读不到时
+        // （`channelAccounts` 缺席）保持占位计数，而不是显示 0。
+        const pool = channelAccounts?.[model.providerId]
+        const accountCount = pool !== undefined
+          && storeManager.getProviderById(model.providerId)?.type === 'account'
+          ? pool.enabled
+          : model.accountCount
         return {
           providerId: model.providerId,
           providerName: model.providerName,
           displayName: model.displayName,
-          accountCount: model.accountCount,
+          accountCount,
           ...(model.ewmaFirstTokenMs === undefined ? {} : { ewmaFirstTokenMs: model.ewmaFirstTokenMs }),
           ...(model.costBucket === undefined ? {} : { costBucket: model.costBucket }),
           ...(circuitUntil === undefined ? {} : { circuitUntil }),
@@ -1869,7 +1893,12 @@ class AutoRouter {
    * 失败一定带原因：模型不在池里、池是空的、路由不存在 —— 静默成功会让托盘显示
    * 一个其实没生效的选择。
    */
-  switchModel(request: RouteSwitchRequest, routes: readonly ModelRoute[], now = Date.now()): RouteSwitchResult {
+  switchModel(
+    request: RouteSwitchRequest,
+    routes: readonly ModelRoute[],
+    now = Date.now(),
+    channelAccounts?: ChannelAccountCounts,
+  ): RouteSwitchResult {
     const route = routes.find(candidate => candidate.name === request.route)
     if (route === undefined) {
       return { ok: false, route: request.route, reason: `路由 '${request.route}' 不存在` }
@@ -1900,7 +1929,7 @@ class AutoRouter {
         route: route.name,
         model: target,
         reason: `模型 '${target}' 不在这条路由的候选池里`,
-        menu: this.routeMenu(route, ROUTE_MENU_MODELS_DEFAULT, now),
+        menu: this.routeMenu(route, ROUTE_MENU_MODELS_DEFAULT, now, channelAccounts),
       }
     }
 
@@ -1936,7 +1965,7 @@ class AutoRouter {
       // （`routes:switch` 的 `persist` 分支）要把它原样写进 `preferredModel`，
       // 不能拿着 `request.providerId` 反推 —— 它可能是 undefined。
       providerId: hit.providerId,
-      menu: this.routeMenu(route, ROUTE_MENU_MODELS_DEFAULT, now),
+      menu: this.routeMenu(route, ROUTE_MENU_MODELS_DEFAULT, now, channelAccounts),
     }
   }
 

@@ -57,7 +57,7 @@ import {
   type TlsMaterial,
 } from '../proxy/tls'
 import { autoRouter, ROUTE_MENU_MODELS_DEFAULT, ROUTE_MENU_MODELS_MAX } from '../proxy/autoRouter'
-import type { RoutePreviewResult, RoutePreviewSample } from '../proxy/autoRouter'
+import type { ChannelAccountCounts, RoutePreviewResult, RoutePreviewSample } from '../proxy/autoRouter'
 import { proxyStatusManager } from '../proxy/status'
 import { ConfigManager } from '../store/config'
 import { generateManagementSecret } from '../proxy/middleware/managementAuth'
@@ -469,6 +469,23 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
   )
 
   /**
+   * 账号渠道的 Worker 池计数，给菜单渠道行的「账号：N」用。
+   *
+   * 宿主侧每家渠道只有一条空凭据占位账号（`manager.ensureLocalAccount`），照本机
+   * 账号表数不出真实池大小；`accountCounts()` 走一次 `provider.status`（池内内存
+   * 副本，无 IO）。Worker 未起或调用失败时返回 undefined，菜单退回占位计数 —— 与
+   * 供应商卡片「读不到保留本地计数」同一原则，不能把已连上的渠道显示成 0 个账号。
+   */
+  async function channelAccountCounts(): Promise<ChannelAccountCounts | undefined> {
+    try {
+      const counts = await accountChannelManager.accountCounts()
+      return Object.keys(counts).length === 0 ? undefined : counts
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
    * 快捷切换模型的菜单快照（托盘与控制台共用）。
    *
    * 只读、不置钉：打开菜单不该改变任何行为。逐路由调用 `autoRouter.routeMenu`，
@@ -490,9 +507,10 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
         ? Math.min(ROUTE_MENU_MODELS_MAX, Math.max(1, Math.trunc(request.limit)))
         : undefined
       try {
+        const channelAccounts = await channelAccountCounts()
         const routes = storeManager.listModelRoutes()
           .filter(route => only === undefined || route.name === only)
-          .map(route => autoRouter.routeMenu(route, limit ?? ROUTE_MENU_MODELS_DEFAULT))
+          .map(route => autoRouter.routeMenu(route, limit ?? ROUTE_MENU_MODELS_DEFAULT, generatedAt, channelAccounts))
         return { routes, generatedAt }
       } catch (error) {
         // 存储没起来时菜单必须是「读不到」而不是「没有路由」：后者会让用户以为自己的
@@ -515,7 +533,13 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
         return { ok: false, route: '', reason: '切换请求缺少路由名' }
       }
       try {
-        const result = autoRouter.switchModel(request, storeManager.listModelRoutes())
+        const channelAccounts = await channelAccountCounts()
+        const result = autoRouter.switchModel(
+          request,
+          storeManager.listModelRoutes(),
+          Date.now(),
+          channelAccounts,
+        )
         if (!result.ok || request.persist !== true) return result
         if (result.model === undefined || result.providerId === undefined) {
           return { ...result, ok: false, reason: '这次选择没有命中任何供应商，无法长期固定' }
@@ -531,7 +555,15 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
         }
         autoRouter.clearPin(result.route)
         broadcastConfigChanged(storeManager.getConfig())
-        return { ...result, menu: autoRouter.routeMenu(written.route) }
+        return {
+          ...result,
+          menu: autoRouter.routeMenu(
+            written.route,
+            ROUTE_MENU_MODELS_DEFAULT,
+            Date.now(),
+            channelAccounts,
+          ),
+        }
       } catch (error) {
         return { ok: false, route: request.route, reason: routeStorageError(error).message }
       }
@@ -561,10 +593,13 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
           broadcastConfigChanged(storeManager.getConfig())
         }
         const fresh = storeManager.listModelRoutes().find(candidate => candidate.name === routeName)
+        const channelAccounts = await channelAccountCounts()
         return {
           ok: true,
           route: routeName,
-          ...(fresh === undefined ? {} : { menu: autoRouter.routeMenu(fresh) }),
+          ...(fresh === undefined
+            ? {}
+            : { menu: autoRouter.routeMenu(fresh, ROUTE_MENU_MODELS_DEFAULT, Date.now(), channelAccounts) }),
         }
       } catch (error) {
         return { ok: false, route: routeName, reason: routeStorageError(error).message }

@@ -436,3 +436,39 @@ test('切换：托盘只能按路由切换，会话级作用域要回到控制�
   assert.match(result.reason ?? '', /控制台/)
   assert.equal(autoRouter.pinFor(route.name), undefined, '被拒的请求不许留下半颗钉子')
 })
+
+// --------------------------------------- 6. 渠道行的账号数（Worker 池口径）
+
+test('菜单：账号渠道行改读 Worker 池的启用账号数，读不到时保留占位计数', () => {
+  sm.addProvider({
+    ...providerFixture('cha', 'Channel-Model', { tier: 'fast' }),
+    type: 'account',
+    apiEndpoint: 'channel://cha',
+  } as never)
+  sm.addAccount(accountFixture('cha') as never)
+  const route = makeRoute()
+
+  const rowOf = (menu: { models: Array<{ providerId: string; accountCount: number }> }) =>
+    menu.models.find(model => model.providerId === 'cha')
+
+  assert.equal(rowOf(autoRouter.routeMenu(route))?.accountCount, 1,
+    '池计数缺席 = 本机那条占位账号，不能让已连上的渠道读成 0')
+
+  assert.equal(rowOf(autoRouter.routeMenu(route, undefined, Date.now(), {
+    cha: { total: 2, enabled: 2 },
+  }))?.accountCount, 2, '池里两个启用账号就是 2')
+
+  assert.equal(rowOf(autoRouter.routeMenu(route, undefined, Date.now(), {
+    cha: { total: 2, enabled: 0 },
+  }))?.accountCount, 0, '池里没有启用的号：读 0，钉定按钮据此禁用')
+
+  const switched = autoRouter.switchModel(
+    { route: route.name, model: 'Channel-Model' },
+    sm.listModelRoutes(),
+    Date.now(),
+    { cha: { total: 2, enabled: 2 } },
+  )
+  assert.equal(switched.ok, true, switched.reason)
+  assert.equal(rowOf(switched.menu!)?.accountCount, 2,
+    '切换后的回灌菜单同样带池计数，否则点一下又变回 1')
+})
