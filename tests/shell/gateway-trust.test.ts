@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import {
   changeGatewayTrust,
   gatewayTrustStatus,
+  resolveClientOrigin,
   type HandshakeProbe,
   type ProbeOutcome,
   type TrustTarget,
@@ -141,4 +142,55 @@ test('the captured handshake cert remains the bootstrap when the leaf read fails
   assert.equal(status.trusted, false)
   assert.equal(status.source, 'handshake')
   assert.equal(status.sha1, sha1Thumbprint(pem), 'the window-captured copy is the fallback evidence')
+})
+
+/**
+ * The client https endpoint is auto-detected from the gateway address only when the entry has
+ * none stored: an https entry is its own endpoint, a stored https value wins, and detection is
+ * the last resort. The switch never calls this - it reads the entry - so detection only fills
+ * a value the user would otherwise type. `detect` is injected; no gateway is contacted.
+ */
+test('resolveClientOrigin: an https entry is its own endpoint and never probes', async () => {
+  let calls = 0
+  const origin = await resolveClientOrigin('https://gw.example.test:8443', null, async () => {
+    calls += 1
+    return 'https://wrong.example.test'
+  })
+  assert.equal(origin, 'https://gw.example.test:8443')
+  assert.equal(calls, 0, 'an https entry must not trigger detection')
+})
+
+test('resolveClientOrigin: a stored https endpoint wins over detection', async () => {
+  let calls = 0
+  const origin = await resolveClientOrigin('http://192.168.0.235:18080', 'https://192.168.0.235:8443', async () => {
+    calls += 1
+    return 'https://other.example.test'
+  })
+  assert.equal(origin, 'https://192.168.0.235:8443')
+  assert.equal(calls, 0, 'a stored endpoint must not be re-probed')
+})
+
+test('resolveClientOrigin: an http entry with no stored endpoint auto-detects from the gateway', async () => {
+  let calls = 0
+  const origin = await resolveClientOrigin('http://192.168.0.235:18080', null, async () => {
+    calls += 1
+    return 'https://192.168.0.235:8443'
+  })
+  assert.equal(origin, 'https://192.168.0.235:8443', 'the same host on the gateway advertised httpsPort')
+  assert.equal(calls, 1)
+})
+
+test('resolveClientOrigin: detection returning null stays null (no https listener / no secret)', async () => {
+  const origin = await resolveClientOrigin('http://192.168.0.235:18080', null, async () => null)
+  assert.equal(origin, null, 'an absent endpoint is reported honestly, never guessed')
+})
+
+test('resolveClientOrigin: a non-https stored value is ignored and detection runs', async () => {
+  let calls = 0
+  const origin = await resolveClientOrigin('http://192.168.0.235:18080', 'http://192.168.0.235:8443', async () => {
+    calls += 1
+    return 'https://192.168.0.235:8443'
+  })
+  assert.equal(origin, 'https://192.168.0.235:8443')
+  assert.equal(calls, 1, 'only an https stored value is usable; an http one is not an endpoint')
 })

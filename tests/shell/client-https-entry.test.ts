@@ -3,12 +3,13 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 /**
- * Access-path data lives on the shell entry, never derived from the gateway: the same
- * gateway is `https://<ip>:8443` reached directly but `https://<domain>` (443, a public
- * edge cert) through a proxy, and the gateway cannot tell those apart. These fences pin
- * the three places that could re-introduce the blind derivation - the entry whitelist
- * dropping the stored value, the switch asking the gateway again, and the probe result
- * being consumed anywhere but the form.
+ * Access-path data lives on the shell entry: the client switch reads it and never derives it
+ * from the gateway, because the same gateway is `https://<ip>:8443` reached directly but
+ * `https://<domain>` (443, a public edge cert) through a proxy, and the gateway cannot tell
+ * those apart. The entry may be auto-filled by detection (the form prober and the trust path
+ * both suggest `https://<host>:<httpsPort>`), but once stored it is entry data. These fences
+ * pin the places that could re-introduce a blind derivation at switch time - the entry
+ * whitelist dropping the stored value, and the switch asking the gateway again.
  */
 const read = (path: string): string => readFileSync(path, 'utf8').replace(/\r\n/g, '\n')
 
@@ -42,11 +43,14 @@ test('the switch reads the entry, never asks the gateway for its https listener'
   assert.match(sync, /clientHttpsUrl,\n/)
 })
 
-test('readGatewayHttpsOrigin survives only as the form prober', () => {
+test('readGatewayHttpsOrigin feeds the form prober and trust probe, never the switch', () => {
   assert.match(rpc, /export async function readGatewayHttpsOrigin/)
   assert.match(rpc, /One-shot form prober/)
-  // The only importer is the dialog wiring in main; the switch path must not reach it.
+  // Importers are the dialog wiring and the trust probe in main; the switch must not reach it.
   assert.match(main, /readGatewayHttpsOrigin/)
+  // The trust path auto-detects the endpoint for the probe only - the blind suggestion is never
+  // persisted, so the switch keeps reading the stored entry value and is never fed a guess.
+  assert.match(main, /resolveClientOrigin\(origin, entry\.clientHttpsUrl \?\? null/)
   const probeHandler = main.slice(main.indexOf("ipcMain.handle('shell:prompt-probe-https'"), main.indexOf('void dialog.loadURL'))
   assert.ok(probeHandler.length > 0, 'the probe handler must live inside promptForGateway')
   assert.match(probeHandler, /readGatewayHttpsOrigin\(origin, found\.secret/)

@@ -43,7 +43,7 @@ import { decideWindowOpen } from './openTarget'
 import { dropSecret, getSecret, putSecret, type SecretSealer } from './secretStore'
 import { secretOriginAllowed } from './secretGatePlan'
 import { gatewayWindowTitle } from './windowTitlePlan'
-import { changeGatewayTrust, describeCertificate, gatewayTrustStatus, type TrustTarget } from './gatewayTrust'
+import { changeGatewayTrust, describeCertificate, gatewayTrustStatus, resolveClientOrigin, type TrustTarget } from './gatewayTrust'
 import {
   applySync,
   buildPreview,
@@ -1652,14 +1652,21 @@ function activeGatewayForTrust(event: IpcMainInvokeEvent): GatewayEntry {
 /** The PEM the console installs, kept under its own profile - never in the gateway's data dir. */
 const gatewayTlsCachePath = (): string => join(app.getPath('userData'), 'tls', 'gateway-ca.pem')
 
-function trustTargetFor(event: IpcMainInvokeEvent): TrustTarget {
+async function trustTargetFor(event: IpcMainInvokeEvent): Promise<TrustTarget> {
   const entry = activeGatewayForTrust(event)
   const origin = normalizeOrigin(entry.url)
   if (origin === null) throw new Error('网关地址无效')
-  // The client-facing endpoint is entry data: an https entry is its own url, an http
-  // entry carries the stored client https endpoint. The gateway's own listener is not
-  // evidence for what a client sees on this path.
-  const clientOrigin = origin.startsWith('https:') ? origin : (entry.clientHttpsUrl ?? null)
+  // The client-facing endpoint is entry data: an https entry is its own url, an http entry
+  // carries the stored client https endpoint. When absent, auto-detect it from the gateway
+  // address (the same host on the advertised httpsPort) for the trust probe only. The
+  // suggestion is access-path-blind, so it is never persisted nor fed to the client switch,
+  // which keeps reading the stored entry value (a domain behind a proxy terminates TLS
+  // elsewhere, and the gateway's own httpsPort would be wrong for that path).
+  const clientOrigin = await resolveClientOrigin(origin, entry.clientHttpsUrl ?? null, async () => {
+    const found = getSecret(secretsPath(), secretSealer, origin)
+    if (found.status !== 'found') return null
+    return await readGatewayHttpsOrigin(origin, found.secret ?? '')
+  })
   return {
     origin,
     clientOrigin,
@@ -1671,15 +1678,15 @@ function trustTargetFor(event: IpcMainInvokeEvent): TrustTarget {
 }
 
 ipcMain.handle('shell:tls-status', async (event: IpcMainInvokeEvent) => {
-  return await gatewayTrustStatus(trustTargetFor(event))
+  return await gatewayTrustStatus(await trustTargetFor(event))
 })
 
 ipcMain.handle('shell:tls-install-trust', async (event: IpcMainInvokeEvent) => {
-  return await changeGatewayTrust(trustTargetFor(event), 'install')
+  return await changeGatewayTrust(await trustTargetFor(event), 'install')
 })
 
 ipcMain.handle('shell:tls-uninstall-trust', async (event: IpcMainInvokeEvent) => {
-  return await changeGatewayTrust(trustTargetFor(event), 'uninstall')
+  return await changeGatewayTrust(await trustTargetFor(event), 'uninstall')
 })
 
 /**

@@ -211,6 +211,24 @@ export function defaultHandshakeProbe(): HandshakeProbe {
   }
 }
 
+/**
+ * The client https origin of an access path. An https entry is its own endpoint; an http
+ * entry uses its stored `clientHttpsUrl`, or auto-detects one from the gateway when absent
+ * (the same host on the gateway's advertised httpsPort). Detection spares the user typing the
+ * address by hand; the trust probe uses it ephemerally and never persists it, so the blind
+ * suggestion cannot reach the client switch, which keeps reading the stored entry value.
+ * `detect` is injected so this stays importable by plain-Node tests.
+ */
+export async function resolveClientOrigin(
+  origin: string,
+  stored: string | null,
+  detect: () => Promise<string | null>,
+): Promise<string | null> {
+  if (origin.startsWith('https:')) return origin
+  if (stored !== null && stored.startsWith('https:')) return stored
+  return await detect()
+}
+
 let resolvedCache: { key: string; at: number; value: ResolvedCertificate } | null = null
 
 /**
@@ -252,7 +270,7 @@ async function resolveUncached(target: TrustTarget, probe: HandshakeProbe): Prom
   if (target.clientOrigin === null) {
     return {
       certificate: null,
-      error: '这条入口没有客户端 HTTPS 地址：回环 http 无需证书信任；远程网关请先在网关条目填「客户端 HTTPS 地址」（可用「从网关探测」）。',
+      error: '这条入口没有可用的客户端 HTTPS 地址：回环 http 无需证书信任；远程网关需开启 HTTPS 监听并在本控制台保存管理密钥，地址会自动从网关探测（也可在网关条目手动填「客户端 HTTPS 地址」）。',
       pathTrusted: false,
     }
   }
