@@ -1939,17 +1939,27 @@ no listener and never evaluates the gateway tree (`tests/build/shell-entries.tes
   is `normalizeOrigin`-ed first (`readBook` keeps it as written, so a legacy trailing slash would lose
   the target); an unreachable target or a failed write to it returns `key: null` rather than a key
   borrowed from another gateway, which would look configured and 401 on arrival. Those rows then say
-  so instead of looking finished: Qoder and WorkBuddy carry `NO_KEY_MANUAL_STEP` ("address moved, enter
+  so instead of looking finished: WorkBuddy carries `NO_KEY_MANUAL_STEP` ("address moved, enter
   the key yourself"), Codex names `MODELPORT_CODEX_API_KEY` because its UI has no key field at all.
   `applySync` refuses only when `plans.length === 0`, so address-only writes with a manual step stay
   possible; the placeholder guard is what keeps a keyless plan from writing a credential.
-* **In place, never a new entry.** Each client's own marker selects the rows: Qoder `type ===
-  'openai-compatible'`, WorkBuddy `vendor === 'Custom'`, CodeBuddy CN presence of `oaicopilot.baseUrl`,
-  Trae `provider === 'custom_openai_compatible'`, Claude `env.ANTHROPIC_BASE_URL`, Codex
+* **In place, never a new entry.** Each client's own marker selects the rows: WorkBuddy
+  `vendor === 'Custom'`, CodeBuddy CN presence of `oaicopilot.baseUrl`, Trae
+  `provider === 'custom_openai_compatible'`, Claude `env.ANTHROPIC_BASE_URL`, Codex
   `[model_providers.modelport]`. Address-book membership is **not** the predicate: measured clients
-  pointed at `192.168.0.239:8080` and `192.168.85.131:8080`, neither listed. Stable ids (Qoder uuid,
-  WorkBuddy `id`, Trae `custom_model_id`) are what preserve the user's selection.
-* **Endpoint shape is per client, measured.** Codex/Qoder/WorkBuddy take `origin + /v1`; Trae takes the
+  pointed at `192.168.0.239:8080` and `192.168.85.131:8080`, neither listed. Stable ids (WorkBuddy
+  `id`, Trae `custom_model_id`) are what preserve the user's selection.
+* **Qoder / Qoder CN are `unsupported`, not writable.** The GUI's custom models live in Qoder's own
+  encrypted daemon store (`~/.qoder-cn/.models/<uid>/customs`, QMC-sealed), reached only through the
+  CLI worker's authenticated BYOK RPC. `settings.json` `providers` is a **derived export** for the
+  CLI/agent SDK - the model picker never reads it - so the old `planQoderSettings` writer edited a
+  file the GUI ignores (measured 2026-11-14: 11 stale entries survived every "switch"). A working
+  external writer would have to decrypt the live safeStorage token and replay Qoder's private
+  org-scoped `jobToken/exchange` (matching machine id + org/endpoint context behind obfuscation),
+  breaking on every Qoder update - not a supportable capability. The row is therefore a permanent
+  `unsupported` whose `manualStep` points at Qoder's own 设置 → 模型, and `not-installed` when the
+  config dir is absent. The writer (`planQoderSettings` and helpers) and its fixtures were removed.
+* **Endpoint shape is per client, measured.** Codex/WorkBuddy take `origin + /v1`; Trae takes the
   full `origin + /v1/chat/completions`; Claude takes the **bare origin** (`ANTHROPIC_BASE_URL`). Claude
   needs no model name: `routes/messages.ts` maps inbound names itself (`anthropicInbound`).
 * **Model lists are reported, not rewritten.** `unservedModels` names what the target does not serve;
@@ -1958,9 +1968,10 @@ no listener and never evaluates the gateway tree (`tests/build/shell-entries.tes
   derivation unknown, so cloning it would be fabrication). `context_window` obeys the standing rule:
   absent stays absent, never `0`. Codex's top-level `model` moves only when the current name is
   unserved, preferring `auto`.
-* **Seven states, three of them absences that must not merge.** `ready`, `unchanged`, `not-installed`,
+* **Eight states, the absences must not merge.** `ready`, `unchanged`, `not-installed`,
   `no-entry` (installed but nothing of ours to update - creating a provider entry needs a uuid and a
-  model list the user has not chosen), `app-running`, `blocked`, `error`. `runningImageNames()` returns
+  model list the user has not chosen), `app-running`, `blocked`, `error`, `unsupported` (the console
+  cannot write this client at all - Qoder above). `runningImageNames()` returns
   `{names, known}`: a failed `tasklist`/`ps` is `blocked`, **never** an empty set read as "nothing is
   running". Trae also refuses when `-wal`/`-shm` is non-empty.
 * **SQLite via sql.js inline wasm.** Electron 33 is Node 20 (no `node:sqlite`), a native `.node` would

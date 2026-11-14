@@ -680,7 +680,8 @@
       "no-entry": "没有可改的条目",
       "app-running": "应用正在运行",
       "blocked": "前提缺失",
-      "error": "读取失败"
+      "error": "读取失败",
+      "unsupported": "不支持外部写入"
     },
     "changesTitle": "将修改",
     "added": "（新增）",

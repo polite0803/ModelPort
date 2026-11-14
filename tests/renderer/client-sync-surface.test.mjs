@@ -81,9 +81,9 @@ test('只有 ready 行可勾选，写盘前必须确认', () => {
   assert.match(page, /clientSync\.confirmBackup/, '确认框要说明会留备份')
 })
 
-test('七种状态各有说法，标签从联合类型枚举、两种语言都写全', () => {
+test('八种状态各有说法，标签从联合类型枚举、两种语言都写全', () => {
   const states = unionMembers('ClientSyncState')
-  assert.equal(states.length, 7, `状态联合解析到 ${states.length} 个成员 —— 形状变了`)
+  assert.equal(states.length, 8, `状态联合解析到 ${states.length} 个成员 —— 形状变了`)
   const ids = unionMembers('ClientId')
   // 条数不写死（移植后是 20 个），改成与主进程标签表现推对账：
   // 加一个 id 少一个标签，页面就会画出空白行，这条必须当场红。
@@ -106,9 +106,9 @@ test('七种状态各有说法，标签从联合类型枚举、两种语言都�
       assert.ok(value.trim().length > 0, `${name} 的 clientSync.state.${state} 是空串`)
     }
   }
-  // 三种「不是 ready」的缺席不能合并：各自的原因由主进程给，页面必须渲染出来。
+  // 各种「不是 ready」的缺席不能合并：各自的原因由主进程给，页面必须渲染出来。
   assert.match(page, /\{row\.reason && <p/)
-  for (const state of ['not-installed', 'no-entry', 'app-running', 'blocked', 'error']) {
+  for (const state of ['not-installed', 'no-entry', 'app-running', 'blocked', 'error', 'unsupported']) {
     assert.ok(states.includes(state), `${state} 必须仍是独立状态`)
   }
 })

@@ -36,6 +36,7 @@ const STATE_TONE: Record<ClientSyncState, string> = {
   'app-running': 'border-amber-500/40 bg-amber-500/10 text-amber-400',
   blocked: 'border-red-500/40 bg-red-500/10 text-red-400',
   error: 'border-red-500/40 bg-red-500/10 text-red-400',
+  unsupported: 'border-slate-500/40 bg-slate-500/10 text-slate-400',
 }
 
 const DISTRIBUTION_TONE: Record<string, string> = {

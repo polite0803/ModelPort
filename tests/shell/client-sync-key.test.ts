@@ -52,8 +52,8 @@ test('a row whose key could not be established says so instead of looking finish
   assert.match(sync, /const NO_KEY_MANUAL_STEP = '没有规范 key/)
   assert.equal(
     sync.split('plan.row.manualStep = NO_KEY_MANUAL_STEP').length - 1,
-    2,
-    'Qoder/Qoder CN and WorkBuddy share the caveat',
+    1,
+    'WorkBuddy carries the caveat; Qoder is unsupported and writes no key',
   )
   const codex = sync.slice(sync.indexOf('// --- Codex'), sync.indexOf('// --- Claude Code'))
   assert.match(codex, /if \(key === null &&/)

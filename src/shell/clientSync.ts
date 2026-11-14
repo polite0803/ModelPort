@@ -25,7 +25,6 @@ import {
   planClaudeSettings,
   planCodeBuddySettings,
   planCodexToml,
-  planQoderSettings,
   planTraeModelList,
   planWorkBuddyModels,
   unservedModels,
@@ -283,26 +282,16 @@ export async function gather(input: GatherInput): Promise<Gathered> {
   }
 
   // --- Qoder / Qoder CN --------------------------------------------------
+  // The GUI's custom models live in Qoder's own encrypted daemon store; settings.json is
+  // only a derived export for the CLI/agent SDK, so editing it never changes the model
+  // picker. The console does not pretend to switch Qoder: an installed client is a
+  // permanent `unsupported` row that names where the models are actually managed.
   for (const [id, path] of [['qoder', input.paths.qoder], ['qoder-cn', input.paths.qoderCn]] as [ClientId, string][]) {
-    const raw = readText(path)
-    if (raw === null) {
-      plans.push(row(id, 'not-installed', [path], [], `没有 ${path}`))
+    if (!existsSync(dirname(path))) {
+      plans.push(row(id, 'not-installed', [path], [], `没有 ${dirname(path)}`))
       continue
     }
-    // With a canonical key and the gateway's routes, the custom model list is rebuilt to
-    // exactly those routes (see planQoderSettings); the old model names are replaced, so
-    // there is nothing left "unserved" to warn about.
-    const rebuild = key !== null && models.length > 0
-    const result = planQoderSettings(raw, { origin, writeKey: key !== null, routes: models, keyPreview })
-    const plan = filePlan(id, path, result, rebuild ? [] : unservedModels(qoderModelNames(raw), routeNames))
-    if (plan.row.state === 'no-entry') {
-      plan.row.manualStep = '先在客户端里添加一个自定义模型（OpenAI 兼容），之后控制台才能代它改地址'
-    } else if (key === null && (plan.row.state === 'ready' || plan.row.state === 'unchanged')) {
-      plan.row.manualStep = NO_KEY_MANUAL_STEP
-    } else if (rebuild && (plan.row.state === 'ready' || plan.row.state === 'unchanged')) {
-      plan.row.manualStep = '写入后若客户端未显示新建的自定义模型，重启它重新读取 settings.json 即可'
-    }
-    plans.push(plan)
+    plans.push(row(id, 'unsupported', [path], [], QODER_UNSUPPORTED_REASON, QODER_UNSUPPORTED_MANUAL))
   }
 
   // --- WorkBuddy ---------------------------------------------------------
@@ -401,19 +390,6 @@ export async function gather(input: GatherInput): Promise<Gathered> {
   return { preview, plans, key }
 }
 
-function qoderModelNames(raw: string): string[] {
-  try {
-    const parsed = JSON.parse(raw) as { providers?: Record<string, { models?: { model?: unknown }[] }> }
-    const names: string[] = []
-    for (const provider of Object.values(parsed.providers ?? {})) {
-      for (const model of provider?.models ?? []) if (typeof model?.model === 'string') names.push(model.model)
-    }
-    return names
-  } catch {
-    return []
-  }
-}
-
 function workBuddyModelNames(raw: string): string[] {
   try {
     const parsed = JSON.parse(raw) as { vendor?: unknown; id?: unknown }[]
@@ -482,6 +458,14 @@ const TRAE_MANUAL_STEP = '在 Trae 的自定义模型里把 API Key 改成目标
  * every request would 401 - so the row has to say so rather than look finished.
  */
 const NO_KEY_MANUAL_STEP = '没有规范 key：地址已改，但 API Key 仍是旧的，请自己在客户端里填成目标网关的 key'
+
+/**
+ * Qoder keeps its GUI custom models in its own encrypted daemon store; the settings.json on
+ * disk is only a derived export for the CLI/agent SDK. No file the console can edit changes
+ * the model picker, so the row says so instead of writing a no-op that looks like a switch.
+ */
+const QODER_UNSUPPORTED_REASON = 'Qoder 的自定义模型由它自己的守护进程加密保管，settings.json 只是给 CLI/SDK 的导出副本——改它不影响模型选择器，控制台无法外部写入。'
+const QODER_UNSUPPORTED_MANUAL = '在 Qoder 的「设置 → 模型」里添加/切换自定义模型（OpenAI 兼容：填网关地址与 key）；这一项不支持控制台一键切换。'
 
 function traeModelNames(raw: string): string[] {
   try {

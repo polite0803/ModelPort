@@ -5,7 +5,7 @@
  * shapes: every writer here was written against a measured file, and the invariant that
  * matters is **everything we did not name stays byte-identical**. A Codex `config.toml`
  * carries `[desktop]`, `[mcp_servers.*]` and `[projects.*]` sections that have nothing to
- * do with the gateway; a Qoder `settings.json` carries plugin and MCP state. Reformatting
+ * do with the gateway; a CodeBuddy CN `settings.json` carries the rest of the fork's settings. Reformatting
  * or reordering those is how a "switch gateway" button turns into a lost workspace.
  *
  * Two rules are enforced here rather than trusted to the caller:
@@ -201,7 +201,7 @@ export function maskSecret(key: string): string {
 
 /**
  * The endpoint shapes differ per client and were measured, not assumed:
- * Codex / Qoder / WorkBuddy / CodeBuddy take a base ending in `/v1`, TRAE takes the whole
+ * Codex / WorkBuddy / CodeBuddy take a base ending in `/v1`, TRAE takes the whole
  * chat-completions URL, and Claude takes the bare origin (its SDK appends `/v1/messages`).
  */
 export type EndpointShape = 'v1' | 'chat-completions' | 'origin'
@@ -395,55 +395,6 @@ export interface JsonPlanInput {
   routes?: { name: string; displayName: string; contextWindow: number | null }[]
 }
 
-export interface QoderPlanInput extends JsonPlanInput {
-  /**
-   * The connected gateway's routes (`GET /v1/models`). When non-empty, the client's custom
-   * model list is rebuilt to exactly these; empty (route fetch failed) falls back to
-   * repointing the existing entries in place.
-   */
-  routes?: { name: string; displayName: string; contextWindow: number | null }[]
-}
-
-/** The observed Qoder custom-model shape, used when no existing entry can serve as template. */
-const QODER_MODEL_DEFAULT = {
-  maxOutputTokens: 8192,
-  capabilities: {
-    vision: false,
-    thinking: { modes: ['enabled'], supportsEffort: true, supportedEffortLevels: ['low', 'medium', 'high'] },
-  },
-}
-
-/** Deterministic id from the route name, so preview and apply agree and re-syncs are idempotent. */
-function qoderProviderId(route: string): string {
-  let h1 = 0x811c9dc5
-  let h2 = 0x9e3779b9
-  for (let i = 0; i < route.length; i += 1) {
-    const code = route.charCodeAt(i)
-    h1 = Math.imul(h1 ^ code, 0x01000193) >>> 0
-    h2 = Math.imul(h2 ^ code, 0x85ebca6b) >>> 0
-  }
-  const hex = (n: number): string => (n >>> 0).toString(16).padStart(8, '0')
-  const s = hex(h1) + hex(h2) + hex(h1 + h2) + hex(h1 ^ h2)
-  return `qoder-custom-${s.slice(0, 8)}-${s.slice(8, 12)}-${s.slice(12, 16)}-${s.slice(16, 20)}-${s.slice(20, 32)}`
-}
-
-/** Non-model fields (limits/capabilities) to copy onto rebuilt entries, from an existing one. */
-function qoderModelTemplate(providers: Record<string, unknown>): { maxOutputTokens: number; capabilities: unknown } {
-  for (const value of Object.values(providers)) {
-    if (value === null || typeof value !== 'object') continue
-    const entry = value as { type?: unknown; models?: unknown }
-    if (entry.type !== 'openai-compatible' || !Array.isArray(entry.models)) continue
-    const model = entry.models[0]
-    if (model === null || typeof model !== 'object') continue
-    const record = model as { maxOutputTokens?: unknown; capabilities?: unknown }
-    return {
-      maxOutputTokens: typeof record.maxOutputTokens === 'number' ? record.maxOutputTokens : QODER_MODEL_DEFAULT.maxOutputTokens,
-      capabilities: record.capabilities ?? QODER_MODEL_DEFAULT.capabilities,
-    }
-  }
-  return QODER_MODEL_DEFAULT
-}
-
 /** Deep copy with every `apiKey` string replaced by a sentinel, so keys compare separately. */
 function maskKeysDeep(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(maskKeysDeep)
@@ -455,121 +406,6 @@ function maskKeysDeep(value: unknown): unknown {
     return out
   }
   return value
-}
-
-/** Structural fingerprint with apiKey normalised, so the key is compared separately. */
-function qoderFingerprint(providers: Record<string, unknown>): string {
-  return JSON.stringify(maskKeysDeep(providers))
-}
-
-/**
- * Replace the OpenAI-compatible providers with one entry per gateway route.
- *
- * This is "the client's custom models follow the connected gateway": after a switch the
- * model list becomes the gateway's routes, each pointing at that gateway with the canonical
- * key. Non-OpenAI-compatible providers and every other top-level key stay untouched.
- */
-function rebuildQoderProviders(
-  providers: Record<string, unknown>,
-  routes: NonNullable<QoderPlanInput['routes']>,
-  url: string,
-): { next: Record<string, unknown>; replaced: number } {
-  const template = qoderModelTemplate(providers)
-  const next: Record<string, unknown> = {}
-  let replaced = 0
-  for (const [id, value] of Object.entries(providers)) {
-    if (value !== null && typeof value === 'object' && (value as { type?: unknown }).type === 'openai-compatible') {
-      replaced += 1
-      continue
-    }
-    next[id] = value
-  }
-  for (const route of routes) {
-    next[qoderProviderId(route.name)] = {
-      baseUrl: url,
-      apiKey: KEY_PLACEHOLDER,
-      type: 'openai-compatible',
-      protocol: 'openai',
-      authType: 'bearer',
-      model: route.name,
-      models: [
-        {
-          model: route.name,
-          displayName: route.displayName === '' ? route.name : route.displayName,
-          ...(route.contextWindow !== null ? { contextWindow: route.contextWindow } : {}),
-          maxOutputTokens: template.maxOutputTokens,
-          capabilities: template.capabilities,
-        },
-      ],
-      displayName: `ModelPort ${route.name}`,
-    }
-  }
-  return { next, replaced }
-}
-
-/**
- * Qoder / Qoder CN: `providers` is an object keyed by `qoder-custom-<uuid>`.
- *
- * With the gateway's routes in hand the custom model list is **rebuilt to exactly those
- * routes** - that is what keeps the client's model names matching the gateway it is
- * connected to across switches. Without routes (fetch failed) or without a canonical key it
- * falls back to repointing existing entries in place, which deletes nothing it cannot replace.
- */
-export function planQoderSettings(raw: string, input: QoderPlanInput): PlanResult {
-  const parsed = parseObject(raw)
-  if (!parsed) return { kind: 'bad-input', reason: 'settings.json 不是可解析的 JSON 对象' }
-  const providers = parsed.providers
-  if (providers === null || typeof providers !== 'object' || Array.isArray(providers)) {
-    return { kind: 'no-entry', reason: 'settings.json 里没有 providers' }
-  }
-  const map = providers as Record<string, unknown>
-  const url = endpointFor(input.origin, 'v1')
-
-  if (input.writeKey && input.routes !== undefined && input.routes.length > 0) {
-    const { next, replaced } = rebuildQoderProviders(map, input.routes, url)
-    let keysMatch = true
-    if (input.keyPreview !== undefined && input.keyPreview !== null) {
-      for (const route of input.routes) {
-        const current = map[qoderProviderId(route.name)]
-        const masked = current && typeof (current as { apiKey?: unknown }).apiKey === 'string'
-          ? maskSecret((current as { apiKey: string }).apiKey)
-          : null
-        if (masked !== input.keyPreview) {
-          keysMatch = false
-          break
-        }
-      }
-    }
-    if (keysMatch && qoderFingerprint(next) === qoderFingerprint(map)) return { kind: 'unchanged' }
-    const names = input.routes.map(route => route.name).join(', ')
-    return changed(
-      JSON.stringify({ ...parsed, providers: next }, null, detectIndent(raw)) + '\n',
-      [{ label: '自定义模型（按当前网关路由重建）', before: `${replaced} 条`, after: `${input.routes.length} 条：${names}` }],
-    )
-  }
-
-  const entries = Object.entries(map).filter(
-    ([, value]) => value !== null && typeof value === 'object' && (value as { type?: unknown }).type === 'openai-compatible',
-  )
-  if (entries.length === 0) return { kind: 'no-entry', reason: 'providers 里没有 openai-compatible 条目' }
-
-  const changes: ClientChange[] = []
-  const next: Record<string, unknown> = { ...map }
-  for (const [id, value] of entries) {
-    const entry = { ...(value as Record<string, unknown>) }
-    const short = id.replace(/^qoder-custom-/, '').slice(0, 8)
-    if (field(changes, `${short}.baseUrl`, entry.baseUrl, url)) entry.baseUrl = url
-    if (input.writeKey) {
-      keyField(changes, `${short}.apiKey`, entry.apiKey, input)
-      entry.apiKey = KEY_PLACEHOLDER
-    }
-    next[id] = entry
-  }
-  if (changes.length === 0) return { kind: 'unchanged' }
-  return changed(
-    JSON.stringify({ ...parsed, providers: next }, null, detectIndent(raw)) + '\n',
-    changes,
-  )
 }
 
 /**

@@ -14,7 +14,6 @@ import {
   planClaudeSettings,
   planCodeBuddySettings,
   planCodexToml,
-  planQoderSettings,
   planTraeModelList,
   planWorkBuddyModels,
   readTomlString,
@@ -158,155 +157,6 @@ test('Codex: CRLF is preserved', () => {
 test('catalog slugs are read for the unserved report, never rewritten', () => {
   assert.deepEqual(catalogSlugs('{"models":[{"slug":"auto"},{"slug":"daily"}]}'), ['auto', 'daily'])
   assert.equal(catalogSlugs('{"nope":1}'), null)
-})
-
-// ---------------------------------------------------------------------------
-// Qoder
-// ---------------------------------------------------------------------------
-
-const QODER_SETTINGS = JSON.stringify(
-  {
-    enabledPlugins: { 'qoder-context@qoderapp-bundler': true },
-    providers: {
-      'qoder-custom-f50bdb45-6287-4ba2-bf7e-e644627bdf69': {
-        baseUrl: 'http://127.0.0.1:8080/v1',
-        apiKey: 'sk-old',
-        type: 'openai-compatible',
-        protocol: 'openai',
-        authType: 'bearer',
-        model: 'daily',
-        models: [{ model: 'daily', displayName: '日常', contextWindow: 1000000, maxOutputTokens: 8192 }],
-        displayName: 'Qoder Custom F50bdb45',
-      },
-      'qoder-custom-6d0a65b8-52a4-4203-8d27-52cf906eabff': {
-        baseUrl: 'http://192.168.0.239:8080/v1',
-        apiKey: 'sk-old',
-        type: 'openai-compatible',
-        model: 'stable',
-        models: [{ model: 'stable', displayName: '稳定', contextWindow: 200000 }],
-      },
-    },
-  },
-  null,
-  2,
-)
-
-test('Qoder: every openai-compatible provider is repointed, uuids and models kept', () => {
-  const result = planQoderSettings(QODER_SETTINGS, { origin: ORIGIN, writeKey: true })
-  assert.equal(result.kind, 'changed')
-  if (result.kind !== 'changed') return
-  const parsed = JSON.parse(result.content)
-  const ids = Object.keys(parsed.providers)
-  assert.deepEqual(ids, [
-    'qoder-custom-f50bdb45-6287-4ba2-bf7e-e644627bdf69',
-    'qoder-custom-6d0a65b8-52a4-4203-8d27-52cf906eabff',
-  ])
-  for (const provider of Object.values(parsed.providers) as Record<string, unknown>[]) {
-    assert.equal(provider.baseUrl, `${ORIGIN}/v1`)
-    assert.equal(provider.apiKey, KEY_PLACEHOLDER)
-  }
-  // The user's own contextWindow is a manual mark, not something to re-derive.
-  assert.equal(parsed.providers[ids[0]].models[0].contextWindow, 1000000)
-  assert.equal(parsed.providers[ids[0]].models[0].displayName, '日常')
-  assert.equal(parsed.enabledPlugins['qoder-context@qoderapp-bundler'], true)
-  assert.ok(!result.content.includes('sk-old'))
-})
-
-test('Qoder: an empty provider table asks for one manual step instead of inventing a uuid', () => {
-  const result = planQoderSettings('{"enabledPlugins":{}}', { origin: ORIGIN, writeKey: true })
-  assert.equal(result.kind, 'no-entry')
-})
-
-test('Qoder: already pointing at the target is unchanged, not a rewrite', () => {
-  const first = planQoderSettings(QODER_SETTINGS, { origin: ORIGIN, writeKey: true })
-  assert.equal(first.kind, 'changed')
-  if (first.kind !== 'changed') return
-  // Substitute the placeholder the way apply does, then re-plan.
-  const written = first.content.split(KEY_PLACEHOLDER).join('sk-canonical')
-  const second = planQoderSettings(written, { origin: ORIGIN, writeKey: true })
-  assert.equal(second.kind, 'changed') // the key differs, so only the key row changes
-  if (second.kind !== 'changed') return
-  assert.deepEqual(second.changes.map(change => change.label.endsWith('.apiKey')), [true, true])
-})
-
-const ROUTE_SET = [
-  { name: 'auto', displayName: 'auto', contextWindow: 200000 },
-  { name: 'daily', displayName: 'daily', contextWindow: 200000 },
-  { name: 'performance', displayName: 'performance', contextWindow: 131072 },
-]
-
-test('Qoder: given the gateway routes the custom models are rebuilt to exactly those routes', () => {
-  const result = planQoderSettings(QODER_SETTINGS, { origin: ORIGIN, writeKey: true, routes: ROUTE_SET })
-  assert.equal(result.kind, 'changed')
-  if (result.kind !== 'changed') return
-  const parsed = JSON.parse(result.content)
-  const providers = parsed.providers as Record<string, Record<string, any>>
-  const custom = Object.entries(providers).filter(([, p]) => p.type === 'openai-compatible')
-  assert.equal(custom.length, ROUTE_SET.length, 'one provider per route')
-  const byModel = new Map(custom.map(([, p]) => [p.model as string, p]))
-  for (const route of ROUTE_SET) {
-    const entry = byModel.get(route.name)
-    assert.ok(entry, `missing route ${route.name}`)
-    assert.equal(entry.baseUrl, `${ORIGIN}/v1`)
-    assert.equal(entry.apiKey, KEY_PLACEHOLDER)
-    assert.equal(entry.models.length, 1)
-    assert.equal(entry.models[0].model, route.name)
-    assert.equal(entry.models[0].contextWindow, route.contextWindow)
-    assert.equal(entry.displayName, `ModelPort ${route.name}`)
-  }
-  // The user's manual providers are replaced; unrelated settings are untouched.
-  assert.equal('qoder-custom-f50bdb45-6287-4ba2-bf7e-e644627bdf69' in providers, false)
-  assert.equal('qoder-custom-6d0a65b8-52a4-4203-8d27-52cf906eabff' in providers, false)
-  assert.equal(parsed.enabledPlugins['qoder-context@qoderapp-bundler'], true)
-  assert.ok(!result.content.includes('sk-old'))
-})
-
-test('Qoder: rebuilding keeps non-openai-compatible providers intact', () => {
-  const raw = JSON.stringify({
-    providers: {
-      'builtin-x': { type: 'anthropic', baseUrl: 'https://x' },
-      'qoder-custom-old': { type: 'openai-compatible', baseUrl: 'http://old/v1', apiKey: 'sk-old', models: [{ model: 'daily' }] },
-    },
-  }, null, 2)
-  const result = planQoderSettings(raw, {
-    origin: ORIGIN,
-    writeKey: true,
-    routes: [{ name: 'auto', displayName: 'auto', contextWindow: 100 }],
-  })
-  assert.equal(result.kind, 'changed')
-  if (result.kind !== 'changed') return
-  const parsed = JSON.parse(result.content)
-  assert.deepEqual(parsed.providers['builtin-x'], { type: 'anthropic', baseUrl: 'https://x' })
-  const custom = Object.values(parsed.providers as Record<string, Record<string, unknown>>)
-    .filter(p => p.type === 'openai-compatible')
-  assert.equal(custom.length, 1)
-  assert.equal(custom[0].model, 'auto')
-})
-
-test('Qoder: an identical route set re-plans as unchanged (idempotent)', () => {
-  const routes = [{ name: 'auto', displayName: 'auto', contextWindow: 200000 }]
-  const first = planQoderSettings(QODER_SETTINGS, { origin: ORIGIN, writeKey: true, routes })
-  assert.equal(first.kind, 'changed')
-  if (first.kind !== 'changed') return
-  const written = first.content.split(KEY_PLACEHOLDER).join('sk-canonical')
-  const second = planQoderSettings(written, {
-    origin: ORIGIN,
-    writeKey: true,
-    routes,
-    keyPreview: maskSecret('sk-canonical'),
-  })
-  assert.equal(second.kind, 'unchanged')
-})
-
-test('Qoder: without routes it only repoints, never wipes the model list', () => {
-  const result = planQoderSettings(QODER_SETTINGS, { origin: ORIGIN, writeKey: true, routes: [] })
-  assert.equal(result.kind, 'changed')
-  if (result.kind !== 'changed') return
-  const parsed = JSON.parse(result.content)
-  assert.deepEqual(Object.keys(parsed.providers), [
-    'qoder-custom-f50bdb45-6287-4ba2-bf7e-e644627bdf69',
-    'qoder-custom-6d0a65b8-52a4-4203-8d27-52cf906eabff',
-  ])
 })
 
 // ---------------------------------------------------------------------------
@@ -580,7 +430,6 @@ test('only known client ids are accepted from the page', () => {
 test('no planner ever emits a plaintext key', () => {
   const outputs = [
     planCodexToml(CODEX_TOML, { origin: ORIGIN, routeNames: ['auto'] }),
-    planQoderSettings(QODER_SETTINGS, { origin: ORIGIN, writeKey: true }),
     planWorkBuddyModels(WORKBUDDY_MODELS, { origin: ORIGIN, writeKey: true }),
     planClaudeSettings(null, { origin: ORIGIN, writeKey: true }),
   ]
