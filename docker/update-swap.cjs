@@ -2,10 +2,10 @@
 /**
  * One-shot swap helper for the Docker gateway's in-UI update.
  *
- * Runs as a short-lived container from the NEW image (entrypoint overridden to this
- * file), with /var/run/docker.sock mounted. The daemon cannot stop itself - it is
- * PID 1 - so this external actor does: stop old -> start new -> probe /health ->
- * remove old on success, or roll back to the old container on failure.
+ * Runs as a short-lived container from the RUNNING daemon's own image (entrypoint
+ * overridden to this file), with /var/run/docker.sock mounted. The daemon cannot stop
+ * itself - it is PID 1 - so this external actor does: stop old -> start new -> probe
+ * /health -> remove old on success, or roll back to the old container on failure.
  *
  * Env (set by src/main/gateway/dockerUpdate.ts):
  *   MP_OLD         old container name (<name>-prev while the swap runs)
@@ -131,6 +131,52 @@ async function probeHealthy() {
   return false
 }
 
+// Docker binds host ports at container start. The new container is created while the
+// old one still holds them, and if the old docker-proxy has not released the port by
+// the time the new one starts, Docker silently drops that binding (the container runs,
+// the bridge IP answers, but the host port is dead). NetworkSettings.Ports is the
+// authoritative record of what actually got bound - HostConfig.PortBindings is only
+// the request.
+async function portPublished() {
+  const inspect = await docker('GET', `/containers/${encodeURIComponent(NEW)}/json`)
+  const ports = (inspect && inspect.NetworkSettings && inspect.NetworkSettings.Ports) || {}
+  const binding = ports[`${PORT}/tcp`]
+  return Array.isArray(binding) && binding.some((b) => b && b.HostPort)
+}
+
+// Re-create the new container from its own inspect. A full delete+create re-allocates
+// the host ports (a mere restart reuses the broken allocation); with the old container
+// already stopped the ports are free, so the binding sticks this time.
+async function recreateNew() {
+  const inspect = await docker('GET', `/containers/${encodeURIComponent(NEW)}/json`)
+  const host = (inspect && inspect.HostConfig) || {}
+  const cfg = (inspect && inspect.Config) || {}
+  const body = {
+    Image: cfg.Image,
+    Env: cfg.Env || [],
+    HostConfig: {
+      Binds: host.Binds || [],
+      PortBindings: host.PortBindings || {},
+      RestartPolicy: host.RestartPolicy || { Name: 'no' },
+      NetworkMode: host.NetworkMode || 'bridge',
+      GroupAdd: host.GroupAdd || [],
+    },
+  }
+  await docker('DELETE', `/containers/${encodeURIComponent(NEW)}?force=true`)
+  await docker('POST', `/containers/create?name=${encodeURIComponent(NEW)}`, body)
+  await docker('POST', `/containers/${encodeURIComponent(NEW)}/start`)
+}
+
+async function ensurePublished() {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (await portPublished()) return true
+    log(`host port ${PORT} not bound; re-creating ${NEW} (attempt ${attempt + 1})`)
+    await recreateNew()
+    await sleep(1500)
+  }
+  return portPublished()
+}
+
 async function rollback(reason) {
   log(`ROLLBACK: ${reason}`)
   try {
@@ -159,6 +205,8 @@ async function main() {
   await sleep(GRACE_MS)
   await docker('POST', `/containers/${encodeURIComponent(OLD)}/stop?t=15`)
   log(`old container ${OLD} stopped`)
+  // Let the old docker-proxy release the host ports before the new container claims them.
+  await sleep(1500)
   try {
     await docker('POST', `/containers/${encodeURIComponent(NEW)}/start`)
   } catch (error) {
@@ -166,6 +214,17 @@ async function main() {
     return
   }
   log(`new container ${NEW} started`)
+  let published = false
+  try {
+    published = await ensurePublished()
+  } catch (error) {
+    await rollback(`port publish error: ${error.message}`)
+    return
+  }
+  if (!published) {
+    await rollback(`host port ${PORT} never published`)
+    return
+  }
   let healthy = false
   try {
     healthy = await probeHealthy()

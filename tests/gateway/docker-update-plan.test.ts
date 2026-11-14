@@ -133,6 +133,16 @@ test('the swap helper is syntactically valid CJS', () => {
   execFileSync(process.execPath, ['--check', join(root, 'docker', 'update-swap.cjs')], { stdio: 'pipe' })
 })
 
+test('the swap helper verifies the host port actually bound, not just the bridge IP', () => {
+  const helper = readFileSync(join(root, 'docker', 'update-swap.cjs'), 'utf8')
+  // A new container started while the old docker-proxy still holds the host port can
+  // run with the binding silently dropped; the bridge IP answers but the host port is
+  // dead. The helper must read the authoritative bound ports and re-create until bound.
+  assert.match(helper, /NetworkSettings\.Ports/, 'must inspect actual bound ports, not the PortBindings request')
+  assert.match(helper, /ensurePublished/, 'must gate success on the host port being published')
+  assert.match(helper, /recreateNew/, 'must re-create (not merely restart) to re-allocate the port')
+})
+
 test('the helper ships in the image and the staged tree', () => {
   const dockerfile = readFileSync(join(root, 'docker', 'Dockerfile'), 'utf8')
   assert.match(dockerfile, /COPY update-swap\.cjs/)
