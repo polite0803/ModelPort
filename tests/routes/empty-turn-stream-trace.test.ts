@@ -24,7 +24,8 @@ import { createServer } from 'node:http'
 import { bootstrapStore, loadModule, startProxy } from './harness.mjs'
 
 const PORT = 18961
-const UPSTREAM_PORT = 18963
+// 18963 与 management-backup-export 的代理端口相同，node --test 并行时互撞
+const UPSTREAM_PORT = 18953
 
 type Payload = Record<string, any>
 

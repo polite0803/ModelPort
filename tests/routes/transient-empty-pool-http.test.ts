@@ -14,7 +14,8 @@ import assert from 'node:assert/strict'
 import { bootstrapStore, loadModule, startProxy } from './harness.mjs'
 import { localDayKey } from '../../src/shared/localDay.ts'
 
-const PORT = 18947
+// 18947 与 completions-empty-prompt 相同，node --test 并行时互撞
+const PORT = 18954
 
 const harness = await bootstrapStore({
   initialData: {
