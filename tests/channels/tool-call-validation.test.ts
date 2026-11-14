@@ -8,6 +8,7 @@ import {
   formatToolCallViolation,
   findToolCallPairingDefects,
   formatToolCallPairing,
+  repairToolCallAdjacency,
   repairToolCallPairing,
 } from '../../src/main/channelPack/toolCallValidation.ts'
 
@@ -360,4 +361,171 @@ test('怪异输入不抛错：非数组原样返回，缺字段的消息跳过',
   assert.deepEqual(findToolCallPairingDefects([null, 42, { role: 'assistant' }]), [])
   // 缺 tool_call_id 的 tool 消息没人能匹配上它，按孤儿处理
   assert.equal(findToolCallPairingDefects([{ role: 'tool', content: 'x' }]).length, 1)
+})
+
+test('相邻性：结果与调用隔着用户消息时上提（2026-11-12 loomy 2013 现场）', () => {
+  const messages = [
+    { role: 'user', content: '查一下' },
+    { role: 'assistant', content: null, tool_calls: [call('call_A')] },
+    { role: 'user', content: '用前复权' },
+    toolResult('call_A'),
+  ]
+
+  const repaired = repairToolCallAdjacency(messages)
+
+  assert.equal(repaired.movedResults, 1)
+  assert.notEqual(repaired.messages, messages)
+  assert.deepEqual(repaired.messages, [
+    { role: 'user', content: '查一下' },
+    { role: 'assistant', content: null, tool_calls: [call('call_A')] },
+    toolResult('call_A'),
+    { role: 'user', content: '用前复权' },
+  ])
+})
+
+test('相邻性：并行批的两条结果一起上提、保持原相对顺序', () => {
+  const messages = [
+    { role: 'assistant', content: null, tool_calls: [call('call_A'), call('call_B')] },
+    { role: 'user', content: '插进来的' },
+    toolResult('call_A'),
+    toolResult('call_B'),
+  ]
+
+  const repaired = repairToolCallAdjacency(messages)
+
+  assert.equal(repaired.movedResults, 2)
+  assert.deepEqual(repaired.messages, [
+    { role: 'assistant', content: null, tool_calls: [call('call_A'), call('call_B')] },
+    toolResult('call_A'),
+    toolResult('call_B'),
+    { role: 'user', content: '插进来的' },
+  ])
+})
+
+test('相邻性：良好历史一个字节不动，返回同一个数组', () => {
+  const messages = [
+    { role: 'user', content: '继续' },
+    { role: 'assistant', content: null, tool_calls: [call('call_A'), call('call_B')] },
+    toolResult('call_A'),
+    toolResult('call_B'),
+    { role: 'user', content: '谢谢' },
+  ]
+
+  const repaired = repairToolCallAdjacency(messages)
+
+  assert.equal(repaired.movedResults, 0)
+  assert.equal(repaired.messages, messages)
+})
+
+test('相邻性：同批结果之间的先后不算缺陷', () => {
+  const messages = [
+    { role: 'assistant', content: null, tool_calls: [call('call_A'), call('call_B')] },
+    toolResult('call_B'),
+    toolResult('call_A'),
+  ]
+
+  const repaired = repairToolCallAdjacency(messages)
+
+  assert.equal(repaired.movedResults, 0)
+  assert.equal(repaired.messages, messages)
+})
+
+test('相邻性：结果先于调用时上提到 assistant 紧后', () => {
+  const messages = [
+    toolResult('call_A'),
+    { role: 'assistant', content: null, tool_calls: [call('call_A')] },
+    { role: 'user', content: '后面' },
+  ]
+
+  const repaired = repairToolCallAdjacency(messages)
+
+  assert.equal(repaired.movedResults, 1)
+  assert.deepEqual(repaired.messages, [
+    { role: 'assistant', content: null, tool_calls: [call('call_A')] },
+    toolResult('call_A'),
+    { role: 'user', content: '后面' },
+  ])
+})
+
+test('相邻性：A 的结果前面隔着 B 的调用（原 2013 根因形状）也拆开', () => {
+  const messages = [
+    { role: 'assistant', content: null, tool_calls: [call('call_A')] },
+    { role: 'assistant', content: null, tool_calls: [call('call_B')] },
+    toolResult('call_A'),
+    toolResult('call_B'),
+  ]
+
+  const repaired = repairToolCallAdjacency(messages)
+
+  assert.equal(repaired.movedResults, 2)
+  assert.deepEqual(repaired.messages, [
+    { role: 'assistant', content: null, tool_calls: [call('call_A')] },
+    toolResult('call_A'),
+    { role: 'assistant', content: null, tool_calls: [call('call_B')] },
+    toolResult('call_B'),
+  ])
+})
+
+test('相邻性：空 id 的结果不归这里管，重排后仍在场', () => {
+  const messages = [
+    { role: 'assistant', content: null, tool_calls: [call('call_A')] },
+    { role: 'tool', content: '没有 id' },
+    toolResult('call_A'),
+  ]
+
+  const repaired = repairToolCallAdjacency(messages)
+
+  assert.equal(repaired.movedResults, 1)
+  const rebuilt = repaired.messages as Array<{ role: string; tool_call_id?: string }>
+  assert.equal(rebuilt.length, 3)
+  assert.deepEqual(rebuilt[0], { role: 'assistant', content: null, tool_calls: [call('call_A')] })
+  assert.equal(rebuilt[1].tool_call_id, 'call_A')
+  assert.deepEqual(rebuilt[2], { role: 'tool', content: '没有 id' })
+})
+
+test('相邻性：重排一次之后幂等', () => {
+  const messages = [
+    { role: 'assistant', content: null, tool_calls: [call('call_A')] },
+    { role: 'user', content: '插进来的' },
+    toolResult('call_A'),
+  ]
+  const first = repairToolCallAdjacency(messages)
+  assert.equal(first.movedResults, 1)
+
+  const second = repairToolCallAdjacency(first.messages)
+  assert.equal(second.movedResults, 0)
+  assert.equal(second.messages, first.messages)
+})
+
+test('相邻性：先配平再重排的组合（孤儿先删，重排不把垃圾上提）', () => {
+  const messages = [
+    { role: 'assistant', content: null, tool_calls: [call('call_A')] },
+    toolResult('call_orphan'),
+    { role: 'user', content: '插进来的' },
+    toolResult('call_A'),
+  ]
+  const pairing = repairToolCallPairing(messages)
+  assert.equal(pairing.defects.length, 1)
+  assert.equal(pairing.defects[0].kind, 'orphan_result')
+
+  const adjacency = repairToolCallAdjacency(pairing.messages)
+  assert.equal(adjacency.movedResults, 1)
+  assert.deepEqual(adjacency.messages, [
+    { role: 'assistant', content: null, tool_calls: [call('call_A')] },
+    toolResult('call_A'),
+    { role: 'user', content: '插进来的' },
+  ])
+})
+
+test('相邻性：怪异输入原样返回', () => {
+  for (const bad of [undefined, null, 'x', 42, {}]) {
+    const repaired = repairToolCallAdjacency(bad)
+    assert.equal(repaired.messages, bad)
+    assert.equal(repaired.movedResults, 0)
+  }
+  // 全程没有带 id 的调用时也不动
+  const messages = [{ role: 'user', content: 'x' }, { role: 'tool', content: '没有 id' }]
+  const repaired = repairToolCallAdjacency(messages)
+  assert.equal(repaired.messages, messages)
+  assert.equal(repaired.movedResults, 0)
 })

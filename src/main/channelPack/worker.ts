@@ -25,7 +25,7 @@ import {
   toGenerateOptions,
 } from 'virtual:channel-pack-messages'
 import { collectOpenAiCompletion, toOpenAiSse } from 'virtual:channel-pack-stream'
-import { assertValidToolCalls, countToolCallShapes, formatToolCallPairing, repairToolCallPairing } from './toolCallValidation'
+import { assertValidToolCalls, countToolCallShapes, formatToolCallPairing, repairToolCallAdjacency, repairToolCallPairing } from './toolCallValidation'
 import { appendOutboundDump, resolveDumpTarget, summarizeOutbound } from './outboundDump'
 
 type Adapter = {
@@ -305,6 +305,15 @@ async function complete(request: CompleteRequest, jobId: string, signal: AbortSi
       `${request.model} 工具记录配对不齐：删无结果调用 ${pairing.counts.unansweredCalls}、`
       + `无调用结果 ${pairing.counts.orphanResults}、重复声明 ${pairing.counts.duplicateCalls}、`
       + `重复回填 ${pairing.counts.duplicateResults}；明细 ${formatToolCallPairing(pairing.defects)}`,
+    )
+  }
+  // 相邻性重排：ID 配对完好但结果没紧跟调用的历史（2026-11-12 MiniMax 2013 的另一半），
+  // 删除式修复对它结构性失明，只重排不删除。必须先配平再重排，顺序不能换。
+  const adjacency = repairToolCallAdjacency(body.messages)
+  if (adjacency.movedResults > 0) {
+    body.messages = adjacency.messages
+    logger.warn(
+      `${request.model} 工具结果相邻性重排：上提 ${adjacency.movedResults} 条 tool 结果到产生它的 assistant 紧后`,
     )
   }
   // 影子诊断（纯观测，不影响校验）：只记"规范合法但上游可能不认"的形状计数。

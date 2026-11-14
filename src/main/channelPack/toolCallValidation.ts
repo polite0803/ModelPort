@@ -410,6 +410,109 @@ export function repairToolCallPairing(messages: unknown): ToolCallPairingRepair 
 }
 
 /**
+ * 「结果没紧跟调用」的**相邻性重排**——删除式配平盖不到的另一半。
+ *
+ * ## 为什么配平对它失明（2026-11-12 `loomy/spark-x2.6` 现网 2013 复盘）
+ *
+ * `planToolCallPairing` 三遍扫全部按 `call_id` 配对、从不看相邻：
+ * `assistant(A) / user(x) / tool(A)` 这种「ID 配对完好、但结果与调用之间隔了别的
+ * 消息」的历史在它眼里零缺陷，一条都不会删；严格上游却把 A 的结果判成「不紧跟
+ * 产生它的调用」整段 400（`isToolCallOrderingError`，MiniMax `2013` 实测）。
+ * 两侧都是合法配对，删除只能丢内容，修法只剩**重排**。
+ *
+ * ## 重排口径（只重排、不删除、不改写任何一条消息）
+ *
+ * 每条 tool 结果上提到产生它的 assistant **紧后**；同一 assistant 的多条结果保持
+ * 原相对顺序，原本隔在调用与结果之间的消息整体后移。这恰恰是客户端历史本来的
+ * 语义——「assistant 发起调用 → 收到结果 → 用户说了 x」，错位形状是客户端拼坏的
+ * 残留。结果出现在调用**之前**的同样上提（逆序残留不是合法形状）。同批结果之间
+ * 的先后不算缺陷：上游判的是「紧跟调用」，不判同批结果之间的相对次序。
+ *
+ * 约定与 `repairToolCallPairing` 一致：没有移动时**原样返回同一个数组**，调用方
+ * 只在 `movedResults > 0` 时替换。孤儿结果、空 `call_id` 是配平的管辖域，这里按
+ * 原位保留。两个修复的执行顺序必须是**先配平再重排**：孤儿先删掉，重排才不会
+ * 把垃圾上提到合法位置。
+ */
+export interface ToolCallAdjacencyRepair {
+  /** 没有移动时**原样返回同一个数组**。 */
+  messages: unknown
+  /** 被上提到产生它的 assistant 紧后的 tool 结果条数。 */
+  movedResults: number
+}
+
+export function repairToolCallAdjacency(messages: unknown): ToolCallAdjacencyRepair {
+  if (!Array.isArray(messages)) return { messages, movedResults: 0 }
+
+  // 第一遍：每个 call_id 归属**最早**声明它的 assistant —— 与 planToolCallPairing
+  // 「保留第一条」同口径；重复声明由配平先删，这里取第一条只是兜底。
+  const ownerOf = new Map<string, number>()
+  messages.forEach((message, messageIndex) => {
+    const record = message as { role?: unknown; tool_calls?: unknown } | null
+    if (record === null || typeof record !== 'object') return
+    if (record.role !== 'assistant' || !Array.isArray(record.tool_calls)) return
+    for (const call of record.tool_calls as unknown[]) {
+      const id = callIdOf(call)
+      if (id !== '' && !ownerOf.has(id)) ownerOf.set(id, messageIndex)
+    }
+  })
+  if (ownerOf.size === 0) return { messages, movedResults: 0 }
+
+  /** tool 结果的归属 assistant 下标；孤儿/空 id 返回 `undefined`（不归这里管）。 */
+  const ownerIdOf = (message: unknown): number | undefined => {
+    const record = message as { role?: unknown; tool_call_id?: unknown } | null
+    if (record === null || typeof record !== 'object') return undefined
+    if (record.role !== 'tool' || typeof record.tool_call_id !== 'string' || record.tool_call_id === '') {
+      return undefined
+    }
+    return ownerOf.get(record.tool_call_id)
+  }
+
+  // 第二遍：逐条判「是否已经紧跟」。判据：结果必须在它的 assistant 之后，且从
+  // assistant 的下一条到它自己之间全是同一 assistant 的结果——隔任何别的消息
+  // （用户/系统/另一个 assistant）都算错位。
+  let movedResults = 0
+  const resultsByOwner = new Map<number, unknown[]>()
+  messages.forEach((message, messageIndex) => {
+    const owner = ownerIdOf(message)
+    if (owner === undefined) return
+    const bucket = resultsByOwner.get(owner)
+    if (bucket === undefined) resultsByOwner.set(owner, [message])
+    else bucket.push(message)
+    if (messageIndex <= owner) {
+      movedResults += 1
+      return
+    }
+    for (let between = owner + 1; between < messageIndex; between++) {
+      if (ownerIdOf(messages[between]) !== owner) {
+        movedResults += 1
+        return
+      }
+    }
+  })
+  if (movedResults === 0) return { messages, movedResults: 0 }
+
+  // 第三遍：重建。归属明确的结果只在它的 assistant 处输出（保持原相对顺序），
+  // 其余消息按原序；没有归属的结果原位保留。
+  const rebuilt: unknown[] = []
+  messages.forEach((message, messageIndex) => {
+    const record = message as { role?: unknown; tool_calls?: unknown } | null
+    const results = resultsByOwner.get(messageIndex)
+    const isAssistantWithCalls = record !== null && typeof record === 'object'
+      && record.role === 'assistant' && Array.isArray(record.tool_calls)
+      && (record.tool_calls as unknown[]).some(call => callIdOf(call) !== '')
+    if (isAssistantWithCalls && results !== undefined) {
+      rebuilt.push(message)
+      for (const result of results) rebuilt.push(result)
+      return
+    }
+    if (ownerIdOf(message) !== undefined) return // 已在归属的 assistant 处输出
+    rebuilt.push(message)
+  })
+
+  return { messages: rebuilt, movedResults }
+}
+
+/**
  * 把配对明细压成一行日志文本（调用方负责决定级别与是否落行）。
  *
  * 只输出下标、`call_id` 与工具名：请求体 1.8MB、落盘只保头部 2%，内容取证结构性

@@ -115,7 +115,12 @@ import { ensureAnthropicOutputCap, outputCapFallbackOf } from './utils/outputCap
 import { opencodeAffinityHeaders } from './utils/opencodeAffinity.ts'
 import { createContextManagementService, trimAppliesToProvider } from './services/contextManagementService'
 import { accountChannelManager } from '../providers/accountChannels/manager'
-import { sanitizeChatToolDefinitions } from '../channelPack/toolCallValidation'
+import {
+  formatToolCallPairing,
+  repairToolCallAdjacency,
+  repairToolCallPairing,
+  sanitizeChatToolDefinitions,
+} from '../channelPack/toolCallValidation'
 import { getAggregateEntry } from '../providers/aggregate/registry'
 import { resolveAggregateEndpoint, aggregateEndpointMissingMessage } from '../providers/aggregate/endpoint'
 import { applyAggregateDropParams } from './aggregateParams'
@@ -392,6 +397,16 @@ export class RequestForwarder {
         console.error('[Compression] duplication measurement failed:', error)
       }
     }
+
+    // 入站历史修复（配平 + 相邻性重排，判据都在 `channelPack/toolCallValidation.ts`；
+    // 渠道账号同一套跑在 worker.ts，幂等无冲突）。位置钉死在测量之后、压缩之前：
+    // ① 上面的重复度/存活测量必须看客户端原样字节，修复只许排在取数之后；
+    // ② 压缩必须是最后一个改写消息的环节（tests/compression/wiring.test.ts），
+    //    修好的历史再压缩，压缩量到的才是真实形状。2026-11-12 loomy 2013 的
+    //    「结果没紧跟调用」此前在主线程路径上没有任何环节修它。
+    // 链式重试按同一份原始历史重算，结果一致。
+    const repairedHistory = this.withRepairedToolHistory(request)
+    if (repairedHistory !== request) request = repairedHistory
 
     // 上下文压缩：只改 live zone（最新一条 tool / user 消息），历史字节不动，
     // 这样上游前缀缓存不被打掉。必须排在托管工具层注入之前 —— 注入的提示属于
@@ -1821,6 +1836,36 @@ export class RequestForwarder {
       data: { injected },
     })
     return recovered
+  }
+
+  /**
+   * 入站历史的配平与相邻性重排（判据都在 `channelPack/toolCallValidation.ts`）。
+   *
+   * 调用位置在重复度测量之后、压缩之前（见 forwardChatCompletion 里的注释）。
+   * 修复是纯函数式的：零缺陷路径原样返回同一个对象；换家循环按同一份原始
+   * request 重入时结果一致，日志按尝试各记一条（与 reasoning 回灌同口径）。
+   */
+  private withRepairedToolHistory(request: ChatCompletionRequest): ChatCompletionRequest {
+    const pairing = repairToolCallPairing(request.messages)
+    const adjacency = repairToolCallAdjacency(
+      pairing.defects.length > 0 ? pairing.messages : request.messages,
+    )
+    if (pairing.defects.length === 0 && adjacency.movedResults === 0) return request
+    const rawMessages = adjacency.movedResults > 0 ? adjacency.messages : pairing.messages
+    const messages = rawMessages as ChatCompletionRequest['messages']
+    if (pairing.defects.length > 0) {
+      storeManager.addLog('warn', `工具记录配对不齐：删无结果调用 ${pairing.counts.unansweredCalls}、`
+        + `无调用结果 ${pairing.counts.orphanResults}、重复声明 ${pairing.counts.duplicateCalls}、`
+        + `重复回填 ${pairing.counts.duplicateResults}；明细 ${formatToolCallPairing(pairing.defects)}`, {
+        requestId: request.requestId,
+      })
+    }
+    if (adjacency.movedResults > 0) {
+      storeManager.addLog('warn', `工具结果相邻性重排：上提 ${adjacency.movedResults} 条 tool 结果到产生它的 assistant 紧后`, {
+        requestId: request.requestId,
+      })
+    }
+    return { ...request, messages }
   }
 
   /**
