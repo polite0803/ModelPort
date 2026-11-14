@@ -6,6 +6,42 @@
 条目按"为什么改、影响什么"描述；每条末尾括号里的短哈希指向产生该变更的提交，可在 `git show <哈希>` 中核对。
 版本边界与溯源说明见文末。
 
+## [1.8.16] - 2026-11-14
+
+版本边界：tag `v1.8.16`（相对 1.8.15）。主题是**Docker 网关在 Web UI 里一键在线更新**：挂载了
+docker.sock 的容器部署不再需要 SSH 到宿主跑脚本，控制台「检查更新 / 立即更新」即可完成下载、校验、
+加载镜像与容器切换；另把具名模型路径的空池按「瞬时 / 永久」分开处置，纯瞬时改报 429 + Retry-After，
+客户端据此退避而不是当成永久失败。
+
+### Added（新增）
+
+- **Docker 网关 Web UI 在线更新**：此前 Docker 形态升级必须 SSH 到宿主执行 `scripts/upgrade-docker.sh`。
+  现在控制台对挂载了 `/var/run/docker.sock` 的容器部署直接提供「检查更新 / 立即更新」：下载 Release 的
+  镜像 tar.gz、按 `.sha256` 校验（不一致拒装）、`docker load`，再由一个一次性 helper 容器完成
+  停旧 → 起新 → 探活 `/health` → 失败回滚。守护进程是容器 PID 1，不能自己 stop 自己，故切换交给
+  helper；helper 先睡一个宽限期让 RPC 响应回到浏览器。未挂 socket / 无权读写 / 非容器部署分别报
+  no-socket / socket-denied / not-docker 并指向脚本，绝不画一个假装能用的按钮。(`d0fc2f6`)
+
+### Fixed（修复）
+
+- **重建容器保留 ExposedPorts，宿主端口不再丢绑定**：在线更新切换后宿主端口一度失联。根因是 Docker
+  裸 API 只发布「同时出现在 `Config.ExposedPorts` 与 `HostConfig.PortBindings`」的端口——`docker run -p`
+  会自动补 ExposedPorts，裸 API create 不会。镜像只 `EXPOSE 8080 8443`，而部署发布的是 18080，重建时
+  只抄了 PortBindings、丢了 ExposedPorts，18080 就被静默忽略（容器在跑、桥接 IP 能答、宿主端口死）。
+  现在重建体把每个 PortBindings 键并入 ExposedPorts。(`9fd9bc5`)
+- **切换后校验宿主端口真 bound，丢绑定则重建**：不再以「容器启动成功」当作更新成功，切换后探测宿主
+  端口是否真的在监听，丢了就重建容器补回绑定。(`1caa6ac`)
+- **helper 改用运行中镜像的稳定 id**：helper 容器此前按目标 tag 取镜像，但目标镜像可能不含
+  `update-swap.cjs`，且同 tag load 会把目标镜像重打标到运行镜像上。改为按运行中容器的镜像 id 起 helper，
+  保证切换脚本一定在场。(`5af6085`)
+
+### Changed（变化）
+
+- **具名模型空池区分瞬时与永久**：具名模型路径此前把任何空池一律报 503 `no_available_account`。
+  现在重走选择过滤器，只有当全部排除都是自恢复状态（配额窗口、耗尽标记、每日上限）时才翻成
+  429 `model_temporarily_unavailable` + `Retry-After`；配置裁剪、能力不匹配等永久原因仍报 503。
+  客户端据此退避重试，而不是把暂时没额度当成永久失败。(`61bf37d`)
+
 ## [1.8.15] - 2026-11-14
 
 版本边界：tag `v1.8.15`（相对 1.8.14）。主题是**客户端接入面按参照实现整体移植**：一键切换从 7 家
