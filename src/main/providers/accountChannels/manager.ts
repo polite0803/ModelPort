@@ -110,6 +110,16 @@ class AccountChannelManager {
   private packServedRefreshing: Promise<void> | null = null
   private onChanged: (() => void) | null = null
   private rateLimitCache = new Map<string, { value: Record<string, { limited: true; resetAtMs: number }>; expiresAt: number }>()
+  /**
+   * 渠道 worker 报的模型级限流镜像：`(渠道, 模型) -> 解禁时刻`。
+   *
+   * `rateLimitCache` 按「这一次问到的模型批次」缓存，形状不适合选路热路径逐候选查。
+   * 这张表把同一份成功读数展开成单键，供 `autoRouter.collectCandidates` 在**排序前
+   * 同步**剔除——主进程选路原本看不到 worker 内存里的限流状态，于是每轮都把同一个
+   * 限流模型选成头部、再在请求前预检里剔光（2026-11-14 `daily` 27 笔 503）。
+   * 只在成功读数时写入；表里没有的模型视为已解禁；账号启停/重置随缓存一起清。
+   */
+  private rateLimitMarks = new Map<string, number>()
 
   private get dataDir(): string {
     return join(homedir(), '.modelport')
@@ -425,6 +435,9 @@ class AccountChannelManager {
         : undefined
       const table = value !== null && typeof value === 'object' ? value : {}
       this.rateLimitCache.set(key, { value: table, expiresAt: Date.now() + (result.ok ? 60_000 : 5_000) })
+      if (result.ok) {
+        this.noteRateLimits(id, table, modelIds)
+      }
       return table
     } catch {
       const table: Record<string, { limited: true; resetAtMs: number }> = {}
@@ -433,16 +446,68 @@ class AccountChannelManager {
     }
   }
 
-  /** 账号启停/重置/换号后立即失效该渠道的限流预检缓存。 */
+  /** 把一次成功读数展开进镜像：这一批里没被报限流的模型从表里删掉（视为已解禁）。 */
+  private noteRateLimits(
+    id: string,
+    table: Record<string, { limited: true; resetAtMs: number }>,
+    modelIds: readonly string[],
+  ): void {
+    const now = Date.now()
+    for (const [key, until] of this.rateLimitMarks) {
+      if (until <= now) this.rateLimitMarks.delete(key)
+    }
+    for (const modelId of modelIds) {
+      const key = `${id}::${modelId}`
+      const entry = table[modelId]
+      if (entry === undefined) {
+        this.rateLimitMarks.delete(key)
+        continue
+      }
+      // 上游偶尔给出荒唐的远期时刻：超过一天按一天算，免得一次坏读数把模型锁死。
+      if (entry.resetAtMs > now) {
+        this.rateLimitMarks.set(key, Math.min(entry.resetAtMs, now + 24 * 60 * 60 * 1000))
+      } else {
+        this.rateLimitMarks.delete(key)
+      }
+    }
+  }
+
+  /**
+   * 选路（同步）读：这个模型此刻是否被渠道 worker 报为限流中；是则返回解禁时刻。
+   *
+   * fail-open：没有读数、读数过期、表里没这个模型，一律 `undefined`（当作可用）。
+   */
+  modelRateLimitResetAt(id: string, modelId: string, now: number = Date.now()): number | undefined {
+    const key = `${id}::${modelId}`
+    const until = this.rateLimitMarks.get(key)
+    if (until === undefined) return undefined
+    if (until <= now) {
+      this.rateLimitMarks.delete(key)
+      return undefined
+    }
+    return until
+  }
+
+  isModelRateLimitedNow(id: string, modelId: string, now: number = Date.now()): boolean {
+    return this.modelRateLimitResetAt(id, modelId, now) !== undefined
+  }
+
+  /** 账号启停/重置/换号后立即失效该渠道的限流预检缓存与镜像。 */
   clearRateLimitCache(id?: string): void {
     if (id === undefined) {
       this.rateLimitCache.clear()
+      this.rateLimitMarks.clear()
       return
     }
     const prefix = `${id}::`
     for (const key of this.rateLimitCache.keys()) {
       if (key.startsWith(prefix)) {
         this.rateLimitCache.delete(key)
+      }
+    }
+    for (const key of this.rateLimitMarks.keys()) {
+      if (key.startsWith(prefix)) {
+        this.rateLimitMarks.delete(key)
       }
     }
   }

@@ -120,7 +120,12 @@ registry) → `adapters/<provider>.ts` → upstream; `loadbalancer.ts` picks the
   re-walks the selection filters, and only a purely transient empty pool flips its 503
   `no_available_account` to the same 429 (permanent causes keep 503). Cooldown never empties the pool
   (the soonest-waking group is kept, so the client sees the real upstream 429); `todayUsed` is day-keyed
-  (`dailyUsageOf`) - never read raw.
+  (`dailyUsageOf`) - never read raw. Channel-worker model rate limits are mirrored
+  (`accountChannelManager.modelRateLimitResetAt`) and read **before ranking**, so a rate-limited model
+  never becomes the head; if a preflight strip after the `single` trim empties the turn anyway, the route
+  re-selects (bounded, 3) with those models excluded rather than answering 503, and an empty pool caused
+  solely by that strip is the same 429 with `cause: 'rate_limit'`. A pin is never overridden by that
+  re-selection.
 - **Soft pin > `preferredModel` > sticky.** `ModelPin` lives in memory only (route or session scope,
   30 min; tray-issued pins default to `TRAY_PIN_MINUTES` = 10 and the menu says they affect every
   client of that route), and a pin is **not** vetoed by the model circuit: user intent outranks an

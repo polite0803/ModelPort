@@ -86,6 +86,111 @@ const AUTO_LOG_CANDIDATES_SHOWN = 10
 const AUTO_LOG_SKIPPED_SHOWN = 20
 
 /**
+ * 请求前预检剔掉的候选。`reason` 决定空池时是 429（等窗口复位）还是 503（配置筛空），
+ * `resetAtMs` 给 `Retry-After` 用（只有 worker 的限流读数带时刻）。
+ */
+interface PreflightStrip {
+  providerId: string
+  providerName: string
+  displayName: string
+  actualModel: string
+  reason: 'rate_limited' | 'pack_not_serving'
+  resetAtMs?: number
+}
+
+/**
+ * 预检剔空后的**重选**上限（含首次选路共 4 次）。每次重选都是一次同步排序加
+ * 一次 TTL 命中的 worker 查询，代价远小于一次必败的上游往返。
+ */
+const MAX_PREFLIGHT_RESEELECTS = 3
+
+/**
+ * 渠道侧的两道请求前预检：worker 的模型级限流、pack 的服务清单。
+ *
+ * 两者都只剔**这一轮**的候选并返回剔除清单，不改配置。调用方负责在剔空后带排除集
+ * 重选——两道预检都跑在 `single` 作用域裁剪之后，剔掉头部而不重选就是整轮零候选：
+ * 2026-11-14 `daily` 实测 27 笔 `503 no_available_model`，头部 `OpenCode / Big Pickle`
+ * 的免费日额度在 00:00 UTC 前打满，池子里另外 51 个模型一次都没被派过。
+ */
+async function applyChannelPreflights(decision: AutoRouteDecision): Promise<PreflightStrip[]> {
+  const stripped: PreflightStrip[] = []
+  if (decision.candidates.length === 0) return stripped
+
+  // 逐家一次、不是逐候选一次：同一家的几个候选读的是同一份 TTL 缓存。
+  const modelIdsByChannel = (candidates: readonly AutoCandidate[]): Map<string, Set<string>> => {
+    const byChannel = new Map<string, Set<string>>()
+    for (const candidate of candidates) {
+      if (candidate.provider.type !== 'account') continue
+      let ids = byChannel.get(candidate.provider.id)
+      if (ids === undefined) {
+        ids = new Set<string>()
+        byChannel.set(candidate.provider.id, ids)
+      }
+      ids.add(candidate.actualModel)
+    }
+    return byChannel
+  }
+
+  // 1) worker 内部账号池的模型级限流（免费日额度用尽、次日解禁这类）：状态只在
+  //    worker 内存里，全账号受限时请求以 QUOTA_EXCEEDED 必败。读数是 worker 亲口
+  //    说的，剔掉之后镜像会写进 manager，下一次选路在排序前就能看到。
+  const rateLimitsByChannel = new Map<string, Record<string, { limited: true; resetAtMs: number }>>()
+  for (const [channelId, modelIds] of modelIdsByChannel(decision.candidates)) {
+    rateLimitsByChannel.set(channelId, await accountChannelManager.modelRateLimits(channelId, [...modelIds]))
+  }
+  decision.candidates = decision.candidates.filter(candidate => {
+    if (candidate.provider.type !== 'account') return true
+    const table = rateLimitsByChannel.get(candidate.provider.id)
+    const limited = table === undefined ? undefined : table[candidate.actualModel]
+    if (limited === undefined) return true
+    // 跳过原因透出（PLAN P0-2）：客户端据此提示「已跳过 xx（额度 x 分钟后复位）」，
+    // 而不是看着候选静默消失。
+    const resetMinutes = Math.max(1, Math.ceil((limited.resetAtMs - Date.now()) / 60_000))
+    decision.skipped.push(
+      `${candidate.provider.id}/${candidate.displayName}:quota_reset_in_${resetMinutes}m`
+    )
+    stripped.push({
+      providerId: candidate.provider.id,
+      providerName: candidate.provider.name,
+      displayName: candidate.displayName,
+      actualModel: candidate.actualModel,
+      reason: 'rate_limited',
+      resetAtMs: limited.resetAtMs,
+    })
+    return false
+  })
+
+  // 候选已经空了就没有第二条预检要查的东西：省掉一次 pack 往返。
+  if (decision.candidates.length === 0) return stripped
+
+  // 2) pack 服务清单：宿主的可路由名单来自 `model.list`（`listAllModels()`，静态
+  //    兜底、不套身份档），而 worker 的请求前闸门读的是分档后的 `listModels()`。
+  //    两边一分歧，条目会在任何上游请求发出前被本地 404；这里把闸门提前。
+  const unservedByChannel = new Map<string, Record<string, { unserved: true }>>()
+  for (const [channelId, modelIds] of modelIdsByChannel(decision.candidates)) {
+    unservedByChannel.set(channelId, await accountChannelManager.packUnservedModels(channelId, [...modelIds]))
+  }
+  decision.candidates = decision.candidates.filter(candidate => {
+    if (candidate.provider.type !== 'account') return true
+    const table = unservedByChannel.get(candidate.provider.id)
+    const unserved = table === undefined ? undefined : table[candidate.actualModel]
+    if (unserved === undefined) return true
+    decision.skipped.push(
+      `${candidate.provider.id}/${candidate.displayName}:pack_not_serving`
+    )
+    stripped.push({
+      providerId: candidate.provider.id,
+      providerName: candidate.provider.name,
+      displayName: candidate.displayName,
+      actualModel: candidate.actualModel,
+      reason: 'pack_not_serving',
+    })
+    return false
+  })
+  return stripped
+}
+
+/**
  * 「本轮请求体量 vs 这一家窗口」的读数工厂。
  *
  * 只在路由决策存在时产出（非路由请求没有可信的估算入量，宁可不写也不写 0）。
@@ -588,79 +693,56 @@ router.post('/completions', async (ctx: Context) => {
   // 两者都没有就是 undefined，粘性照旧用内容指纹（`shared/clientSessionKey.ts` 说明为什么
   // 需要它，以及为什么这条链只有一份判断）。
   const clientSession = clientSessionKey({ body: request, headers: ctx.headers })
-  const autoDecision = route !== undefined
-    ? autoRouter.select(request, config.loadBalanceStrategy, autoPreferenceFromHeader(ctx), route, clientSession, autoModelFromHeader(ctx))
+  const autoPreference = autoPreferenceFromHeader(ctx)
+  const headerModel = autoModelFromHeader(ctx)
+  let autoDecision = route !== undefined
+    ? autoRouter.select(request, config.loadBalanceStrategy, autoPreference, route, clientSession, headerModel)
     : null
 
-  // 限流预检：worker 内部账号池的模型级限流（loomy spark-x2.6 当日额度用尽、
-  // 次日解禁）只存在于渠道 worker 内存，全账号受限时请求以 QUOTA_EXCEEDED 必败
-  // —— 换家循环拿到的是 HTTP 失败，无法区分「渠道此刻不可服务」与账号故障。
-  // 在发请求前逐渠道查询（走 worker 内存副本 rpc，TTL 缓存 60s）并把必败模型
-  // 的候选剔掉（用户报障 2026-10-30，与 maxTools 前置跳过同一思路）。
-  if (autoDecision && autoDecision.candidates.length > 0) {
-    const modelIdsByChannel = new Map<string, Set<string>>()
-    for (const candidate of autoDecision.candidates) {
-      if (candidate.provider.type !== 'account') continue
-      let ids = modelIdsByChannel.get(candidate.provider.id)
-      if (ids === undefined) {
-        ids = new Set<string>()
-        modelIdsByChannel.set(candidate.provider.id, ids)
+  // 请求前预检：worker 的模型级限流与 pack 服务清单（两块合并进
+  // `applyChannelPreflights`）。剔空之后必须**带着排除集重选** —— 两道预检都跑在
+  // `single` 作用域裁剪之后，剔掉头部而不重选就是整轮零候选。重选发生在任何上游
+  // 请求发出之前，仍是同一轮，不违反「一轮一个模型」。
+  const preflightStripped: PreflightStrip[] = []
+  const preflightSkipped: string[] = []
+  let lastStripped: PreflightStrip[] = []
+  if (autoDecision !== null) {
+    let decision: AutoRouteDecision = autoDecision
+    for (let attempt = 0; ; attempt++) {
+      if (decision.candidates.length === 0) break
+      const skippedBefore = decision.skipped.length
+      lastStripped = await applyChannelPreflights(decision)
+      preflightStripped.push(...lastStripped)
+      // 预检写下的原因（`quota_reset_in_Nm` / `pack_not_serving`）要跟着决策走：重选
+      // 会换一个新的决策对象，旧决策的 skipped 不会自己搬过来，客户端就只剩一个
+      // `rate_limited`，读不出「多久之后会回来」。
+      for (const marker of decision.skipped.slice(skippedBefore)) {
+        if (!preflightSkipped.includes(marker)) preflightSkipped.push(marker)
       }
-      ids.add(candidate.actualModel)
-    }
-    const rateLimitsByChannel = new Map<string, Record<string, { limited: true; resetAtMs: number }>>()
-    for (const [channelId, modelIds] of modelIdsByChannel) {
-      rateLimitsByChannel.set(channelId, await accountChannelManager.modelRateLimits(channelId, [...modelIds]))
-    }
-    autoDecision.candidates = autoDecision.candidates.filter(candidate => {
-      if (candidate.provider.type !== 'account') return true
-      const table = rateLimitsByChannel.get(candidate.provider.id)
-      const limited = table === undefined ? undefined : table[candidate.actualModel]
-      if (limited === undefined) return true
-      // 跳过原因透出（PLAN P0-2）：客户端据此提示「已跳过 xx（额度 x 分钟后复位）」，
-      // 而不是看着候选静默消失。
-      const resetMinutes = Math.max(1, Math.ceil((limited.resetAtMs - Date.now()) / 60_000))
-      autoDecision.skipped.push(
-        `${candidate.provider.id}/${candidate.displayName}:quota_reset_in_${resetMinutes}m`
+      if (decision.candidates.length > 0) break
+      // 钉子（软钉或持久 `preferredModel`）不许被重选绕开：那等于静默换模型。
+      // 这颗钉此刻不可用由下面的 429/503 投影说明，清钉仍是 `routes:unpin` 的事。
+      if (decision.pin !== undefined || route === undefined || attempt >= MAX_PREFLIGHT_RESEELECTS) break
+      const retry = autoRouter.select(
+        request,
+        config.loadBalanceStrategy,
+        autoPreference,
+        route,
+        clientSession,
+        headerModel,
+        preflightStripped.map(strip => ({ providerId: strip.providerId, displayName: strip.displayName }))
       )
-      return false
-    })
-  }
-
-  // 服务清单预检（与上面的限流预检同一位置、同一跳过透出、同样只在发请求前剔除）：
-  // 宿主的可路由名单来自渠道包的 `model.list`（`listAllModels()`，不套身份档，也不随
-  // 远端目录收缩），而渠道 worker 的请求前闸门读的是**分档后**的 `listModels(provider)`
-  // （`channelPack/worker.ts`）。两个集合一分歧，被点名/被 auto 选中的条目就在**任何上游
-  // 请求发出之前**本地 404 `模型不存在或已停用`，换下一候选大概率同样 404 —— 实测 4 天
-  // 137 行（providerId 全是 `opencode`）。这里把那道闸门提前：pack 明确不服务的候选
-  // 直接不进换家循环。`failover.ts::isChannelModelUnavailableError` 的精确文案识别保留，
-  // 兜住预检与请求之间的竞态。
-  if (autoDecision && autoDecision.candidates.length > 0) {
-    const modelIdsByChannel = new Map<string, Set<string>>()
-    for (const candidate of autoDecision.candidates) {
-      if (candidate.provider.type !== 'account') continue
-      let ids = modelIdsByChannel.get(candidate.provider.id)
-      if (ids === undefined) {
-        ids = new Set<string>()
-        modelIdsByChannel.set(candidate.provider.id, ids)
+      // 重选的决策只记得自己那轮采集：把预检剔掉的名字并进来，面板与
+      // `X-ModelPort-Auto-Skipped` 才能回答整条链为什么绕开了它们。
+      for (const marker of preflightSkipped) {
+        if (!retry.skipped.includes(marker)) retry.skipped.push(marker)
       }
-      ids.add(candidate.actualModel)
+      decision = retry
+      autoDecision = retry
+      // 重选之后，`lastStripped` 只代表**上一轮**的剔除：新一轮若一个候选都没有，
+      // 循环在顶部就退出，不会覆盖它。清空，免得把上一轮的限流当成这一轮的成因。
+      lastStripped = []
     }
-    // 逐家一次、不是逐候选一次：一家几个候选都读同一份 TTL 缓存清单。
-    const unservedByChannel = new Map<string, Record<string, { unserved: true }>>()
-    for (const [channelId, modelIds] of modelIdsByChannel) {
-      unservedByChannel.set(channelId, await accountChannelManager.packUnservedModels(channelId, [...modelIds]))
-    }
-    autoDecision.candidates = autoDecision.candidates.filter(candidate => {
-      if (candidate.provider.type !== 'account') return true
-      const table = unservedByChannel.get(candidate.provider.id)
-      const unserved = table === undefined ? undefined : table[candidate.actualModel]
-      if (unserved === undefined) return true
-      autoDecision.skipped.push(
-        `${candidate.provider.id}/${candidate.displayName}:pack_not_serving`
-      )
-      return false
-    })
   }
 
   // 跳过清单透出：与 X-ModelPort-Auto-Degraded 并列。必须写在任何 return 之前
@@ -891,6 +973,32 @@ router.post('/completions', async (ctx: Context) => {
     // `skipped` 一起回答「为什么一个候选都没有」。客户端只会转述一句 503，
     // 面板上没有这一段就再也查不回来了。
     const refusalAuto = autoLogRecord(autoDecision, 0, [], null)
+    // 预检剔空、且每一次剔除都是 worker 亲口说的限流：这是「等窗口复位」，不是
+    // 「配置里没有模型」。`Retry-After` 取最早解禁时刻（封顶 1 小时，避免客户端
+    // 按一个十几小时的窗口禁用整条路由）。
+    const preflightTransient = lastStripped.length > 0
+      && lastStripped.every(strip => strip.reason === 'rate_limited')
+      ? (() => {
+          const now = Date.now()
+          const until = Math.min(...lastStripped.map(strip => strip.resetAtMs ?? now + 60_000))
+          return {
+            cause: 'rate_limit' as const,
+            skipped: lastStripped.length,
+            retryAfterSeconds: Math.max(1, Math.min(3600, Math.ceil((until - now) / 1000))),
+          }
+        })()
+      : undefined
+    // 拒绝行必须指得出是哪个模型把池子掏空的：只写路由名的一行，事后既不能归因
+    // 也给不了「下次别选它」的任何依据（capacity 失败按裁定不进 Bandit 能力轴，
+    // 但面板和排障至少要知道是谁）。
+    const strippedHead = lastStripped[lastStripped.length - 1] ?? preflightStripped[preflightStripped.length - 1]
+    const refusalAttribution = strippedHead === undefined
+      ? undefined
+      : {
+          providerId: strippedHead.providerId,
+          providerName: strippedHead.providerName,
+          actualModel: strippedHead.actualModel,
+        }
     // 钉子失效（模型根本不在池里）时选路已经**把软钉撤了**并返回了空链：这一轮
     // 快速失败，下一次请求就走自动排序。原先「照常按池服务」实测是 3× 504 ——
     // 客户端以为还在跟钉住的模型对话，其实每一轮都在换实现。这里必须把这件事
@@ -972,7 +1080,7 @@ router.post('/completions', async (ctx: Context) => {
       storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
       return
     }
-    const transient = autoDecision.transientUnavailable
+    const transient = autoDecision.transientUnavailable ?? preflightTransient
     if (transient) {
       const message = `All candidates for route '${autoDecision.routeName}' are temporarily unavailable (${describeTransientCause(transient.cause)}); retry in ${transient.retryAfterSeconds}s`
       const body = {
@@ -1002,6 +1110,7 @@ router.post('/completions', async (ctx: Context) => {
           client,
         }),
         ...(refusalAuto === undefined ? {} : { auto: refusalAuto }),
+        ...(refusalAttribution === undefined ? {} : refusalAttribution),
       }
       storeManager.addRequestLog(refused)
       storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
@@ -1044,6 +1153,7 @@ router.post('/completions', async (ctx: Context) => {
         client,
       }),
       ...(refusalAuto === undefined ? {} : { auto: refusalAuto }),
+      ...(refusalAttribution === undefined ? {} : refusalAttribution),
     }
     storeManager.addRequestLog(refused)
     storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)

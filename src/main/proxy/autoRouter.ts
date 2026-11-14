@@ -167,7 +167,14 @@ export interface TransientSkip {
   accountId: string
   /** 上游真实模型名：额度耗尽标记按这个键记（不是 displayName）。 */
   model: string
-  reason: QuotaBlockReason | 'daily_limit'
+  /**
+   * `rate_limited` = 渠道 worker 亲口说这个模型限流到某个时刻（读数镜像在
+   * `accountChannelManager` 里）；它与额度窗口同属「会自己复位」，但复位时刻是
+   * worker 给的，见 `until`。
+   */
+  reason: QuotaBlockReason | 'daily_limit' | 'rate_limited'
+  /** 原因自带解禁时刻时给出（渠道 worker 的限流读数）。缺省按上游标记/默认间隔推。 */
+  until?: number
 }
 
 /**
@@ -313,7 +320,7 @@ export interface AutoRouteDecision {
    * 503「这条路由没有模型」：后者会让用户去查供应商，而真正要等的是一个窗口复位。
    */
   transientUnavailable?: {
-    cause: 'quota' | 'daily_limit' | 'mixed'
+    cause: 'quota' | 'daily_limit' | 'mixed' | 'rate_limit'
     /** 被瞬时状态挡掉的 (账号, 模型) 条数。 */
     skipped: number
     retryAfterSeconds: number
@@ -586,6 +593,8 @@ const TRANSIENT_SKIP_REASONS = new Set<string>([
   'tpm_exhausted',
   'tpd_exhausted',
   'monthly_exhausted',
+  // 渠道 worker 的模型级限流（`modelRateLimits` 读数的镜像）。
+  'rate_limited',
 ])
 
 /** 算不出解禁时刻时的重试间隔（秒）：窗口类原因最短的复位粒度就是分钟级。 */
@@ -611,9 +620,10 @@ function skippedAreAllTransient(skipped: ReadonlySet<string>): boolean {
 /**
  * 瞬时空池的人话成因：客户端读得到、用户也读得懂，且与 `details.cause` 同源。
  */
-export function describeTransientCause(cause: 'quota' | 'daily_limit' | 'mixed'): string {
+export function describeTransientCause(cause: 'quota' | 'daily_limit' | 'mixed' | 'rate_limit'): string {
   if (cause === 'daily_limit') return 'daily request limit reached'
   if (cause === 'mixed') return 'quota and daily limits reached'
+  if (cause === 'rate_limit') return 'upstream rate limit in effect'
   return 'quota or credit exhausted'
 }
 
@@ -642,12 +652,19 @@ export function summarizeTransientSkips(
   if (skips.length === 0) return undefined
   let quota = false
   let daily = false
+  let rateLimit = false
   let unlockAt = Number.POSITIVE_INFINITY
   const exhaustions = new Map<string, AggregateQuotaExhaustionRecord[] | undefined>()
   for (const skip of skips) {
     if (skip.reason === 'daily_limit') {
       daily = true
       unlockAt = Math.min(unlockAt, nextLocalMidnight(now))
+      continue
+    }
+    // 渠道 worker 的限流读数自带解禁时刻：不用再翻额度标记表。
+    if (skip.reason === 'rate_limited') {
+      rateLimit = true
+      if (skip.until !== undefined) unlockAt = Math.min(unlockAt, skip.until)
       continue
     }
     quota = true
@@ -665,7 +682,13 @@ export function summarizeTransientSkips(
     if (record !== undefined) unlockAt = Math.min(unlockAt, exhaustionExpiresAt(record))
   }
   return {
-    cause: quota && daily ? 'mixed' : daily ? 'daily_limit' : 'quota',
+    cause: (quota || rateLimit) && daily
+      ? 'mixed'
+      : daily
+        ? 'daily_limit'
+        : quota
+          ? 'quota'
+          : 'rate_limit',
     skipped: skips.length,
     retryAfterSeconds: unlockAt === Number.POSITIVE_INFINITY
       ? DEFAULT_TRANSIENT_RETRY_AFTER_SECONDS
@@ -937,6 +960,34 @@ class AutoRouter {
           continue
         }
 
+        // 渠道 worker 亲口报的模型级限流（读数镜像在 `accountChannelManager`）。
+        //
+        // 这条状态原本只有 `chat.ts` 的请求前预检能看到，而预检跑在**作用域裁剪之后**：
+        // `single` 已把整轮收成一个模型，剔掉它就是零候选。2026-11-14 `daily` 实测
+        // 27 笔 `503 no_available_model` —— 头部 `OpenCode / Big Pickle` 的免费日额度
+        // 在 00:00 UTC 前打满，池子里另外 51 个模型一次都没被派过。选路阶段读这条状态，
+        // 头部才能落到下一个模型；`until` 让空池投影能算准 `Retry-After`。
+        if (!options.ignoreTransientAvailability) {
+          const rateLimitedUntil = accountChannelManager.modelRateLimitResetAt(
+            provider.id,
+            model.actualModelId,
+            now
+          )
+          if (rateLimitedUntil !== undefined) {
+            skipped.add(`${provider.id}/${model.displayName}:rate_limited`)
+            for (const account of accounts) {
+              transientSkips.push({
+                providerId: provider.id,
+                accountId: account.id,
+                model: model.actualModelId,
+                reason: 'rate_limited',
+                until: rateLimitedUntil,
+              })
+            }
+            continue
+          }
+        }
+
         // 上游目录已经明确「没有这个模型」：冷却期内不再送进候选池，省掉
         // 每笔请求 0.1–3.5s 的必败往返。广告口径不扣（`ignoreTransientAvailability`），
         // 与配额门控同一层语义。
@@ -1074,6 +1125,12 @@ class AutoRouter {
      * 选路 —— 会话键只有这一处算得出来，调用方各自拼一份就会两个键对不上。
      */
     headerModel?: { displayName: string },
+    /**
+     * 请求前预检（渠道 worker 限流 / pack 服务清单）刚剔掉的模型：剔空之后要
+     * **带排除集重选**，否则 `single` 已经裁到的那一个模型就是整轮天花板。
+     * 只在这一次调用里生效，不写任何冷却、也不改变配置。
+     */
+    excludeModels?: readonly { providerId: string; displayName: string }[],
   ): AutoRouteDecision {
     const profile = profileRequest(request)
     const now = Date.now()
@@ -1088,7 +1145,15 @@ class AutoRouter {
     const stickyMinutes = route?.stickyMinutes ?? autoConfig?.stickyMinutes ?? 0
     const prefer = preferOverride ?? route?.prefer ?? autoConfig?.prefer ?? 'balanced'
 
-    const { rankInputs, candidatesByKey, skipped, transientSkips } = this.collectCandidates(request, now)
+    const { rankInputs: collectedInputs, candidatesByKey, skipped, transientSkips } = this.collectCandidates(request, now)
+    // 预检排除集：只摘这一轮的候选，不进 `skipped`（预检已经把原因写进调用方那份
+    // 决策的 skipped 并会并回来，这里再写一次就成了两条同义记录）。
+    const excludedKeys = new Set(
+      (excludeModels ?? []).map(entry => `${entry.providerId}::${entry.displayName}`)
+    )
+    const rankInputs = excludedKeys.size === 0
+      ? collectedInputs
+      : collectedInputs.filter(input => !excludedKeys.has(`${input.providerId}::${input.displayName}`))
     const needs = contractNeeds(request)
 
     // 策略筛选（静态、用户预设）：在候选池构建处、契约过滤之前生效。

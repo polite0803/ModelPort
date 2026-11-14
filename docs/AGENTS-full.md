@@ -1481,6 +1481,29 @@ Three prunes could empty it, and none of them is a configuration fact:
 Config-emptied pools (`pool_strategy`, `manual_filter`) and capability mismatches keep the 503 +
 `details.missing`: those are the two cases where the user really does have to change something.
 
+4. **The request-time preflight (2026-11-14).** `chat.ts` runs two async preflights after `select()`:
+   the channel worker's model-level rate limits and the pack service list. Both used to run *after* the
+   `single` scope trim, so stripping the head left the turn with zero candidates - on 2026-11-14 the
+   `daily` route answered 27 `503 no_available_model` in three bursts while 51 other models in the pool
+   were never dispatched (`OpenCode / Big Pickle`'s free daily quota was spent until 00:00 UTC).
+   Two things changed:
+   - the rate-limit reading is **mirrored** into `accountChannelManager.rateLimitMarks` (written by
+     `modelRateLimits()` on every successful read, keyed `(channel, model) -> resetAtMs`, cleared with
+     `clearRateLimitCache`), and `collectCandidates` reads it **before ranking**, so a rate-limited model
+     never becomes the head. It joins `TRANSIENT_SKIP_REASONS` as `rate_limited`; `summarizeTransientSkips`
+     takes its `until` as the unlock instant and the cause is `'rate_limit'`;
+   - when a preflight strip does empty the turn, the route **re-selects** with those models excluded
+     (`autoRouter.select(..., excludeModels)`, bounded at `MAX_PREFLIGHT_RESEELECTS` = 3). No upstream
+     request has been sent yet, so this is still one model per turn. A pin (`pin` set on the decision) is
+     never overridden by that re-selection: it answers 429 `model_temporarily_unavailable` with
+     `cause: 'rate_limit'` instead. Only a strip that is entirely rate-limit caused projects the 429; a
+     permanent strip keeps the 503.
+
+   The refusal row also carries `providerId` / `providerName` / `actualModel` of the stripped model
+   (`refusalAttribution`), so the row names what emptied the pool. Capacity failures are still excluded
+   from the Bandit capability axis by ruling - this is diagnostic traceability, not a score change.
+   Tests: `tests/routes/channel-rate-limit-reselect.test.ts`.
+
 **A refused selection leaves a row.** Neither empty-pool answer (429 or 503) reaches a provider, and
 until 2026-11-13 neither wrote anything: a client quoting one line of 503 was the whole evidence, and
 the log panel showed no failure at all while the retained window held zero rows for that class. Both
