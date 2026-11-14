@@ -11,6 +11,7 @@ import {
   dockerUpdateCapability,
   recreateConfig,
   selfContainerId,
+  swapHelperBody,
   swapHelperEnv,
   type ContainerInspect,
 } from '../../src/main/gateway/dockerUpdatePlan.ts'
@@ -52,6 +53,7 @@ test('selfContainerId reads cgroup v1, falls back to hostname, refuses custom na
 
 const inspect: ContainerInspect = {
   Name: '/modelport',
+  Image: 'sha256:runningimageid',
   Config: { Image: 'modelport-daemon:1.8.14', Env: ['HOME=/data', 'PATH=/usr/bin'] },
   HostConfig: {
     Binds: ['modelport-data:/data', '/var/run/docker.sock:/var/run/docker.sock'],
@@ -75,7 +77,7 @@ test('recreateConfig copies the deployment identity, not the old image', () => {
 })
 
 test('recreateConfig defaults missing host config instead of dropping it', () => {
-  const bare: ContainerInspect = { Name: '/x', Config: { Image: 'old' }, HostConfig: {} }
+  const bare: ContainerInspect = { Name: '/x', Image: 'sha256:bare', Config: { Image: 'old' }, HostConfig: {} }
   const body = recreateConfig(bare, 'new')
   assert.deepEqual(body.Env, [])
   assert.deepEqual(body.HostConfig.Binds, [])
@@ -104,6 +106,27 @@ test('swapHelperEnv carries every knob the helper reads', () => {
     'MP_TIMEOUT_MS=60000',
     'MP_GRACE_MS=3000',
   ])
+})
+
+test('the swap helper runs from the running image id, never the target tag', () => {
+  const body = swapHelperBody({
+    selfImageId: inspect.Image,
+    env: swapHelperEnv({ oldName: 'modelport-prev', newName: 'modelport', port: 18080, scheme: 'http', probeHost: '', timeoutMs: 60000, graceMs: 3000 }),
+    socketPath: '/var/run/docker.sock',
+    socketGid: '123',
+    networkMode: 'bridge',
+  })
+  // The target tag may predate this feature (no update-swap.cjs) or be retagged over
+  // the running image by a same-tag load; only the stable running id is safe.
+  assert.equal(body.Image, 'sha256:runningimageid')
+  assert.notEqual(body.Image, 'modelport-daemon:1.8.15')
+  assert.notEqual(body.Image, inspect.Config.Image)
+  assert.deepEqual(body.Entrypoint, ['node', '/app/update-swap.cjs'])
+  assert.deepEqual(body.Cmd, [])
+  assert.equal(body.HostConfig.AutoRemove, false)
+  assert.deepEqual(body.HostConfig.Binds, ['/var/run/docker.sock:/var/run/docker.sock'])
+  assert.deepEqual(body.HostConfig.GroupAdd, ['123'])
+  assert.equal(body.HostConfig.NetworkMode, 'bridge')
 })
 
 test('the swap helper is syntactically valid CJS', () => {

@@ -3,10 +3,10 @@
  *
  * The daemon is PID 1 of its container: it can download, verify and `docker load`
  * the new image, but `docker stop` on itself would kill the orchestrator mid-swap.
- * So the last step is handed to a one-shot helper container from the SAME new image
- * (`/app/update-swap.cjs`): stop old -> start new -> probe /health -> rollback on
- * failure. The helper sleeps a grace period first so this RPC response reaches the
- * browser before the daemon dies.
+ * So the last step is handed to a one-shot helper container from the RUNNING daemon's
+ * own image (`/app/update-swap.cjs`, guaranteed present there): stop old -> start new
+ * -> probe /health -> rollback on failure. The helper sleeps a grace period first so
+ * this RPC response reaches the browser before the daemon dies.
  *
  * Without the socket the surface reports which absence it is (not-docker /
  * no-socket / socket-denied) and points at scripts/upgrade-docker.sh - never a
@@ -29,6 +29,7 @@ import {
   dockerUpdateCapability,
   recreateConfig,
   selfContainerId,
+  swapHelperBody,
   swapHelperEnv,
   type ContainerInspect,
 } from './dockerUpdatePlan'
@@ -191,11 +192,11 @@ export async function applyDockerUpdate(version?: string): Promise<DockerUpdateS
     // The helper runs as the image's `node` user; the mounted sock is root:docker 660,
     // so it needs the socket's group as a supplementary group or every API call 403s.
     const socketGid = String(statSync(DOCKER_SOCKET).gid)
-    const helper = await dockerApi<DockerCreateResult>('POST', '/containers/create', {
-      Image: image,
-      Entrypoint: ['node', '/app/update-swap.cjs'],
-      Cmd: [],
-      Env: swapHelperEnv({
+    const helper = await dockerApi<DockerCreateResult>('POST', '/containers/create', swapHelperBody({
+      // By stable id, not the target tag: the target may lack update-swap.cjs, and a
+      // same-tag load retags the target over this image. See swapHelperBody.
+      selfImageId: inspect.Image,
+      env: swapHelperEnv({
         oldName: prevName,
         newName: oldName,
         port,
@@ -204,15 +205,10 @@ export async function applyDockerUpdate(version?: string): Promise<DockerUpdateS
         timeoutMs: PROBE_TIMEOUT_MS,
         graceMs: GRACE_MS,
       }),
-      HostConfig: {
-        Binds: [`${DOCKER_SOCKET}:${DOCKER_SOCKET}`],
-        // Not AutoRemove: a failed swap must stay readable via `docker logs
-        // modelport-update-swap`; the next apply removes the leftover.
-        AutoRemove: false,
-        NetworkMode: networkMode,
-        GroupAdd: [socketGid],
-      },
-    })
+      socketPath: DOCKER_SOCKET,
+      socketGid,
+      networkMode,
+    }))
     await dockerApi('POST', `/containers/${helper.Id}/start`)
     state = { ...state, phase: 'swapping' }
     return { ...state }

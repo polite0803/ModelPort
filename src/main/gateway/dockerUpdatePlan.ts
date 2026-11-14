@@ -3,8 +3,8 @@
  *
  * The daemon is PID 1 of its container: it can load a new image and stage the
  * replacement, but the stop-old/start-new swap must run outside it (a separate
- * short-lived helper container from the same image). Everything here is the
- * part a test can prove without a Docker host: capability absences, asset
+ * short-lived helper container from the running daemon's own image). Everything here
+ * is the part a test can prove without a Docker host: capability absences, asset
  * naming, self-identification and the recreate config mapping.
  */
 
@@ -46,6 +46,9 @@ export function selfContainerId(cgroupText: string, hostname: string): string | 
 
 export interface ContainerInspect {
   Name: string
+  /** Stable image id the container runs from; unlike Config.Image (a tag) it does not
+   *  move when a same-tag tarball is loaded over it. */
+  Image: string
   Config: { Image: string; Env?: string[] }
   HostConfig: {
     Binds?: string[]
@@ -109,4 +112,46 @@ export function swapHelperEnv(input: {
     `MP_TIMEOUT_MS=${input.timeoutMs}`,
     `MP_GRACE_MS=${input.graceMs}`,
   ]
+}
+
+export interface SwapHelperBody {
+  Image: string
+  Entrypoint: string[]
+  Cmd: string[]
+  Env: string[]
+  HostConfig: {
+    Binds: string[]
+    AutoRemove: boolean
+    NetworkMode: string
+    GroupAdd: string[]
+  }
+}
+
+/**
+ * The helper runs from the RUNNING daemon's own image (by stable id), never the
+ * target tag. Two reasons: a target release may predate this feature and ship no
+ * `/app/update-swap.cjs`, and loading a same-tag tarball retags the target over the
+ * old image so even `Config.Image` would resolve to the wrong one. The running image
+ * is guaranteed to carry the helper, because the daemon executing this code came from it.
+ */
+export function swapHelperBody(input: {
+  selfImageId: string
+  env: string[]
+  socketPath: string
+  socketGid: string
+  networkMode: string
+}): SwapHelperBody {
+  return {
+    Image: input.selfImageId,
+    Entrypoint: ['node', '/app/update-swap.cjs'],
+    Cmd: [],
+    Env: input.env,
+    HostConfig: {
+      Binds: [`${input.socketPath}:${input.socketPath}`],
+      // A failed swap must stay readable via `docker logs`; the next apply removes it.
+      AutoRemove: false,
+      NetworkMode: input.networkMode,
+      GroupAdd: [input.socketGid],
+    },
+  }
 }
