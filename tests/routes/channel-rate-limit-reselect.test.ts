@@ -86,6 +86,8 @@ const { autoRouter } = await loadModule('main/proxy/autoRouter.ts')
 
 /** worker 报「限流中」的模型 id；`resetAtMs` 由 every test 现算。 */
 let limitedModels = new Set<string>()
+/** 上游在**产出前**就以额度文案拒绝的模型 id（预检看不见的那一类）。 */
+let failingModels = new Set<string>()
 let rateLimitQueries: string[][] = []
 /** 渠道实际收到的模型名（被剔的条目不应出现在这里）。 */
 const seenModels: string[] = []
@@ -108,6 +110,13 @@ accountChannelManager.bridgeOrThrow = async () => ({
 accountChannelManager.packUnservedModels = async () => ({})
 accountChannelManager.complete = async (request: { model: string }) => {
   seenModels.push(request.model)
+  if (failingModels.has(request.model)) {
+    // 渠道包跨桥只带 message/status（`bridge.ts`），与真流量同一形状：
+    // 2026-11-14 现网 `opencode: 所有通道对该模型均受限（…(free_usage_limit)）` + 429。
+    const failure = new Error('opencode: 所有通道对该模型均受限（acct-a(free_usage_limit)）')
+    ;(failure as { status?: number }).status = 429
+    throw failure
+  }
   return {
     id: 'chatcmpl-fake',
     object: 'chat.completion',
@@ -129,6 +138,7 @@ beforeEach(() => {
   seenModels.length = 0
   rateLimitQueries = []
   limitedModels = new Set()
+  failingModels = new Set()
   autoRouter.reset()
   // 镜像与 TTL 缓存一起清：否则上一轮的限流读数会把这一轮的头部继续挡在外面。
   accountChannelManager.clearRateLimitCache()
@@ -206,4 +216,40 @@ test('钉子不被重选绕开：钉住的模型被限流时快速失败，不�
   } finally {
     assert.equal(sm.updateRoute('auto', { preferredModel: undefined }).ok, true)
   }
+})
+
+test('上游零产出地拒绝额度：同一回合换下一个模型重放，而不是把 429 交给客户端', async () => {
+  // 预检看不见的那一类：渠道匿名池的 free_usage_limit 只在请求发出后才以 429 回来。
+  // 一个字节都没产出 ⇒ 客户端看来这一发还没开始，换模型不伤上下文/工具协议/缓存。
+  failingModels = new Set(['opencode/pickle'])
+
+  const response = await postAuto()
+
+  assert.equal(response.status, 200, '头部零产出地被额度拒绝后，下一个模型应当接住')
+  assert.deepEqual(seenModels, ['opencode/pickle', 'opencode/live'],
+    '先试头部（被拒，零产出），再换下一个模型重放')
+  const skipped = decodeURIComponent(String(response.headers['x-modelport-auto-skipped'] ?? ''))
+  assert.match(skipped, /OpenCode \/ Pickle:quota-exhausted/, '换掉的那一家要写进跳过清单')
+  assert.equal(response.headers['x-modelport-auto-attempts'], '2', '两次尝试都要记进读数')
+
+  const row = sm.getRequestLogs()[0]
+  assert.equal(row.status, 'success')
+  assert.equal(row.actualModel, 'opencode/live')
+  assert.equal(row.auto?.attempts, 2)
+})
+
+test('整池都零产出地被额度拒绝：尝试有上限，收口成可重试的 503 而不是无限换家', async () => {
+  failingModels = new Set(['opencode/pickle', 'opencode/live'])
+
+  const response = await postAuto()
+
+  // 多家候选都被上游亲口判了额度：按既有裁定收口成 503（客户端退避后重来），
+  // 429 在客户端是终止语义，见 `failover.ts::autoExhaustedResponse` 的注释。
+  assert.equal(response.status, 503)
+  assert.equal(response.json?.error?.code, 'no_available_model')
+  assert.match(String(response.json?.error?.message ?? ''), /exhausted all 2 accounts of 'OpenCode \/ Live'/)
+  assert.match(String(response.json?.error?.message ?? ''), /free_usage_limit/)
+  assert.ok(Number(response.headers['retry-after']) >= 1, '要给出可退避的间隔')
+  assert.deepEqual(seenModels, ['opencode/pickle', 'opencode/live'],
+    '池里只有两个模型：各试一次就收口，排除了整池之后不再空转')
 })

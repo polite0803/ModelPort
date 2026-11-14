@@ -630,12 +630,12 @@ test('chat 路由必须把跳过清单写进 X-ModelPort-Auto-Skipped（源码�
   // `details.skipped` 共用同一个常量，头与体不会各说各的。
   assert.match(
     chatRouteSource,
-    /const shown = autoDecision\.skipped\.slice\(0, AUTO_SKIPPED_REPORT_LIMIT\)/,
+    /const shown = skipped\.slice\(0, AUTO_SKIPPED_REPORT_LIMIT\)/,
     'the skipped list must be capped before it goes into a header',
   )
   assert.match(
     chatRouteSource,
-    /ctx\.set\('X-ModelPort-Auto-Skipped', toHeaderValue\(/,
+    /ctx\.set\('X-ModelPort-Auto-Skipped', header\)/,
     'the skipped list must be surfaced as X-ModelPort-Auto-Skipped, through toHeaderValue',
   )
   assert.match(
@@ -806,8 +806,13 @@ test('换家取证必须落到源码：循环记录每次失败，日志写出 f
   )
   assert.match(
     chatRouteSource,
-    /autoFailures = outcome\.failures/,
-    'the chat route must adopt the forwarder per-attempt failure list',
+    /failuresTotal = \[\.\.\.failuresTotal, \.\.\.outcome\.failures\]/,
+    'the chat route must adopt the forwarder per-attempt failure list (accumulated across capacity hops)',
+  )
+  assert.match(
+    chatRouteSource,
+    /autoFailures = failuresTotal/,
+    'the accumulated list must reach the request log',
   )
 })
 

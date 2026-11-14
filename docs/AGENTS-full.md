@@ -1504,6 +1504,17 @@ Config-emptied pools (`pool_strategy`, `manual_filter`) and capability mismatche
    from the Bandit capability axis by ruling - this is diagnostic traceability, not a score change.
    Tests: `tests/routes/channel-rate-limit-reselect.test.ts`.
 
+5. **A capacity refusal the preflight could not see (2026-11-14).** The worker's `model.rateLimits`
+   does not cover every exhausted class - OpenCode's anonymous `free_usage_limit` only shows up as a
+   429 when the request is dispatched. With `single` scope that refusal ended the turn. `chat.ts` now
+   treats a **zero-output capacity failure** (`isZeroOutputCapacityFailure`: no stream, no
+   `localAdmissionRejected`, status 402/429 or the narrow quota wording) as "the turn has not started"
+   and re-selects with the tried models excluded (`MAX_CAPACITY_MODEL_SWITCHES` = 2 extra hops),
+   replaying the same request before a byte reaches the client. A pin is never overridden this way.
+   When the whole pool is out this way the existing `autoExhaustedResponse` still answers
+   503 `no_available_model` + `Retry-After` (429 is terminal in clients such as Codex), and the
+   tried models are named in `skipped` as `quota-exhausted`.
+
 **A refused selection leaves a row.** Neither empty-pool answer (429 or 503) reaches a provider, and
 until 2026-11-13 neither wrote anything: a client quoting one line of 503 was the whole evidence, and
 the log panel showed no failure at all while the retained window held zero rows for that class. Both

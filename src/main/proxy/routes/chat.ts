@@ -10,7 +10,9 @@ import { ChatCompletionRequest, ChatCompletionResponse, ProxyContext } from '../
 import type { AccountSelection, ForwardResult } from '../types'
 import { loadBalancer } from '../loadbalancer'
 import { requestForwarder } from '../forwarder'
+import type { ForwardChainOutcome } from '../forwarder'
 import { isAccountFault, isSameProviderRotationStatus, isContextOverflowError, SILENT_CHANNEL_SKIP_CODE } from '../failover'
+import { isAccountArrearsError, isRecoverableChannelFailure } from '../failover'
 import { autoExhaustedResponse, parseRetryAfterSeconds } from '../failover'
 import { SSEParser, extractStreamErrorFrame, streamHandler, type StreamErrorFrame } from '../stream'
 import { proxyStatusManager } from '../status'
@@ -103,6 +105,37 @@ interface PreflightStrip {
  * 一次 TTL 命中的 worker 查询，代价远小于一次必败的上游往返。
  */
 const MAX_PREFLIGHT_RESEELECTS = 3
+
+/**
+ * 上游额度类失败（零产出）在一个回合内最多再换几个模型。
+ *
+ * 与 `MAX_REJECTED_REQUEST_SWITCHES` 同一量级：每次换都近乎瞬时（请求在生成前
+ * 被拒），但池子真全没额度时，多换只会把同一句 429 重演几遍、拖长客户端等待。
+ */
+const MAX_CAPACITY_MODEL_SWITCHES = 2
+
+/** `X-ModelPort-Auto-Skipped` 的取值：前几条原因，超出折成 `+N`；空清单不发头。 */
+function autoSkippedHeader(skipped: readonly string[]): string | undefined {
+  if (skipped.length === 0) return undefined
+  const shown = skipped.slice(0, AUTO_SKIPPED_REPORT_LIMIT)
+  const hidden = skipped.length - shown.length
+  return toHeaderValue(hidden > 0 ? `${shown.join(',')},+${hidden}` : shown.join(','))
+}
+
+/**
+ * 上游在**产出任何字节之前**就拒绝、且成因是额度/限流：这一发可以安全地换模型重放。
+ *
+ * `stream === undefined` 是「零产出」的判据：流式请求只要拿到了首块，转发层会交回
+ * 一个流（成败在流内结算），那种情况绝不能换 —— 切换只在「客户端还没看到任何
+ * 内容」时才不伤上下文、工具协议与前缀缓存。
+ */
+function isZeroOutputCapacityFailure(result: ForwardResult): boolean {
+  if (result.success || result.stream !== undefined) return false
+  // 本地并发准入拒绝是我们自己的闸门，不是上游对额度的判决。
+  if (result.localAdmissionRejected === true) return false
+  if (result.status === 402 || result.status === 429) return true
+  return isRecoverableChannelFailure(result.error) || isAccountArrearsError(result.error)
+}
 
 /**
  * 渠道侧的两道请求前预检：worker 的模型级限流、pack 的服务清单。
@@ -754,11 +787,8 @@ router.post('/completions', async (ctx: Context) => {
   // 空池的那两条拒绝（429/503）另会把同一份前几条写进错误体与请求日志行 —— 客户端
   // 只转述一句话时，面板上的那一行是唯一能回答「为什么没有候选」的地方。
   if (autoDecision && autoDecision.skipped.length > 0) {
-    const shown = autoDecision.skipped.slice(0, AUTO_SKIPPED_REPORT_LIMIT)
-    const hidden = autoDecision.skipped.length - shown.length
-    ctx.set('X-ModelPort-Auto-Skipped', toHeaderValue(
-      hidden > 0 ? `${shown.join(',')},+${hidden}` : shown.join(',')
-    ))
+    const header = autoSkippedHeader(autoDecision.skipped)
+    if (header !== undefined) ctx.set('X-ModelPort-Auto-Skipped', header)
   }
 
   let selection: AccountSelection | null = null
@@ -1217,20 +1247,71 @@ router.post('/completions', async (ctx: Context) => {
     let result: ForwardResult
 
     if (autoDecision) {
-      const outcome = await requestForwarder.forwardAutoCompletion(
-        request,
-        autoDecision.candidates,
-        context,
-        // 换家预算随 decision 走：这条路由的 maxAttempts，而不是转发层自己去读
-        // 全局 legacy `autoRouting.maxAttempts`。池语义（换下一家含下一个模型）由
-        // `forwardAutoCompletion` 自己打开，调用方不再传栅栏。
-        {
-          baseCap: autoDecision.baseCap,
-          ...(autoDecision.wallClockBudgetMs === undefined
-            ? {}
-            : { wallClockBudgetMs: autoDecision.wallClockBudgetMs }),
+// 上游亲口说「这个模型此刻没有额度」且**一个字节都没产出**：这一发在客户端
+      // 看来还没开始，换下一个模型重放不伤上下文 / 工具协议 / 前缀缓存 ——
+      // `single` 收口禁止的是「产出到一半换实现」，不是禁止在同一条空结果上重新
+      // 开局。预检看得见的限流已在选号前重选（`applyChannelPreflights`），这里
+      // 兜住预检看不见的那一类（渠道匿名池的 `free_usage_limit` 等）。
+      const triedModels = new Map<string, { providerId: string; displayName: string }>()
+      const capacitySkipped: string[] = []
+      let outcome: ForwardChainOutcome<AutoCandidate> | null = null
+      let attemptsTotal = 0
+      let failuresTotal: AutoAttemptFailure[] = []
+      let traceTotal: RequestAttemptTrace[] = []
+      for (let hop = 0; ; hop += 1) {
+        for (const candidate of autoDecision.candidates) {
+          triedModels.set(`${candidate.provider.id}::${candidate.displayName}`, {
+            providerId: candidate.provider.id,
+            displayName: candidate.displayName,
+          })
         }
-      )
+        outcome = await requestForwarder.forwardAutoCompletion(
+          request,
+          autoDecision.candidates,
+          context,
+          // 换家预算随 decision 走：这条路由的 maxAttempts，而不是转发层自己去读
+          // 全局 legacy `autoRouting.maxAttempts`。池语义（换下一家含下一个模型）由
+          // `forwardAutoCompletion` 自己打开，调用方不再传栅栏。
+          {
+            baseCap: autoDecision.baseCap,
+            ...(autoDecision.wallClockBudgetMs === undefined
+              ? {}
+              : { wallClockBudgetMs: autoDecision.wallClockBudgetMs }),
+          }
+        )
+        if (!outcome) break
+        attemptsTotal += outcome.attempts
+        failuresTotal = [...failuresTotal, ...outcome.failures]
+        traceTotal = [...traceTotal, ...outcome.attemptTrace]
+        if (!isZeroOutputCapacityFailure(outcome.result)) break
+        if (hop >= MAX_CAPACITY_MODEL_SWITCHES) break
+        // 钉子与「一条都没选出来」都不换：钉子换模型等于静默违背用户选择；
+        // 空链留给下面的 429/503 投影。
+        if (autoDecision.pin !== undefined || route === undefined) break
+        if (request.signal?.aborted === true) break
+        const retry = autoRouter.select(
+          request,
+          config.loadBalanceStrategy,
+          autoPreference,
+          route,
+          clientSession,
+          headerModel,
+          [...triedModels.values()]
+        )
+        if (retry.candidates.length === 0) break
+        for (const { providerId, displayName } of triedModels.values()) {
+          const marker = `${providerId}/${displayName}:quota-exhausted`
+          if (!capacitySkipped.includes(marker)) capacitySkipped.push(marker)
+        }
+        for (const marker of capacitySkipped) {
+          if (!retry.skipped.includes(marker)) retry.skipped.push(marker)
+        }
+        autoDecision = retry
+        // 换模型发生在任何响应字节写出之前：把新的跳过清单补发一次，客户端看到的
+        // 「为什么绕开上一家」与请求日志是同一份。
+        const skippedHeader = autoSkippedHeader(retry.skipped)
+        if (skippedHeader !== undefined) ctx.set('X-ModelPort-Auto-Skipped', skippedHeader)
+      }
 
       if (!outcome) {
         ctx.status = 503
@@ -1246,21 +1327,23 @@ router.post('/completions', async (ctx: Context) => {
       }
 
       result = outcome.result
-      autoAttempts = outcome.attempts
-      autoFailures = outcome.failures
-      attemptTrace = outcome.attemptTrace
-      ctx.set('X-ModelPort-Auto-Attempts', String(outcome.attempts))
+      autoAttempts = attemptsTotal
+      autoFailures = failuresTotal
+      attemptTrace = traceTotal
+      ctx.set('X-ModelPort-Auto-Attempts', String(attemptsTotal))
       chosenCandidate = outcome.candidate
-      account = outcome.candidate.account
-      provider = outcome.candidate.provider
-      actualModel = outcome.candidate.actualModel
+      // 循环外的窄化：赋值发生在循环里，控制流分析不会把窄化带出来。
+      const served = chosenCandidate
+      account = served.account
+      provider = served.provider
+      actualModel = served.actualModel
       // 供应商名可能含中文（账号渠道如 `TRAE (字节)`、自定义供应商由用户命名），
       // 直接写进头值会让 Node 抛 ERR_INVALID_CHAR、把一次成功的路由变成 500，
       // 所以动态部分一律过 toHeaderValue（非 ASCII 按 UTF-8 百分号编码）。
       ctx.set('X-ModelPort-Route', routeHeaderValue(actualModel, provider.name))
       // 中途换实现的客户端可见形态：只在这一轮服务者与上一轮锚点不同时出现。
       // 「模型名不变、行为变了」是客户端最难自查的一类故障，这个头把它变成可观察事实。
-      const switched = autoSwitchOf(autoDecision, chosenCandidate)
+      const switched = autoSwitchOf(autoDecision, served)
       if (switched !== null) {
         ctx.set('X-ModelPort-Switch', toHeaderValue(`${switched.from} -> ${switched.to}`))
       }
@@ -1276,7 +1359,7 @@ router.post('/completions', async (ctx: Context) => {
       } else if (autoDecision.pinMiss !== undefined) {
         ctx.set('X-ModelPort-Pin', toHeaderValue(`miss=${autoDecision.pinMiss}`))
       } else if (autoDecision.pin !== undefined
-        && chosenCandidate.displayName === autoDecision.pin.displayName) {
+        && served.displayName === autoDecision.pin.displayName) {
         ctx.set('X-ModelPort-Pin', toHeaderValue(`hit=${autoDecision.pin.displayName}`))
       }
     } else if (chainCandidates.length > 1) {

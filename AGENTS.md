@@ -101,8 +101,10 @@ registry) → `adapters/<provider>.ts` → upstream; `loadbalancer.ts` picks the
 - **A turn serves one model** (`ModelRoute.modelScope`, default `single`; `family` = same
   `modelFamilyKey`; `pool` = the pre-A cross-model failover, still selectable). Trimming happens in
   `autoRouter.select()` *after* the soft pin and the circuit reorder, so a user pick or a degraded
-  model changes the head of that turn; from there only accounts of that one model are tried, and the
-  wall clock is 40 s (`AUTO_SINGLE_SCOPE_BUDGET_MS`) rather than 90 s. `minTier` is a route **floor**
+  model changes the head of that turn; from there only accounts of that one model are tried — except a
+  **zero-output capacity refusal** (429/402/quota wording, nothing streamed yet) re-selects the next
+  model, at most two extra hops, before a byte reaches the client; a pin is never overridden that way.
+  The wall clock is 40 s (`AUTO_SINGLE_SCOPE_BUDGET_MS`) rather than 90 s. `minTier` is a route **floor**
   (`applyMinTier`, after the name pin, before pool strategies and manual includes: neither can bring
   a model back), distinct from the `strong-tier` / `balanced-tier` equality strategies; an empty
   result reports `missing: ['min_tier']`, and the preview status is `below-tier`. Cross-model switching is a
