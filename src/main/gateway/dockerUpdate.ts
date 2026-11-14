@@ -192,7 +192,7 @@ export async function applyDockerUpdate(version?: string): Promise<DockerUpdateS
     // The helper runs as the image's `node` user; the mounted sock is root:docker 660,
     // so it needs the socket's group as a supplementary group or every API call 403s.
     const socketGid = String(statSync(DOCKER_SOCKET).gid)
-    const helper = await dockerApi<DockerCreateResult>('POST', '/containers/create', swapHelperBody({
+    const helper = await dockerApi<DockerCreateResult>('POST', `/containers/create?name=${encodeURIComponent(HELPER_NAME)}`, swapHelperBody({
       // By stable id, not the target tag: the target may lack update-swap.cjs, and a
       // same-tag load retags the target over this image. See swapHelperBody.
       selfImageId: inspect.Image,

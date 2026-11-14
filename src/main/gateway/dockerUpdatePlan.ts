@@ -49,7 +49,7 @@ export interface ContainerInspect {
   /** Stable image id the container runs from; unlike Config.Image (a tag) it does not
    *  move when a same-tag tarball is loaded over it. */
   Image: string
-  Config: { Image: string; Env?: string[] }
+  Config: { Image: string; Env?: string[]; ExposedPorts?: Record<string, unknown> }
   HostConfig: {
     Binds?: string[]
     PortBindings?: Record<string, { HostIp?: string; HostPort?: string }[]>
@@ -62,6 +62,7 @@ export interface ContainerInspect {
 export interface RecreateBody {
   Image: string
   Env: string[]
+  ExposedPorts: Record<string, unknown>
   HostConfig: {
     Binds: string[]
     PortBindings: Record<string, { HostIp?: string; HostPort?: string }[]>
@@ -72,20 +73,40 @@ export interface RecreateBody {
 }
 
 /**
+ * The Docker API only publishes a port that is ALSO in Config.ExposedPorts;
+ * PortBindings alone is silently ignored for any port the image does not EXPOSE.
+ * `docker run -p` adds the port to ExposedPorts for you, a raw API create does not -
+ * so a recreate that copies PortBindings but drops ExposedPorts loses every published
+ * port outside the image's EXPOSE list (here 18080, while the image exposes 8080/8443).
+ * Union the source ExposedPorts with the PortBindings keys so every bound port is exposed.
+ */
+export function exposedPortsFor(
+  source: Record<string, unknown> | undefined,
+  portBindings: Record<string, { HostIp?: string; HostPort?: string }[]>,
+): Record<string, unknown> {
+  const exposed: Record<string, unknown> = { ...(source ?? {}) }
+  for (const key of Object.keys(portBindings)) exposed[key] = exposed[key] ?? {}
+  return exposed
+}
+
+/**
  * Copy only what makes this deployment this deployment - env, volumes, published
- * ports, restart policy, network mode, supplementary groups. Cmd/Entrypoint/User
- * come from the new image, never from the old container: that is what makes this an
- * upgrade and not a clone. GroupAdd matters: it is what lets the container user reach
- * the mounted docker.sock, and dropping it would break the next online update.
+ * ports (and their ExposedPorts, without which the API drops the binding), restart
+ * policy, network mode, supplementary groups. Cmd/Entrypoint/User come from the new
+ * image, never from the old container: that is what makes this an upgrade and not a
+ * clone. GroupAdd matters: it is what lets the container user reach the mounted
+ * docker.sock, and dropping it would break the next online update.
  */
 export function recreateConfig(inspect: ContainerInspect, image: string): RecreateBody {
   const host = inspect.HostConfig ?? { Binds: [], PortBindings: {}, RestartPolicy: { Name: 'no' } }
+  const portBindings = host.PortBindings ?? {}
   return {
     Image: image,
     Env: inspect.Config?.Env ?? [],
+    ExposedPorts: exposedPortsFor(inspect.Config?.ExposedPorts, portBindings),
     HostConfig: {
       Binds: host.Binds ?? [],
-      PortBindings: host.PortBindings ?? {},
+      PortBindings: portBindings,
       RestartPolicy: host.RestartPolicy ?? { Name: 'no' },
       NetworkMode: host.NetworkMode && host.NetworkMode !== '' ? host.NetworkMode : 'bridge',
       GroupAdd: host.GroupAdd ?? [],

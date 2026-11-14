@@ -9,6 +9,7 @@ import {
   dockerArchFromNodeArch,
   dockerDaemonAssetName,
   dockerUpdateCapability,
+  exposedPortsFor,
   recreateConfig,
   selfContainerId,
   swapHelperBody,
@@ -74,6 +75,41 @@ test('recreateConfig copies the deployment identity, not the old image', () => {
   assert.equal(body.HostConfig.NetworkMode, 'bridge')
   // Dropping GroupAdd would revoke docker.sock access and break the next update.
   assert.deepEqual(body.HostConfig.GroupAdd, ['999'])
+  // The published port must be exposed even though the source Config has no ExposedPorts.
+  assert.deepEqual(body.ExposedPorts, { '8080/tcp': {} })
+})
+
+test('exposedPortsFor unions source ports with every PortBindings key', () => {
+  assert.deepEqual(
+    exposedPortsFor({ '8080/tcp': {} }, { '18080/tcp': [{ HostPort: '18080' }] }),
+    { '8080/tcp': {}, '18080/tcp': {} },
+  )
+  assert.deepEqual(exposedPortsFor(undefined, {}), {})
+  // An existing exposed entry is preserved as-is, not overwritten.
+  const marker = { '18080/tcp': { keep: true } }
+  assert.equal(exposedPortsFor(marker, { '18080/tcp': [{}] })['18080/tcp'], marker['18080/tcp'])
+})
+
+test('recreateConfig exposes a published port the image does not EXPOSE', () => {
+  // The real bug: the deployment publishes 18080 but the image only EXPOSEs 8080/8443.
+  // The Docker API silently drops a PortBindings entry whose port is not in ExposedPorts,
+  // so a recreate that copies PortBindings alone loses the host binding (container runs,
+  // bridge IP answers, host port dead). Every bound port must end up exposed.
+  const deployed: ContainerInspect = {
+    ...inspect,
+    Config: { ...inspect.Config, ExposedPorts: { '8080/tcp': {}, '8443/tcp': {} } },
+    HostConfig: {
+      ...inspect.HostConfig,
+      PortBindings: {
+        '18080/tcp': [{ HostIp: '', HostPort: '18080' }],
+        '8443/tcp': [{ HostIp: '', HostPort: '8443' }],
+      },
+    },
+  }
+  const body = recreateConfig(deployed, 'modelport-daemon:1.8.15')
+  assert.ok(body.ExposedPorts['18080/tcp'], 'published 18080 must be exposed though the image does not EXPOSE it')
+  assert.ok(body.ExposedPorts['8443/tcp'], 'published 8443 stays exposed')
+  assert.ok(body.ExposedPorts['8080/tcp'], 'source ExposedPorts are preserved')
 })
 
 test('recreateConfig defaults missing host config instead of dropping it', () => {
@@ -85,6 +121,7 @@ test('recreateConfig defaults missing host config instead of dropping it', () =>
   assert.deepEqual(body.HostConfig.RestartPolicy, { Name: 'no' })
   assert.equal(body.HostConfig.NetworkMode, 'bridge')
   assert.deepEqual(body.HostConfig.GroupAdd, [])
+  assert.deepEqual(body.ExposedPorts, {})
 })
 
 test('swapHelperEnv carries every knob the helper reads', () => {
@@ -135,12 +172,33 @@ test('the swap helper is syntactically valid CJS', () => {
 
 test('the swap helper verifies the host port actually bound, not just the bridge IP', () => {
   const helper = readFileSync(join(root, 'docker', 'update-swap.cjs'), 'utf8')
-  // A new container started while the old docker-proxy still holds the host port can
-  // run with the binding silently dropped; the bridge IP answers but the host port is
-  // dead. The helper must read the authoritative bound ports and re-create until bound.
+  // The host binding was silently dropped because the recreate copied PortBindings but
+  // not ExposedPorts: the API ignores a published port the image does not EXPOSE. The
+  // helper's recreate must preserve ExposedPorts, and must confirm the port really bound
+  // via the authoritative NetworkSettings.Ports (not the PortBindings request).
+  assert.match(helper, /ExposedPorts/, 'helper recreate must preserve ExposedPorts or the API drops the published port')
   assert.match(helper, /NetworkSettings\.Ports/, 'must inspect actual bound ports, not the PortBindings request')
   assert.match(helper, /ensurePublished/, 'must gate success on the host port being published')
   assert.match(helper, /recreateNew/, 'must re-create (not merely restart) to re-allocate the port')
+  // The docker-proxy lingers seconds after `docker stop`/`rm` returns; starting the new
+  // container too soon fails with "port is already allocated". The helper must actively
+  // wait for the host port to refuse connections before starting the new container.
+  assert.match(helper, /waitForPortFree/, 'must wait for the host port to be free before starting new')
+  assert.match(helper, /tcpOpen/, 'must probe the host port via TCP to detect docker-proxy release')
+  // Rollback re-creates the old container under the NEW name and starts that name;
+  // starting OLD after it was removed 404s and leaves the gateway down.
+  assert.doesNotMatch(helper, /encodeURIComponent\(OLD\)\}\/start/, 'rollback must start the new name, not the removed old name')
+})
+
+test('the helper container is created under its documented name', () => {
+  const orchestrator = readFileSync(join(root, 'src', 'main', 'gateway', 'dockerUpdate.ts'), 'utf8')
+  // Without ?name= Docker assigns a random name: `docker logs modelport-update-swap`
+  // then 404s and removeContainerIfExists(HELPER_NAME) never cleans the prior helper.
+  assert.match(
+    orchestrator,
+    /containers\/create\?name=\$\{encodeURIComponent\(HELPER_NAME\)\}/,
+    'helper create must pin HELPER_NAME so logs and cleanup resolve',
+  )
 })
 
 test('the helper ships in the image and the staged tree', () => {
