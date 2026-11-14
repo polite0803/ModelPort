@@ -1,6 +1,6 @@
 {
   "name": "modelport",
-  "version": "1.8.16",
+  "version": "1.8.17",
   "description": "ModelPort 模型港 - 统一管理多个 AI 服务提供商与账号渠道，提供 OpenAI 兼容 API 接口",
   "main": "./out/main/index.js",
   "author": {
