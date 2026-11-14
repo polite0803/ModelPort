@@ -591,6 +591,26 @@ vendor claim.
 the quota generator discarded; it keeps only ids the catalogue ships, since claiming a free model we
 cannot route to advertises something that never answers.
 
+### Prompt Cache and Compression Economics (2026-11-14)
+
+- **Capabilities** live in `AggregateEntry.promptCache` (`src/shared/promptCache.ts`): `mode`,
+  `readDiscount`, `writeMultiplier`, `maxBreakpoints`, `ttlMinutes`. `unknown` means "do nothing",
+  never "assume cache-friendly".
+- **Break-even** is `1 - c/(1+w)` (`cacheEconomicsOf` / `acceptCompression`); the declared `0.1`
+  floor applies only when no economics are known. Anthropic's 1h tier has `w = 1`; the 5m tier 0.25.
+- **Two-round attribution** is recorded per provider per day: `byProvider[*].compression.{applied,
+  refused}` holds upstream prompt, cache-reporting requests/tokens, cache reads and the ESTIMATED
+  `savedTokens`. `summarizeCompressionCache` returns the realized saving, both cache shares and
+  `clearsBreakEven`; `GET /v1/management/compression/economics?days=7` renders it. Absent fields are
+  `null`, never 0.
+- **Affinity is capped by the documented TTL** (`effectiveAffinityMinutes`): `cacheAffinityMinutes`
+  (60) may not outlive the cache - Anthropic 5m tier → 5m, 1h tier → 60m; an undocumented TTL keeps
+  the configured value. Rationale: a pin past the cache only blocks a better candidate.
+- **Held, deliberately**: the fourth Anthropic breakpoint (a mid-history marker moves every turn and
+  rewrites a large prefix each time) and adaptive 5m/1h TTL (the 1h tier doubles the write price and
+  the next turn's gap is unknown). Both wait for `/economics` to show a warm cache and a saving
+  above break-even; see `docs/plan/PLAN-prompt-cache.md` P3 (2026-11-14 ruling).
+
 ### Account Channels
 
 Thirteen login channels - `lobsterai`, `qoder`, `qodercn`, `trae`, `cline`, `loomy`,

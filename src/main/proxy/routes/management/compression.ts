@@ -15,6 +15,9 @@ import { managementAuthMiddleware } from '../../middleware/managementAuth'
 import { getCcrStore } from '../../compression/ccr/store'
 import { summarizeDuplication, interpretDuplication } from '../../compression/duplicationSummary.ts'
 import { readSurvivorshipStats } from '../../compression/survivorship.ts'
+import { addCompressionArms, summarizeCompressionCache } from '../../../../shared/tokenAccounting.ts'
+import { cacheEconomicsOf, promptCacheOf } from '../../../../shared/promptCache.ts'
+import { getAggregateEntry } from '../../../providers/aggregate/registry.ts'
 import { COMPRESSION_AGGRESSIVENESS, type ManagementApiResponse } from '../../../../shared/types'
 
 const router = new Router({ prefix: '/v1/management/compression' })
@@ -30,6 +33,54 @@ router.get('/status', async (ctx: Context) => {
       config: config.compression,
       aggressivenessOptions: COMPRESSION_AGGRESSIVENESS,
       ccr: getCcrStore().stats(),
+    },
+  } as ManagementApiResponse
+})
+
+/**
+ * Compression versus cache, measured per provider over the retained day buckets.
+ *
+ * The question is the two-round account from `PLAN-prompt-cache.md` §P3:
+ * `R'(1+w) < cR` — compression only wins when the saving beats the cache the
+ * client's next turn re-reads. This endpoint answers it with the two arms the
+ * accounting layer records: requests that compressed, and requests the gate
+ * refused, on the same provider and window.
+ *
+ * Read it with three constraints: the unit is upstream-reported tokens (plus an
+ * ESTIMATED `savedTokens`); `cacheShare` is null unless the upstream reported a
+ * cache figure; and `breakEvenSavingRatio` is null when the provider's cache is
+ * unknown — which is not "break-even at 0".
+ */
+router.get('/economics', async (ctx: Context) => {
+  const requested = Number(ctx.query.days)
+  const days = Number.isFinite(requested) && requested > 0 ? Math.min(Math.floor(requested), 30) : 7
+  const buckets = storeManager.getTokenUsageDays()
+  const dayKeys = Object.keys(buckets).sort().slice(-days)
+
+  const totals = new Map<string, ReturnType<typeof addCompressionArms>>()
+  for (const day of dayKeys) {
+    for (const [providerId, usage] of Object.entries(buckets[day]?.byProvider ?? {})) {
+      if (usage.compression === undefined) continue
+      totals.set(providerId, addCompressionArms(totals.get(providerId), usage.compression))
+    }
+  }
+
+  const promptCaching = ConfigManager.get().promptCaching
+  const providers = [...totals.entries()].map(([providerId, pair]) => {
+    const economics = cacheEconomicsOf(
+      promptCacheOf(getAggregateEntry(providerId)),
+      promptCaching?.anthropicTtl
+    )
+    return { providerId, ...summarizeCompressionCache(pair, economics) }
+  })
+
+  ctx.body = {
+    success: true,
+    data: {
+      window: { days, firstDay: dayKeys[0] ?? null, lastDay: dayKeys[dayKeys.length - 1] ?? null },
+      /** What the counters are: upstream tokens from day buckets, savedTokens is an estimate. */
+      unit: 'upstream_tokens+estimated_saved',
+      providers,
     },
   } as ManagementApiResponse
 })

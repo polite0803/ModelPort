@@ -313,6 +313,13 @@ DeepSeek `c ≈ 0.1` ⇒ 需省 ~90%；OpenAI `c ≈ 0.25~0.5` ⇒ 需省 50–7
 
 **拍板项 P3-1**：A 还是 B（推荐先测再拍；若押长期形态，推荐 B）。
 
+**2026-11-14 落地与暂缓（裁定）**
+
+- **已落地归因**：按日桶 `byProvider[*].compression` 记 applied / refused 两臂（上游 prompt、缓存上报数、命中 token、估算节省），`summarizeCompressionCache` 按 `R'(1+w) < cR` 算出实现节省率与 break-even；`GET /v1/management/compression/economics?days=7` 按供应商输出。它不是新通路，而是把已有日志行/日桶的字段做成可读判据。
+- **已落地路由侧**：`cacheAffinityMinutes`（默认 60）按供应商文档 TTL 封顶（`effectiveAffinityMinutes`；Anthropic 5m 档 → 5m，1h 档 → 60m）。钉在一个已经过期的缓存上只是挡住更优候选，不是省钱。
+- **暂缓 1：第 4 个断点**。断点上限 4、当前只用 3（tools / system / 上一轮末）。长历史中段断点**每轮位置都在移动**，等于每轮重写一段大前缀；要开它，先要 `/economics` 证明该家缓存确实命中、且省幅过 break-even，否则是"无脑开"。
+- **暂缓 2：TTL 按轮间隔自适应**。1h 档 `writeMultiplier=1`（写价翻倍）。唯一可论证的切换点是"上一轮间隔 > 5m、5m 缓存已经冷了"，但下一次间隔仍未知；在拿到真实轮间隔与命中率之前，不做自动切换。所需读数由上面的 `/economics` 与 `byProvider` 两臂提供。
+
 ---
 
 ## 4. 顺序与依赖

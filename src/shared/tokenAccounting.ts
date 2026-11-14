@@ -56,6 +56,12 @@ export interface ProviderDayUsage {
   costUsd: number
   /** Requests whose cost was computable at all — the denominator for `costUsd`. */
   costedRequests: number
+  /**
+   * Compression/cache arms of this provider on this day. Optional: a bucket
+   * written before this instrument existed says nothing about compression, and
+   * reading that as "both arms measured zero" would render a false comparison.
+   */
+  compression?: CompressionArmPair
 }
 
 export type ProviderDayUsageMap = Record<string, ProviderDayUsage>
@@ -118,6 +124,35 @@ export interface CompressionCandidateReading {
   tokensBefore: number
   tokensAfter: number
   accepted: boolean
+}
+
+/**
+ * Upstream-measured requests of one compression arm (applied or refused).
+ *
+ * The two arms are the A/B the two-round account needs: "compression on" versus
+ * "compression refused" on the same provider, both with real prompt tokens, so
+ * the realized cache share and the realized saving can be compared instead of
+ * assumed. Only upstream-reported requests enter — an estimate cannot say
+ * whether a prefix was cached.
+ */
+export interface CompressionCacheArm {
+  /** Upstream-measured requests in this arm. */
+  requests: number
+  /** Prompt tokens the upstream reported for those requests (already compressed on the applied arm). */
+  promptTokens: number
+  /** Requests that carried a cache figure; an explicit 0 counts as reported. */
+  cacheReportedRequests: number
+  /** Prompt tokens of the cache-reporting requests — the only honest hit-rate denominator. */
+  promptTokensWithCache: number
+  /** Cache-read input tokens (subset of `promptTokensWithCache`). */
+  cacheReadTokens: number
+  /** ESTIMATED tokens compression removed; always 0 on the refused arm. */
+  savedTokens: number
+}
+
+export interface CompressionArmPair {
+  applied: CompressionCacheArm
+  refused: CompressionCacheArm
 }
 
 /**
@@ -393,6 +428,54 @@ function nonNegativeAmount(value: number | undefined): number {
   return Number.isFinite(numeric) && numeric > 0 ? numeric : 0
 }
 
+function emptyCacheArm(): CompressionCacheArm {
+  return {
+    requests: 0,
+    promptTokens: 0,
+    cacheReportedRequests: 0,
+    promptTokensWithCache: 0,
+    cacheReadTokens: 0,
+    savedTokens: 0,
+  }
+}
+
+function normalizeCacheArm(input: unknown): CompressionCacheArm {
+  const raw = (input ?? {}) as Record<string, unknown>
+  const arm = emptyCacheArm()
+  for (const key of Object.keys(arm) as (keyof CompressionCacheArm)[]) {
+    arm[key] = nonNegative(raw[key] as number)
+  }
+  return arm
+}
+
+/** Clean one persisted arm pair; undefined when the field was never written. */
+export function normalizeProviderCompression(input: unknown): CompressionArmPair | undefined {
+  if (input === null || input === undefined || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const raw = input as Record<string, unknown>
+  const hasArm = (raw.applied !== null && typeof raw.applied === 'object')
+    || (raw.refused !== null && typeof raw.refused === 'object')
+  if (!hasArm) return undefined
+  return { applied: normalizeCacheArm(raw.applied), refused: normalizeCacheArm(raw.refused) }
+}
+
+/** Sum two arm pairs; used to fold several days into one window. */
+export function addCompressionArms(
+  left: CompressionArmPair | undefined,
+  right: CompressionArmPair | undefined
+): CompressionArmPair {
+  const a = left ?? { applied: emptyCacheArm(), refused: emptyCacheArm() }
+  const b = right ?? { applied: emptyCacheArm(), refused: emptyCacheArm() }
+  const sum = (x: CompressionCacheArm, y: CompressionCacheArm): CompressionCacheArm => ({
+    requests: x.requests + y.requests,
+    promptTokens: x.promptTokens + y.promptTokens,
+    cacheReportedRequests: x.cacheReportedRequests + y.cacheReportedRequests,
+    promptTokensWithCache: x.promptTokensWithCache + y.promptTokensWithCache,
+    cacheReadTokens: x.cacheReadTokens + y.cacheReadTokens,
+    savedTokens: x.savedTokens + y.savedTokens,
+  })
+  return { applied: sum(a.applied, b.applied), refused: sum(a.refused, b.refused) }
+}
+
 function emptyProviderUsage(): ProviderDayUsage {
   return {
     upstreamPrompt: 0,
@@ -418,10 +501,13 @@ function normalizeProviderUsage(input: unknown): ProviderDayUsageMap {
     // Same rule as the day bucket: the field list lives in `emptyProviderUsage()`
     // alone, so a counter added later is cleaned without anyone remembering.
     for (const key of Object.keys(usage) as (keyof ProviderDayUsage)[]) {
+      if (key === 'compression') continue
       usage[key] = key === 'costUsd'
         ? nonNegativeAmount(item[key] as number)
         : nonNegative(item[key] as number)
     }
+    const compression = normalizeProviderCompression(item.compression)
+    if (compression !== undefined) usage.compression = compression
     next[providerId] = usage
   }
 
@@ -506,6 +592,38 @@ function accumulateModelUsage(
 }
 
 /**
+ * Fold one request into this provider's compression arms.
+ *
+ * Estimates never enter: a `chars/4` prompt multiplied by a cache hit rate is a
+ * claim nobody measured. `saved` is the estimator's figure, so the realized
+ * saving ratio keeps an "estimate" label wherever it is rendered.
+ */
+function accumulateProviderCompression(
+  base: CompressionArmPair | undefined,
+  verdict: CompressionVerdict,
+  isUpstream: boolean,
+  prompt: number,
+  cacheRead: number,
+  cacheReported: boolean,
+  saved: number
+): CompressionArmPair | undefined {
+  if (!isUpstream) return base
+  const previous = base ?? { applied: emptyCacheArm(), refused: emptyCacheArm() }
+  const arm = verdict.applied.length > 0 ? previous.applied : previous.refused
+  const next: CompressionCacheArm = {
+    requests: arm.requests + 1,
+    promptTokens: arm.promptTokens + prompt,
+    cacheReportedRequests: arm.cacheReportedRequests + (cacheReported ? 1 : 0),
+    promptTokensWithCache: arm.promptTokensWithCache + (cacheReported ? prompt : 0),
+    cacheReadTokens: arm.cacheReadTokens + (cacheReported ? cacheRead : 0),
+    savedTokens: arm.savedTokens + (verdict.applied.length > 0 ? saved : 0),
+  }
+  return verdict.applied.length > 0
+    ? { applied: next, refused: previous.refused }
+    : { applied: previous.applied, refused: next }
+}
+
+/**
  * Fold one request into a day bucket. Pure: returns a new bucket, never mutates.
  *
  * Kept pure so the accumulation rule can be tested without a store, and so the
@@ -586,19 +704,30 @@ export function accumulateDayBucket(
     ? input.costUsd
     : null
 
-  next.byProvider = {
-    ...base.byProvider,
-    [providerId]: {
-      upstreamPrompt: previous.upstreamPrompt + (isUpstream ? prompt : 0),
-      upstreamCompletion: previous.upstreamCompletion + (isUpstream ? completion : 0),
-      estimatedPrompt: previous.estimatedPrompt + (isUpstream ? 0 : prompt),
-      estimatedCompletion: previous.estimatedCompletion + (isUpstream ? 0 : completion),
-      requests: previous.requests + 1,
-      upstreamRequests: previous.upstreamRequests + (isUpstream ? 1 : 0),
-      costUsd: previous.costUsd + (cost ?? 0),
-      costedRequests: previous.costedRequests + (cost === null ? 0 : 1),
-    },
+  const providerUsage: ProviderDayUsage = {
+    upstreamPrompt: previous.upstreamPrompt + (isUpstream ? prompt : 0),
+    upstreamCompletion: previous.upstreamCompletion + (isUpstream ? completion : 0),
+    estimatedPrompt: previous.estimatedPrompt + (isUpstream ? 0 : prompt),
+    estimatedCompletion: previous.estimatedCompletion + (isUpstream ? 0 : completion),
+    requests: previous.requests + 1,
+    upstreamRequests: previous.upstreamRequests + (isUpstream ? 1 : 0),
+    costUsd: previous.costUsd + (cost ?? 0),
+    costedRequests: previous.costedRequests + (cost === null ? 0 : 1),
   }
+  if (input.compression !== undefined) {
+    const arms = accumulateProviderCompression(
+      previous.compression,
+      input.compression,
+      isUpstream,
+      prompt,
+      cacheRead,
+      cacheReported,
+      saved
+    )
+    if (arms !== undefined) providerUsage.compression = arms
+  }
+
+  next.byProvider = { ...base.byProvider, [providerId]: providerUsage }
 
   const modelId = (input.modelId ?? '').trim()
   if (modelId.length > 0) {
@@ -615,6 +744,75 @@ export function summarizeDay(day: string, bucket: DayTokenBucket): DayTokenSumma
     ...bucket,
     day,
     upstreamCoverage: requests > 0 ? bucket.upstreamRequests / requests : null,
+  }
+}
+
+/** The provider's cache economics, as `promptCache.ts` resolves them. */
+export interface CompressionCacheEconomics {
+  /** Relative price of a cached input token (1 = fresh input). */
+  readDiscount: number
+  /** Extra multiplier charged when writing the cache. */
+  writeMultiplier: number
+}
+
+/**
+ * The two-round account, measured instead of assumed.
+ *
+ * `realizedSavingRatio` is the compression's own estimate; `breakEvenSavingRatio`
+ * is `1 - c/(1+w)` — the saving compression must reach just to pay for the cache
+ * bytes the client's next request re-sends. When the first is below the second,
+ * that provider's applied arm was a net loss in tokens, whatever the header says.
+ *
+ * Every term is `null` when its input is absent, never 0 — "no cache figure"
+ * must not render as "a 0% hit rate".
+ */
+export interface CompressionCacheSummary {
+  applied: CompressionCacheArm
+  refused: CompressionCacheArm
+  /** `cacheReadTokens / promptTokensWithCache` on the compressed arm. */
+  appliedCacheShare: number | null
+  /** Same share on the refused arm — the counterfactual. */
+  refusedCacheShare: number | null
+  /** `saved / (promptTokens + saved)` on the applied arm (mixed estimate). */
+  realizedSavingRatio: number | null
+  /** `1 - c/(1+w)`; null when the cache is unknown or costs at least fresh input. */
+  breakEvenSavingRatio: number | null
+  /** Whether the realized saving clears the break-even; null when either is unknown. */
+  clearsBreakEven: boolean | null
+}
+
+function cacheShareOf(arm: CompressionCacheArm): number | null {
+  return arm.promptTokensWithCache > 0 ? arm.cacheReadTokens / arm.promptTokensWithCache : null
+}
+
+export function summarizeCompressionCache(
+  pair: CompressionArmPair | undefined,
+  economics?: CompressionCacheEconomics
+): CompressionCacheSummary {
+  const applied = pair?.applied ?? emptyCacheArm()
+  const refused = pair?.refused ?? emptyCacheArm()
+  // On the applied arm `promptTokens` is what the upstream saw (R'), so the
+  // original is R' + saved. On the refused arm the two are the same.
+  const realizedBase = applied.promptTokens + applied.savedTokens
+  const realizedSavingRatio = applied.savedTokens > 0 && realizedBase > 0
+    ? applied.savedTokens / realizedBase
+    : null
+  const breakEvenSavingRatio = economics !== undefined
+    && Number.isFinite(economics.readDiscount)
+    && economics.readDiscount < 1
+    ? Math.max(0, 1 - economics.readDiscount / (1 + Math.max(0, economics.writeMultiplier)))
+    : null
+
+  return {
+    applied,
+    refused,
+    appliedCacheShare: cacheShareOf(applied),
+    refusedCacheShare: cacheShareOf(refused),
+    realizedSavingRatio,
+    breakEvenSavingRatio,
+    clearsBreakEven: realizedSavingRatio === null || breakEvenSavingRatio === null
+      ? null
+      : realizedSavingRatio >= breakEvenSavingRatio,
   }
 }
 

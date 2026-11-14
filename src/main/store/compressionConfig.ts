@@ -36,9 +36,13 @@ export function normalizeCompressionConfig(
       : undefined
 
   return {
-    // Only an explicit `true` enables it; an explicit `false` keeps it off even
-    // though the shipped default is on. A stray non-boolean also lands on off.
-    enabled: input.enabled === true,
+    // Absent inherits the shipped default (on); an explicit `false` keeps it off,
+    // and a stray non-boolean lands on off rather than guessing. A pre-upgrade
+    // `data.json` that carries a partial block but no `enabled` key must read the
+    // same as one that has no block at all.
+    enabled: input.enabled === undefined
+      ? DEFAULT_COMPRESSION_CONFIG.enabled
+      : input.enabled === true,
     aggressiveness: COMPRESSION_AGGRESSIVENESS.includes(
       input.aggressiveness as CompressionConfig['aggressiveness']
     )

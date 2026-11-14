@@ -51,7 +51,7 @@ import { permanentRefusalCooldownMs } from './failover.ts'
 import { clearCatalogMissCooldowns, isCatalogMissCoolingDown } from './modelCatalogCooldown'
 import { getChannelDefinition } from '../providers/accountChannels/catalogue'
 import { getAggregateEntry } from '../providers/aggregate/registry.ts'
-import { promptCacheOf } from '../../shared/promptCache.ts'
+import { promptCacheOf, effectiveAffinityMinutes, type PromptCacheCapability } from '../../shared/promptCache.ts'
 import {
   advertisedContextFloorOf,
   advertisedContextTokens,
@@ -142,9 +142,9 @@ export type ChannelAccountCounts = Readonly<Record<string, { total: number; enab
  * Only aggregate entries carry the capability table; builtin/custom endpoints
  * stay out, because "unknown" must not silently become "cache-friendly".
  */
-function isCacheCapableProvider(provider: Provider): boolean {
-  if (provider.type !== 'aggregate' || !provider.aggregateId) return false
-  return promptCacheOf(getAggregateEntry(provider.aggregateId)).mode !== 'unknown'
+function promptCacheCapabilityOf(provider: Provider): PromptCacheCapability | undefined {
+  if (provider.type !== 'aggregate') return undefined
+  return promptCacheOf(getAggregateEntry(provider.aggregateId ?? provider.id))
 }
 
 export interface AutoCandidate {
@@ -2067,12 +2067,20 @@ class AutoRouter {
     this.modelCircuit.delete(circuitMapKey(routeName, candidate.displayName))
     if (!key) return
 
-    const config = storeManager.getConfig().autoRouting
+    const fullConfig = storeManager.getConfig()
+    const config = fullConfig.autoRouting
     const minutes = route?.stickyMinutes ?? config?.stickyMinutes ?? 0
-    const affinityMinutes = config?.cacheAffinityMinutes ?? 0
-    const cacheCapable = isCacheCapableProvider(candidate.provider)
+    const requestedAffinity = config?.cacheAffinityMinutes ?? 0
+    const capability = promptCacheCapabilityOf(candidate.provider)
+    const cacheCapable = capability !== undefined && capability.mode !== 'unknown'
+    // A cache affinity may not outlive the cache it exists for: pinned for 60 min
+    // to a provider whose documented TTL is 5 min keeps a switch that no longer
+    // pays for anything.
+    const affinityMinutes = cacheCapable
+      ? effectiveAffinityMinutes(requestedAffinity, capability, fullConfig.promptCaching?.anthropicTtl)
+      : 0
 
-    if (minutes <= 0 && !(affinityMinutes > 0 && cacheCapable)) return
+    if (minutes <= 0 && affinityMinutes <= 0) return
 
     const now = Date.now()
     for (const [existingKey, entry] of this.sticky) {
@@ -2098,7 +2106,7 @@ class AutoRouter {
       this.sticky.set(stickyKey, { hint, expiresAt: now + minutes * 60 * 1000 })
     }
 
-    if (affinityMinutes > 0 && cacheCapable) {
+    if (affinityMinutes > 0) {
       this.cacheAffinity.delete(stickyKey)
       this.cacheAffinity.set(stickyKey, { hint, expiresAt: now + affinityMinutes * 60 * 1000 })
     }

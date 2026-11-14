@@ -178,21 +178,31 @@ ModelPort/
 - **入口**：
   - `applyCompression(input)`：压缩 live zone 并产出 `CompressionReport`（`index.ts`）
   - `recordCompressionReport(requestId, report)` / `takeCompressionReport(requestId)`：把报告从转发器交给路由层（路由负责响应头与请求日志行）
-- **模块划分**（共 15 个文件）：
+- **模块划分**（`src/main/proxy/compression/`，19 个文件）：
   - `index.ts`：门面与报告注册表
   - `detector.ts`：内容类型识别（JSON 数组 / JSON 文档 / 日志 / 搜索 / 源码 / 纯文本等）
   - `estimator.ts`：内容感知的 token 估算
-  - `policy.ts`：门禁（必须严格变小，且至少省 `MIN_SAVINGS_RATIO`）
+  - `policy.ts`：门禁（必须严格变小，且至少省 `MIN_SAVINGS_RATIO`；有缓存经济性时升为 `1 - c/(1+w)`）
   - `liveZone.ts`：live zone 选取与字节区间替换
   - `types.ts`：共享类型与阈值常量（配置类型来自 `src/shared/types.ts`）
   - `compressors/smartCrusher.ts`：JSON 统计选行压缩
+  - `compressors/logCompressor.ts`、`compressors/searchCompressor.ts`：日志与搜索结果行压缩
+  - `fold.ts`、`foldGate.ts`：跨轮重复折叠本体与测量门（默认关，`duplication.ts`/`duplicationSummary.ts` 只观测）
   - `ccr/store.ts`、`ccr/markers.ts`：可逆内容寻址存储与哨兵标记
   - `signals/adaptiveSizer.ts`、`signals/errorKeywords.ts`：保留行预算与错误关键词分级
-  - `outputSteering.ts`：输出侧 verbosity 注入
   - `duplication.ts`、`duplicationSummary.ts`、`survivorship.ts`：**只观测不改动请求**的跨轮重复度与会话存活期统计
-- **配套管理接口**：`src/main/proxy/routes/management/compression.ts`（`/v1/management/compression/status|retrieve|duplication`）
-- **注入点**：`src/main/proxy/forwarder.ts`（`applyCompression` / `applyVerbositySteering` / `measureCrossTurnDuplication` / `recordConversationTurn`），报告在 `src/main/proxy/routes/chat.ts` 取回
+  - `evalCorpus.ts`：离线语料回放
+- **配套管理接口**：`src/main/proxy/routes/management/compression.ts`（`/v1/management/compression/status|economics|retrieve|duplication`）
+- **注入点**：`src/main/proxy/forwarder.ts`（`applyCompression` / `applyGatewayText` / `measureCrossTurnDuplication` / `recordConversationTurn`），报告在 `src/main/proxy/routes/chat.ts` 取回
 - **配置**：`src/shared/types.ts` 的 `CompressionConfig` / `DEFAULT_COMPRESSION_CONFIG`，落地在 `src/main/store/compressionConfig.ts`
+
+#### 4.1.5.1 提示词缓存 (src/shared/promptCache.ts)
+- **能力表**：`PromptCacheCapability`（`explicit-breakpoints` / `implicit-prefix` / `unknown`），按聚合条目声明读折扣、写倍率、断点上限与 TTL
+- **Anthropic 断点**：`src/main/proxy/adapters/anthropic.ts` 的 `applyCacheBreakpoints`，只放 tools 尾 / system 尾 / 上一轮末三个稳定位（上限 4）
+- **压缩门的经济性**：`cacheFirst` + `isCacheSensitive`（读折扣 ≤ 0.2 默认跳过），`cacheEconomicsOf` 供 `policy.ts` 与压缩归因共用
+- **路由亲和**：`effectiveAffinityMinutes` 把 `cacheAffinityMinutes` 封顶在供应商文档 TTL（Anthropic 5m / 1h 档 60m）
+- **归因**：按日桶 `byProvider[*].compression` 记录 applied/refused 两臂的上游 prompt 与 cache read，`summarizeCompressionCache` 算两轮账
+- **输出契约**：`src/main/proxy/gatewayText.ts` 的 `say-less-contract`（默认关，带工具才注入，受 `outputContractGuard.ts` 退化熔断）
 
 #### 4.1.6 额度计量 (src/main/proxy/quota/)
 - **职责**：聚合目录的额度记账、观察学习与预检；`smart` / `pace` 路由策略读同一份账本

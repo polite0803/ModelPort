@@ -86,6 +86,28 @@ export function cacheEconomicsOf(
   return { readDiscount: capability.readDiscount, writeMultiplier }
 }
 
+/**
+ * How long a conversation may stay pinned for cache reasons, in minutes.
+ *
+ * The configured window is an upper bound, never a promise: pinning for an hour
+ * to a provider whose documented prefix cache lives five minutes keeps a switch
+ * that no longer pays. `anthropicTtl: '1h'` raises the documented floor to the
+ * tier the adapter actually writes; an unknown TTL leaves the configured value
+ * alone rather than inventing one.
+ */
+export function effectiveAffinityMinutes(
+  configuredMinutes: number,
+  capability: PromptCacheCapability | undefined,
+  anthropicTtl?: '5m' | '1h'
+): number {
+  if (!Number.isFinite(configuredMinutes) || configuredMinutes <= 0) return 0
+  const documented = capability?.mode === 'explicit-breakpoints' && anthropicTtl === '1h'
+    ? 60
+    : capability?.ttlMinutes
+  if (documented === undefined || !Number.isFinite(documented) || documented <= 0) return configuredMinutes
+  return Math.min(configuredMinutes, documented)
+}
+
 /** Stored switch; the adapter reads it on every request. */
 export interface PromptCachingConfig {
   enabled: boolean

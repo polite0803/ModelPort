@@ -20,7 +20,7 @@
 | 最值得移植的是什么？ | **① JSON 统计压缩（SmartCrusher）**，60–95%；**② 日志/搜索/diff 行压缩**；**③ CCR 可逆存储**；**④ live-zone 缓存安全规则**（不是压缩算法，但是让前三者安全的前提）；**⑤ 输出侧 verbosity 抑制**。 |
 | 最大的技术风险是什么？ | **打破上游 prompt 前缀缓存**。压缩历史 = 缓存全部 miss，省下的 token 变成多花的钱。Headroom 的解法是「只压最新一轮的字节」，这也是本方案第一硬约束。 |
 | 落地位置 | `src/main/proxy/forwarder.ts` 的 `forwardChatCompletion()`，与现有 `contextManagement` 同一层、**在 `transformRequestForPromptToolUse` 之前**。 |
-| 默认值 | **关闭**。Headroom 自己的 Rust 代理也默认关闭（`config.rs:362-370`，`CompressionMode::Off`）。按供应商/模型白名单开启。 |
+| 默认值 | **代码默认开启**（`DEFAULT_COMPRESSION_CONFIG.enabled = true`，`src/shared/types.ts`）。本计划成文时的口径是关闭；当前 `cacheFirst` 会让 DeepSeek/Anthropic 等有文档前缀缓存的家默认跳过，`providerOverrides` 才显式覆盖。 |
 | 工作量 | P0–P5 六阶段，纯 TS 约 3.5k–4.5k 行 + 测试；P1 单独上线即可拿到绝大部分收益。 |
 
 ---

@@ -19,6 +19,16 @@ test('only an explicit true enables compression', () => {
   assert.equal(normalizeCompressionConfig({ enabled: 'yes' as never }).enabled, false)
 })
 
+test('a partial block without the enabled key inherits the shipped default', () => {
+  // A block that exists but lost its key must read like "no block at all";
+  // reading it as `false` would silently turn compression off on upgrade.
+  assert.equal(
+    normalizeCompressionConfig({ aggressiveness: 'aggressive' }).enabled,
+    DEFAULT_COMPRESSION_CONFIG.enabled
+  )
+  assert.equal(normalizeCompressionConfig({ cacheFirst: false }).enabled, DEFAULT_COMPRESSION_CONFIG.enabled)
+})
+
 test('an unrecognised strength falls back to the default', () => {
   assert.equal(
     normalizeCompressionConfig({ aggressiveness: 'turbo' as never }).aggressiveness,
