@@ -170,6 +170,18 @@ export interface RouteModelRef {
   displayName: string
 }
 
+/** 星级推荐的上限（1–5 星）；写入校验与界面共用这一个数。 */
+export const ROUTE_RATING_MAX_STARS = 5
+
+/**
+ * 用户对池内某个模型的星级推荐。键与手工增删引用同形（providerId + displayName）：
+ * 同名模型可能被多家服务，评分落在「这一家的这个模型」上，不是全局模型名。
+ */
+export interface RouteModelRating extends RouteModelRef {
+  /** 1–5 的整数；清除评分 = 删掉这一条，而不是写 0。 */
+  stars: number
+}
+
 /** 空池原因。前四个是请求画像缺能力，后两个是路由配置把池筛光。 */
 export type RoutePoolMissingReason =
   | 'vision'
@@ -491,6 +503,15 @@ export interface ModelRoute {
    * `resolveCapability` 对未标注模型按名字启发式给档，因此这里总有一个确定值。
    */
   minTier?: AutoModelTier
+  /**
+   * 池内模型的星级推荐（1–5 星，`routes:rate` 写入）。
+   *
+   * 纯标注：只影响路由页的展示与「星级优先」显示排序，**不参与选路打分**——
+   * 评分是用户对模型质量的主观推荐，与自动排序的客观判据（延迟/成本/退化）是
+   * 两件事，混进打分等于让一次点击悄悄改写每一轮的路由行为。
+   * 缺省（不落键）= 没有任何评分；空数组归一时同样不落键。
+   */
+  modelRatings?: RouteModelRating[]
 }
 
 /** 一轮请求内的模型换家范围（见 `ModelRoute.modelScope`）。 */
@@ -534,6 +555,8 @@ export interface RouteMenuModel {
   current: boolean
   /** 被 `preferredModel` 或一次显式切换钉住的模型。 */
   pinned: boolean
+  /** 用户给的星级推荐（1–5）；没评过不写。 */
+  rating?: number
 }
 
 /** 一条路由的托盘/界面菜单快照。 */
@@ -611,6 +634,28 @@ export interface RouteSwitchResult {
   reason?: string
   /** 切换后新的菜单快照，省一次往返。 */
   menu?: RouteMenuEntry
+}
+
+/**
+ * 一次星级推荐写入。`stars: 0` = 清除这个模型的评分；1–5 = 设定/覆盖。
+ * 与切换不同，评分不要求模型此刻在可派池里：冷却/配额是瞬时状态，
+ * 用户对模型质量的推荐不该因为一次限流就被拒写或丢掉。
+ */
+export interface RouteRateRequest {
+  route: string
+  providerId: string
+  model: string
+  stars: number
+}
+
+export interface RouteRateResult {
+  ok: boolean
+  route: string
+  model?: string
+  /** 写入后的星级（清除时为 0）。 */
+  stars?: number
+  /** 失败原因，可直接展示。 */
+  reason?: string
 }
 
 /** How two adjacent pool strategies combine: intersect (`and`) or union (`or`). */

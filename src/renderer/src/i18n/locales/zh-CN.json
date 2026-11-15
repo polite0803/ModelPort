@@ -596,6 +596,7 @@
     "routePoolMissing_manual_filter": "手动移除清空了候选池",
     "routePoolMissing_min_tier": "能力下限把候选池筛空了",
     "routePoolUnresolved": "有 {{count}} 条手动加入的模型已不在候选范围（已停用或删除），可逐条移除",
+    "routePoolClearUnresolved": "一键清理失效引用",
     "routePoolSampleVision": "预览请求需要图片",
     "routePoolSampleTools": "预览请求需要工具",
     "routePoolSampleTokens": "预估上下文",
@@ -2109,7 +2110,7 @@
   },
   "routes": {
     "title": "路由与模型",
-    "description": "按路由查看全部可切换模型，搜索后点「固定」（30 分钟软钉）或「长期」（写进路由配置，重启后仍生效）。「恢复自动排序」会把两者一起清掉。「上轮服务」是已经发生的事实，「已固定」是下一轮请求会优先走的选择。",
+    "description": "按路由查看全部可切换模型，搜索后点「固定」（30 分钟软钉）或「长期」（写进路由配置，重启后仍生效）。「恢复自动排序」会把两者一起清掉。「上轮服务」是已经发生的事实，「已固定」是下一轮请求会优先走的选择。星级推荐（1–5 星）是对模型质量的主观标注，不影响选路排序。",
     "loading": "正在读取路由…",
     "unavailable": "路由接口不可用，请重启应用后重试",
     "loadFailed": "读取失败：{{error}}",
@@ -2150,7 +2151,16 @@
     "persist": "长期",
     "persistHint": "把这条路由长期固定到这个模型：写入路由配置，重启后仍然生效",
     "persistDone": "已长期固定到 {{model}}",
-    "persistentBadge": "长期固定"
+    "persistentBadge": "长期固定",
+    "ratingGroup": "给 {{model}} 评星",
+    "rateAria": "评 {{n}} 星",
+    "rateClearAria": "清除 {{model}} 的星级（当前 {{n}} 星）",
+    "rateDone": "已给 {{model}} 评 {{n}} 星",
+    "rateCleared": "已清除 {{model}} 的星级",
+    "sortByRating": "星级优先",
+    "sortByRouting": "路由顺序",
+    "sortHint": "只改变列表显示顺序，不改变真实选路",
+    "ratedCount": "已评分 {{n}} 个"
   },
   "gatewayConnection": {
     "network": "网络错误",

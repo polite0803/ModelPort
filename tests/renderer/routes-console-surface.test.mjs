@@ -23,6 +23,9 @@ const read = (path) => readFileSync(join(root, path), 'utf8')
 const page = read('src/renderer/src/pages/Routes.tsx')
 const app = read('src/renderer/src/App.tsx')
 const sidebar = read('src/renderer/src/components/layout/Sidebar.tsx')
+const trayRoutes = read('src/renderer/src/api/trayRoutes.ts')
+const sharedApi = read('src/shared/api.ts')
+const channels = read('src/main/ipc/channels.ts')
 
 const locales = ['zh-CN', 'en-US'].map(name => ({
   name,
@@ -85,6 +88,42 @@ test('软钉与持久钉在列表里长得不一样', () => {
   assert.match(page, /model\.displayName !== persistentPin && \(/, '已经长期固定那一行不再显示「长期」按钮')
 })
 
+test('星级推荐走 routes:rate：纯标注控件，星数共用常量，排序只改显示顺序', () => {
+  assert.match(page, /function StarRating\(/, '每行一个可点的星级控件')
+  assert.match(page, /ROUTE_RATING_MAX_STARS/, '星数与主进程读写校验共用同一个常量，不在页面再写一个 5')
+  assert.match(page, /await api\.rate\(\{/, '评分必须是命名方法 routes:rate，不是页面自己拼配置')
+  assert.match(page, /providerId: model\.providerId/, '同名模型多家服务，评分落在「这一家的这个模型」')
+  assert.match(page, /onChange=\{stars => void runRate\(model, stars\)\}/)
+  assert.match(page, /stars === 0 \? undefined : stars/, '清除 = 行上不再带 rating（乐观更新）')
+  assert.match(page, /star === current \? 0 : star/, '再点同一颗星清除，不是永远只能加星')
+  // 「星级优先」只改显示顺序：真实选路仍按快照原序。
+  assert.match(page, /\(b\.rating \?\? 0\) - \(a\.rating \?\? 0\)/, '同星保持快照原序（稳定排序）')
+  assert.match(page, /sortByRating \? t\('routes\.sortByRating'\) : t\('routes\.sortByRouting'\)/)
+  assert.match(page, /t\('routes\.sortHint'\)/, '排序按钮要说明「只改显示、不改选路」')
+  // 写失败要回读真相，不能让乐观更新的星星停在屏幕上骗人。
+  assert.match(page, /if \(!result\.ok\) \{[\s\S]{0,260}?await refresh\(\)/)
+})
+
+test('池结构变更订阅：供应商/模型启停后路由页与托盘自动重取（批 B）', () => {
+  // 专用事件，不复用 config:changed —— 评分也写 config 但不改池，混在一起会让每次
+  // 点星都整池重读。常量、命名方法、两处订阅各钉一处，少一处就退回「停了还列着」。
+  assert.match(channels, /ROUTES_POOL_CHANGED: 'routes:pool-changed'/)
+  assert.match(sharedApi, /onPoolChanged: \(callback: \(payload: \{ at: number \}\) => void\) => \{/)
+  assert.match(sharedApi, /wire\.on\(IpcChannels\.ROUTES_POOL_CHANGED, handler\)/)
+  assert.match(sharedApi, /return \(\) => wire\.off\(IpcChannels\.ROUTES_POOL_CHANGED, handler\)/,
+    '订阅要能取消：重挂载不能留两个监听器')
+
+  // 路由页（挂载时）重取本页视图。
+  assert.match(page, /api\.onPoolChanged\(\(\) => \{ void refresh\(\) \}\)/,
+    '路由页订阅池变更并重取，否则停在旧快照')
+
+  // 托盘桥（App 顶层常驻）重发快照：不依赖路由页是否挂载。
+  assert.match(trayRoutes, /window\.electronAPI\?\.routes\?\.onPoolChanged\?\.\(\(\) => publish\(\)\)/,
+    '托盘缓存只有这一处能更新，池变了就要重发')
+  assert.match(trayRoutes, /offPool\(\)/, '清理要连同池变更订阅一起取消')
+  assert.match(app, /installTrayRouteBridge\(\)/, '桥在 App 顶层常驻，任意页启停供应商都能刷新托盘')
+})
+
 test('托盘的溢出提示与深链对得上：带路由名才落到那一条', () => {
   const shell = read('src/shell/main.ts')
   assert.match(shell, /`\/routes\?\$\{new URLSearchParams\(\{ route \}\)\.toString\(\)\}`/,
@@ -121,7 +160,16 @@ test('两种语言写全，插值槽一致', () => {
     persist: '',
     persistHint: '',
     persistDone: '{{model}}',
-    persistentBadge: ''
+    persistentBadge: '',
+    ratingGroup: '{{model}}',
+    rateAria: '{{n}}',
+    rateClearAria: '{{model}},{{n}}',
+    rateDone: '{{model}},{{n}}',
+    rateCleared: '{{model}}',
+    sortByRating: '',
+    sortByRouting: '',
+    sortHint: '',
+    ratedCount: '{{n}}'
   }
   for (const { name, json } of locales) {
     assert.equal(typeof json.nav.routes, 'string', `${name} 缺 nav.routes`)
@@ -133,7 +181,7 @@ test('两种语言写全，插值槽一致', () => {
     }
     // 计数变量刻意叫 n 不叫 count：i18next 见到 count 会去查 `_one`/`_other`，
     // 而这里没有单复数变体，缺键会落到原键上显示成「1 models」。
-    for (const key of ['listModelCount', 'accountCount', 'showing']) {
+    for (const key of ['listModelCount', 'accountCount', 'showing', 'ratedCount']) {
       assert.doesNotMatch(json.routes[key], /{{\s*count\s*}}/, `${name} 的 routes.${key} 用了 count 槽`)
     }
   }

@@ -38,6 +38,8 @@ import type {
   RoutePreviewSample,
   RouteMenuResult,
   RouteMenuRequest,
+  RouteRateRequest,
+  RouteRateResult,
   RouteSwitchRequest,
   RouteSwitchResult,
   TlsStatus,
@@ -543,6 +545,17 @@ interface RoutesAPI {
   switchModel: (request: RouteSwitchRequest) => Promise<RouteSwitchResult>
   /** 恢复自动排序：清软钉并清掉持久 `preferredModel`。 */
   unpin: (route: string) => Promise<RouteSwitchResult>
+  /**
+   * 星级推荐（1–5，0 清除）：写路由配置的 `modelRatings`。纯标注，不改选路
+   * 排序，也不要求模型此刻在可派池里（冷却/配额是瞬时状态）。
+   */
+  rate: (request: RouteRateRequest) => Promise<RouteRateResult>
+  /**
+   * 候选池**结构**变更订阅（供应商/账号/模型启停增删、能力标注、路由结构编辑）。
+   * 主进程落盘时推 `routes:pool-changed`，路由页与托盘桥据此重取菜单。纯星级评分
+   * 不触发（标注不改池成员）。返回取消订阅函数，重挂载不留两个监听器。
+   */
+  onPoolChanged: (callback: (payload: { at: number }) => void) => () => void
 }
 
 interface RequestLogEntry {

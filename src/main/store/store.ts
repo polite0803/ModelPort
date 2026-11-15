@@ -4,12 +4,14 @@
  * Seals strings through the host binding: the Electron keystore, or none on a headless daemon
  */
 
-import { getHost } from '../runtime/host'
+import { getHost, isHostBound } from '../runtime/host'
+import { IpcChannels } from '../ipc/channels'
 import type { RendererSink } from '../ipc/logBroadcast'
 import { homedir } from 'os'
 import { join } from 'path'
 import { copyFileSync, existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs'
 import { randomBytes, randomUUID } from 'crypto'
+import { isDeepStrictEqual } from 'util'
 import {
   StoreSchema,
   AppConfig,
@@ -82,6 +84,7 @@ import { normalizeAutoRoutingConfig } from './autoRoutingConfig'
 import {
   allModelRoutes,
   checkPoolStrategyIds,
+  checkRouteModelRatings,
   checkRouteModelRefs,
   checkRouteName,
   findModelRoute,
@@ -134,8 +137,26 @@ type StoreType = any
  */
 const CIPHERTEXT_PREFIX = 'v1:'
 
+/**
+ * 改变「哪些模型能进池」的顶层键。只有这些键的写会 bump 结构修订号：供应商/账号
+ * 启停增删、配置与路由、模型 served 标注（overrides）、手工能力标注（marks）、
+ * 目录采纳（adoptions）。每请求的日志/统计/额度快照写**不在其列** —— 否则 preview
+ * 的 15s 短缓存会被高频写打穿，退回全池扫描（实测 p50 4.7s / p90 10.2s）。
+ */
+const STRUCTURAL_KEYS = [
+  'providers',
+  'accounts',
+  'config',
+  'userModelOverrides',
+  'userModelMarks',
+  'catalogAdoptions',
+] as const
+type StructuralKey = (typeof STRUCTURAL_KEYS)[number]
+
 class StoreManager {
   private store: StoreType | null = null
+  private structuralRevision = 0
+  private structuralSnapshot = new Map<string, unknown>()
   private isInitialized: boolean = false
   private mainWindow: RendererSink | null = null
   private initializationError: Error | null = null
@@ -149,6 +170,73 @@ class StoreManager {
 
   setMainWindow(window: RendererSink | null): void {
     this.mainWindow = window
+  }
+
+  /**
+   * 结构写拦截（批 A/B）。**刻意不用 conf 的 `onDidChange`**：它的回调 getter 每次都
+   * `get store()` —— 整文件读盘 + JSON.parse，加密时还要 pbkdf2(10000 轮) + AES 解密；
+   * 而且**任何键**的一次 `set` 都会触发全部订阅。实测把 6 个结构键订阅挂上去，每请求的
+   * `statistics` 写要多付 6 次整文件读：明文 +5.4ms/写、加密 +24.6ms/写（data.json ~600KB、
+   * 300 次均值）—— 直接打穿本批要保的 preview 短缓存性能目标（全池扫描 p50 4.7s）。
+   *
+   * 改为在 conf 实例的 `set` 上包一层：写入参数里就带着键与值，**零读盘**即可判断是不是
+   * 结构键、值有没有真变。`clear()` 内部走 `reset → set`，所以同样被这层接住，无需另包；
+   * `delete()` 只用在退役的非结构键上，不影响池。内存快照复刻 conf watcher 的「值没变就不
+   * bump」语义 —— renderer 整份镜像回写常常是无变化的 no-op，不该让它触发整池重扫。
+   * 两处 `new Store`（正常 / 损坏恢复）都要装：恢复路径换了新实例，旧实例上的包装随它作废。
+   */
+  private installStructuralWriteHook(): void {
+    const store = this.store
+    if (store === null) return
+
+    // 一次性读盘播种快照：让安装后第一次 no-op 写也不误 bump（初始化期的一次读，非热路径）。
+    const seed = store.store as Record<string, unknown>
+    for (const key of STRUCTURAL_KEYS) this.structuralSnapshot.set(key, seed[key])
+
+    const isStructural = (key: string): key is StructuralKey =>
+      (STRUCTURAL_KEYS as readonly string[]).includes(key)
+    const bump = (top: StructuralKey): void => {
+      this.structuralRevision += 1
+      // config 键只 bump 不发事件：星级推荐（modelRatings）也写 config 但不改池成员，
+      // 发事件会让路由页每次评分整池重读。路由结构改动由 createRoute/updateRoute/
+      // deleteRoute 显式发（纯评分补丁除外）。其余五键落盘即通知。
+      if (top !== 'config') this.notifyPoolChanged()
+    }
+
+    const originalSet = store.set.bind(store)
+    store.set = (key: unknown, value?: unknown): void => {
+      originalSet(key, value)
+      if (typeof key !== 'string') return
+      const dot = key.indexOf('.')
+      const top = dot === -1 ? key : key.slice(0, dot)
+      if (!isStructural(top)) return
+      if (dot === -1) {
+        // 整对象写：值没真变就不 bump（与 conf watcher 的深比较同语义），并刷新快照。
+        if (isDeepStrictEqual(this.structuralSnapshot.get(top), value)) return
+        this.structuralSnapshot.set(top, value)
+      }
+      // 点路径写的是片段，无法与整对象快照深比较；结构键今天只整对象写，保守 bump 不动快照。
+      bump(top)
+    }
+  }
+
+  /**
+   * 池结构变更通知（批 B）：推给所有窗口（Electron）与 SSE 客户端（无头），路由页与
+   * 托盘据此重取菜单。没有宿主绑定时（纯存储单测）静默跳过 —— 通知是增益，不是写盘前提。
+   */
+  private notifyPoolChanged(): void {
+    if (!isHostBound()) return
+    getHost().push(IpcChannels.ROUTES_POOL_CHANGED, { at: Date.now() })
+  }
+
+  /**
+   * 结构写修订号（单调递增）。折进 `autoRouter.preview` 的缓存键：供应商/模型启停
+   * 一落盘，缓存键即变，下一次预览/托盘菜单/切换立刻读到新池，而不是停在 ≤15s 的
+   * 旧快照上（旧键只含路由配置，不含 enabled/served 状态 —— 那正是「停了还在池里」
+   * 的显示层根因）。
+   */
+  getStructuralRevision(): number {
+    return this.structuralRevision
   }
 
   /**
@@ -195,6 +283,7 @@ class StoreManager {
         defaults: this.getDefaultData(),
         encryptionKey: this.encryptionKey,
       })
+      this.installStructuralWriteHook()
       this.orphanSystemPrompts(storagePath)
       this.dropRetiredTopLevelKeys()
 
@@ -238,6 +327,7 @@ class StoreManager {
           defaults: this.getDefaultData(),
           encryptionKey: this.encryptionKey,
         })
+        this.installStructuralWriteHook()
         await this.initializeAppLogManager(storagePath)
         await this.initializeRequestLogManager(storagePath)
         this.initializeQuotaLedger(storagePath)
@@ -1710,6 +1800,7 @@ class StoreManager {
     }
 
     this.addLog('info', `Route created: ${name}`, { data: { name } })
+    this.notifyPoolChanged()
     return { ok: true, route, routes: written.routes ?? {} }
   }
 
@@ -1774,6 +1865,9 @@ class StoreManager {
     }
 
     this.addLog('info', `Route updated: ${nextName}`, { data: { name: nextName } })
+    // 纯评分补丁（只动 modelRatings）不改池成员，不发池变更事件 —— 否则路由页每次
+    // 评分都整池重读。其余字段（include/exclude/pin/enabled/preferredModel/改名…）都发。
+    if (Object.keys(patch).some(key => key !== 'modelRatings')) this.notifyPoolChanged()
     return { ok: true, route, routes: written.routes ?? {} }
   }
 
@@ -1802,6 +1896,7 @@ class StoreManager {
     const written = this.updateConfig({ routes: next })
 
     this.addLog('info', `Route deleted: ${validated.name}`, { data: { name: validated.name } })
+    this.notifyPoolChanged()
     return { ok: true, removed: existing, routes: written.routes ?? {} }
   }
 
@@ -1824,6 +1919,8 @@ class StoreManager {
     if (excludeError !== undefined) return excludeError
     const pinError = checkRouteModelRefs('pinModels', input.pinModels)
     if (pinError !== undefined) return pinError
+    const ratingError = checkRouteModelRatings(input.modelRatings)
+    if (ratingError !== undefined) return ratingError
     return undefined
   }
 

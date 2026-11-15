@@ -36,14 +36,16 @@ test('三个通道各有一条字符串定义，主进程与页面都只引用�
   assert.equal(IpcChannels.ROUTES_MENU, 'routes:menu')
   assert.equal(IpcChannels.ROUTES_SWITCH, 'routes:switch')
   assert.equal(IpcChannels.ROUTES_UNPIN, 'routes:unpin')
+  assert.equal(IpcChannels.ROUTES_RATE, 'routes:rate')
 
-  for (const channel of ['ROUTES_MENU', 'ROUTES_SWITCH', 'ROUTES_UNPIN']) {
+  for (const channel of ['ROUTES_MENU', 'ROUTES_SWITCH', 'ROUTES_UNPIN', 'ROUTES_RATE']) {
     assert.ok(handlers.includes(`IpcChannels.${channel}`), `handlers 少了 ${channel}`)
     assert.ok(api.includes(`IpcChannels.${channel}`), `api.ts 少了 ${channel}`)
   }
   // 页面只认命名方法：这三件事不能以「通用 invoke + 字符串」的形式再开放一次。
   assert.match(api, /menu: \(request\?: RouteMenuRequest\): Promise<RouteMenuResult> =>\s*\n\s*wire\.invoke\(IpcChannels\.ROUTES_MENU, request\)/)
   assert.match(api, /unpin: \(route: string\): Promise<RouteSwitchResult> =>\s*\n\s*wire\.invoke\(IpcChannels\.ROUTES_UNPIN, route\)/)
+  assert.match(api, /rate: \(request: RouteRateRequest\): Promise<RouteRateResult> =>\s*\n\s*wire\.invoke\(IpcChannels\.ROUTES_RATE, request\)/)
 })
 
 test('菜单读失败带回原因：托盘才能把「读不到」与「没有路由」分开说', () => {
@@ -132,4 +134,32 @@ test('长期固定：显式 persist 才落盘，先写配置再撤软钉，写�
   assert.ok(clearAt > writeAt, '先落盘再撤软钉：写失败时那颗 30 分钟的钉子还在')
   assert.match(block, /broadcastConfigChanged\(/, '配置改了要广播，路由页/托盘才会看到「一直」')
   assert.match(block, /written\.ok/, '落盘失败要原样报错，不能回一个成功')
+})
+
+/**
+ * 星级推荐是第四条线，与切换刻意分开：
+ * 1. 先验形状与星级范围（0–5 整数，0 = 清除），坏请求不进存储；
+ * 2. 覆盖按大小写不敏感引用键（与归一去重同口径），重复点击是覆盖不是追加；
+ * 3. 不置钉、不撤钉、不要求模型此刻在池里 —— 评分是纯标注，冷却/配额是瞬时状态；
+ * 4. 写盘失败原样报错，成功广播配置。
+ */
+test('星级推荐：形状与范围先验，覆盖不追加，纯标注不碰钉子', () => {
+  const block = handlerBlock('ROUTES_RATE')
+  assert.match(block, /typeof request\.route !== 'string'/, '非字符串的路由名不许进存储')
+  assert.match(block, /typeof request\.providerId !== 'string'/)
+  assert.match(block, /typeof request\.model !== 'string'/)
+  assert.match(block, /评分请求缺少路由名、供应商或模型名/)
+  assert.match(block, /Number\.isInteger\(stars\)/, '小数/NaN 不许落盘')
+  assert.match(block, /stars < 0 \|\| stars > ROUTE_RATING_MAX_STARS/, '范围与界面星数共用同一个常量')
+
+  assert.match(block, /entry\.providerId\.toLowerCase\(\)/, '覆盖匹配与归一去重同口径（大小写不敏感）')
+  assert.match(block, /stars === 0 \? kept : \[\.\.\.kept, \{ providerId, displayName, stars \}\]/,
+    '0 = 删条目；其余 = 先滤掉旧条目再追加，重复点击是覆盖')
+  assert.match(block, /storeManager\.updateRoute\(routeName, \{ modelRatings: next \}\)/)
+  assert.match(block, /written\.ok/, '写盘失败要原样报错')
+  assert.match(block, /broadcastConfigChanged\(/, '评分改了配置要广播')
+
+  assert.doesNotMatch(block, /setPin|clearPin/, '评分不置钉也不撤钉：与「下一轮用谁」无关')
+  assert.doesNotMatch(block, /selectableModels|switchModel/,
+    '不要求模型此刻在可派池里：冷却/配额是瞬时状态，不该拒写用户的推荐')
 })

@@ -368,6 +368,41 @@ test('菜单：池被筛空时列不出模型，但路由本身仍然可读', ()
   assert.equal(menu.route, route.name, '空池不是「路由不存在」')
 })
 
+test('菜单：星级推荐按 (providerId, displayName) 投影到行上，未评分不落键，也不改选路顺序', () => {
+  const route = makeRoute({ modelScope: 'pool' })
+  const written = sm.updateRoute(route.name, {
+    modelRatings: [
+      { providerId: 'pb', displayName: 'Beta-Lite', stars: 5 },
+      { providerId: 'pc', displayName: 'Gamma-Mini', stars: 2 },
+    ],
+  })
+  assert.equal(written.ok, true, JSON.stringify(written.error))
+  const rated = sm.listModelRoutes().find(candidate => candidate.name === route.name)!
+
+  const menu = autoRouter.routeMenu(rated)
+  assert.equal(menu.models.find(model => model.displayName === 'Beta-Lite')?.rating, 5)
+  assert.equal(menu.models.find(model => model.displayName === 'Gamma-Mini')?.rating, 2)
+  assert.equal(menu.models.find(model => model.displayName === 'Alpha-Flash')?.rating, undefined,
+    '没评过分的行不落 rating 键')
+
+  // 纯标注：队首仍是打分第一，评分不参与选路，也不重排菜单。
+  assert.equal(select(rated).candidates[0].displayName, 'Alpha-Flash',
+    '5 星的 Beta-Lite 不许因为评分爬到队首 —— 主观推荐与客观排序是两件事')
+  assert.deepEqual(
+    autoRouter.routeMenu(rated).models.map(model => model.displayName),
+    menu.models.map(model => model.displayName),
+    '菜单顺序 = 选路顺序，星级只挂在行上',
+  )
+
+  // 清除（写空表）把整格从盘上去掉，行上不再带 rating。
+  const cleared = sm.updateRoute(route.name, { modelRatings: [] })
+  assert.equal(cleared.ok, true, JSON.stringify(cleared.error))
+  const after = sm.listModelRoutes().find(candidate => candidate.name === route.name)!
+  assert.equal(after.modelRatings, undefined, '空表归一成「没配」，不留空键')
+  assert.equal(autoRouter.routeMenu(after).models.find(model => model.displayName === 'Beta-Lite')?.rating,
+    undefined)
+})
+
 // ------------------------------------------------------------ 5. 切换入口
 
 test('切换：点名写入软钉，下一轮就按它服务；来源记为 tray', () => {

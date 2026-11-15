@@ -38,6 +38,13 @@ export const IpcChannels = {
   ROUTES_MENU: 'routes:menu',
   ROUTES_SWITCH: 'routes:switch',
   ROUTES_UNPIN: 'routes:unpin',
+  // 星级推荐（1–5，0 清除）：写路由配置的 `modelRatings`，纯标注不改选路。
+  // 独立一条而不并入 switch：评分不是切换，限流桶与日志要分得开。
+  ROUTES_RATE: 'routes:rate',
+  // 主进程 → 界面：候选池的**结构**变了（供应商/账号/模型启停增删、能力标注、路由
+  // 结构编辑）。路由页与托盘据此重取菜单。刻意不复用 config:changed —— 星级推荐也写
+  // config，但它不改池成员，混在一起会让每次评分都触发整池重读（实测全池扫描 p50 4.7s）。
+  ROUTES_POOL_CHANGED: 'routes:pool-changed',
 
   // Anthropic 客户端（Claude Desktop / Claude Code）的可发现名：一条只读预览、一条落库。
   // 分两条是因为客户端那一侧的白名单会筛名字，用户必须先看一眼「会新增哪几条」再写。

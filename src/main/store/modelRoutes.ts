@@ -20,9 +20,10 @@ import type {
   LoadBalanceStrategy,
   ModelRoute,
   ModelScope,
+  RouteModelRating,
   RouteModelRef,
 } from '../../shared/types.ts'
-import { isAutoPoolStrategyId, AUTO_MODEL_TIERS, FAIRNESS_LEAD_MAX, MODEL_SCOPES } from '../../shared/types.ts'
+import { isAutoPoolStrategyId, AUTO_MODEL_TIERS, FAIRNESS_LEAD_MAX, MODEL_SCOPES, ROUTE_RATING_MAX_STARS } from '../../shared/types.ts'
 import { normalizeAutoRoutingConfig } from './autoRoutingConfig.ts'
 import type { ModelRouteError } from '../../shared/modelRouteName.ts'
 import {
@@ -113,6 +114,38 @@ export function normalizeRouteModelRefs(input: unknown): RouteModelRef[] {
 }
 
 /**
+ * 归一一条路由的星级推荐。与手工增删引用同一条规则：非法条目整条丢弃、
+ * 按 `providerId + displayName` 大小写不敏感去重（保留首次出现的大小写）。
+ * 星级只认 1–`ROUTE_RATING_MAX_STARS` 的整数：0/负数/小数/字符串一律丢弃 ——
+ * 「清除评分」在写入侧表现为删掉条目，盘上不该存在 0 星这种半状态。
+ */
+export function normalizeRouteModelRatings(input: unknown): RouteModelRating[] {
+  if (!Array.isArray(input)) return []
+
+  const out: RouteModelRating[] = []
+  const seen = new Set<string>()
+  for (const entry of input as unknown[]) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+    const rawProvider = (entry as { providerId?: unknown }).providerId
+    const rawName = (entry as { displayName?: unknown }).displayName
+    const rawStars = (entry as { stars?: unknown }).stars
+    if (typeof rawProvider !== 'string' || typeof rawName !== 'string') continue
+    const providerId = rawProvider.trim()
+    const displayName = rawName.trim()
+    if (providerId.length === 0 || displayName.length === 0) continue
+    if (typeof rawStars !== 'number' || !Number.isInteger(rawStars)
+      || rawStars < 1 || rawStars > ROUTE_RATING_MAX_STARS) continue
+
+    const key = `${providerId.toLowerCase()}\u0000${displayName.toLowerCase()}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ providerId, displayName, stars: rawStars })
+    if (out.length >= MAX_MANUAL_MODEL_REFS) break
+  }
+  return out
+}
+
+/**
  * 写入侧的模型引用校验（`pinModels` / `includeModels` / `excludeModels` 同一口径）：
  * 只校验**结构**，不校验模型是否还存在。
  *
@@ -136,6 +169,38 @@ export function checkRouteModelRefs(
       return {
         code: 'invalid_input',
         message: `Route field '${field}' entries need a non-empty providerId and displayName`,
+      }
+    }
+  }
+  return undefined
+}
+
+/**
+ * 写入侧的星级推荐校验：结构与手工增删引用同口径，另加星级范围。
+ * 读侧对怪值静默丢弃，但写入侧静默丢弃等于「点了 5 星、存下来没有」——
+ * 用户会以为评分生效了，所以这里返回可读错误而不是悄悄过滤。
+ */
+export function checkRouteModelRatings(input: unknown): ModelRouteError | undefined {
+  if (input === undefined) return undefined
+  if (!Array.isArray(input)) {
+    return { code: 'invalid_input', message: `Route field 'modelRatings' must be an array` }
+  }
+  for (const entry of input as unknown[]) {
+    const providerId = (entry as { providerId?: unknown } | null)?.providerId
+    const displayName = (entry as { displayName?: unknown } | null)?.displayName
+    const stars = (entry as { stars?: unknown } | null)?.stars
+    if (typeof providerId !== 'string' || providerId.trim().length === 0
+      || typeof displayName !== 'string' || displayName.trim().length === 0) {
+      return {
+        code: 'invalid_input',
+        message: `Route field 'modelRatings' entries need a non-empty providerId and displayName`,
+      }
+    }
+    if (typeof stars !== 'number' || !Number.isInteger(stars)
+      || stars < 1 || stars > ROUTE_RATING_MAX_STARS) {
+      return {
+        code: 'invalid_input',
+        message: `Route field 'modelRatings' stars must be an integer 1-${ROUTE_RATING_MAX_STARS}`,
       }
     }
   }
@@ -191,6 +256,8 @@ function normalizeRouteFields(name: string, entry: Record<string, unknown>, opti
   const preferredModel = normalizeRouteModelRefs(
     entry.preferredModel === undefined ? [] : [entry.preferredModel]
   )[0]
+  // 星级推荐：空列表不落键（与 `preferredModel` 同形），盘上每条路由才不多出这一格。
+  const modelRatings = normalizeRouteModelRatings(entry.modelRatings)
 
   return {
     name,
@@ -208,6 +275,7 @@ function normalizeRouteFields(name: string, entry: Record<string, unknown>, opti
     ...(modelScope === undefined ? {} : { modelScope }),
     ...(minTier === undefined ? {} : { minTier }),
     ...(preferredModel === undefined ? {} : { preferredModel }),
+    ...(modelRatings.length === 0 ? {} : { modelRatings }),
     // 只在显式关掉时落键：缺省即硬钉（见 `ModelRoute.stickyHardPin`）。把「没配」也归一成
     // `true` 会让盘上每条路由多出这一格，而读侧两处判断（`!== false`）本来就同形。
     ...(entry.stickyHardPin === false ? { stickyHardPin: false } : {}),
@@ -706,6 +774,10 @@ export function validateRoutesForWrite(
       if (refError !== undefined) {
         errors.push(`routes.${name}: ${refError.message}`)
       }
+    }
+    const ratingError = checkRouteModelRatings(record.modelRatings)
+    if (ratingError !== undefined) {
+      errors.push(`routes.${name}: ${ratingError.message}`)
     }
     if (record.modelScope !== undefined
       && record.modelScope !== 'single'

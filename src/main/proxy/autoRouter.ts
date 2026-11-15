@@ -1567,9 +1567,15 @@ class AutoRouter {
     // 实测 p50 4.7s / p90 10.2s。预览不扣冷却（它问的是配置），所以同一个池配置在
     // 几秒内答案不变 —— 缓存键必须含**解引用之后**的池，`basedOnRoute` 的字段改了
     // 而调用方传进来的 route 一个字没变时，这个键才会跟着变。
+    //
+    // 结构修订号（2026-11-15）：池配置不变、但供应商/模型启停变了时，旧键一个字没变，
+    // 缓存会把「已停的供应商仍在池里」的快照再端 ≤15s（菜单/切换也读这份）。把
+    // store 的结构写修订号折进键：启停一落盘号即 +1，下一次预览立刻重算。每请求的
+    // 日志/统计/额度写不 bump，缓存对高频读仍然有效。
     const cacheKey = [
       route.name,
       JSON.stringify(pool),
+      storeManager.getStructuralRevision(),
       sample.needsVision === true ? 1 : 0,
       sample.needsTools === true ? 1 : 0,
       sample.needsReasoning === true ? 1 : 0,
@@ -1913,6 +1919,11 @@ class AutoRouter {
       source,
       ...(pinStale ? { stale: true as const } : {}),
     })
+    // 星级推荐按 (providerId, displayName) 精确键投影：同名模型多家服务时各评各的，
+    // 与写入侧（routes:rate）和归一去重用的是同一条引用键。
+    const ratings = new Map(
+      (route.modelRatings ?? []).map(entry => [`${entry.providerId}\u0000${entry.displayName}`, entry.stars]),
+    )
     return {
       route: routeName,
       enabled: route.enabled !== false,
@@ -1933,6 +1944,7 @@ class AutoRouter {
           && storeManager.getProviderById(model.providerId)?.type === 'account'
           ? pool.enabled
           : model.accountCount
+        const rating = ratings.get(`${model.providerId}\u0000${model.displayName}`)
         return {
           providerId: model.providerId,
           providerName: model.providerName,
@@ -1941,6 +1953,7 @@ class AutoRouter {
           ...(model.ewmaFirstTokenMs === undefined ? {} : { ewmaFirstTokenMs: model.ewmaFirstTokenMs }),
           ...(model.costBucket === undefined ? {} : { costBucket: model.costBucket }),
           ...(circuitUntil === undefined ? {} : { circuitUntil }),
+          ...(rating === undefined ? {} : { rating }),
           current: current !== undefined && current.displayName === model.displayName,
           pinned: pinnedName !== undefined && pinnedName === model.displayName,
         } satisfies RouteMenuModel

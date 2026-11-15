@@ -287,9 +287,10 @@ test('preview：同一份池配置返回隔离副本，调用方改不脏缓存'
   assert.equal(second.missing.includes('vision'), false)
 })
 
-test('preview 缓存键不含标注：编辑器用 fresh 绕过读缓存拿到当下真值', () => {
-  // 缓存键只含「路由 + 画像」：手工标注、账号增减都不在键里。菜单读 15 秒内的旧答案
-  // 可以接受，但编辑器保存标注后立刻重取时必须看到新值 —— 否则「标了可用、预览说不可用」。
+test('preview 缓存键含结构修订号：标注一落盘，下一次预览立刻重算（无需 fresh）', () => {
+  // 结构写修订号（2026-11-15，批 A）折进缓存键：手工标注改变能力画像、从而改变池成员，
+  // 落盘即 bump，预览/菜单下一次读就是新池 —— 不再停在 ≤15s 的旧快照上。
+  // （旧契约「标注不在键里、菜单读旧答案可接受」正是「停了还在池里」那类显示层滞后的根因。）
   const route = makeRoute({ modelScope: 'pool', minTier: 'strong' })
   assert.equal(
     autoRouter.preview(route).models.find(model => model.displayName === 'Quick-Mini')?.status,
@@ -299,16 +300,16 @@ test('preview 缓存键不含标注：编辑器用 fresh 绕过读缓存拿到�
   sm.setUserModelMark('pfast', 'Quick-Mini', { tier: 'strong' } as never)
   assert.equal(
     autoRouter.preview(route).models.find(model => model.displayName === 'Quick-Mini')?.status,
-    'below-tier',
-    '前置：15 秒内命中旧缓存',
-  )
-  assert.equal(
-    autoRouter.preview(route, {}, { fresh: true }).models.find(model => model.displayName === 'Quick-Mini')?.status,
     'kept',
-    'fresh 要看到刚保存的标注',
+    '结构写后无需 fresh：缓存键已随修订号变化',
   )
 
   sm.setUserModelMark('pfast', 'Quick-Mini', null)
+  assert.equal(
+    autoRouter.preview(route).models.find(model => model.displayName === 'Quick-Mini')?.status,
+    'below-tier',
+    '撤标注同样立刻生效',
+  )
 })
 
 // ---------------- 5. 能力下限 ----------------
@@ -378,4 +379,70 @@ test('写入侧拒绝怪 minTier：静默回落等于「选了 strong 却不生�
     sm.listModelRoutes().find(candidate => candidate.name === route.name)?.minTier,
     'balanced',
   )
+})
+
+// ---------------- 6. 结构写修订号：启停立刻穿透 preview 短缓存（批 A） ----------------
+
+test('供应商停用：preview/menu 立刻不再列它的模型，无需 fresh、无需等 15 秒', () => {
+  const route = makeRoute({ modelScope: 'pool' })
+  assert.ok(
+    autoRouter.preview(route).models.some(model => model.displayName === 'Core-Mid'),
+    '前置：启用时在池里',
+  )
+
+  sm.updateProvider('pbal', { enabled: false })
+  // 路由配置一个字没变（缓存键的池部分相同），旧契约会把这份快照再端 ≤15s。
+  assert.equal(
+    autoRouter.preview(route).models.some(model => model.displayName === 'Core-Mid'),
+    false,
+    '停用后下一次 preview 立刻剔除（结构修订号已折进缓存键）',
+  )
+  assert.equal(
+    autoRouter.routeMenu(route).models.some(model => model.displayName === 'Core-Mid'),
+    false,
+    '托盘/控制台菜单读同一份 preview，也立刻剔除',
+  )
+
+  sm.updateProvider('pbal', { enabled: true })
+  assert.ok(
+    autoRouter.preview(route).models.some(model => model.displayName === 'Core-Mid'),
+    '重新启用立刻回到池里',
+  )
+})
+
+test('模型停服（served=false）：preview 立刻剔除，恢复后立刻回来', () => {
+  const route = makeRoute({ modelScope: 'pool' })
+  assert.ok(
+    autoRouter.preview(route).models.some(model => model.displayName === 'Heavy-Pro'),
+    '前置：在服时在池里',
+  )
+
+  sm.setModelsServed('pstr', ['Heavy-Pro'], false)
+  assert.equal(
+    autoRouter.preview(route).models.some(model => model.displayName === 'Heavy-Pro'),
+    false,
+    '停服写的是 userModelOverrides（结构键），立刻穿透缓存',
+  )
+
+  sm.setModelsServed('pstr', ['Heavy-Pro'], true)
+  assert.ok(
+    autoRouter.preview(route).models.some(model => model.displayName === 'Heavy-Pro'),
+    '恢复在服立刻回来',
+  )
+})
+
+test('结构修订号：只认真正改变池的写，纯读与统计写不 bump（保住短缓存）', () => {
+  const route = makeRoute({ modelScope: 'pool' })
+  const baseline = sm.getStructuralRevision()
+
+  autoRouter.preview(route)
+  autoRouter.preview(route)
+  assert.equal(sm.getStructuralRevision(), baseline, '纯读不 bump：15s 短缓存对高频读仍然有效')
+
+  sm.updateStatistics({})
+  assert.equal(sm.getStructuralRevision(), baseline, '统计写不在结构键里：每请求落盘不打穿缓存')
+
+  sm.updateProvider('pbal', { enabled: false })
+  assert.ok(sm.getStructuralRevision() > baseline, '供应商启停 bump')
+  sm.updateProvider('pbal', { enabled: true })
 })

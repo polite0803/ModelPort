@@ -596,6 +596,7 @@
     "routePoolMissing_manual_filter": "manual removals emptied the pool",
     "routePoolMissing_min_tier": "the capability floor emptied the pool",
     "routePoolUnresolved": "{{count}} manually added model(s) are no longer candidates (stopped or deleted); remove them individually",
+    "routePoolClearUnresolved": "Clear all stale refs",
     "routePoolSampleVision": "Preview request needs images",
     "routePoolSampleTools": "Preview request needs tools",
     "routePoolSampleTokens": "Estimated context",
@@ -2109,7 +2110,7 @@
   },
   "routes": {
     "title": "Routes and models",
-    "description": "Every switchable model of a route, with a search box. \"Pin\" writes a 30-minute in-memory soft pin; \"Keep\" writes the choice into the route config and survives a restart. \"Back to automatic order\" clears both. \"Last served\" is what actually ran last turn; \"Pinned\" is what the next request will prefer.",
+    "description": "Every switchable model of a route, with a search box. \"Pin\" writes a 30-minute in-memory soft pin; \"Keep\" writes the choice into the route config and survives a restart. \"Back to automatic order\" clears both. \"Last served\" is what actually ran last turn; \"Pinned\" is what the next request will prefer. Star ratings (1-5) are your subjective recommendation of a model - they never change routing order.",
     "loading": "Reading routes…",
     "unavailable": "The routes API is unavailable; restart the app and try again",
     "loadFailed": "Read failed: {{error}}",
@@ -2150,7 +2151,16 @@
     "persist": "Keep",
     "persistHint": "Pin this route to this model for good: written to the route config, still there after a restart",
     "persistDone": "Pinned permanently to {{model}}",
-    "persistentBadge": "Persistent"
+    "persistentBadge": "Persistent",
+    "ratingGroup": "Rate {{model}}",
+    "rateAria": "Rate {{n}} stars",
+    "rateClearAria": "Clear the rating of {{model}} (currently {{n}} stars)",
+    "rateDone": "Rated {{model}} {{n}} stars",
+    "rateCleared": "Cleared the rating of {{model}}",
+    "sortByRating": "Stars first",
+    "sortByRouting": "Routing order",
+    "sortHint": "Changes the display order only - actual routing is untouched",
+    "ratedCount": "{{n}} rated"
   },
   "gatewayConnection": {
     "network": "network error",

@@ -88,11 +88,16 @@ export function installTrayRouteBridge(): () => void {
       window.dispatchEvent(new Event(ROUTES_CHANGED_EVENT))
     })
   }) ?? (() => {})
+  // 池结构变了（供应商/模型启停等，发生在任意页/窗口）就重发托盘快照：托盘缓存只有
+  // 这一处能更新，不订阅的话用户停了供应商、托盘还列着旧模型，直到下一次右键才刷新。
+  // 这个桥在 App 顶层常驻，不依赖路由页是否挂载。评分不发此事件（纯标注不改池）。
+  const offPool = window.electronAPI?.routes?.onPoolChanged?.(() => publish()) ?? (() => {})
   publish()
 
   return () => {
     disposed = true
     offRequest()
     offCommand()
+    offPool()
   }
 }

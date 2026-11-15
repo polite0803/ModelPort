@@ -67,7 +67,8 @@ import type { RouteListResult, RouteMutationResult, RouteRemovalResult, RoutePoo
 import type { ManagementApiConfig, AppConfig } from '../store/types'
 import { DEFAULT_CONTEXT_MANAGEMENT_CONFIG } from '../store/types'
 import type { TlsStatus, TlsTrustResult } from '../../shared/types'
-import type { RouteMenuRequest, RouteMenuResult, RouteSwitchRequest, RouteSwitchResult } from '../../shared/types'
+import type { RouteMenuRequest, RouteMenuResult, RouteRateRequest, RouteRateResult, RouteSwitchRequest, RouteSwitchResult } from '../../shared/types'
+import { ROUTE_RATING_MAX_STARS } from '../../shared/types'
 import type { ProviderType } from '../oauth/types'
 import type { ModelsFetchFailure } from '../store/types'
 
@@ -603,6 +604,59 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
         }
       } catch (error) {
         return { ok: false, route: routeName, reason: routeStorageError(error).message }
+      }
+    },
+  )
+
+  /**
+   * 星级推荐（1–5，0 清除）：写这条路由的 `modelRatings`，纯标注不改选路。
+   *
+   * 与切换的三点不同：
+   * 1. 不要求模型此刻在可派池里 —— 冷却/配额是瞬时状态，用户对模型质量的推荐
+   *    不该因为一次限流就被拒写（池 membership 由 `routes:menu` 那一侧表达）；
+   * 2. 不置钉、不撤钉 —— 评分与「下一轮用谁」是两件事；
+   * 3. 覆盖按 `providerId + displayName` 大小写不敏感匹配（与归一去重同口径），
+   *    同一家的同一个模型只留一条，重复点击是覆盖不是追加。
+   */
+  registerMainHandler(
+    IpcChannels.ROUTES_RATE,
+    async (_, request: RouteRateRequest): Promise<RouteRateResult> => {
+      if (request === null || typeof request !== 'object'
+        || typeof request.route !== 'string' || request.route.trim().length === 0
+        || typeof request.providerId !== 'string' || request.providerId.trim().length === 0
+        || typeof request.model !== 'string' || request.model.trim().length === 0) {
+        return {
+          ok: false,
+          route: typeof request?.route === 'string' ? request.route : '',
+          reason: '评分请求缺少路由名、供应商或模型名',
+        }
+      }
+      const stars = request.stars
+      if (typeof stars !== 'number' || !Number.isInteger(stars)
+        || stars < 0 || stars > ROUTE_RATING_MAX_STARS) {
+        return { ok: false, route: request.route, reason: `星级必须是 0–${ROUTE_RATING_MAX_STARS} 的整数（0 = 清除）` }
+      }
+      try {
+        const routeName = request.route.trim()
+        const route = storeManager.listModelRoutes().find(candidate => candidate.name === routeName)
+        if (route === undefined) {
+          return { ok: false, route: routeName, reason: `路由 '${routeName}' 不存在` }
+        }
+        const providerId = request.providerId.trim()
+        const displayName = request.model.trim()
+        const key = `${providerId.toLowerCase()}\u0000${displayName.toLowerCase()}`
+        const kept = (route.modelRatings ?? []).filter(entry =>
+          `${entry.providerId.toLowerCase()}\u0000${entry.displayName.toLowerCase()}` !== key
+        )
+        const next = stars === 0 ? kept : [...kept, { providerId, displayName, stars }]
+        const written = storeManager.updateRoute(routeName, { modelRatings: next })
+        if (!written.ok) {
+          return { ok: false, route: routeName, model: displayName, reason: written.error.message }
+        }
+        broadcastConfigChanged(storeManager.getConfig())
+        return { ok: true, route: routeName, model: displayName, stars }
+      } catch (error) {
+        return { ok: false, route: request.route, reason: routeStorageError(error).message }
       }
     },
   )

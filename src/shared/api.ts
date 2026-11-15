@@ -38,6 +38,8 @@ import type {
   RoutePreviewSample,
   RouteMenuResult,
   RouteMenuRequest,
+  RouteRateRequest,
+  RouteRateResult,
   RouteSwitchRequest,
   RouteSwitchResult,
   TlsStatus,
@@ -865,6 +867,20 @@ const routesAPI = {
 
   unpin: (route: string): Promise<RouteSwitchResult> =>
     wire.invoke(IpcChannels.ROUTES_UNPIN, route),
+
+  // 星级推荐（1–5，0 清除）：写路由配置的 `modelRatings`。纯标注，不改选路排序，
+  // 也不要求模型此刻在可派池里（冷却/配额是瞬时状态，不该拒写用户的推荐）。
+  rate: (request: RouteRateRequest): Promise<RouteRateResult> =>
+    wire.invoke(IpcChannels.ROUTES_RATE, request),
+
+  // 池结构变更（供应商/账号/模型启停增删、能力标注、路由结构编辑）：主进程单向推送，
+  // 路由页与托盘据此重取菜单。与 config:changed 分开 —— 评分写 config 但不改池，
+  // 不该触发整池重读。返回取消订阅函数，桌面与无头宿主同一条 wire.on/off。
+  onPoolChanged: (callback: (payload: { at: number }) => void) => {
+    const handler = (_event: unknown, payload: { at: number }) => callback(payload)
+    wire.on(IpcChannels.ROUTES_POOL_CHANGED, handler)
+    return () => wire.off(IpcChannels.ROUTES_POOL_CHANGED, handler)
+  },
 }
 
 interface ManagementApiConfig {

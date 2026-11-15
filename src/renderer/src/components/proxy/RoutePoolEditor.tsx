@@ -12,7 +12,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { RefreshCw, Plus, Minus, RotateCcw, Pencil, Pin } from 'lucide-react'
+import { RefreshCw, Plus, Minus, RotateCcw, Pencil, Pin, Trash2 } from 'lucide-react'
 import { ModelMarkEditor } from '@/components/models/ModelAnnotationDialog'
 import { weightTone } from '@/lib/costTone'
 import { costBucketOf, type CostBucket } from '@shared/channels'
@@ -208,6 +208,24 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
       includeModels: withoutRef(values.includeModels, providerId, displayName),
       excludeModels: withoutRef(values.excludeModels, providerId, displayName),
       pinModels: withoutRef(values.pinModels, providerId, displayName),
+    })
+  }
+
+  /**
+   * 一键清理全部失效引用（批 C）。供应商/模型停用或删除后，include 里指向它们的引用
+   * 不会再进池（`applyManualModelSelection` 只从已门控的基底捞），但配置里仍留着这些
+   * 死引用，逐条点减号太繁琐。这里把 `unresolved` 名单整批从三个手动名单里剔除，
+   * 与逐条 `resetManual` 同口径（大小写不敏感引用键），只是批量。
+   */
+  const clearUnresolved = () => {
+    const stale = preview?.manual.unresolved ?? []
+    if (stale.length === 0) return
+    const strip = (refs: RouteModelRef[]): RouteModelRef[] =>
+      stale.reduce((acc, ref) => withoutRef(acc, ref.providerId, ref.displayName), refs)
+    onChange({
+      includeModels: strip(values.includeModels),
+      excludeModels: strip(values.excludeModels),
+      pinModels: strip(values.pinModels),
     })
   }
 
@@ -408,9 +426,21 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
 
       {preview && preview.manual.unresolved.length > 0 && (
         <div className="space-y-1.5 rounded-md border border-dashed px-3 py-2">
-          <p className="text-xs text-muted-foreground">
-            {t('proxy.routePoolUnresolved', { count: preview.manual.unresolved.length })}
-          </p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-muted-foreground">
+              {t('proxy.routePoolUnresolved', { count: preview.manual.unresolved.length })}
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-6 px-2 text-xs"
+              onClick={clearUnresolved}
+            >
+              <Trash2 className="mr-1 h-3 w-3" />
+              {t('proxy.routePoolClearUnresolved')}
+            </Button>
+          </div>
           <div className="flex flex-wrap gap-1.5">
             {preview.manual.unresolved.map((ref) => (
               <span key={refKey(ref.providerId, ref.displayName)} className="flex items-center gap-1">

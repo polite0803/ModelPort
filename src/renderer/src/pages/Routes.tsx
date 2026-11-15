@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSearchParams } from 'react-router-dom'
-import { Pin, RefreshCw, RotateCcw, Search, SkipForward } from 'lucide-react'
+import { Pin, RefreshCw, RotateCcw, Search, SkipForward, Star } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input'
 import { useToast } from '@/hooks/use-toast'
 import { publishTrayRouteMenu, ROUTES_CHANGED_EVENT } from '@/api/trayRoutes'
 import { cn } from '@/lib/utils'
+import { ROUTE_RATING_MAX_STARS } from '@shared/types'
 import type { RouteMenuEntry, RouteMenuModel } from '@shared/types'
 
 /**
@@ -16,6 +17,63 @@ import type { RouteMenuEntry, RouteMenuModel } from '@shared/types'
  * 上限只在主进程夹一次（`ROUTE_MENU_MODELS_MAX`），页面不重复写一份。
  */
 const FULL_LIST_LIMIT = 2000
+
+/**
+ * 池内模型的星级推荐（1–5）。点第 N 颗设定 N 星，再点同一颗清除；悬停/聚焦
+ * 预览将要落下的星级。纯标注控件：写的是路由配置的 `modelRatings`
+ * （`routes:rate`），不参与选路打分 —— 主观推荐与客观排序是两件事。
+ */
+function StarRating({ model, value, disabled, onChange }: {
+  model: string
+  value: number | undefined
+  disabled: boolean
+  onChange: (stars: number) => void
+}) {
+  const { t } = useTranslation()
+  const [preview, setPreview] = useState<number | null>(null)
+  const current = value ?? 0
+  const shown = preview ?? current
+  return (
+    <span
+      className="flex items-center gap-0.5"
+      role="group"
+      aria-label={t('routes.ratingGroup', { model })}
+      onMouseLeave={() => setPreview(null)}
+    >
+      {Array.from({ length: ROUTE_RATING_MAX_STARS }, (_, index) => index + 1).map(star => (
+        <button
+          key={star}
+          type="button"
+          disabled={disabled}
+          className={cn(
+            'rounded-sm p-0.5 transition-colors',
+            disabled ? 'cursor-not-allowed opacity-50' : 'hover:bg-accent',
+          )}
+          aria-label={star === current
+            ? t('routes.rateClearAria', { model, n: star })
+            : t('routes.rateAria', { model, n: star })}
+          aria-pressed={star <= current}
+          title={star === current
+            ? t('routes.rateClearAria', { model, n: star })
+            : t('routes.rateAria', { model, n: star })}
+          onMouseEnter={() => setPreview(star)}
+          onFocus={() => setPreview(star)}
+          onBlur={() => setPreview(null)}
+          onClick={() => onChange(star === current ? 0 : star)}
+        >
+          <Star
+            className={cn(
+              'h-3.5 w-3.5 transition-colors',
+              star <= shown
+                ? 'fill-[var(--warning)] text-[var(--warning)]'
+                : 'text-muted-foreground/35',
+            )}
+          />
+        </button>
+      ))}
+    </span>
+  )
+}
 
 /**
  * 路由与模型。
@@ -42,6 +100,8 @@ export function Routes() {
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [busy, setBusy] = useState(false)
+  // 「星级优先」只改显示顺序：真实选路仍按快照原序，两者不许混为一谈。
+  const [sortByRating, setSortByRating] = useState(false)
 
   const api = window.electronAPI?.routes
   const selectedName = searchParams.get('route')
@@ -124,6 +184,15 @@ export function Routes() {
     return () => window.removeEventListener(ROUTES_CHANGED_EVENT, onChange)
   }, [refresh])
 
+  // 供应商/账号/模型启停、能力标注、路由结构编辑发生在别的页（或别的窗口）时，这一页
+  // 若已挂载也要跟着重取 —— 否则「停了供应商，路由页还列着它的模型」。主进程在结构写
+  // 落盘时推 routes:pool-changed（评分除外：纯标注不改池）。托盘快照由 App 顶层的
+  // tray 桥同一事件重发，这里只管本页视图。桌面与无头宿主走同一条订阅（wire.on/off）。
+  useEffect(() => {
+    if (api?.onPoolChanged === undefined) return
+    return api.onPoolChanged(() => { void refresh() })
+  }, [api, refresh])
+
   // 倒计时是「到点就过期」的东西：没有心跳，页面会一直停在加载那一刻的分钟数。
   // 到期再拉一次 —— 钉子到点就该从本页和托盘上一起消失，而不是等下次手动刷新。
   const [, setTick] = useState(0)
@@ -187,13 +256,66 @@ export function Routes() {
   const visibleModels = useMemo(() => {
     if (detail === null) return []
     const needle = search.trim().toLowerCase()
-    if (needle.length === 0) return detail.models
-    return detail.models.filter(model =>
-      model.displayName.toLowerCase().includes(needle)
-      || model.providerName.toLowerCase().includes(needle)
-      || model.providerId.toLowerCase().includes(needle)
-    )
-  }, [detail, search])
+    const filtered = needle.length === 0
+      ? detail.models
+      : detail.models.filter(model =>
+        model.displayName.toLowerCase().includes(needle)
+        || model.providerName.toLowerCase().includes(needle)
+        || model.providerId.toLowerCase().includes(needle)
+      )
+    if (!sortByRating) return filtered
+    // 稳定排序：同星（含未评分）保持快照原序，即真实选路的先后。
+    return [...filtered].sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0))
+  }, [detail, search, sortByRating])
+
+  /**
+   * 星级推荐写入：乐观更新（星星立刻亮），失败再回读真相。成功不整页重读 ——
+   * 服务端已确认这一次写入，重读几百行只会让列表闪一下；托盘不画星级，
+   * 也不需要为此发布一份新快照。
+   */
+  const runRate = async (model: RouteMenuModel, stars: number): Promise<void> => {
+    if (api?.rate === undefined || detail === null) return
+    setDetail(current => current === null ? current : {
+      ...current,
+      models: current.models.map(entry =>
+        entry.providerId === model.providerId && entry.displayName === model.displayName
+          ? { ...entry, rating: stars === 0 ? undefined : stars }
+          : entry
+      ),
+    })
+    setBusy(true)
+    try {
+      const result = await api.rate({
+        route: detail.route,
+        providerId: model.providerId,
+        model: model.displayName,
+        stars,
+      })
+      if (!result.ok) {
+        toast({
+          title: t('routes.actionFailed'),
+          description: result.reason ?? t('routes.actionFailedHint'),
+          variant: 'destructive',
+        })
+        await refresh()
+      } else {
+        toast({
+          title: stars === 0
+            ? t('routes.rateCleared', { model: model.displayName })
+            : t('routes.rateDone', { model: model.displayName, n: stars }),
+        })
+      }
+    } catch (caught) {
+      toast({
+        title: t('routes.actionFailed'),
+        description: caught instanceof Error ? caught.message : String(caught),
+        variant: 'destructive',
+      })
+      await refresh()
+    } finally {
+      setBusy(false)
+    }
+  }
 
   // `until: 0` 是持久偏好（`preferredModel`），其余是 30 分钟的软钉：两者在列表里
   // 必须长得不一样，否则用户点「长期」之后看到的仍是倒计时，会以为没生效。
@@ -297,6 +419,16 @@ export function Routes() {
                     <RotateCcw className="mr-1.5 h-4 w-4" />
                     {t('routes.reset')}
                   </Button>
+                  <Button
+                    size="sm"
+                    variant={sortByRating ? 'secondary' : 'ghost'}
+                    disabled={detail === null}
+                    title={t('routes.sortHint')}
+                    onClick={() => setSortByRating(value => !value)}
+                  >
+                    <Star className={cn('mr-1.5 h-4 w-4', sortByRating && 'fill-[var(--warning)] text-[var(--warning)]')} />
+                    {sortByRating ? t('routes.sortByRating') : t('routes.sortByRouting')}
+                  </Button>
                   <Button size="sm" variant="ghost" disabled={busy} onClick={() => void refresh()}>
                     <RefreshCw className={cn('h-4 w-4', (busy || detailLoading) && 'animate-spin')} />
                   </Button>
@@ -346,6 +478,9 @@ export function Routes() {
               {detail !== null && (
                 <p className="text-xs text-muted-foreground">
                   {t('routes.showing', { shown: visibleModels.length, total: detail.totalModels })}
+                  {detail.models.some(model => model.rating !== undefined) && (
+                    <> · {t('routes.ratedCount', { n: detail.models.filter(model => model.rating !== undefined).length })}</>
+                  )}
                 </p>
               )}
             </CardHeader>
@@ -371,6 +506,12 @@ export function Routes() {
                     <span className="block truncate text-sm font-medium">{model.displayName}</span>
                     <span className="block truncate text-xs text-muted-foreground">{model.providerName}</span>
                   </span>
+                  <StarRating
+                    model={model.displayName}
+                    value={model.rating}
+                    disabled={busy}
+                    onChange={stars => void runRate(model, stars)}
+                  />
                   <span className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
                     {model.current && (
                       <Badge variant="secondary" title={t('routes.currentBadgeHint')}>
