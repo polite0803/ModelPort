@@ -280,7 +280,13 @@ export interface QoderProduct {
 }
 
 /**
- * 模型目录（**实测数据**，2026-09-20）。
+ * 模型目录（**离线兜底快照**，2026-11-15 在线重采；在线目录为权威）。
+ *
+ * ⚠️ **本表已降级为兜底**：与 CN 表一样，适配器运行时优先拉取在线目录
+ * （`GET {encryptedInferBase}/algo/api/v2/model/list` 的 chat 场景，5 分钟 TTL，
+ * 见 `qoder-adapter.ts` 的 `ensureRemoteModels`），官方调价 / 上新 / 改名实时生效，
+ * 本表只在尚未拉取成功（无账号 / 网络失败）时兜底。国际版基线已于 2026-11-15 经网关
+ * 国际账号在线重采（15 条）；下方字段口径与坑位记录仍有效。
  *
  * ## `id` 是目录 key，且**必须走加密端点**
  *
@@ -334,79 +340,22 @@ export interface QoderProduct {
  * - `efforts`：目录 `thinking_config.enabled.efforts` 的键。
  */
 const QODER_FALLBACK_MODELS: readonly QoderFallbackModel[] = [
-  // ⚠️ 全部数值逐条对照本机 catalog-v6 实测（2026-09-21）。早期版本多处为
-  // 手工估值，与真实值**大范围不符**（14 个模型有偏差，如 `smodel` 写 3.2
-  // 实际 8、`qmodel_38max` 写 0.5 实际 0.2），用户据此报障。
-  // 改动本表时必须重新对照 catalog，不要凭印象填。
-  //
-  // 字段顺序：id, 展示名, 上下文, vl, reasoning, free, 倍率
-  //
-  // ⚠️ `contextWindow` 取官方档位表 `context_config` 的**最大档**，不是 `max_input_tokens`
-  // —— 与本文件 CN 表的同一口径，完整论证见那份表的注释与 AGENTS.md「2.1」。
-  // 国际版客户端里该判定的实现与 CN **逐字符同构**
-  // （`function LV(A,e){…let i=Jqr(A);if(i)return i.includes(t);…max_input_tokens…}`，
-  // 由 `scripts/probe-qoder-intl-window-logic.mjs` 复核），故同一条结论成立。
-  // 本表 17 条的档位表实测（`scripts/probe-qoder-windows.mjs intl`）：
-  // 除 `auto` 无档位表外**全部含 1M 档**（`performance` 是 {272K,400K,1M}、
-  // `efficient` 默认档为 400K）。
-  //
-  // ⚠️ **国际版的「服务端真能收多少」未实测**：`api2.qoder.sh` 在本机网络下
-  // 恒定 HTTP/2 `NGHTTP2_INTERNAL_ERROR`（连 1K 的最小请求也不通），
-  // 故本表依据是「客户端逻辑 + 目录档位表」，**不是** CN 那样的实发验证。
-  // 若将来国际版可用，应按 `probe-qoder-context-needle.mjs` 复核一遍。
-  //
-  // ⚠️ **思考档位**（`efforts` / `defaultEffort` / `supportsDisable`）逐条对照
-  // 客户端算法复刻结果（`scripts/probe-qoder-effort-fields.mjs`，按 `$lc` 顺序
-  // 逐字段试、再过白名单 `Qj`）。本表的档位来自目录 `thinking_config.enabled.efforts`。
-  { id: 'auto', name: 'Auto', contextWindow: 200_000, supportsImage: true, supportsThinking: false, priceFactor: 0.5 },
-  { id: 'ultimate', name: 'Ultimate', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 2, efforts: ['xhigh', 'high', 'low', 'max', 'medium'], defaultEffort: 'high', supportsDisable: true },
-  // ⚠️ `is_reasoning: false` 但 `thinking_config.enabled` 为真 —— 上游确实
-  // 提供档位选择，故 `efforts` 保留；而请求体的 `isReasoning` 取 `is_reasoning`。
-  // ⚠️ 档位表是 {272K(default), 400K, 1M}，取最大档。
-  { id: 'performance', name: 'Performance', contextWindow: 1_000_000, supportsImage: true, supportsThinking: false, priceFactor: 1.1, efforts: ['xhigh', 'high', 'low', 'max', 'medium'], defaultEffort: 'medium', supportsDisable: true },
-  // ⚠️ 档位表 {200K, 400K(default), 1M} —— 唯一默认档不是 200K 的国际版模型。
-  { id: 'efficient', name: 'Efficient', contextWindow: 1_000_000, supportsImage: true, supportsThinking: false, priceFactor: 0.3 },
-  // ⚠️ `smodel` / `cmodel` 有 5 档但**无 `disabled` 分支** → 不能关闭思考。
-  { id: 'smodel', name: 'Sonus', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 8, efforts: ['xhigh', 'high', 'low', 'max', 'medium'], defaultEffort: 'high' },
-  { id: 'cmodel', name: 'Cantus', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 4, efforts: ['xhigh', 'high', 'low', 'max', 'medium'], defaultEffort: 'high' },
-  // 免费额度模型（is_free=true）：e2e 探针默认用它们以免消耗积分。
-  // ⚠️ `priceFactor` 是**采集时刻的生效价**（窗口内为折后价），原价在
-  // `promotion.beforePromotionPriceFactor`；展示时本地推算当前价。
-  {
-    // ⚠️ 默认档与国际版其他模型不同：这里是 `xhigh`（CN 同模型是 `medium`）。
-    id: 'qmodel_38max', name: 'Qwen3.8-Max', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true,
-    isFree: true, priceFactor: 0.2, efforts: ['xhigh', 'low', 'medium'], defaultEffort: 'xhigh', supportsDisable: true,
-    promotion: { active: true, discountFactor: 0.4, beforePromotionPriceFactor: 0.5, windowStart: '22:00', windowEnd: '08:00', badgeZh: '错峰 4 折' },
-  },
-  {
-    // ⚠️ `priceFactor: 0` 是**免费**（实测），不是缺失 —— 见接口注释。
-    id: 'qfmodel', name: 'Qwen3.8-Flash', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true,
-    isFree: true, priceFactor: 0, originalPriceFactor: 0.1, efforts: ['xhigh', 'low', 'medium'], defaultEffort: 'medium', supportsDisable: true,
-  },
-  // ⚠️ 这两个模型目录里**只有 `disabled` + `enabled.is_default`，没有 `efforts`**
-  // —— 即官方只提供「关闭思考」一个选项（用户 2026-09-28 确认：
-  // 「上面两个没有思考档位就是关闭的意思」）。故 `efforts` 留空，
-  // 由 `supportsDisable` 表达，适配器会追加 `none`（复刻客户端 `gU()`）。
-  {
-    id: 'qmodel_latest', name: 'Qwen3.7-Max', contextWindow: 1_000_000, supportsImage: true, supportsThinking: false,
-    priceFactor: 0.1, originalPriceFactor: 0.5, supportsDisable: true,
-    promotion: { active: true, discountFactor: 0.2, beforePromotionPriceFactor: 0.5, windowStart: '22:00', windowEnd: '08:00', badgeZh: '错峰 2 折' },
-  },
-  {
-    id: 'qmodel', name: 'Qwen3.7-Plus', contextWindow: 1_000_000, supportsImage: true, supportsThinking: false,
-    priceFactor: 0.04, supportsDisable: true,
-    promotion: { active: true, discountFactor: 0.4, beforePromotionPriceFactor: 0.1, windowStart: '22:00', windowEnd: '08:00', badgeZh: '错峰 4 折' },
-  },
-  { id: 'kmodel_latest', name: 'Kimi-K3', contextWindow: 1_000_000, supportsImage: true, supportsThinking: false, priceFactor: 1.4, efforts: ['high', 'low', 'max'], defaultEffort: 'max' },
-  // ⚠️ 该模型**未下发 `max_input_tokens`**（这正是「该字段不是权威值」的旁证）——
-  // 旧表因此退回 `context_config` 的**默认档** 200K，但官方客户端给用户选的是
-  // **最大档** 1M（`zX()` 只查成员资格，不限于默认档）。故取 1M。
-  { id: 'kmodel', name: 'Kimi-K2.8-Preview', contextWindow: 1_000_000, supportsImage: true, supportsThinking: false, priceFactor: 0.8, efforts: ['high', 'low', 'max'], defaultEffort: 'max' },
-  { id: 'gmodel', name: 'GLM-5.3', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 0.8, efforts: ['high', 'low', 'max'], defaultEffort: 'max' },
+  // 2026-11-15 经国际账号在线拉取 `chat` 场景重采（15 条），`normalizeQoderCatalogEntry` 同口径归一。
+  { id: 'auto', name: 'Auto', contextWindow: 1_000_000, supportsImage: true, supportsThinking: false, priceFactor: 0.5 },
+  { id: 'ultimate', name: 'Ultimate', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, isFree: false, priceFactor: 2, promotion: { active: false, discountFactor: 0.2, beforePromotionPriceFactor: 2, windowStart: '22:00', windowEnd: '08:00', badgeZh: '错峰2折' }, efforts: ['xhigh', 'high', 'low', 'max', 'medium'], defaultEffort: 'high' },
+  { id: 'efficient', name: 'Efficient', contextWindow: 200_000, supportsImage: true, supportsThinking: false, priceFactor: 0.3 },
+  { id: 'smodel', name: 'Sonus', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, isFree: false, priceFactor: 8, efforts: ['xhigh', 'high', 'low', 'max', 'medium'], defaultEffort: 'high' },
+  { id: 'cmodel', name: 'Cantus', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, isFree: false, priceFactor: 4, efforts: ['xhigh', 'high', 'low', 'max', 'medium'], defaultEffort: 'high' },
+  { id: 'qmodel_latest', name: 'Qwen4-Max-Preview', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 0.1, originalPriceFactor: 0.5, efforts: ['xhigh', 'high', 'low'], defaultEffort: 'xhigh', supportsDisable: true },
+  { id: 'qmodel_38max', name: 'Qwen3.8-Max', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 0.5, promotion: { active: false, discountFactor: 0.4, beforePromotionPriceFactor: 0.5, windowStart: '22:00', windowEnd: '08:00', badgeZh: '错峰 4 折' }, efforts: ['xhigh', 'low', 'medium'], defaultEffort: 'medium', supportsDisable: true },
+  { id: 'qfmodel', name: 'Qwen3.8-Flash', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, isFree: false, priceFactor: 0.1, promotion: { active: false, discountFactor: 0.4, beforePromotionPriceFactor: 0.1, windowStart: '22:00', windowEnd: '08:00', badgeZh: '错峰 4 折' }, efforts: ['xhigh', 'low', 'medium'], defaultEffort: 'medium', supportsDisable: true },
+  { id: 'kmodel_latest', name: 'Kimi-K3.1-Pro', contextWindow: 1_000_000, supportsImage: true, supportsThinking: false, isFree: false, priceFactor: 1, efforts: ['high', 'low', 'max'], defaultEffort: 'high' },
+  { id: 'kmodel', name: 'Kimi-K2.8-Preview', contextWindow: 1_000_000, supportsImage: true, supportsThinking: false, isFree: false, priceFactor: 0.8, efforts: ['high', 'low', 'max'], defaultEffort: 'high' },
+  { id: 'gmodel', name: 'GLM-5.3', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, isFree: false, priceFactor: 0.8, efforts: ['high', 'low', 'max'], defaultEffort: 'high' },
   { id: 'gfmodel', name: 'GLM-5.3-Flash', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 0.1, efforts: ['high', 'max'], defaultEffort: 'max' },
-  { id: 'dmodel', name: 'DeepSeek-V4-Pro', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 0.5, efforts: ['high', 'max'], defaultEffort: 'max', supportsDisable: true },
-  { id: 'dfmodel', name: 'DeepSeek-Flash', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 0.1, efforts: ['high', 'max', 'low'], defaultEffort: 'max', supportsDisable: true },
-  { id: 'mmodel', name: 'MiniMax-M3', contextWindow: 1_000_000, supportsImage: true, supportsThinking: false, priceFactor: 0.2 },
+  { id: 'dmodel', name: 'DeepSeek-V4-Pro', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, isFree: false, priceFactor: 0.5, efforts: ['high', 'max'], defaultEffort: 'max', supportsDisable: true },
+  { id: 'dfmodel', name: 'DeepSeek-Flash', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, isFree: false, priceFactor: 0.1, efforts: ['high', 'max', 'low'], defaultEffort: 'high', supportsDisable: true },
+  { id: 'mmodel', name: 'MiniMax-M3.1-Flash', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, isFree: false, priceFactor: 0.1, efforts: ['xhigh', 'high', 'low', 'max', 'medium'], defaultEffort: 'xhigh' },
 ]
 
 /** Qoder provider 配置（国际版）。 */
@@ -433,125 +382,45 @@ export const QODER: QoderProduct = {
 }
 
 /**
- * 中国版模型目录（**实测数据**，2026-09-27，设计文档 E6）。
+ * 中国版模型目录（**离线兜底快照**，2026-11-15 在线重采）。
  *
- * 来源：本机 `~/.qoder-cn/.models/{uid}/catalog-v6` 的 `chat` 场景，
- * 用**国际版那份** WASM 解密（见 E5），共 14 条。
+ * ⚠️ **本表已降级为兜底**：适配器运行时优先拉取在线目录
+ * （`GET {encryptedInferBase}/algo/api/v2/model/list` 的 `chat` 场景，WASM 签名，
+ * 5 分钟 TTL，见 `qoder-adapter.ts` 的 `ensureRemoteModels`），官方调价 / 上新 /
+ * 改名随在线目录实时生效。本表只在**尚未拉取成功**（无账号 / 网络失败）时兜底，
+ * 不必再手工追平官方 —— 但重采时仍须按下方口径填，保证兜底本身不失真。
  *
- * ⚠️ **不能沿用国际版那张 17 条的表**：
- * - CN 独有 `q37fmodel` / `gm51model`；
- * - CN **没有** `ultimate` / `performance` / `efficient` / `smodel` / `cmodel`
- *   —— 沿用会让菜单出现 5 个 CN 端点根本不认的模型，点了就报错；
- * - 5 条上下文窗口、4 条思考标记、1 条 vl 标记不同；
- * - `mmodel` 在 CN 是 **MiniMax-M2.7**（国际版 M3）。
+ * 来源：2026-11-15 用真实账号在线拉取的 `chat` 场景（12 条），经
+ * `normalizeQoderCatalogEntry` 同口径归一。此前 2026-09-27 的静态快照已漂移
+ * （用户报障）：`qfmodel` 倍率 0→0.1（页面误标「免费」）、`qmodel_latest` 改名
+ * 「Qwen4-Max-Preview」并新增思考档位、`mmodel` 由 MiniMax-M2.7 换成 M3.1-Flash、
+ * `qmodel` / `q37fmodel` / `gm51model` 已下架。
  *
- * ⚠️ CN 目录条目的标识字段名是 **`key`**，国际版是 `model_key` —— 只影响
- * 重新采集时的解析（`scripts/probe-qodercn-catalog.mjs` 两个名字都认），
- * 不影响本表（本表已是扁平结构）。
- *
- * 字段口径与国际版表完全一致，见 `QoderFallbackModel` 的注释。
+ * 字段口径见 `QoderFallbackModel` 注释，要点：
+ * - `contextWindow` 取 `context_config` 档位表**最大档**（官方客户端只认档位表，
+ *   不是 `max_input_tokens`）；无档位表才退回 `max_input_tokens`。
+ * - `priceFactor` 是采集时刻生效价，**0 是合法值**（免费），展示由 `qoderDisplayName`
+ *   结合促销窗口本地推算；`promotion` 的窗口（`windowStart` / `windowEnd`）稳定，
+ *   `active` 只是快照、会过期。
+ * - `efforts` 取 `thinking_config.enabled.efforts` 的**键**（目录原序），
+ *   `defaultEffort` 取 `is_default: true` 的键，`supportsDisable` = 存在 `disabled` 分支。
+ * - CN 目录条目标识字段是 `key`（国际版 `model_key`）。
  */
 const QODER_CN_FALLBACK_MODELS: readonly QoderFallbackModel[] = [
-  // ⚠️ 全部数值逐条对照本机 CN catalog-v6 的 chat 场景实解值（2026-09-27）。
-  // 国际版曾因为「手工估值 + 单测只断言 id 列表」让价格漂移长期未被发现
-  // （14 个模型有偏差，用户报障）。改本表必须重新跑探针对照。
-  //
-  // ⚠️ **`contextWindow` 取官方档位表 `context_config` 的最大档，不是 `max_input_tokens`。**
-  //
-  // 两个字段经常自相矛盾（CN `dmodel`：`max_input_tokens: 96000`，档位表却是
-  // `{200K, 400K, 1M}`），而**官方客户端只认后者**：`isContextWindowSupportedByModel()`
-  // 把值换算成整数后交给 `zX()`，`zX()` 一旦发现档位表存在就**只检查「是否为表内成员」**，
-  // 那条 `max_input_tokens` 兜底分支（`t <= n`）根本不会执行
-  // （asar 证据：`function zX(A,e){…let i=Yai(A);if(i)return i.includes(t);…}`）。
-  // 故照 `max_input_tokens` 填（180K / 96K）会让 DSH 远早于官方能力就触发压缩。
-  //
-  // 实测（2026-09-27，CN 网关加密端点，`scripts/probe-qoder-context-needle.mjs`）：
-  // `max_input_tokens` 与 `parameters.context_length` **都不构成**服务端约束 ——
-  // 同一份 400K 提示在声明 180K / 200K / 1M / 不发该字段时**全部完整送达**
-  // （`prompt_tokens` 一致）；声明 96K 的 `dmodel` 也照收 852K。
-  //
-  // ⚠️ **上限因模型而异，不是网关统一值**（这是被实测推翻的早期结论）。
-  // 逐模型实测的最大通过量（针埋在提示正中间，命中即证明未被截断）：
-  //
-  // | 模型 | 实测通过最大 | 服务端实际计入 | 越界点 | 越界错误形态 |
-  // |---|---|---|---|---|
-  // | `dfmodel` | 938,000 目标 | **999,991** | ≈1,002,000 | `Internal Server Error` |
-  // | `qfmodel` | 984,000 目标 | **983,490** | 990,000 | 参数错误 + `Range … [1, 983616]` |
-  // | `dmodel` | 800,000 目标 | **852,951** | 985,000 | `Internal Server Error` |
-  //
-  // ⚠️ **`983,616`（`1M − 16K`）只对报了它的那个模型成立，不能推广成全局上限** ——
-  // `dfmodel` 实测通过到 999,991，已超过该数。
-  //
-  // ⇒ **取值口径（用户 2026-09-27 定）**：**档位表有 1M 档就填 1M**。
-  // - `qfmodel` / `dfmodel` / `dmodel` 及以下各条：**填 1M**。
-  //   `qfmodel` 与 `dfmodel` 的实测已逼近 1M（983,490 / 999,991）；
-  //   `dmodel` 的实测只到 852,951（985,000 越界），但它是**档位表成员 1M**
-  //   —— 采信官方档位表，且 1M × 0.8 = 800K 的压缩阈值低于 852,951 这个
-  //   已知安全点，故填 1M 在 DSH 侧安全。
-  // - `mmodel`：档位表**只有 200K 一档**，故填 200K。
-  // - `auto`：无档位表，沿用 200K。
-  //
-  // ⚠️ **思考档位**（`efforts` / `defaultEffort` / `supportsDisable`）逐条对照
-  // 客户端算法复刻结果（`scripts/probe-qoder-effort-fields.mjs`）。三条口径：
-  // - `efforts` 取自目录 `thinking_config.enabled.efforts` 的**键**（目录原序）；
-  // - `defaultEffort` 取该对象里 `is_default: true` 的键；
-  // - `supportsDisable` = 目录存在 `thinking_config.disabled` 分支。
-  // ⚠️ **`qmodel` / `qmodel_latest` 只有「关闭思考」**：目录里它们的 `enabled`
-  // **没有 `efforts` 键**，只有 `disabled` + `enabled.is_default` ——
-  // 即官方就只提供「关」这一个选项（用户 2026-09-28 确认：
-  // 「上面两个没有思考档位就是关闭的意思」）。不要给它们补默认档位。
-  // ⚠️ `q37fmodel` / `mmodel` / `auto` **连 `thinking_config` 都没有** →
-  // 完全不可选（界面显示「当前模型未提供推理等级」，与 IDE 的「不支持」一致）。
-  { id: 'auto', name: 'Auto', contextWindow: 200_000, supportsImage: true, supportsThinking: true, priceFactor: 0.5 },
-  // 免费额度模型（isFree=true）：e2e 探针默认用它们，以免消耗积分。
-  {
-    id: 'qmodel_38max', name: 'Qwen3.8-Max', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true,
-    isFree: true, priceFactor: 0.2, efforts: ['xhigh', 'low', 'medium'], defaultEffort: 'medium', supportsDisable: true,
-    promotion: { active: true, discountFactor: 0.4, beforePromotionPriceFactor: 0.5, windowStart: '22:00', windowEnd: '08:00', badgeZh: '错峰 4 折' },
-  },
-  {
-    // ⚠️ `priceFactor: 0` 是**免费**，不是缺失 —— 0 是合法值，不能用 `> 0` 过滤。
-    // 实测最大窗口：984,000 目标 → 服务端计入 **983,490**（越界点 990,000，
-    // 越界时服务端回 `Range of input length should be [1, 983616]`）。填 1M。
-    id: 'qfmodel', name: 'Qwen3.8-Flash', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true,
-    isFree: true, priceFactor: 0, originalPriceFactor: 0.1, efforts: ['xhigh', 'low', 'medium'], defaultEffort: 'medium', supportsDisable: true,
-  },
-  {
-    // ⚠️ **没有 `efforts`，只有「关闭思考」**（见本表前的口径注释）。
-    id: 'qmodel_latest', name: 'Qwen3.7-Max', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true,
-    priceFactor: 0.1, supportsDisable: true,
-    promotion: { active: true, discountFactor: 0.2, beforePromotionPriceFactor: 0.5, windowStart: '22:00', windowEnd: '08:00', badgeZh: '错峰2折' },
-  },
-  {
-    // ⚠️ 同上：只有「关闭思考」。
-    id: 'qmodel', name: 'Qwen3.7-Plus', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true,
-    priceFactor: 0.04, supportsDisable: true,
-    promotion: { active: true, discountFactor: 0.4, beforePromotionPriceFactor: 0.1, windowStart: '22:00', windowEnd: '08:00', badgeZh: '错峰4折' },
-  },
-  // CN 独有：Qwen3.7-Flash（国际版目录无此 key）
-  // ⚠️ 目录里**完全没有 `thinking_config`** → 不可选档位（IDE 显示「不支持」）。
-  { id: 'q37fmodel', name: 'Qwen3.7-Flash', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 0.1 },
-  // ⚠️ CN 的 `max_input_tokens` 是 96000，但档位表与其它模型一样有 1M 档；
-  // 官方客户端只认档位表 → **填 1M**（用户 2026-09-27 定：档位表有 1M 就填 1M）。
-  // 实测只探到 800,000 目标 → 服务端计入 **852,951** 通过，985,000 时越界且
-  // **只回 `Internal Server Error`（未给出区间）**，故它的真实天花板未探明；
-  // 但 1M × 0.8 = 800K 的压缩阈值低于 852,951 这个已证安全点，故 1M 在 DSH 侧安全。
+  { id: 'auto', name: 'Auto', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 0.5 },
+  { id: 'qmodel_latest', name: 'Qwen4-Max-Preview', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 0.1, originalPriceFactor: 0.5, efforts: ['xhigh', 'high', 'low'], defaultEffort: 'xhigh', supportsDisable: true },
+  { id: 'qmodel_38max', name: 'Qwen3.8-Max', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 0.5, promotion: { active: false, discountFactor: 0.4, beforePromotionPriceFactor: 0.5, windowStart: '22:00', windowEnd: '08:00', badgeZh: '错峰 4 折' }, efforts: ['xhigh', 'low', 'medium'], defaultEffort: 'medium', supportsDisable: true },
+  // ⚠️ `isFree: true` 但 `priceFactor: 0.1`（官方已把免费额度模型的倍率从 0 调到
+  // 0.1）—— 「免费」标记只在 `priceFactor === 0` 时显示，故现在显示 x0.1，与客户端一致。
+  { id: 'qfmodel', name: 'Qwen3.8-Flash', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, isFree: true, priceFactor: 0.1, promotion: { active: false, discountFactor: 0.4, beforePromotionPriceFactor: 0.1, windowStart: '22:00', windowEnd: '08:00', badgeZh: '错峰 4 折' }, efforts: ['xhigh', 'low', 'medium'], defaultEffort: 'medium', supportsDisable: true },
   { id: 'dmodel', name: 'DeepSeek-V4-Pro', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 0.5, efforts: ['high', 'max'], defaultEffort: 'max', supportsDisable: true },
-  // ⚠️ CN 的 `is_reasoning` 为 false（国际版为 true），故不声明 supportsThinking。
-  // 实测最大窗口：938,000 目标 → 服务端计入 **999,991** 通过（连续 3 次可复现），
-  // 939,000 时越界（`Internal Server Error`）→ 真实上限≈1,000,000。填 1M。
-  { id: 'dfmodel', name: 'DeepSeek-Flash', contextWindow: 1_000_000, supportsImage: true, priceFactor: 0.1, efforts: ['high', 'max', 'low'], defaultEffort: 'max', supportsDisable: true },
-  // ⚠️ `gmodel` / `gfmodel` / `kmodel*` 有档位但**无 `disabled` 分支** → 不能关闭。
-  { id: 'gmodel', name: 'GLM-5.3', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 0.8, efforts: ['high', 'low', 'max'], defaultEffort: 'max' },
+  { id: 'dfmodel', name: 'DeepSeek-Flash', contextWindow: 1_000_000, supportsImage: true, supportsThinking: false, priceFactor: 0.1, efforts: ['high', 'max', 'low'], defaultEffort: 'high', supportsDisable: true },
+  { id: 'gmodel', name: 'GLM-5.3', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, isFree: false, priceFactor: 0.8, efforts: ['high', 'low', 'max'], defaultEffort: 'high' },
   { id: 'gfmodel', name: 'GLM-5.3-Flash', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 0.1, efforts: ['high', 'max'], defaultEffort: 'max' },
-  // CN 独有：GLM-5.2（国际版目录无此 key）
-  { id: 'gm51model', name: 'GLM-5.2', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 0.6, efforts: ['high', 'max'], defaultEffort: 'max', supportsDisable: true },
-  { id: 'kmodel_latest', name: 'Kimi-K3', contextWindow: 1_000_000, supportsImage: true, priceFactor: 1.4, efforts: ['high', 'low', 'max'], defaultEffort: 'max' },
-  { id: 'kmodel', name: 'Kimi-K2.8-Preview', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 0.8, efforts: ['high', 'low', 'max'], defaultEffort: 'max' },
-  // ⚠️ 版本是 **M2.7**（国际版 M3），且 CN 的 `is_vl` 为 false，故两个标记都不写。
-  // ⚠️ 唯一档位表只有 200K 一档的 CN 模型 —— 不要跟着其它条改成 1M。
-  // ⚠️ 目录里也**没有 `thinking_config`** → 不可选档位（与 IDE「不支持」一致）。
-  { id: 'mmodel', name: 'MiniMax-M2.7', contextWindow: 200_000, priceFactor: 0.2 },
+  { id: 'kmodel_latest', name: 'Kimi-K3.1-Pro', contextWindow: 1_000_000, supportsImage: true, supportsThinking: false, isFree: false, priceFactor: 1, efforts: ['high', 'low', 'max'], defaultEffort: 'high' },
+  { id: 'kmodel', name: 'Kimi-K2.8-Preview', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 0.8, efforts: ['high', 'low', 'max'], defaultEffort: 'high' },
+  { id: 'jmodel', name: 'Step-5-Preview', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, isFree: false, priceFactor: 0.3, efforts: ['high', 'low', 'medium'], defaultEffort: 'high', supportsDisable: true },
+  { id: 'mmodel', name: 'MiniMax-M3.1-Flash', contextWindow: 1_000_000, supportsImage: true, supportsThinking: true, priceFactor: 0.1, efforts: ['xhigh', 'high', 'low', 'max', 'medium'], defaultEffort: 'xhigh' },
 ]
 
 /** Qoder provider 配置（**中国版**）。 */

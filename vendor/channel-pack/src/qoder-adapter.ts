@@ -29,9 +29,10 @@ import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelIn
 import { randomUUID } from 'node:crypto'
 import { AccountPool, providerCatalogVisible } from './account-pool.js'
 import { isQoderExpired, type QoderCredential } from './qoder.js'
-import { QoderEncryptedInfer, type QoderInferMessage, type QoderInferRequest, type QoderInferTool, type QoderInferToolCall } from './qoder-wasm.js'
+import { QoderEncryptedInfer, decryptServerResponse, type QoderInferMessage, type QoderInferRequest, type QoderInferTool, type QoderInferToolCall } from './qoder-wasm.js'
 import { unwrapQoderEnvelopeStream } from './qoder-envelope.js'
 import { QODER, type QoderFallbackModel, type QoderModelPromotion, type QoderProduct } from './qoder-product.js'
+import { RemoteCatalogGate } from './remote-catalog-gate.js'
 import { reasoningRankOf } from './reasoning-ladder.js'
 import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
 import {
@@ -227,6 +228,97 @@ export function qoderEffortsFor(model: QoderFallbackModel): string[] {
   const efforts = [...(model.efforts ?? [])]
   if (model.supportsDisable === true && !efforts.includes('none')) efforts.push('none')
   return sortEffortsByStrength(efforts)
+}
+
+/**
+ * 远端目录缓存有效期：过期后下一次目录读取会重新拉取，从而跟随官方的
+ * 调价 / 上新 / 改名（用户报障：静态兜底表把 `qfmodel` 的倍率固化在采集时刻
+ * 的 0，官方早已改成 0.1，页面却一直标「免费」）。
+ *
+ * 取 5 分钟与 gemini 一致：目录变化不频繁，但也不该永久缓存（重启才可见）。
+ * 拉取失败时保留上一次的成功结果（陈旧但真实），由 `RemoteCatalogGate` 冷却
+ * 防止抖动打爆端点。
+ */
+const QODER_CATALOG_TTL_MS = 5 * 60_000
+
+/**
+ * 把远端目录 `chat` 场景的一条原始记录归一为 {@link QoderFallbackModel}。
+ *
+ * 字段口径与兜底表逐项对齐（见 `qoder-product.ts`）：
+ * - `contextWindow` 取 `context_config` 档位表的**最大档**，无档位表才退回
+ *   `max_input_tokens`（官方客户端只认档位表，两者常自相矛盾）。
+ * - `efforts` 取 `thinking_config.enabled.efforts` 的**键**（保持目录原始顺序），
+ *   `is_default` 的那一项作 `defaultEffort`；`disabled` 分支存在即 `supportsDisable`。
+ * - `priceFactor` 是目录下发那一刻的生效价（**0 是合法值**，免费），展示时由
+ *   `qoderDisplayName` 结合促销窗口本地推算当前价。
+ *
+ * 缺 `key` 或上下文窗口无法确定的畸形条目返回 undefined（调用方过滤）。
+ */
+export function normalizeQoderCatalogEntry(raw: unknown): QoderFallbackModel | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined
+  const r = raw as Record<string, unknown>
+  const id = typeof r.key === 'string' ? r.key : ''
+  if (id.length === 0) return undefined
+  const name = typeof r.display_name === 'string' && r.display_name.length > 0 ? r.display_name : id
+
+  let contextWindow: number | undefined
+  const cc = r.context_config
+  if (typeof cc === 'object' && cc !== null) {
+    for (const tier of Object.values(cc as Record<string, unknown>)) {
+      const count = (tier as Record<string, unknown> | null)?.token_count
+      if (typeof count === 'number' && count > 0) contextWindow = Math.max(contextWindow ?? 0, count)
+    }
+  }
+  if (contextWindow === undefined && typeof r.max_input_tokens === 'number' && r.max_input_tokens > 0) {
+    contextWindow = r.max_input_tokens
+  }
+  if (contextWindow === undefined) return undefined
+
+  const model: QoderFallbackModel = { id, name, contextWindow }
+  if (typeof r.is_vl === 'boolean') model.supportsImage = r.is_vl
+  if (typeof r.is_reasoning === 'boolean') model.supportsThinking = r.is_reasoning
+  if (typeof r.is_free === 'boolean') model.isFree = r.is_free
+  if (typeof r.price_factor === 'number') model.priceFactor = r.price_factor
+  if (typeof r.original_price_factor === 'number') model.originalPriceFactor = r.original_price_factor
+
+  const promo = r.promotion
+  if (typeof promo === 'object' && promo !== null) {
+    const p = promo as Record<string, unknown>
+    const promotion: QoderModelPromotion = { active: p.active === true }
+    if (typeof p.discount_factor === 'number') promotion.discountFactor = p.discount_factor
+    if (typeof p.before_promotion_price_factor === 'number') promotion.beforePromotionPriceFactor = p.before_promotion_price_factor
+    if (typeof p.window_start === 'string') promotion.windowStart = p.window_start
+    if (typeof p.window_end === 'string') promotion.windowEnd = p.window_end
+    const badge = p.badge
+    if (typeof badge === 'object' && badge !== null && typeof (badge as Record<string, unknown>).zh === 'string') {
+      promotion.badgeZh = (badge as Record<string, unknown>).zh as string
+    }
+    model.promotion = promotion
+  }
+
+  const tc = r.thinking_config
+  if (typeof tc === 'object' && tc !== null) {
+    const t = tc as Record<string, unknown>
+    const enabled = t.enabled
+    const efforts = typeof enabled === 'object' && enabled !== null
+      ? (enabled as Record<string, unknown>).efforts
+      : undefined
+    if (typeof efforts === 'object' && efforts !== null) {
+      const keys = Object.keys(efforts as Record<string, unknown>)
+      if (keys.length > 0) {
+        model.efforts = keys
+        for (const key of keys) {
+          const tier = (efforts as Record<string, unknown>)[key]
+          if (typeof tier === 'object' && tier !== null && (tier as Record<string, unknown>).is_default === true) {
+            model.defaultEffort = key
+            break
+          }
+        }
+      }
+    }
+    if (t.disabled !== undefined && t.disabled !== null) model.supportsDisable = true
+  }
+  return model
 }
 
 /**
@@ -619,6 +711,14 @@ export class QoderAdapter extends LlmAdapter {
   private readonly fetchImpl: typeof fetch
   /** 产品级兜底模型索引（`product.fallbackModels` 的 id → 条目）。 */
   private readonly fallbackIndex: ReadonlyMap<string, QoderFallbackModel>
+  /**
+   * 在线目录缓存（`chat` 场景归一后的条目）。`undefined` 表示尚未成功拉取，
+   * 此时所有读取回退兜底表。成功后带时间戳，{@link QODER_CATALOG_TTL_MS} 过期重拉。
+   */
+  private remoteModels: QoderFallbackModel[] | undefined
+  private remoteModelsAtMs = 0
+  /** 在线目录加载闸门：并发去重 + 失败/空结果冷却。 */
+  private readonly catalogGate: RemoteCatalogGate
 
   constructor(private readonly options: QoderAdapterOptions) {
     super()
@@ -627,6 +727,72 @@ export class QoderAdapter extends LlmAdapter {
     this.fallbackIndex = new Map(
       (this.product.fallbackModels ?? []).map((model) => [model.id, model]),
     )
+    this.catalogGate = new RemoteCatalogGate({ now: () => this.now() })
+  }
+
+  /**
+   * 模型条目：在线目录优先，兜底表补充。
+   *
+   * 在线目录是官方实时下发的权威数据（倍率/档位/上下文）；兜底表只在尚未拉取
+   * 成功或某个 id 在线缺失时兜底。推理路径与目录读取共用这一条查找口径，
+   * 避免「页面显示在线价、请求体却用兜底表的旧 contextWindow」之类的漂移。
+   */
+  private modelEntry(id: string): QoderFallbackModel | undefined {
+    return this.remoteModels?.find((model) => model.id === id) ?? this.fallbackIndex.get(id)
+  }
+
+  /**
+   * 懒加载在线模型目录（TTL + 并发去重 + 失败冷却）。
+   *
+   * 命中新鲜缓存直接返回；否则进闸门拉取。拉取失败/无账号/空目录都返回 false
+   * 触发冷却，`remoteModels` 保持上一次的成功值（或 undefined → 兜底表）。
+   */
+  private async ensureRemoteModels(): Promise<void> {
+    if (this.remoteModels !== undefined && this.now() - this.remoteModelsAtMs < QODER_CATALOG_TTL_MS) return
+    await this.catalogGate.run(async () => {
+      try {
+        const credential = await this.options.resolveCredential()
+        if (credential === undefined || credential.access_token.length === 0) return false
+        const models = await this.fetchRemoteCatalog(credential)
+        if (models.length === 0) return false
+        this.remoteModels = models
+        this.remoteModelsAtMs = this.now()
+        return true
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.warn(`[qoder] 在线模型目录拉取失败（回退本地兜底表）：${error instanceof Error ? error.message : String(error)}`)
+        return false
+      }
+    })
+  }
+
+  /**
+   * 拉取并归一在线目录（`GET {encryptedInferBase}/algo/api/v2/model/list`）。
+   *
+   * 与推理同一条 WASM 签名链路（`prepareRequest` authMode=auth），响应可能是
+   * 加密文本（`decryptServerResponse` 失败回退原文）。只取 `chat` 场景 ——
+   * 那是推理模型目录；其余场景（developer/inline/…）不是本适配器的路由域。
+   */
+  private async fetchRemoteCatalog(credential: QoderCredential): Promise<QoderFallbackModel[]> {
+    const c = await this.ensureUid(credential)
+    const client = await QoderEncryptedInfer.create({
+      user: { uid: c.uid!, securityOauthToken: c.security_oauth_token ?? c.access_token },
+      machineId: c.machine_id,
+      metadata: { ...this.product.clientMetadata },
+      host: this.product.encryptedInferBase,
+    })
+    const request = client.prepareRequest({ path: '/api/v2/model/list', method: 'GET', authMode: 'auth' })
+    const response = await this.fetchImpl(request.url, { method: 'GET', headers: request.headers })
+    if (!response.ok) throw new Error(`model/list HTTP ${response.status}`)
+    const decrypted = await decryptServerResponse(await response.text())
+    const json = JSON.parse(decrypted) as { chat?: unknown }
+    const chat = Array.isArray(json.chat) ? json.chat : []
+    const models: QoderFallbackModel[] = []
+    for (const entry of chat) {
+      const model = normalizeQoderCatalogEntry(entry)
+      if (model !== undefined) models.push(model)
+    }
+    return models
   }
 
   /**
@@ -671,37 +837,48 @@ export class QoderAdapter extends LlmAdapter {
   /**
    * 模型接受的输入模态。
    *
-   * 按**模型**判定（兜底表的 `supportsImage`），不是按 provider 一刀切。
+   * 按**模型**判定（目录的 `supportsImage` / `is_vl`），不是按 provider 一刀切。
    * 未声明时**保守报 text**：宁可少报能力（用户改用文本描述），
    * 也不要报一个服务端不认的模态（请求会失败）。
    *
-   * ⚠️ 兜底表是本地估计值，不是远端权威数据 —— 见 `qoder-product.ts` 的说明。
+   * 在线目录优先、兜底表补充（见 `modelEntry`）。
    */
   private inputModalitiesFor(model: string): readonly ('text' | 'image')[] {
-    return this.fallbackIndex.get(model)?.supportsImage === true ? ['text', 'image'] : ['text']
+    return this.modelEntry(model)?.supportsImage === true ? ['text', 'image'] : ['text']
   }
 
-  /**
-   * 模型目录。
-   *
-   * **不发任何网络请求**：Qoder 的模型列表端点需要 WASM 签名
-   * （`qoder_auth_wasm`），本插件不实现，故恒用产品兜底表。
-   * 见设计文档 §2.6 与 `qoder-product.ts` 的 `fallbackModels` 说明。
-   */
   /**
    * 完整模型目录（**不应用用户黑名单**），含最终展示名（倍率/免费标记）。
    *
    * 设置页必须渲染被关闭的模型（否则用户无法重新打开），而 `listModels` 会按
    * 黑名单过滤掉它们 —— RPC 层只能凭裸 id 补回，展示名与倍率随之丢失
    * （用户报障：「关闭的就没有显示倍率」）。详见 `model.list` 端点的注释。
+   *
+   * ⚠️ 本方法是**同步**的（与 RPC 层 `ModelCatalogSource` 契约一致），故只能读
+   * 已缓存的在线目录；缓存为空/过期时触发一次**后台**加载。`model.list` 端点
+   * 之前一定先走 `ctx.llm.listModels()`（那会 await 加载完成），故实际不会读空。
+   * 在线目录不可用时回退兜底表（界面不会因此少模型）。
    */
   listAllModels(): readonly { id: string; name: string; supportsImage?: boolean }[] {
-    // 兜底表逐条声明 `supportsImage`（目录 `is_vl`）；缺失时保持未知。
-    return this.product.fallbackModels.map((model) => ({
+    const source = this.remoteModels ?? this.product.fallbackModels
+    if (this.remoteModels === undefined || this.now() - this.remoteModelsAtMs >= QODER_CATALOG_TTL_MS) {
+      void this.ensureRemoteModels()
+    }
+    // 逐条声明 `supportsImage`（目录 `is_vl`）；缺失时保持未知。
+    return source.map((model) => ({
       id: model.id,
       name: qoderDisplayName(model),
       ...model.supportsImage === undefined ? {} : { supportsImage: model.supportsImage },
     }))
+  }
+
+  /**
+   * 目录来源（`model.list` 透传给界面做来源提醒）：拉到在线目录 = `upstream`；
+   * 尚未拉取成功（无账号 / 网络失败）而读兜底表 = `static-fallback`。
+   * 兜底时界面据此提示「静态快照」，不把离线表伪装成实时目录。
+   */
+  catalogSource(): 'upstream' | 'static-fallback' {
+    return this.remoteModels === undefined ? 'static-fallback' : 'upstream'
   }
 
   async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
@@ -709,10 +886,15 @@ export class QoderAdapter extends LlmAdapter {
     // provider 分组隐藏（它显式 `.filter(group => group.models.length > 0)`）。
     // ⚠️ 必须返回 `[]` 而**不能抛错**（抛错会被归入 catalog 的 `failures`，
     // 界面上反而多出一条 provider 报错）。
+    //
+    // ⚠️ 门控放在 `ensureRemoteModels()` **之前**：没有已登录账号时连远端目录都
+    // 不必拉。
     if (!await providerCatalogVisible(this.options.accountPool, this.product.id)) return []
+    // 必须 await：冷缓存时目录尚未落地就返回，模型选择器会短暂显示错误的集合。
+    await this.ensureRemoteModels()
     // 用户在 Channel Pack 关闭的模型（黑名单制：不在表里即默认打开）。
     const disabled = this.options.accountPool?.disabledModelsFor(this.product.id)
-    const source = this.product.fallbackModels
+    const source = this.remoteModels ?? this.product.fallbackModels
     const listed = disabled === undefined || disabled.size === 0
       ? source
       : source.filter((model) => !disabled.has(model.id))
@@ -736,15 +918,17 @@ export class QoderAdapter extends LlmAdapter {
    * 我们应该按照他的设置给出可设置的档位选择」）。
    */
   async resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
-    const entry = this.fallbackIndex.get(model)
+    // 目录可能先于 listModels 被调用（直接进入会话）；同样触发在线拉取。
+    await this.ensureRemoteModels()
+    const entry = this.modelEntry(model)
     const resolved: LlmResolvedModelInfo = {
       provider,
       id: model,
       name: entry?.name ?? model,
       inputModalities: this.inputModalitiesFor(model),
     }
-    // 上下文窗口：兜底表是**本地估计值**。未知模型不编造 context
-    // （宁可让 DSH 用默认值，也不要报一个假的窗口大小）。
+    // 上下文窗口：在线目录是官方权威值，兜底表是本地估计值。未知模型不编造
+    // context（宁可让 DSH 用默认值，也不要报一个假的窗口大小）。
     if (entry !== undefined) resolved.context = { contextWindow: entry.contextWindow }
     // 思考档位：见 `qoderEffortsFor` 的三条口径（含「关闭思考」的追加规则）。
     if (entry !== undefined) {
@@ -866,7 +1050,7 @@ export class QoderAdapter extends LlmAdapter {
     // （用户报障「qwen3.8-flash 执行任务出现任务调用 xml 泄露任务终止」）。
     const tools = buildQoderTools(options.tools)
 
-    const fallback = this.fallbackIndex.get(options.model)
+    const fallback = this.modelEntry(options.model)
 
     // ===== 会话身份 =====
     //

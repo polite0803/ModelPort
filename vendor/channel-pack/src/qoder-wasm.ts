@@ -586,8 +586,8 @@ export async function generateRuntimeAuthFields(user: QoderWasmUserInfo): Promis
  * 这个报错看起来像「密文损坏」，实际是缺参数。
  * 该值由本插件生成并随凭据持久化（`QoderCredential.machine_id`）。
  *
- * 仅用于离线读取本机缓存做核对/排查；线上模型列表仍走兜底表
- * （目录端点需 WASM 签名，见 `qoder-adapter.ts` 的 `listModels`）。
+ * 仅用于离线读取本机缓存做核对/排查；线上模型列表已改走在线目录
+ * （`qoder-adapter.ts` 的 `ensureRemoteModels`，本函数仅诊断用）。
  */
 export async function decryptModelCatalog(encrypted: string, machineId: string): Promise<unknown> {
   const g = await getGlue()
@@ -678,6 +678,54 @@ export class QoderEncryptedInfer {
       )
     })
 
+    return this.readRequestResult(result)
+  }
+
+  /**
+   * 构造一次**通用签名请求**（url / headers / body?）——模型目录等非推理端点用。
+   *
+   * 与 `prepareInfer` 共用同一个 `QoderContext`，但走 `qodercontext_prepareRequest`
+   * 导出（官方 `fIi`/`f6` 的链路）。`authMode: 'auth'` 用登录态签名（目录端点
+   * `requireLogin`），`'sign'` 是匿名签名。
+   *
+   * ⚠️ 返回的 `headers` **必须原样透传**（`Authorization` 是 WASM 生成的
+   * `Bearer COSY.<载荷>.<签名>`，覆盖会 403）。`url` 由 WASM 拼好（含 `/algo`
+   * 前缀与查询串），调用方不要再改。
+   *
+   * 参数顺序对照官方 glue：`(endpoint, path, method, authMode, body?, headersJson?)`，
+   * 其中 `body`/`headersJson` 缺省时传 `(0, 0)`（官方 `J$(n)?0:…`）。
+   */
+  prepareRequest(options: {
+    path: string
+    method?: string
+    authMode?: 'auth' | 'sign'
+    body?: string
+    headers?: Record<string, string>
+  }): QoderInferRequest {
+    const g = this.g
+    const result = g.callPointer((stack) => {
+      const endpoint = g.writeString(this.host); const endpointLen = g.lastLength()
+      const path = g.writeString(options.path); const pathLen = g.lastLength()
+      const method = g.writeString(options.method ?? 'GET'); const methodLen = g.lastLength()
+      const mode = g.writeString(options.authMode ?? 'auth'); const modeLen = g.lastLength()
+      let body = 0; let bodyLen = 0
+      if (options.body !== undefined) { body = g.writeString(options.body); bodyLen = g.lastLength() }
+      let headersJson = 0; let headersJsonLen = 0
+      if (options.headers !== undefined) {
+        headersJson = g.writeString(JSON.stringify(options.headers)); headersJsonLen = g.lastLength()
+      }
+      g.exports.qodercontext_prepareRequest!(
+        stack, this.context,
+        endpoint, endpointLen, path, pathLen, method, methodLen, mode, modeLen,
+        body, bodyLen, headersJson, headersJsonLen,
+      )
+    })
+    return this.readRequestResult(result)
+  }
+
+  /** 读取 `RequestResult`（url / headers / body）——推理与通用请求共用。 */
+  private readRequestResult(result: number): QoderInferRequest {
+    const g = this.g
     const headerMap = g.takeObject(g.exports.requestresult_headers!(result))
     const headers: Record<string, string> = {}
     if (headerMap instanceof Map) {
@@ -705,6 +753,25 @@ export class QoderEncryptedInfer {
       headers,
       body: readResultString((stack, ptr) => g.exports.requestresult_body!(stack, ptr)),
     }
+  }
+}
+
+/**
+ * 解密服务端响应体（`decrypt_server_response`）。
+ *
+ * 官方 `kSe`：`try { return wasm.decrypt_server_response(text) } catch { return text }`
+ * —— 解密失败**回退原文**（有些端点明文下发）。目录端点 `?Encode=1` 的响应
+ * 是加密文本，须先经此再 `JSON.parse`（官方 `g6`）。
+ */
+export async function decryptServerResponse(text: string): Promise<string> {
+  const g = await getGlue()
+  try {
+    return g.callString((stack) => {
+      const a = g.writeString(text)
+      g.exports.decrypt_server_response!(stack, a, g.lastLength())
+    })
+  } catch {
+    return text
   }
 }
 
