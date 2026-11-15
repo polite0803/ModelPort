@@ -1693,6 +1693,16 @@
       "last_model": "至少要保留一个模型",
       "keyless_entry": "该端点无需 Key"
     },
+    "planCatalog": {
+      "title": "在线目录凭据（IAM AK/SK）",
+      "hint": "该订阅通路没有 GET /models。同步经 ListArkAgentPlanModel 开放接口在线获取清单，仅支持 Access Key 鉴权——不是聊天的 Bearer Key。密钥对本地加密保存，仅用于目录同步。",
+      "ak": "Access Key ID",
+      "sk": "Secret Access Key",
+      "save": "保存凭据",
+      "saved": "目录凭据已保存",
+      "configured": "已配置",
+      "notConfigured": "未配置"
+    },
     "manage": {
       "search": "搜索供应商",
       "sectionEnabled": "已启用",

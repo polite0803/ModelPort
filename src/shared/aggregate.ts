@@ -214,6 +214,8 @@ export interface AggregateDetail {
    * 与 `credit` 并列不合并：那条是钱的余额，这条是一次真实调用被拒的证词。
    */
   quotaExhaustions?: AggregateQuotaExhaustionRecord[]
+  /** planCatalog 条目是否已存 IAM AK/SK（在线目录可用）。非 planCatalog 条目缺省。 */
+  planCatalogConfigured?: boolean
 }
 
 /** Key / 模型变更的结果；`detail` 是变更后重新读取的面板数据。 */
@@ -323,6 +325,12 @@ export interface AggregateSaveInput {
    * 只为 `pathVars` 声明的条目使用；有 Key 却没给全时整个保存被拒。
    */
   pathVars?: Record<string, string>
+  /**
+   * 火山方舟开放接口 ListArkAgentPlanModel 的 IAM Access Key（仅 planCatalog 条目）。
+   * 与聊天 Bearer Key 分离，密封落在账号凭据里；同步在线目录时使用。
+   */
+  planAccessKeyId?: string
+  planSecretAccessKey?: string
   /** Overrides which registry model ids are exposed, as raw upstream ids */
   models?: string[]
   enabled?: boolean

@@ -1693,6 +1693,16 @@
       "last_model": "At least one model must remain",
       "keyless_entry": "This endpoint needs no key"
     },
+    "planCatalog": {
+      "title": "Online catalogue credentials (IAM AK/SK)",
+      "hint": "This subscription lane has no GET /models. Sync fetches the live list via the ListArkAgentPlanModel open API, which accepts only Access Key auth — not the chat Bearer key. The key pair is sealed locally and used only for catalogue sync.",
+      "ak": "Access Key ID",
+      "sk": "Secret Access Key",
+      "save": "Save credentials",
+      "saved": "Catalogue credentials saved",
+      "configured": "Configured",
+      "notConfigured": "Not configured"
+    },
     "manage": {
       "search": "Search providers",
       "sectionEnabled": "Enabled",

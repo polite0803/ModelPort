@@ -320,10 +320,31 @@ class AggregateProviderManager {
       storeManager.addProvider(record)
     }
 
+    // IAM AK/SK 是条目级凭据（一对密钥服务整个订阅），不随聊天 Key 轮换消失：
+    // writeKeys 会删掉不在本次列表里的账号，先把它读出来，保存后再贴回现存账号。
+    const priorPlanKey = entry.planCatalog
+      ? AccountManager.getByProviderId(entry.id, true)
+        .find(account => account.credentials.accessKeyId && account.credentials.secretAccessKey)
+      : undefined
+
     if (entry.authKind === 'none') {
       this.ensureLocalAccount(entry.id, entry.name)
     } else if (keyList && keyList.length > 0) {
       this.writeKeys(entry.id, entry.name, keyList, pathVarValues)
+    }
+
+    // IAM AK/SK 与聊天 Key 分离：本次显式提交优先，否则沿用已存的一对（密封），
+    // 不随普通保存清空。在线目录（ListArkAgentPlanModel）同步时读取。
+    if (entry.planCatalog) {
+      const ak = (input.planAccessKeyId ?? '').trim() || priorPlanKey?.credentials.accessKeyId || ''
+      const sk = (input.planSecretAccessKey ?? '').trim() || priorPlanKey?.credentials.secretAccessKey || ''
+      if (ak && sk) {
+        for (const account of AccountManager.getByProviderId(entry.id, true)) {
+          AccountManager.update(account.id, {
+            credentials: { ...account.credentials, accessKeyId: ak, secretAccessKey: sk },
+          })
+        }
+      }
     }
 
     // 接线只落在供应商记录的 `modelMappings` 账本上：全局别名表是用户的东西，
@@ -439,7 +460,11 @@ class AggregateProviderManager {
     // 上游自己的答案，与 probe 成功同权（可 removeMissing）。读不到再退 models.dev。
     let upstreamModels: FetchedModel[] | null = probe.ok ? probe.models : null
     if (!probe.ok && entry.planCatalog) {
-      const key = volcengineAccessKeyFromEnv()
+      const stored = AccountManager.getByProviderId(entry.id, true)
+        .find(account => account.credentials.accessKeyId && account.credentials.secretAccessKey)
+      const key = stored
+        ? { accessKeyId: stored.credentials.accessKeyId, secretAccessKey: stored.credentials.secretAccessKey }
+        : volcengineAccessKeyFromEnv()
       if (key) {
         upstreamModels = await fetchArkAgentPlanModels(entry.planCatalog.edition, key.accessKeyId, key.secretAccessKey)
       }
@@ -528,6 +553,7 @@ class AggregateProviderManager {
         ...(quotaUsage ? { quotaUsage } : {}),
         ...(credit ? { credit } : {}),
         ...(quotaExhaustions.length === 0 ? {} : { quotaExhaustions }),
+        ...(entry.planCatalog ? { planCatalogConfigured: false } : {}),
       }
     }
 
@@ -556,6 +582,12 @@ class AggregateProviderManager {
       ...(quotaUsage ? { quotaUsage } : {}),
       ...(credit ? { credit } : {}),
       ...(quotaExhaustions.length === 0 ? {} : { quotaExhaustions }),
+      ...(entry.planCatalog
+        ? {
+            planCatalogConfigured: AccountManager.getByProviderId(id, true)
+              .some(account => Boolean(account.credentials.accessKeyId && account.credentials.secretAccessKey)),
+          }
+        : {}),
     }
   }
 

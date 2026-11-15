@@ -3546,7 +3546,7 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     "planCatalog": { "edition": "personal" },
     "authUrl": "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
     "envVar": "ARK_AGENT_PLAN_API_KEY",
-    "notes": "Agent Plan 订阅端点：官方接入文档给出 OpenAI 协议 /api/plan/v3、Anthropic 协议 /api/plan，并要求使用 Agent Plan 专属 Key。ark-code-latest 由控制台切换实际模型。基线按 2026-11-11 官方概览/控制台清单手抄（含 DeepSeek-V4.1-Flash、GLM-5.3、Kimi-K3.1-Pro；Kimi-K3 标注即将下线）。/api/plan/v3 无 GET /models，在线同步改走开放接口 ListArkAgentPlanModel（Access Key 鉴权，读环境变量 VOLCENGINE_ACCESS_KEY_ID/SECRET_ACCESS_KEY）。",
+    "notes": "Agent Plan 订阅端点：官方接入文档给出 OpenAI 协议 /api/plan/v3、Anthropic 协议 /api/plan，并要求使用 Agent Plan 专属 Key。ark-code-latest 由控制台切换实际模型。基线按 2026-11-11 官方概览/控制台清单手抄（含 DeepSeek-V4.1-Flash、GLM-5.3、Kimi-K3.1-Pro；Kimi-K3 标注即将下线）。/api/plan/v3 无 GET /models，在线同步改走开放接口 ListArkAgentPlanModel（Access Key 鉴权；控制台「在线目录凭据」填入 IAM AK/SK 密封保存，或读环境变量 VOLCENGINE_ACCESS_KEY_ID/SECRET_ACCESS_KEY）。",
     "website": "https://www.volcengine.com/docs/82379/2374459"
   },
   {

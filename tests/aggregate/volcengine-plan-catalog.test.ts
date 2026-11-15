@@ -1,10 +1,11 @@
-import { test } from 'node:test'
+import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   readArkAgentPlanModels,
   signVolcengineV4,
   volcengineAccessKeyFromEnv,
 } from '../../src/main/providers/aggregate/volcenginePlanCatalog.ts'
+import { bootstrapStore, loadModule } from '../routes/harness.mjs'
 
 test('readArkAgentPlanModels maps Datas[].ModelID and dedups', () => {
   const rows = readArkAgentPlanModels({
@@ -67,4 +68,47 @@ test('volcengineAccessKeyFromEnv reads standard and legacy pairs', () => {
   } finally {
     process.env = saved
   }
+})
+
+/* ------------------------------------------------------------------ */
+/* 管理器层：控制台填入的 IAM AK/SK 密封落账号凭据，与聊天 Key 分离      */
+/* ------------------------------------------------------------------ */
+
+const harness = await bootstrapStore({})
+const { aggregateProviderManager } = await loadModule('main/providers/aggregate/manager.ts')
+const { getAggregateEntry } = await loadModule('main/providers/aggregate/registry.ts')
+const PLAN_ID = 'volcengine_ark_agent_plan'
+const planFirstModel = getAggregateEntry(PLAN_ID)!.models[0].id
+
+after(() => harness.dispose())
+
+test('console AK/SK are sealed into account credentials and reported by detail', () => {
+  assert.equal(aggregateProviderManager.detail(PLAN_ID)!.planCatalogConfigured, false)
+
+  aggregateProviderManager.save({
+    id: PLAN_ID,
+    apiKeys: ['ark-plan-chat-key'],
+    models: [planFirstModel],
+    planAccessKeyId: 'AKCONSOLE',
+    planSecretAccessKey: 'SKCONSOLE',
+  })
+
+  const stored = harness.storeManager.getAccountsByProviderId(PLAN_ID, true)
+  assert.equal(stored.length, 1)
+  assert.equal(stored[0].credentials.apiKey, 'ark-plan-chat-key')
+  assert.equal(stored[0].credentials.accessKeyId, 'AKCONSOLE')
+  assert.equal(stored[0].credentials.secretAccessKey, 'SKCONSOLE')
+  assert.equal(aggregateProviderManager.detail(PLAN_ID)!.planCatalogConfigured, true)
+})
+
+test('a plain save without AK/SK keeps the stored pair (no silent wipe)', () => {
+  aggregateProviderManager.save({
+    id: PLAN_ID,
+    apiKeys: ['ark-plan-chat-key-2'],
+    models: [planFirstModel],
+  })
+  const stored = harness.storeManager.getAccountsByProviderId(PLAN_ID, true)
+  assert.ok(stored.some(account => account.credentials.accessKeyId === 'AKCONSOLE'
+    && account.credentials.secretAccessKey === 'SKCONSOLE'))
+  assert.equal(aggregateProviderManager.detail(PLAN_ID)!.planCatalogConfigured, true)
 })

@@ -342,6 +342,14 @@ export function AggregateDetailPanel(props: AggregateDetailProps) {
             onApplyDetail={onApplyDetail}
             onRefresh={onRefresh}
           />
+          {entry.planCatalog && (
+            <PlanCatalogCard
+              entry={entry}
+              configured={detail.planCatalogConfigured ?? false}
+              reasonText={reasonText}
+              onRefresh={onRefresh}
+            />
+          )}
           <EndpointCard
             entry={entry}
             state={state}
@@ -477,6 +485,68 @@ function SetupPanel(props: {
           <Button onClick={() => void handleSave()} disabled={saving || !varsReady}>
             {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
             {t('aggregate.manage.setup.submit')}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+/** 火山 Agent Plan 在线目录凭据（IAM AK/SK，与聊天 Bearer Key 分离）。 */
+function PlanCatalogCard(props: {
+  entry: AggregateEntry
+  configured: boolean
+  reasonText: (reason?: string) => string
+  onRefresh: () => Promise<void>
+}) {
+  const { t } = useTranslation()
+  const { toast } = useToast()
+  const { entry, configured, reasonText, onRefresh } = props
+  const [ak, setAk] = useState('')
+  const [sk, setSk] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const handleSave = async () => {
+    if (!ak.trim() || !sk.trim()) return
+    setSaving(true)
+    const result = await window.electronAPI.aggregate.save({
+      id: entry.id,
+      planAccessKeyId: ak.trim(),
+      planSecretAccessKey: sk.trim(),
+    })
+    setSaving(false)
+    if (!result.success) {
+      toast({ title: t('common.error'), description: reasonText(result.reason), variant: 'destructive' })
+      return
+    }
+    setAk('')
+    setSk('')
+    toast({ title: t('aggregate.planCatalog.saved') })
+    await onRefresh()
+  }
+
+  return (
+    <Card>
+      <CardHeader className="flex-row items-center justify-between pb-2">
+        <CardTitle className="text-base">{t('aggregate.planCatalog.title')}</CardTitle>
+        <Badge variant={configured ? 'default' : 'outline'}>
+          {configured ? t('aggregate.planCatalog.configured') : t('aggregate.planCatalog.notConfigured')}
+        </Badge>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <p className="text-xs text-muted-foreground">{t('aggregate.planCatalog.hint')}</p>
+        <div className="space-y-1.5">
+          <Label htmlFor="plan-ak">{t('aggregate.planCatalog.ak')}</Label>
+          <Input id="plan-ak" className="font-mono text-xs" value={ak} onChange={event => setAk(event.target.value)} />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="plan-sk">{t('aggregate.planCatalog.sk')}</Label>
+          <Input id="plan-sk" type="password" className="font-mono text-xs" value={sk} onChange={event => setSk(event.target.value)} />
+        </div>
+        <div className="flex justify-end">
+          <Button onClick={() => void handleSave()} disabled={saving || !ak.trim() || !sk.trim()}>
+            {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            {t('aggregate.planCatalog.save')}
           </Button>
         </div>
       </CardContent>
