@@ -696,3 +696,23 @@ prompt_tokens 区间 59,722–175,435（均价 105,133，合计 231 万）
 **正解落地（2026-11-10 08:31，拍板通过）**：`ContextManagementConfig` 增 `channelIds?: string[]`——点名谁可以被裁，**缺省/空 = 不裁任何人**（`enabled:true` 也不再全局生效）。没有照搬压缩的能力表判据：能力表只覆盖聚合渠道，罩不住这次被误伤的账号渠道（loomy/raccoon 无 AggregateEntry 条目）；点名是能盖住全部渠道形状的诚实门。`trimAppliesToProvider()` 进 forwarder 裁剪门；UI 面板加作用域输入框（i18n×2）。测试：相关 21/21 绿 + 新增 `context-trim-scope` 5 条（变异：门恒真 → 红 3）。**部署走并行会话新落的 `scripts/deploy-wsl-daemon.sh`**（单命令停-拷-起-探活-回滚，备份 `/root/mpd.bak-20261110-083115`），现网 `enabled=true, channelIds=["trae"]`。**验证**：重启后 4 分钟窗口 4 条非 TRAE 请求（bailian/raccoon）零裁剪事件；TRAE 侧由单测覆盖。钉子提醒：并行会话在途的仪表盘统计窗口功能（dashboardStore 等 4 文件）未进本部署，其 2 条钉子测试在完整工作树上仍红，落地时随他们的功能一起修。
 
 **操作教训（已入记忆）**：RPC 写配置后必须等落盘再重启（本例等 2s 不够）；或写后用 `getConfig` 读回 + 观察日志再重启。
+
+## 9.12 TRAE 缓存根因终局：缓存长在加密的 create_agent_task 代理泳道，llm_utils_chat 不参与（2026-11-15 MITM 实证）
+
+**结论先行**：网关走的 `llm_utils_chat` 泳道**拿不到** TRAE 的前缀缓存；官方客户端的缓存命中长在 **`create_agent_task` 代理任务泳道**（服务端会话态、请求体加密）。给 `llm_utils_chat` 注入 `cache_control`/`use_cache` 是**错误机制**，已实证无效并回退。这不是网关出站形状能修的缺口。
+
+**取证（用户批准的可逆 MITM，11-09 四步法）**：WSL `mitmdump` 只放 TRAE 域 → Windows 装临时 CA（按指纹删）→ 带代理重启 TRAE → 用户发消息 → 读 flow。关键坑：聊天先走 `trae-ws-cn.mchost.guru` 的 WS 隧道（只有 ping/pong），真正的模型请求走 **`api5-normal.mchost.guru`**——漏拦该域会一直抓不到正文，最终把整个 `*.mchost.guru` 簇纳入才捕获。
+
+**决定性读数（官方客户端真实报文）**：
+- `POST api5-normal.mchost.guru/api/agent/v3/create_agent_task -> 200`，响应 `event:token_usage`：
+  `prompt_tokens=67238, completion_tokens=273, cache_creation_input_tokens=0, cache_read_input_tokens=12288`，`config_name=deepseek-flash`。
+  **官方命中了 12288 token 缓存**（`cache_creation=0` 说明是读上一轮已缓存的前缀——服务端隐式前缀缓存，按会话/任务态键控）。
+- 请求体 `content-type:application/json` 但实为**密文**（`x-helios`/`x-medusa`/`x-neptune` 字节安全 SDK），无法对比官方是否携带 `cache_control`；`dll` 串表里的 `cache_control` 属于另一泳道，不能外推到 SOLO 代理泳道。
+
+**网关侧对照（此前真机探针，四假设全排除）**：`llm_utils_chat` 注入断点后 `cache_creation` 仍 0（连写入都没有）；补顶层 `use_cache` 仍 0；8k token 前缀仍 0；换 GLM-5.3-Flash 仍 0；同窗口经网关的真实客户端 55k–84k token 请求也全 0。⇒ 与「该泳道根本不参与缓存」一致，而非形状/体量/模型问题。
+
+**处置**：回退 `applyTraeCacheBreakpoints`（`trae.ts` 恢复至 HEAD）+ `trae-adapter.ts` 接线与 import，删配套测试 `tests/channels/trae-cache-breakpoints.test.ts`；`trae-adapter.ts` 留一条根因注释防再犯。读取通路（`readCachedInput`/`cachedReported`，9.10 已落）不动——TRAE 显示「已上报 0%」是诚实读数。**未部署**：回退后全量门禁红在并行会话 renderer 半成品（`trayRoutes.ts:94`、`Routes.tsx:192/193` `onPoolChanged` TS2339），非本批文件；`build`+`build:daemon` 成功、TRAE/channel-pack 零 tsc 错误。门禁红不部署，现网暂留无害注入（上游忽略），待并行批落地随整树绿一并上线。
+
+**残留边界（要修需拍板，非小改）**：真正拿到缓存须把 TRAE 通道切到 `create_agent_task` 代理协议——请求体加密、服务端跑工具、`commit_toolcall_result` 往返、会话/隧道态管理，是一次大改且加密大概率不可复现。未验证的廉价假设仅剩「`llm_utils_chat` 带会话/隧道头能否命中」，再探需花积分，未获授权不做。**积分口径**：9.11 已证 TRAE 耗分几乎全由每轮 prompt 体量决定（~0.5 分/轮），缓存即便拿到也只是省重复前缀的一部分；当前 `channelIds=["trae"]` 裁剪仍是主要止血手段。
+
+**收尾（已做）**：按指纹 `3709048081F9…` 删 CA（Root 70→69）、`ProxyEnable=0` 清 ProxyServer、无代理重启 TRAE、停 `trae-mitm` 单元、删含明文 Authorization 的 flow/WS/计费 dump、删取证 drop-in `trae-usage-dump.conf` 与 dump 文件。

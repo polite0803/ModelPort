@@ -1083,6 +1083,9 @@ export class TraeAdapter extends LlmAdapter {
     // 同一模型只在列出它的通道里可调用（发错通道会得到流内 4001）。
     const bodyObj = transformToSOLOBody(openaiBody, undefined, this.channelFor(options.model))
 
+    // TRAE 前缀缓存长在 create_agent_task 代理泳道（服务端会话态、请求体加密）；
+    // 本网关走的 llm_utils_chat 不参与该缓存，注入 cache_control/use_cache 无效
+    // （2026-11-15 MITM 实证：官方 cache_read=12288，同账号 llm_utils_chat 恒 0）。
     const body = JSON.stringify(bodyObj)
 
     // 4. 发送请求（401/403 时刷新一次凭据后重试）
