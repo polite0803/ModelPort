@@ -782,6 +782,26 @@ parser plus the real gateway projection (bundled through esbuild, since vendor s
 imported directly under `node --test`) so a regression is caught at the wire format, not at the
 adapter's internals.
 
+**The reverse hop loses the name the same way: an inbound anthropic stream must not open a
+`tool_use` block before `function.name` arrives.** Measured 2026-11-14 (`chatcmpl-mwgfb5ax-xg72hv`):
+Claude Code turned 10 on the `daily` route reached `openrouter/free` and was refused with
+`tool_calls[1].function.name must be a non-empty string (got empty string)`. The name was empty in
+the *replayed history*, not in that turn's output: `createAnthropicStreamTranslator` used to open
+`content_block_start` on the first delta carrying an `id`, so an upstream that sends `id` first and
+`name` on the next delta produced a `tool_use` snapshot with `name: ""`. The client stores that
+snapshot verbatim and sends it back every turn, which makes the conversation fail until the history
+is repaired. Two changes close it. The stream translator buffers `id`/`arguments` per tool index and
+opens the block only once a non-blank name exists, replaying the buffered arguments as
+`input_json_delta`; calls whose name never arrives cannot be represented, so they are dropped and
+reported via `unresolvedToolCalls()` (a warn row, since the response headers are already gone).
+On the inbound side, `utils/toolCallNames.ts` deletes assistant `tool_calls` whose name is blank
+**and** the `role: tool` results that lose their pair, at the same chat-entry site as
+`normalizeToolCallArguments` - deletion only, same ruling as `repairToolCallPairing`, with
+`X-ModelPort-Tool-Name-Dropped` / `X-ModelPort-Tool-Result-Dropped` making the removal visible.
+`chatResponseToAnthropicMessage` drops unnamed calls too and falls back to `end_turn` when every
+call in a non-stream body was unnamed. Never invent a name: a blank name cannot be mapped to any
+declared tool without guessing which one the model meant.
+
 That inbound error is also why the worker pre-validates the history itself
 (`src/main/channelPack/toolCallValidation.ts`, called from `worker.ts` before `toGenerateOptions`):
 the pack's own message says only "invalid function call", so a client developer has no way to tell
@@ -1949,16 +1969,26 @@ no listener and never evaluates the gateway tree (`tests/build/shell-entries.tes
   `[model_providers.modelport]`. Address-book membership is **not** the predicate: measured clients
   pointed at `192.168.0.239:8080` and `192.168.85.131:8080`, neither listed. Stable ids (WorkBuddy
   `id`, Trae `custom_model_id`) are what preserve the user's selection.
-* **Qoder / Qoder CN are `unsupported`, not writable.** The GUI's custom models live in Qoder's own
-  encrypted daemon store (`~/.qoder-cn/.models/<uid>/customs`, QMC-sealed), reached only through the
-  CLI worker's authenticated BYOK RPC. `settings.json` `providers` is a **derived export** for the
-  CLI/agent SDK - the model picker never reads it - so the old `planQoderSettings` writer edited a
-  file the GUI ignores (measured 2026-11-14: 11 stale entries survived every "switch"). A working
-  external writer would have to decrypt the live safeStorage token and replay Qoder's private
-  org-scoped `jobToken/exchange` (matching machine id + org/endpoint context behind obfuscation),
-  breaking on every Qoder update - not a supportable capability. The row is therefore a permanent
-  `unsupported` whose `manualStep` points at Qoder's own 设置 → 模型, and `not-installed` when the
-  config dir is absent. The writer (`planQoderSettings` and helpers) and its fixtures were removed.
+* **Qoder / Qoder CN write through the app's own bridge, over a debug pipe.** The GUI's custom
+  models live in Qoder's encrypted daemon store, and `settings.json` `providers` is a **derived
+  export** for the CLI/agent SDK - the model picker never reads it (measured 2026-11-14: 11 stale
+  entries survived every "switch"; the file-level writer `planQoderSettings` and its fixtures were
+  removed). The writable face is the app itself: every Qoder page exposes the preload bridge
+  `window.qoderDesktop` (`listByokConfigs`/`createByokConfig`/`updateByokConfig`; payload
+  validators `LZr`/`y$e` in the asar pin exact key sets), and `qoderNative.ts` launches the
+  desktop exe with `--remote-debugging-pipe` - CDP over anonymous fds 3/4, the controlled-launch
+  pattern of the open-source qoder-model-bridge: no TCP port, nothing decrypted, no credential
+  replay. The preview never spawns Qoder; at apply time the app must be closed first
+  (`requestSingleInstanceLock` - a second spawn exits at once, so the row reads `app-running`
+  until then), the pre-list decides create-one-config vs add-missing-models to the existing
+  same-endpoint config (`decideQoderWrites`, endpoint + `openai` protocol match), and the
+  read-back decides success (`verifyQoderReadback` - a model the list cannot see is a failure,
+  never a success). Boundaries: the create payload takes at most 32 models
+  (`QODER_NATIVE_MAX_MODELS`, overflow is `unserved`); vision/reasoning/efforts are not derivable
+  from `/v1/models` and are written conservatively - Qoder's own model editor adjusts them; a
+  model with no advertised window falls back to Qoder's 200000 preset
+  (`QODER_DEFAULT_CONTEXT_WINDOW`) because the payload schema demands a positive int; no user
+  config is ever deleted (their payloads are encrypted at rest, so deletion is irreversible).
 * **Endpoint shape is per client, measured.** Codex/WorkBuddy take `origin + /v1`; Trae takes the
   full `origin + /v1/chat/completions`; Claude takes the **bare origin** (`ANTHROPIC_BASE_URL`). Claude
   needs no model name: `routes/messages.ts` maps inbound names itself (`anthropicInbound`).
@@ -1968,10 +1998,9 @@ no listener and never evaluates the gateway tree (`tests/build/shell-entries.tes
   derivation unknown, so cloning it would be fabrication). `context_window` obeys the standing rule:
   absent stays absent, never `0`. Codex's top-level `model` moves only when the current name is
   unserved, preferring `auto`.
-* **Eight states, the absences must not merge.** `ready`, `unchanged`, `not-installed`,
+* **Seven states, the absences must not merge.** `ready`, `unchanged`, `not-installed`,
   `no-entry` (installed but nothing of ours to update - creating a provider entry needs a uuid and a
-  model list the user has not chosen), `app-running`, `blocked`, `error`, `unsupported` (the console
-  cannot write this client at all - Qoder above). `runningImageNames()` returns
+  model list the user has not chosen), `app-running`, `blocked`, `error`. `runningImageNames()` returns
   `{names, known}`: a failed `tasklist`/`ps` is `blocked`, **never** an empty set read as "nothing is
   running". Trae also refuses when `-wal`/`-shm` is non-empty.
 * **SQLite via sql.js inline wasm.** Electron 33 is Node 20 (no `node:sqlite`), a native `.node` would

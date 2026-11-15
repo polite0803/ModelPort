@@ -431,6 +431,79 @@ test('工具只走原生字段：上游收到 tools 与 tool_choice，消息里�
     '这条请求没有 system，出站就不该有')
 })
 
+test('历史里空名的 tool_use 与失去配对的结果在入口被删掉，上游收到配平历史', async () => {
+  const response = await proxy.request('POST', '/v1/messages', {
+    body: messagesBody('auto', {
+      messages: [
+        { role: 'user', content: 'run' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'tool_use', id: 'call_ok', name: 'Bash', input: { cmd: 'ls' } },
+            { type: 'tool_use', id: 'call_bad', name: '', input: {} },
+          ],
+        },
+        {
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: 'call_ok', content: 'a' },
+            { type: 'tool_result', tool_use_id: 'call_bad', content: 'b' },
+          ],
+        },
+      ],
+    }),
+  })
+
+  assert.equal(response.status, 200)
+  const sent = seenBodies[0].messages
+  const assistant = sent.find((message: Payload) => message.role === 'assistant')
+  assert.deepEqual(
+    assistant.tool_calls.map((call: Payload) => call.function.name),
+    ['Bash'],
+    '空名调用发到上游就是 `function.name must be a non-empty string`',
+  )
+  assert.deepEqual(
+    sent.filter((message: Payload) => message.role === 'tool').map((message: Payload) => message.tool_call_id),
+    ['call_ok'],
+    '失去配对的结果必须一起删，否则变成孤儿 tool 消息',
+  )
+  // 空名在 anthropic 源头就被删掉，所以这份清单是它唯一的可见痕迹。
+  assert.match(response.headers['x-modelport-anthropic-dropped'] ?? '', /tool_use:empty_name/)
+  assert.match(response.headers['x-modelport-anthropic-dropped'] ?? '', /tool_result:empty_name_call/)
+})
+
+test('chat 入口兜底：非 anthropic 客户端回放的空名 tool_calls 同样被清理并报数', async () => {
+  const response = await proxy.request('POST', '/v1/chat/completions', {
+    body: {
+      model: 'Test-Model',
+      messages: [
+        { role: 'user', content: 'run' },
+        {
+          role: 'assistant',
+          content: null,
+          tool_calls: [
+            { id: 'call_ok', type: 'function', function: { name: 'Bash', arguments: '{}' } },
+            { id: 'call_bad', type: 'function', function: { name: '', arguments: '{}' } },
+          ],
+        },
+        { role: 'tool', tool_call_id: 'call_ok', content: 'a' },
+        { role: 'tool', tool_call_id: 'call_bad', content: 'b' },
+      ],
+    },
+  })
+
+  assert.equal(response.status, 200)
+  assert.equal(response.headers['x-modelport-tool-name-dropped'], '1')
+  assert.equal(response.headers['x-modelport-tool-result-dropped'], '1')
+  const sent = seenBodies[0].messages
+  const assistant = sent.find((message: Payload) => message.role === 'assistant')
+  assert.deepEqual(assistant.tool_calls.map((call: Payload) => call.function.name), ['Bash'])
+  assert.deepEqual(
+    sent.filter((message: Payload) => message.role === 'tool').map((message: Payload) => message.tool_call_id),
+    ['call_ok'],
+  )
+})
+
 test('带 anthropic-version 列模型返回 anthropic 形状；不带时保持 OpenAI 形状', async () => {
   const anthropic = await proxy.request('GET', '/v1/models', { headers: { 'anthropic-version': '2023-06-01' } })
   assert.equal(anthropic.status, 200)

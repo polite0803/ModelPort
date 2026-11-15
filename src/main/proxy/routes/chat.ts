@@ -42,6 +42,7 @@ import {
 } from '../utils/undeclaredToolNameAudit'
 import { normalizeMessageRoles } from '../utils/messageRoles'
 import { normalizeToolCallArguments } from '../utils/toolArguments'
+import { normalizeToolCallNames } from '../utils/toolCallNames'
 import { normalizeOutputCap } from '../utils/outputCap'
 import { toHeaderValue, routeHeaderValue } from '../utils/headerValue'
 import { readStreamOutcome } from '../utils/streamOutcome'
@@ -603,6 +604,21 @@ router.post('/completions', async (ctx: Context) => {
     }
   }
   request = normalizeOutputCap({ ...request, messages: argNormalized.messages })
+
+  // 没有名字的 tool_calls 同样会让严格上游拒掉整段历史，而客户端每轮都会把
+  // 同一份历史发回来（判据与降级口径见 toolCallNames.ts）。
+  const nameNormalized = normalizeToolCallNames(request.messages)
+  if (nameNormalized.droppedCalls > 0) {
+    console.log(
+      `[Chat] 历史 tool_calls 空名清理 ${nameNormalized.droppedCalls} 个调用`
+      + (nameNormalized.droppedResults > 0 ? `，连带 ${nameNormalized.droppedResults} 条工具结果` : ''),
+    )
+    ctx.set('X-ModelPort-Tool-Name-Dropped', String(nameNormalized.droppedCalls))
+    if (nameNormalized.droppedResults > 0) {
+      ctx.set('X-ModelPort-Tool-Result-Dropped', String(nameNormalized.droppedResults))
+    }
+    request = { ...request, messages: nameNormalized.messages }
+  }
 
   // 客户端请求的输出上限；入口已把 max_completion_tokens 折进 max_tokens，这里只读一个字段。
   const requestedMaxTokens = typeof request.max_tokens === 'number' ? request.max_tokens : undefined

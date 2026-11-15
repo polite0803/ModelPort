@@ -40,6 +40,7 @@ import {
   createAnthropicStreamTranslator,
   estimateAnthropicInputTokens,
   estimateAnthropicInputTokensDetailed,
+  unnamedToolCallCount,
 } from '../../../shared/anthropicWire'
 import type { AppConfig } from '../../../shared/types'
 import { mapForwardFailure, withRequestId } from '../errorMapping'
@@ -333,6 +334,15 @@ router.post('/messages', async (ctx: Context) => {
     }
     // 回显客户端自己发的模型名：它按这个名字做上下文预算与 UI 显示，
     // 换成网关内部名字会让 Claude Code 认为「模型被换了」。
+    const unnamed = unnamedToolCallCount(payload)
+    if (unnamed > 0) {
+      // 空名字的 tool_use 在 anthropic 形状里无法表示，只能丢；但丢了要让人知道。
+      ctx.set('X-ModelPort-Tool-Use-Dropped', String(unnamed))
+      storeManager.addLog('warn', `Anthropic outbound dropped ${unnamed} unnamed tool call(s)`, {
+        requestId: relayRequestId,
+        data: { requestedModel, resolvedModel: resolved.model },
+      })
+    }
     ctx.set('Content-Type', 'application/json')
     ctx.body = chatResponseToAnthropicMessage(payload, {
       model: requestedModel || resolved.model,
@@ -381,6 +391,16 @@ router.post('/messages', async (ctx: Context) => {
     } finally {
       reader.releaseLock?.()
       if (!out.destroyed) out.end()
+      // 上游整条流都没给名字的调用：anthropic 形状无法表示，只能丢；丢掉的计数
+      // 是这笔请求唯一能留下的痕迹（响应头早已发出，不能再加）。
+      const unresolved = translator.unresolvedToolCalls()
+      if (unresolved.length > 0) {
+        storeManager.addLog(
+          'warn',
+          `Anthropic stream dropped ${unresolved.length} tool call(s) without a name`,
+          { requestId: relayRequestId, data: { requestedModel, resolvedModel: resolved.model, toolIndexes: unresolved } },
+        )
+      }
     }
   })()
 

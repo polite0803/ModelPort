@@ -29,6 +29,7 @@ import {
   modelsToAnthropicList,
   routesAbsentFromClaudePicker,
   stopReasonOf,
+  unnamedToolCallCount,
 } from '../../src/shared/anthropicWire.ts'
 
 /** 把一段 anthropic SSE 文本按事件拆开（`event:` + `data:` 成对）。 */
@@ -107,6 +108,41 @@ test('assistant 的 tool_use 历史翻成 tool_calls，参数序列化成字符�
   }])
   // tool 结果必须紧跟在产生它的 assistant 之后，否则上游判「没有对应调用的工具结果」。
   assert.deepEqual(request.messages[2], { role: 'tool', tool_call_id: 'toolu_1', content: '22C' })
+})
+
+test('空名的 tool_use 与其结果一起跳过，并进 dropped 清单', () => {
+  const { request, dropped } = anthropicToChatRequest(
+    {
+      model: 'claude-x',
+      messages: [
+        { role: 'user', content: 'go' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'tool_use', id: 'ok', name: 'read', input: {} },
+            { type: 'tool_use', id: 'bad', name: '', input: {} },
+          ],
+        },
+        {
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: 'ok', content: 'a' },
+            { type: 'tool_result', tool_use_id: 'bad', content: 'b' },
+          ],
+        },
+      ],
+    },
+    { model: 'auto', stream: false },
+  )
+
+  const assistant = request.messages[1] as any
+  assert.deepEqual(assistant.tool_calls.map((call: any) => call.function.name), ['read'])
+  assert.deepEqual(
+    (request.messages as any[]).filter((message) => message.role === 'tool').map((message) => message.tool_call_id),
+    ['ok'],
+    '空名调用的结果必须一起删，否则是孤儿 tool 消息',
+  )
+  assert.deepEqual(dropped, ['tool_use:empty_name', 'tool_result:empty_name_call'])
 })
 
 test('纯工具调用的 assistant 轮 content 是 null 而不是空串', () => {
@@ -450,6 +486,35 @@ test('坏的参数 JSON 翻成空对象，而不是把字符串塞进 input', ()
   assert.equal(message.content[0].type, 'tool_use')
 })
 
+test('空名的工具调用不写进 tool_use；全都没有名字时 stop_reason 回落到 end_turn', () => {
+  const body = {
+    choices: [{
+      message: {
+        content: 'done',
+        tool_calls: [
+          { id: 'c1', function: { name: 'read', arguments: '{}' } },
+          { id: 'c2', function: { name: '', arguments: '{}' } },
+        ],
+      },
+      finish_reason: 'tool_calls',
+    }],
+  }
+  const message = chatResponseToAnthropicMessage(body, { model: 'm' })
+  assert.equal(message.stop_reason, 'tool_use')
+  assert.deepEqual(message.content.map((block: any) => block.name ?? block.type), ['text', 'read'])
+  assert.equal(unnamedToolCallCount(body), 1)
+
+  const onlyBad = chatResponseToAnthropicMessage({
+    choices: [{
+      message: { content: 'hi', tool_calls: [{ id: 'c', function: { name: '', arguments: '{}' } }] },
+      finish_reason: 'tool_calls',
+    }],
+  }, { model: 'm' })
+  // 声称调了工具却没有可表示的块：报 tool_use 会让客户端等一个不存在的工具块。
+  assert.equal(onlyBad.stop_reason, 'end_turn')
+  assert.deepEqual(onlyBad.content, [{ type: 'text', text: 'hi' }])
+})
+
 /* ------------------------------------------------------------------ 流方向 */
 
 test('一条流恰好一套骨架，块 start/stop 配对且索引单调递增', () => {
@@ -508,6 +573,40 @@ test('工具参数逐片段转发，绝不拼完再一次性发', () => {
   assert.equal(deltas.length, 1)
   assert.equal(deltas[0].event, 'content_block_delta')
   assert.deepEqual(deltas[0].data.delta, { type: 'input_json_delta', partial_json: ':1}' })
+})
+
+test('工具名晚于 id 到达时不开空名块：好名字到齐才发 content_block_start', () => {
+  const translator = createAnthropicStreamTranslator({ model: 'm', fallbackId: 'r' })
+  const head = translator.push(chatSse(
+    '{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"a","function":{"arguments":"{\\"x\\""}}]}}]}',
+  ))
+  // 名字还没到：不能把 `name: ""` 写进客户端历史，那会让下一轮上游整段 400。
+  assert.equal(head.includes('content_block_start'), false)
+
+  const tail = translator.push(chatSse(
+    '{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read","arguments":":1}"}}]}}]}',
+  ))
+  const list = eventsOf(tail)
+  const start = list.find((entry) => entry.event === 'content_block_start')
+  assert.equal(start?.data.content_block.name, 'read')
+  assert.equal(start?.data.content_block.id, 'a')
+  // 名字到达之前攒下的参数片段要按原顺序补发，一个字都不能丢。
+  const partial = list
+    .filter((entry) => entry.event === 'content_block_delta')
+    .map((entry) => entry.data.delta.partial_json)
+    .join('')
+  assert.equal(partial, '{"x":1}')
+})
+
+test('整条流都没给工具名：不发空名块，并登记为未解决调用', () => {
+  const translator = createAnthropicStreamTranslator({ model: 'm', fallbackId: 'r' })
+  const text = translator.push(chatSse(
+    '{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"b","function":{"arguments":"{}"}}]}}]}',
+    '{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+  )) + translator.end()
+
+  assert.equal(text.includes('content_block_start'), false)
+  assert.deepEqual(translator.unresolvedToolCalls(), [1])
 })
 
 test('帧被 TCP 分片截断时不丢内容也不重复发', () => {

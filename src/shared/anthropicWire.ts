@@ -246,6 +246,8 @@ export function anthropicToChatRequest(body: unknown, options: AnthropicToChatOp
   const source = asRecord(body) ?? {}
   const messages: Payload[] = []
   const dropped: string[] = []
+  /** 本次请求里因空名被丢掉的 tool_use id：它们的结果也要一起跳过。 */
+  const droppedToolUseIds = new Set<string>()
 
   for (const key of Object.keys(source)) {
     if (!TRANSLATED_BODY_KEYS.has(key)) dropped.push(`body:${key}`)
@@ -311,11 +313,21 @@ export function anthropicToChatRequest(body: unknown, options: AnthropicToChatOp
         continue
       }
       if (type === 'tool_use') {
+        const name = stringOf(block.name)
+        const id = stringOf(block.id)
+        if (name.trim() === '') {
+          // 空名调用在 chat 里无法表示：上游会以
+          // `tool_calls[n].function.name must be a non-empty string` 拒掉整段请求。
+          // 它的结果也必须一起跳过，否则会变成孤儿 tool 消息（严格上游同样拒收）。
+          if (id !== '') droppedToolUseIds.add(id)
+          dropped.push('tool_use:empty_name')
+          continue
+        }
         toolCalls.push({
-          id: stringOf(block.id),
+          id,
           type: 'function',
           function: {
-            name: stringOf(block.name),
+            name,
             // `input` 已经是对象；chat 要的是 JSON 字符串，序列化失败就给空对象。
             arguments: JSON.stringify(asRecord(block.input) ?? {}),
           },
@@ -323,6 +335,11 @@ export function anthropicToChatRequest(body: unknown, options: AnthropicToChatOp
         continue
       }
       if (type === 'tool_result') {
+        const toolUseId = stringOf(block.tool_use_id)
+        if (toolUseId !== '' && droppedToolUseIds.has(toolUseId)) {
+          dropped.push('tool_result:empty_name_call')
+          continue
+        }
         const resultText = textOfContent(block.content)
         const isError = block.is_error === true
         toolResults.push({
@@ -550,17 +567,23 @@ export function chatResponseToAnthropicMessage(
   if (text !== '') content.push({ type: 'text', text })
 
   const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : []
+  const toolUses: Payload[] = []
   for (const rawCall of toolCalls) {
     const call = asRecord(rawCall)
     if (!call) continue
     const fn = asRecord(call.function) ?? {}
-    content.push({
+    const name = stringOf(fn.name)
+    // `tool_use.name` 必填；空名字发出去会被客户端原样存进历史，下一轮上游就
+    // 以 `tool_calls[n].function.name must be a non-empty string` 拒掉整段会话。
+    if (name.trim() === '') continue
+    toolUses.push({
       type: 'tool_use',
       id: stringOf(call.id) || `toolu_${Date.now().toString(36)}`,
-      name: stringOf(fn.name),
+      name,
       input: parseArguments(fn.arguments),
     })
   }
+  content.push(...toolUses)
 
   const usage = usageOf(response.usage)
   const result: Payload = {
@@ -569,7 +592,12 @@ export function chatResponseToAnthropicMessage(
     role: 'assistant',
     model: options.model,
     content,
-    stop_reason: toolCalls.length > 0 ? 'tool_use' : stopReasonOf(choice.finish_reason),
+    // 所有调用都没有名字时不能报 `tool_use`：客户端会等一个不存在的工具块。
+    stop_reason: toolUses.length > 0
+      ? 'tool_use'
+      : choice.finish_reason === 'tool_calls' || choice.finish_reason === 'function_call'
+        ? 'end_turn'
+        : stopReasonOf(choice.finish_reason),
     stop_sequence: null,
   }
   // usage 只在真有数时出现：anthropic 客户端用它算上下文余量，编 0 会让它以为没消耗。
@@ -588,6 +616,27 @@ export function chatResponseToAnthropicMessage(
   return result
 }
 
+/**
+ * 响应体里有几个**没有名字**的工具调用（会被 {@link chatResponseToAnthropicMessage} 丢弃）。
+ *
+ * 只用于让调用方把「这一格缺席」写进日志与响应头：丢弃本身不能让客户端看见，
+ * 而一次静默丢掉的工具调用会被读成「模型没打算动手」。
+ */
+export function unnamedToolCallCount(body: unknown): number {
+  const response = asRecord(body) ?? {}
+  const choice = Array.isArray(response.choices) ? asRecord(response.choices[0]) ?? {} : {}
+  const message = asRecord(choice.message) ?? {}
+  const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : []
+  let count = 0
+  for (const rawCall of toolCalls) {
+    const call = asRecord(rawCall)
+    if (call === null) continue
+    const fn = asRecord(call.function) ?? {}
+    if (stringOf(fn.name).trim() === '') count += 1
+  }
+  return count
+}
+
 function sseEvent(name: string, payload: unknown): string {
   return `event: ${name}\ndata: ${JSON.stringify(payload)}\n\n`
 }
@@ -602,6 +651,13 @@ export interface AnthropicStreamTranslator {
    * 发过 `error` 之后再发 `message_stop` 会让客户端把这次失败记成一次成功的短回答。
    */
   fail(message: string): string
+  /**
+   * 一直没有等到 `function.name` 的工具调用索引（按升序）。
+   *
+   * 这些调用无法写成 anthropic 的 `tool_use`（`name` 必填），只能丢弃；调用方
+   * 拿它写一条 warn —— 静默丢一次工具调用，等于让模型「凭空少做一步」。
+   */
+  unresolvedToolCalls(): number[]
 }
 
 /**
@@ -629,6 +685,13 @@ export function createAnthropicStreamTranslator(options: ChatToAnthropicOptions)
   let outputTokens = 0
   let cachedTokens = 0
   let cacheCreationTokens = 0
+  /**
+   * 还没开块的工具调用：chat 的分片允许「id 先到、name 后到」，在名字到齐之前
+   * 不能写 `content_block_start` —— 那个快照一旦把 name 写成空串，客户端会把它
+   * 存进历史并在下一轮回放，上游随即以
+   * `tool_calls[n].function.name must be a non-empty string` 拒掉整段会话。
+   */
+  const pendingTools = new Map<number, { id: string; name: string; args: string }>()
 
   const messageId = `msg_${options.fallbackId ?? Date.now().toString(36)}`
 
@@ -691,6 +754,14 @@ export function createAnthropicStreamTranslator(options: ChatToAnthropicOptions)
     return out.join('')
   }
 
+  function inputJsonDelta(partial: string): string {
+    return sseEvent('content_block_delta', {
+      type: 'content_block_delta',
+      index: blockIndex,
+      delta: { type: 'input_json_delta', partial_json: partial },
+    })
+  }
+
   function handleChunk(payload: Payload): string {
     const out: string[] = []
     const choice = Array.isArray(payload.choices) ? asRecord(payload.choices[0]) ?? {} : {}
@@ -726,23 +797,27 @@ export function createAnthropicStreamTranslator(options: ChatToAnthropicOptions)
       const fn = asRecord(call.function) ?? {}
       const name = stringOf(fn.name)
       const id = stringOf(call.id)
-
-      // chat 的后续分片只带 arguments；只有第一次出现（带 id 或 name）才开新块。
-      if (openKind !== 'tool' || openToolIndex !== toolIndex) {
-        out.push(startMessage())
-        out.push(openTool(toolIndex, id || `toolu_${toolIndex}`, name))
-      }
-
       const args = stringOf(fn.arguments)
-      if (args !== '') {
-        out.push(
-          sseEvent('content_block_delta', {
-            type: 'content_block_delta',
-            index: blockIndex,
-            delta: { type: 'input_json_delta', partial_json: args },
-          })
-        )
+
+      if (openKind === 'tool' && openToolIndex === toolIndex) {
+        // 块已开：后续分片只带 arguments。
+        if (args !== '') out.push(inputJsonDelta(args))
+        continue
       }
+
+      // 名字没到齐就不开块。id 与 arguments 先攒着，等 name 出现再一次性开块
+      // 并把攒下的参数按 `input_json_delta` 补发。
+      const pending = pendingTools.get(toolIndex) ?? { id: '', name: '', args: '' }
+      if (pending.id === '' && id !== '') pending.id = id
+      if (pending.name === '' && name.trim() !== '') pending.name = name
+      pending.args += args
+      pendingTools.set(toolIndex, pending)
+      if (pending.name.trim() === '') continue
+
+      pendingTools.delete(toolIndex)
+      out.push(startMessage())
+      out.push(openTool(toolIndex, pending.id || `toolu_${toolIndex}`, pending.name))
+      if (pending.args !== '') out.push(inputJsonDelta(pending.args))
     }
 
     const reason = stringOf(choice.finish_reason)
@@ -837,6 +912,10 @@ export function createAnthropicStreamTranslator(options: ChatToAnthropicOptions)
         type: 'error',
         error: { type: 'api_error', message },
       })
+    },
+
+    unresolvedToolCalls(): number[] {
+      return [...pendingTools.keys()].sort((a, b) => a - b)
     },
   }
 }
