@@ -19,16 +19,26 @@
  * interception that the buddy adapter deliberately rotates past with a 30-minute
  * cooldown - parking the account for that would disable a healthy login.
  * Only wording that says the **account** is stopped may match.
+ *
+ * "Go use the official client" is **guidance, not a stop** (2026-11-15). Tencent's
+ * `11128` channel-verification body carries `displayTips` reading "possibly because
+ * it was not sent from an official client" / 「可能不是官方客户端发出的」. Those phrases
+ * used to be markers, so a single content-level rejection permanently disabled a
+ * healthy login (`workbuddy-aad65f7f`, parked 11:50 CST) and the pool then answered
+ * 「没有其它可用账号可换」 for every later request. Every observed real stop carries a
+ * stronger marker (`停止提供服务` / `account suspended`), so dropping the guidance
+ * phrases (`官方渠道` / `官方客户端` / `official client` / `official channel` /
+ * `use the official`) loses no true positive.
  */
 
 export const ACCOUNT_STOP_MARKERS: readonly string[] = [
   // Chinese: enforcement wording seen from CN vendors (有道 / 腾讯 / 字节 / 智谱).
-  '停止提供服务', '停止服务', '不再提供服务', '官方渠道', '官方客户端',
+  '停止提供服务', '停止服务', '不再提供服务',
   '账号已被封禁', '账号被封禁', '账号已封停', '账号已被冻结', '账号已被停用',
   '封禁', '封停', '违规使用', '违反用户协议',
   // English mirrors (same vendors, international endpoints).
   'account suspended', 'account banned', 'account disabled', 'account terminated',
-  'abuse detected', 'official client', 'official channel', 'use the official',
+  'abuse detected',
   'service has been stopped', 'stopped providing service',
 ]
 

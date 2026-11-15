@@ -40,24 +40,30 @@
  *    `replaceAll` 的字面量比对必须带 `i`；但**只差一个词**或**多一个空格**都不拦，
  *    说明服务端认的是**逐字符的字面量**，**不能**把它泛化成正则/关键词。
  *
- * ## 为什么落在网关，而不是 `buddy-adapter`
+ * ## 落点：`buddy-adapter` 的出站构造处（2026-11-15 修正）
  *
- * - **DSH 直连不受影响**，这是有依据的：`buddy-adapter.serializeMessages` 只把
- *   `role==='system'` 的内容放进 wire 的 system，用户正文与工具结果分别进
- *   `role:'user'` / `role:'tool'`（见该文件 328–369 行），而上面第 6、7 行实测
- *   那两个角色不拦。DSH 自己的系统提示词也不含这些模板句。
- * - 改在适配器里等于**对 DSH 自己的提示词做静默改写**，越过「不伪造上游行为」的
- *   既有边界，且会让直连与经网关两条路的行为不可比。
- * - 网关是**外部客户端入口**：指纹来自客户端，网关正是知道 provider 与消息角色
- *   的那一层。
+ * 本文件原先论证「应该落在网关、不要落在适配器」，但那个论证漏了一件事：
+ * **ModelPort 的转发通路根本不经过本插件的 openai-gateway**（那是 DSH 插件形态的
+ * 独立入口）。于是 `rewriteTencentContentFingerprints` 自写下起**全仓零调用点**，
+ * 是一段死代码 —— Qoder 经 ModelPort 调 workbuddy 时，`Main branch (you will
+ * usually use this for PRs)` 原样发出，稳定吃 11128（2026-11-15 实测三笔）。
  *
- * ## ⚠️ 千万不要把 11128 加进 `isContentRejection`
+ * 现在接在 `buddy-adapter` 构造 wire messages 之后、`prompt_cache_key` 派生之前：
+ * - 那是**唯一**同时覆盖 ModelPort 转发与 DSH 直连的位置（两条路都经该适配器）；
+ * - 「对 DSH 自己的提示词做静默改写」这条顾虑不成立：DSH 提示词不含这些模板句，
+ *   改写对它是 no-op，且无命中时**返回同一个数组引用**（见
+ *   {@link rewriteTencentSystemMessages}），前缀缓存逐字节不变；
+ * - 仍然只改 `system`：`user` / `tool` 里同一句实测不拦（上表第 6、7 行）。
+ *
+ * ## ⚠️ 11128 不是账号级拦截（判据已按此收口）
  *
  * 那是**内容级**拦截：同一账号换掉这一句就通（上面「改写该句」一行）。
- * 认成「账号被策略拦」会触发换号 + 30 分钟账号冷却（`CONTENT_REJECTION_COOLDOWN_MS`），
- * 把整个账号池白锁 30 分钟，而真正该做的是改写那一句。
- * 维持现状（`isContentRejection` 只认 11140 / `request illegal` / 安全审核文案）
- * **是正确**的。
+ * 认成「账号被策略拦」会触发换号 + 30 分钟账号冷却，把整个账号池白锁 30 分钟，
+ * 而真正该做的是改写那一句。
+ * ⚠️ 原文这里写「维持现状是正确的」，但现状的 `isContentRejection` 匹配
+ * `/request illegal/i` —— 而 **11128 的 `msg` 恰好也是 `request illegal`**，
+ * 所以它一直在被误认。现已在 `buddy-adapter.isContentRejection` 里按业务码
+ * 显式排除 11128，并给它一条不冷却、不换号、不停用账号的专门报错。
  *
  * ## 表驱动，而不是写死一处
  *
@@ -141,4 +147,29 @@ export function rewriteTencentContentFingerprints(text: string, provider: string
     out = out.replace(rule.pattern, rule.replace)
   }
   return out
+}
+
+/**
+ * 对一组 wire 消息里的**所有** `system` 做指纹改写（其余角色原样）。
+ *
+ * 无命中时返回**传入的同一个数组引用**：腾讯侧按前缀缓存，无谓地重建数组或字符串
+ * 会让每一轮都算作新前缀。命中时也只替换被改的那一条消息对象，其余元素同一引用。
+ *
+ * @param messages 已序列化的 wire 消息；`content` 是纯文本时才改（多模态 parts 不动）
+ * @param provider 产品 id（`buddy` / `workbuddy` 之外原样返回）
+ */
+export function rewriteTencentSystemMessages(
+  messages: Array<Record<string, unknown>>,
+  provider: string,
+): Array<Record<string, unknown>> {
+  if (!isTencentContentFingerprintProvider(provider)) return messages
+  let changed = false
+  const out = messages.map((message) => {
+    if (message.role !== 'system' || typeof message.content !== 'string') return message
+    const rewritten = rewriteTencentContentFingerprints(message.content, provider)
+    if (rewritten === message.content) return message
+    changed = true
+    return { ...message, content: rewritten }
+  })
+  return changed ? out : messages
 }

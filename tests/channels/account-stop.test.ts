@@ -36,7 +36,6 @@ test('账号级停止文案命中（中英文两种载体）', async () => {
     '账号已停止提供服务。请通过官方渠道使用有道龙虾；如有异议，请联',
     '{"code":-1,"message":"该账号已被封禁"}',
     'Your account suspended due to violation of the terms',
-    'please use the official client',
   ]
   for (const sample of samples) {
     assert.equal(isAccountStoppedMessage(sample), true, `应命中: ${sample}`)
@@ -55,12 +54,47 @@ test('负控：额度、限流、普通 403 都不算账号被停', async () => 
     // 判成账号被停用会误伤一个正常登录。
     '{"code":11140,"msg":"请求被安全审核拦截"}',
     'request violates the content policy',
+    // 「去官方客户端用」是**引导语**，不是停服声明。腾讯 11128 的 displayTips
+    // 正是这句，2026-11-15 据此永久停用了一个健康登录（workbuddy-aad65f7f）。
+    'please use the official client',
+    '请通过官方渠道使用本服务',
     '',
   ]
   for (const sample of samples) {
     assert.equal(isAccountStoppedMessage(sample), false, `不得命中: ${sample}`)
   }
   assert.equal(isAccountStoppedMessage(undefined), false)
+})
+
+/** 2026-11-15 现网真实报文（`/root/.modelport/channel-pack/state.json` 的 serviceStopped.text）。 */
+const TENCENT_11128_BODY = JSON.stringify({
+  code: 11128,
+  msg: 'request illegal',
+  requestId: '6d711c14-87f8-4e5d-8a27-0c41c5a28def',
+  displayMsg: {
+    en: 'Request blocked. Please send it again',
+    zh: '请求被拦截，请重新发送',
+    'zh-hant': '請求已被攔截，請重新傳送',
+  },
+  displayTips: {
+    en: 'This call failed channel verification, possibly because it was not sent from an official client. Please resend from the official client.',
+    zh: '这次调用没通过渠道校验，可能不是官方客户端发出的。请用官方版本重新发送。',
+  },
+})
+
+test('腾讯 11128 渠道校验报文不得停用账号（真实报文负控）', async () => {
+  const { isAccountStoppedMessage, matchAccountStop } = await loadAccountStop()
+  // 这一整段就是当天把 workbuddy-aad65f7f 写成 enabled:false 的原文。
+  assert.equal(isAccountStoppedMessage(TENCENT_11128_BODY), false)
+  assert.equal(matchAccountStop(TENCENT_11128_BODY), undefined)
+  // 它的 msg 与 11140 共用 `request illegal`，所以「靠文案分不开」是实测事实：
+  // 区分只能靠业务码，由 buddy-adapter 的 isChannelVerificationRejection 负责。
+  assert.match(TENCENT_11128_BODY, /request illegal/)
+  // 真停服文案仍然命中（ lobsterai 原文含强标记，不依赖被摘掉的引导语）。
+  assert.equal(
+    isAccountStoppedMessage('账号已停止提供服务。请通过官方渠道使用有道龙虾；如有异议，请联'),
+    true,
+  )
 })
 
 test('停车写入 enabled:false 并保留上游原文', async () => {

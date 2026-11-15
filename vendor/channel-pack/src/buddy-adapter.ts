@@ -46,6 +46,7 @@ import {
 } from './llm-register-compat.js'
 import { reportLedgerAccount } from './token-ledger.js'
 import { isAccountStoppedMessage, parkStoppedAccount } from './account-stop.js'
+import { rewriteTencentSystemMessages } from './openai-gateway/tencent-fingerprint.js'
 import { deriveBuddyCacheKey } from './buddy-session.js'
 import { firstUserTextOf, qoderContentText } from './qoder-session.js'
 import { readCachedInput, uncachedInput } from './usage-cache.js'
@@ -431,12 +432,45 @@ function errorMessage(error: unknown): string {
  *
  * 判据用三个独立信号（任一命中即可）：业务码、`msg` 措辞、`displayMsg` 文案。
  * 只看状态码无法区分 —— 403 同时覆盖「真认证失败 / 额度 / 权限 / 安全策略」。
+ *
+ * ## ⚠️ 必须排除 11128（2026-11-15）
+ *
+ * `11128` 是**渠道校验 / 内容级**拦截（`displayTips`：「可能不是官方客户端发出的」），
+ * 同一账号换掉 system 里那句模板就通 —— 而它的 `msg` **也是 `request illegal`**，
+ * 于是下面第二条信号一直在把它误认成账号级策略拦截：换号 + 30 分钟冷却白锁整池，
+ * 再叠上 `account-stop.ts` 当时把「official client」当停服标记，一个健康登录被永久
+ * 停用（实测 `workbuddy-aad65f7f`）。已知指纹的改写见
+ * `openai-gateway/tencent-fingerprint.ts`，本函数只负责**不再把它当账号级**。
  */
 function isContentRejection(body: string): boolean {
   if (body.length === 0) return false
+  if (isChannelVerificationRejection(body)) return false
   return /"code"\s*:\s*11140/.test(body)
     || /request illegal/i.test(body)
     || /安全审核|safety review/i.test(body)
+}
+
+/**
+ * 腾讯**渠道校验**拦截（业务码 11128）：内容级，账号未被处置。
+ *
+ * 判据只认业务码，不认文案 —— `request illegal` / 「请求被拦截」两个措辞
+ * 11140 与 11128 共用，靠文案分不开（那正是误判的来源）。
+ */
+function isChannelVerificationRejection(body: string): boolean {
+  return body.length > 0 && /"code"\s*:\s*11128/.test(body)
+}
+
+/**
+ * 账号级终态判定，**内容级拒绝优先**。
+ *
+ * 顺序不是洁癖：11140 的 `displayMsg` 与 11128 的 `displayTips` 都可能带上
+ * 「请通过官方客户端…」一类引导语，而那是**内容级**报文里的话。先判内容级，
+ * 才不会把一次可恢复的拦截写成 `enabled: false` 的永久停用。
+ */
+function isAccountStop(body: string): boolean {
+  return !isContentRejection(body)
+    && !isChannelVerificationRejection(body)
+    && isAccountStoppedMessage(body)
 }
 
 /**
@@ -529,6 +563,24 @@ function contentRejectionError(
     `${productId}: ${summary}。该拦截按账号生效（同一请求在其他账号可正常返回），`
     + `请在 Channel Pack 停用或更换被拦账号：${errorDetail(body)}`,
     'PERMISSION_DENIED',
+    { status },
+  )
+}
+
+/**
+ * 渠道校验拦截（11128）的错误：**内容级**，不冷却、不换号、不停用账号。
+ *
+ * 码取 `INVALID_REQUEST`：请求体里确实有上游不收的东西（system 模板句），宿主的
+ * `isDeterministicChannelRejection` 据此停止原地重试，而换家仍允许 —— 换到非腾讯系
+ * 模型能成，换腾讯系的另一个账号不能成（同一句照样被拦）。取 `AUTH` /
+ * `PERMISSION_DENIED` 都会把用户引向「重新登录 / 停用账号」，而那个账号是健康的。
+ */
+function channelVerificationError(productId: string, status: number, body: string): LlmError {
+  return new LlmError(
+    `${productId}: 上游渠道校验拦截（HTTP ${status}，code 11128）。这是内容级拦截，账号未被处置：`
+    + `system 里含上游不收的客户端模板句（已知指纹已自动改写，见 openai-gateway/tencent-fingerprint.ts）；`
+    + `请调整该句或补充指纹表：${errorDetail(body)}`,
+    'INVALID_REQUEST',
     { status },
   )
 }
@@ -1392,10 +1444,13 @@ export class BuddyAdapter extends LlmAdapter {
         imageUrls.set(id, `data:${image.mediaType};base64,${Buffer.from(image.data).toString('base64')}`)
       }
     }
-    const messages = serializeMessages(options.messages, imageUrls)
+    const serialized = serializeMessages(options.messages, imageUrls)
     if (options.system !== undefined && options.system.length > 0) {
-      messages.unshift({ role: 'system', content: options.system })
+      serialized.unshift({ role: 'system', content: options.system })
     }
+    // 腾讯内容级风控（11128）：客户端注入 system 的模板句会让上游整笔拒收。
+    // 只改 system；无命中时返回同一个数组引用，前缀缓存逐字节不变。
+    const messages = rewriteTencentSystemMessages(serialized, this.product.id)
     const tools = options.tools?.map((tool) => ({
       type: 'function' as const,
       function: {
@@ -1564,7 +1619,7 @@ export class BuddyAdapter extends LlmAdapter {
           // 必须**先于**「仅 401/403 才继续」的判据检查，否则会被当成普通 403
           // 之外的错误而 break，退回到「只试一个账号」的老问题。
           const rotatedBody = await response.clone().text().catch(() => '')
-          if (isAccountStoppedMessage(rotatedBody)) {
+          if (isAccountStop(rotatedBody)) {
             await parkStoppedAccount(this.options.accountPool, currentAccountId, rotatedBody)
             throw new LlmError(
               `${this.product.id}: 上游已停止为该账号服务（${errorDetail(rotatedBody)}）`,
@@ -1649,7 +1704,11 @@ export class BuddyAdapter extends LlmAdapter {
     }
     if (!response.ok) {
       let errorText = await response.text().catch(() => '')
-      if (isAccountStoppedMessage(errorText)) {
+      // 11128 是内容级：不冷却、不换号、不停用账号（见 channelVerificationError）。
+      if (isChannelVerificationRejection(errorText)) {
+        throw channelVerificationError(this.product.id, response.status, errorText)
+      }
+      if (isAccountStop(errorText)) {
         await parkStoppedAccount(this.options.accountPool, currentAccountId, errorText)
         throw new LlmError(
           `${this.product.id}: 上游已停止为该账号服务（${errorDetail(errorText)}）；该账号已退出选号`,
@@ -1788,7 +1847,7 @@ export class BuddyAdapter extends LlmAdapter {
             return
           }
           errorText = await response.text().catch(() => '')
-          if (isAccountStoppedMessage(errorText)) {
+          if (isAccountStop(errorText)) {
             await parkStoppedAccount(this.options.accountPool, currentAccountId, errorText)
             throw new LlmError(
               `${this.product.id}: 上游已停止为该账号服务（${errorDetail(errorText)}）`,
@@ -2051,6 +2110,10 @@ export class BuddyAdapter extends LlmAdapter {
             data = JSON.parse(payload)
           } catch {
             continue
+          }
+          // 11128 的流内形态：内容级，不冷却、不停用账号，如实报错而不是静默丢帧。
+          if (data.choices === undefined && isChannelVerificationRejection(payload)) {
+            throw channelVerificationError(this.product.id, 200, payload)
           }
           // ⚠️ **流内**的安全策略拦截（HTTP 200 + SSE 内嵌 11140 帧）。
           //
