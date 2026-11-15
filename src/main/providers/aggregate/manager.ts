@@ -18,6 +18,7 @@ import {
 } from './registry'
 import { readModelList } from '../modelListReaders'
 import { MODELS_DEV_URL, listModelsDevModels, planSyncModelIds } from '../../../shared/modelsDev'
+import { fetchArkAgentPlanModels, volcengineAccessKeyFromEnv } from './volcenginePlanCatalog'
 import { aggregateCostOf } from '../../../shared/aggregateCost.ts'
 import AccountManager from '../../store/accounts'
 import { storeManager } from '../../store/store'
@@ -433,12 +434,23 @@ class AggregateProviderManager {
 
     const probe = await this.probe(entry, provider)
 
+    // 订阅计费通路（如火山 Agent Plan）没有 GET /models。声明了 planCatalog 且环境
+    // 提供 Access Key 时，改走厂商开放接口 ListArkAgentPlanModel 在线取清单——它是
+    // 上游自己的答案，与 probe 成功同权（可 removeMissing）。读不到再退 models.dev。
+    let upstreamModels: FetchedModel[] | null = probe.ok ? probe.models : null
+    if (!probe.ok && entry.planCatalog) {
+      const key = volcengineAccessKeyFromEnv()
+      if (key) {
+        upstreamModels = await fetchArkAgentPlanModels(entry.planCatalog.edition, key.accessKeyId, key.secretAccessKey)
+      }
+    }
+
     // 上游清单读不到时退到 models.dev：它按同一个条目 id 聚合厂商的模型元数据，
     // 于是"这家没有 /models 端点"或"探测被 401 挡下"不再等于"无法同步"。
     // 判定本身在 `planSyncModelIds` 里：探测成功但返回空**不是**可降级条件。
-    const fallback = probe.ok ? null : await this.fetchModelsDevModels(entry.id)
+    const fallback = upstreamModels ? null : await this.fetchModelsDevModels(entry.id)
     const plan = planSyncModelIds({
-      upstream: probe.ok ? probe.models : null,
+      upstream: upstreamModels,
       modelsDev: fallback,
     })
     if (!probe.ok && plan.source === 'none') return probe.result

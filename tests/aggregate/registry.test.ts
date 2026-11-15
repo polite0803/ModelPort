@@ -35,7 +35,11 @@ test('the catalogue carries the entries that can actually be wired', () => {
   // stepfun-ai/Step-3.7-Flash - upstream answered 400 'Model id : ... , has no
   // provider supported' for both on 2026-11-14 live traffic (x3 / x1; the
   // 2026-11-06 window had 11 hits of the same wording class).
-  assert.equal(AGGREGATE_REGISTRY.reduce((sum, entry) => sum + entry.models.length, 0), 621)
+  // plus 4 on 2026-11-15: volcengine_ark_agent_plan baseline refreshed to the
+  // official 2026-11-11 console list (10 -> 14: +doubao-seed-evolving/2.1-pro/2.1-lite/
+  // 2.0-mini, deepseek-v4.1-flash[-economy], glm-5.3[-flash], kimi-k3.1-pro/k2.8-preview/k3,
+  // retiring the stale 2.0-pro/lite/code, glm-5.2, kimi-k2.7-code, minimax-m3).
+  assert.equal(AGGREGATE_REGISTRY.reduce((sum, entry) => sum + entry.models.length, 0), 625)
 
   // Browser-login account channels are retired; the responses-only relay is not wired.
   for (const excluded of ['openai', 'github_copilot', 'fleetrelay_t1']) {

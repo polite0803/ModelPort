@@ -103,6 +103,11 @@ export interface AggregateEntry {
   /** Endpoint that lists models; absent means discovery is unavailable */
   modelsUrl?: string
   /**
+   * 火山方舟开放接口 ListArkAgentPlanModel 的套餐版本。声明后，当 /models 读不到
+   * 且环境提供了 Access Key 时，同步改走该在线接口（厂商自己的清单，authoritative）。
+   */
+  planCatalog?: { edition: 'personal' | 'enterprise' }
+  /**
    * 账号级实时额度的查询端点；缺席 = 这家问不到，界面上的按钮也不会出现。
    * 目录里目前只有两家真实存在（`open_router` / `siliconflow`）。
    */

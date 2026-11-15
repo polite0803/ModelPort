@@ -3529,19 +3529,24 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     "wire": "openai-chat",
     "models": [
       { "id": "ark-code-latest", "name": "Ark Code Latest" },
-      { "id": "doubao-seed-2.1-turbo", "name": "Doubao Seed 2.1 Turbo" },
-      { "id": "doubao-seed-2.0-pro", "name": "Doubao Seed 2.0 Pro" },
-      { "id": "doubao-seed-2.0-lite", "name": "Doubao Seed 2.0 Lite" },
-      { "id": "doubao-seed-2.0-code", "name": "Doubao Seed 2.0 Code" },
+      { "id": "doubao-seed-evolving", "name": "Doubao Seed Evolving" },
+      { "id": "doubao-seed-2.1-pro", "name": "Doubao Seed 2.1 Pro" },
+      { "id": "doubao-seed-2.1-lite", "name": "Doubao Seed 2.1 Lite" },
+      { "id": "doubao-seed-2.0-mini", "name": "Doubao Seed 2.0 Mini" },
+      { "id": "deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash" },
+      { "id": "deepseek-v4.1-flash-economy", "name": "DeepSeek V4.1 Flash Economy" },
       { "id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash" },
       { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro" },
-      { "id": "glm-5.2", "name": "GLM 5.2" },
-      { "id": "kimi-k2.7-code", "name": "Kimi K2.7 Code" },
-      { "id": "minimax-m3", "name": "MiniMax M3" }
+      { "id": "glm-5.3", "name": "GLM 5.3" },
+      { "id": "glm-5.3-flash", "name": "GLM 5.3 Flash" },
+      { "id": "kimi-k3.1-pro", "name": "Kimi K3.1 Pro" },
+      { "id": "kimi-k2.8-preview", "name": "Kimi K2.8 Preview" },
+      { "id": "kimi-k3", "name": "Kimi K3" }
     ],
+    "planCatalog": { "edition": "personal" },
     "authUrl": "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
     "envVar": "ARK_AGENT_PLAN_API_KEY",
-    "notes": "Agent Plan 订阅端点：官方接入文档给出 OpenAI 协议 /api/plan/v3、Anthropic 协议 /api/plan，并要求使用 Agent Plan 专属 Key。ark-code-latest 由控制台切换实际模型；Kimi K3 只在 Medium 及以上档位提供，故不进基线。",
+    "notes": "Agent Plan 订阅端点：官方接入文档给出 OpenAI 协议 /api/plan/v3、Anthropic 协议 /api/plan，并要求使用 Agent Plan 专属 Key。ark-code-latest 由控制台切换实际模型。基线按 2026-11-11 官方概览/控制台清单手抄（含 DeepSeek-V4.1-Flash、GLM-5.3、Kimi-K3.1-Pro；Kimi-K3 标注即将下线）。/api/plan/v3 无 GET /models，在线同步改走开放接口 ListArkAgentPlanModel（Access Key 鉴权，读环境变量 VOLCENGINE_ACCESS_KEY_ID/SECRET_ACCESS_KEY）。",
     "website": "https://www.volcengine.com/docs/82379/2374459"
   },
   {
