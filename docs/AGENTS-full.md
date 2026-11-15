@@ -1139,8 +1139,10 @@ stability and precedence, and a source pin that both `buildHeaders` call sites p
 
 **An account the upstream says it will not serve is parked, not rotated - on every channel.**
 `vendor/channel-pack/src/account-stop.ts` holds the shared judgement (`ACCOUNT_STOP_MARKERS`:
-停止提供服务 / 封禁 / 违规 / 安全审核 / account suspended / official client …, and deliberately *not*
-generic `forbidden` / `unauthorized`, which are ordinary 403s) plus `parkStoppedAccount`, which writes
+停止提供服务 / 封禁 / 违规 / account suspended / abuse detected …, and deliberately *not*
+generic `forbidden` / `unauthorized`, which are ordinary 403s, *not* 安全审核 / `request illegal`
+(Tencent's per-request content interception), and *not* the "go use the official client" guidance
+phrases - see the 11128 ruling below) plus `parkStoppedAccount`, which writes
 `enabled: false` and `serviceStopped { at, text }` in one store write. Every adapter calls it at the
 point where status and body are known: buddy/workbuddy (three paths), qoder (HTTP + in-stream),
 trae (first response + rotation loop), cline (region-403 read + both error paths), loomy, raccoon,
@@ -1153,6 +1155,27 @@ refresh + resend, no rate-limit badge (a ban shown as "限额重置" is a false 
 re-enabling the row (per account or per channel) drops the record - that switch is the user's
 explicit "try again". `tests/channels/account-stop.test.ts` pins the judgement, the write, the
 failure-isolation, and a source scan that every adapter still calls it.
+
+**Tencent `11128` is content-level, `11140` is account-level - and they share the same `msg`.**
+Both answer `request illegal`, so wording cannot separate them; only the business code can
+(`buddy-adapter.ts::isChannelVerificationRejection`). `isContentRejection` therefore excludes 11128
+first: treating it as account-level rotated the pool and wrote a 30-minute cooldown per account for a
+rejection that one rewritten sentence clears. Its `displayTips` ("possibly because it was not sent
+from an official client" / 「可能不是官方客户端发出的」) also used to match `ACCOUNT_STOP_MARKERS`, which
+permanently disabled a healthy login on 2026-11-15 (`workbuddy-aad65f7f`, parked 11:50 CST) and left
+the pool answering 「没有其它可用账号可换」. The guidance phrases are gone from the marker table, the
+three buddy stop checks go through `isAccountStop` (content-level first), and 11128 gets its own
+`channelVerificationError` (`INVALID_REQUEST`, no cooldown, no rotation, no parking) on both the HTTP
+and the in-stream path. The trigger itself is now rewritten: `rewriteTencentSystemMessages`
+(`openai-gateway/tencent-fingerprint.ts`) runs in `buddy-adapter` right after the wire messages are
+built and **before** `prompt_cache_key` is derived - the only place that covers both ModelPort
+forwarding and DSH direct, since ModelPort never goes through the pack's own openai-gateway. It
+rewrites **only** `system` (the same sentence in `user` / `tool` is not intercepted, measured),
+case-insensitively, and returns the **same array reference** when nothing matches so the prefix cache
+stays byte-identical. Every rule needs both a captured rejection and a captured pass after rewriting.
+Pinned by `tests/channels/tencent-fingerprint.test.ts` (rewrite scope, reference identity, wiring
+order, and the 11128/11140 split) plus the real 11128 body as a negative control in
+`tests/channels/account-stop.test.ts`.
 
 Rotation is bounded everywhere: `BUDDY_MAX_ROTATE` replaced workbuddy/buddy's `for (;;)` until the
 pool ran dry, and `QODER_MAX_ROTATE` bounds `switchAccountOnQuota`; the other channels already ran at
@@ -1478,6 +1501,28 @@ recomputation from `includeModels`, the three search fields, both management cal
 absences, locale slots in both languages), `tests/shell/tray-model-menu.test.ts` (the overflow line
 is clickable and carries the route), `tests/ipc/routes-menu-wire.test.ts` (the range arguments only
 narrow the query).
+
+### Star ratings on the pool (2026-11-15)
+
+Each pool row on `/routes` carries a 1–5 star recommendation (`StarRating` in `Routes.tsx`): click the
+Nth star to set N, click the same star again to clear, hover/focus previews the pending value. The
+write is a fourth wire, `routes:rate` (`RouteRateRequest { route, providerId, model, stars }`, `0` =
+clear), persisted as `ModelRoute.modelRatings` (`RouteModelRating[]`, ref key + `stars`). It is a
+**pure annotation**: it never enters ranking, never pins, and does not require the model to be in the
+dispatchable pool right now - cooldown/quota are transient states and must not refuse a user's
+recommendation. Overwrite matches the ref case-insensitively (same dedup rule as the manual refs);
+an empty list normalizes to the key being absent. Read-side normalization drops invalid entries
+(stars must be an integer `1..ROUTE_RATING_MAX_STARS`), write-side validation returns a readable
+error instead of silently filtering. `routeMenu` projects the rating onto each row as `rating`
+(omitted when unrated); the tray ignores the field. The page updates optimistically and re-reads on
+failure; a "星级优先 / Stars first" toggle sorts the **display** only (stable, unrated last) and says
+so in its tooltip - routing order stays the snapshot order.
+
+Tests: `tests/routes/route-model-ratings.test.ts` (normalize/check/whole-table write validation),
+`tests/routes/model-scope-pin-circuit.test.ts` (menu projection, rating never reorders selection,
+clear drops the key), `tests/ipc/routes-menu-wire.test.ts` (the fourth channel, shape/range guards,
+overwrite-not-append, no pin side effects), `tests/renderer/routes-console-surface.test.mjs` (the
+control, the shared star constant, display-only sort, locale slots).
 
 ### An empty pool: three causes, three answers (2026-11-13)
 
