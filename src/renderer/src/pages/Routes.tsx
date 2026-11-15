@@ -23,9 +23,11 @@ const FULL_LIST_LIMIT = 2000
  * 预览将要落下的星级。纯标注控件：写的是路由配置的 `modelRatings`
  * （`routes:rate`），不参与选路打分 —— 主观推荐与客观排序是两件事。
  */
-function StarRating({ model, value, disabled, onChange }: {
+function StarRating({ model, value, manual, disabled, onChange }: {
   model: string
   value: number | undefined
+  /** true = 显示手动评分（金色）；false = 显示系统默认推荐（灰色实心），点星即覆盖。 */
+  manual: boolean
   disabled: boolean
   onChange: (stars: number) => void
 }) {
@@ -38,39 +40,45 @@ function StarRating({ model, value, disabled, onChange }: {
       className="flex items-center gap-0.5"
       role="group"
       aria-label={t('routes.ratingGroup', { model })}
+      title={manual ? undefined : t('routes.recommendedHint', { n: current })}
       onMouseLeave={() => setPreview(null)}
     >
-      {Array.from({ length: ROUTE_RATING_MAX_STARS }, (_, index) => index + 1).map(star => (
-        <button
-          key={star}
-          type="button"
-          disabled={disabled}
-          className={cn(
-            'rounded-sm p-0.5 transition-colors',
-            disabled ? 'cursor-not-allowed opacity-50' : 'hover:bg-accent',
-          )}
-          aria-label={star === current
-            ? t('routes.rateClearAria', { model, n: star })
-            : t('routes.rateAria', { model, n: star })}
-          aria-pressed={star <= current}
-          title={star === current
-            ? t('routes.rateClearAria', { model, n: star })
-            : t('routes.rateAria', { model, n: star })}
-          onMouseEnter={() => setPreview(star)}
-          onFocus={() => setPreview(star)}
-          onBlur={() => setPreview(null)}
-          onClick={() => onChange(star === current ? 0 : star)}
-        >
-          <Star
+      {Array.from({ length: ROUTE_RATING_MAX_STARS }, (_, index) => index + 1).map(star => {
+        const isClear = manual && star === current
+        return (
+          <button
+            key={star}
+            type="button"
+            disabled={disabled}
             className={cn(
-              'h-3.5 w-3.5 transition-colors',
-              star <= shown
-                ? 'fill-[var(--warning)] text-[var(--warning)]'
-                : 'text-muted-foreground/35',
+              'rounded-sm p-0.5 transition-colors',
+              disabled ? 'cursor-not-allowed opacity-50' : 'hover:bg-accent',
             )}
-          />
-        </button>
-      ))}
+            aria-label={isClear
+              ? t('routes.rateClearAria', { model, n: star })
+              : t('routes.rateAria', { model, n: star })}
+            aria-pressed={star <= current}
+            title={isClear
+              ? t('routes.rateClearAria', { model, n: star })
+              : t('routes.rateAria', { model, n: star })}
+            onMouseEnter={() => setPreview(star)}
+            onFocus={() => setPreview(star)}
+            onBlur={() => setPreview(null)}
+            onClick={() => onChange(isClear ? 0 : star)}
+          >
+            <Star
+              className={cn(
+                'h-3.5 w-3.5 transition-colors',
+                star <= shown
+                  ? manual
+                    ? 'fill-[var(--warning)] text-[var(--warning)]'
+                    : 'fill-muted-foreground/45 text-muted-foreground/45'
+                  : 'text-muted-foreground/35',
+              )}
+            />
+          </button>
+        )
+      })}
     </span>
   )
 }
@@ -265,7 +273,8 @@ export function Routes() {
       )
     if (!sortByRating) return filtered
     // 稳定排序：同星（含未评分）保持快照原序，即真实选路的先后。
-    return [...filtered].sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0))
+    return [...filtered].sort((a, b) =>
+      (b.rating ?? b.recommendedStars ?? 0) - (a.rating ?? a.recommendedStars ?? 0))
   }, [detail, search, sortByRating])
 
   /**
@@ -508,7 +517,8 @@ export function Routes() {
                   </span>
                   <StarRating
                     model={model.displayName}
-                    value={model.rating}
+                    value={model.rating ?? model.recommendedStars}
+                    manual={model.rating !== undefined}
                     disabled={busy}
                     onChange={stars => void runRate(model, stars)}
                   />

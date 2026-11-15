@@ -2110,7 +2110,7 @@
   },
   "routes": {
     "title": "Routes and models",
-    "description": "Every switchable model of a route, with a search box. \"Pin\" writes a 30-minute in-memory soft pin; \"Keep\" writes the choice into the route config and survives a restart. \"Back to automatic order\" clears both. \"Last served\" is what actually ran last turn; \"Pinned\" is what the next request will prefer. Star ratings (1-5) are your subjective recommendation of a model - they never change routing order.",
+    "description": "Every switchable model of a route, with a search box. \"Pin\" writes a 30-minute in-memory soft pin; \"Keep\" writes the choice into the route config and survives a restart. \"Back to automatic order\" clears both. \"Last served\" is what actually ran last turn; \"Pinned\" is what the next request will prefer. Star ratings (1-5) default to a system recommendation (tier / first-token latency / current health, muted fill); clicking a star overrides it with your manual rating (gold), and clicking the same star again clears the manual rating back to the system recommendation. Display only - never changes routing order.",
     "loading": "Reading routes…",
     "unavailable": "The routes API is unavailable; restart the app and try again",
     "loadFailed": "Read failed: {{error}}",
@@ -2160,7 +2160,8 @@
     "sortByRating": "Stars first",
     "sortByRouting": "Routing order",
     "sortHint": "Changes the display order only - actual routing is untouched",
-    "ratedCount": "{{n}} rated"
+    "ratedCount": "{{n}} rated",
+    "recommendedHint": "System recommends {{n}} stars (tier/latency/health); click a star to override"
   },
   "gatewayConnection": {
     "network": "network error",

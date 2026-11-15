@@ -403,6 +403,35 @@ test('菜单：星级推荐按 (providerId, displayName) 投影到行上，未�
     undefined)
 })
 
+test('菜单：未评分的行也带系统推荐星 recommendedStars（1–5），手动评分不改变它', () => {
+  const route = makeRoute({ modelScope: 'pool' })
+  const menu = autoRouter.routeMenu(route)
+  assert.ok(menu.models.length > 0)
+  for (const model of menu.models) {
+    assert.equal(typeof model.recommendedStars, 'number', `${model.displayName} 缺系统推荐星`)
+    assert.ok(model.recommendedStars! >= 1 && model.recommendedStars! <= 5,
+      `${model.displayName} 推荐星越界：${model.recommendedStars}`)
+    assert.equal(model.rating, undefined, '未评分不落 rating 键')
+  }
+
+  // 手动评分只覆盖显示，不改动系统推导值，也不重排选路。
+  const written = sm.updateRoute(route.name, {
+    modelRatings: [{ providerId: 'pb', displayName: 'Beta-Lite', stars: 1 }],
+  })
+  assert.equal(written.ok, true, JSON.stringify(written.error))
+  const rated = sm.listModelRoutes().find(candidate => candidate.name === route.name)!
+  const ratedMenu = autoRouter.routeMenu(rated)
+  const before = menu.models.find(model => model.displayName === 'Beta-Lite')!
+  const now = ratedMenu.models.find(model => model.displayName === 'Beta-Lite')!
+  assert.equal(now.rating, 1)
+  assert.equal(now.recommendedStars, before.recommendedStars, '手动评分不改系统推导值')
+  assert.deepEqual(
+    ratedMenu.models.map(model => model.displayName),
+    menu.models.map(model => model.displayName),
+    '系统推荐星只作展示，不重排菜单/选路',
+  )
+})
+
 // ------------------------------------------------------------ 5. 切换入口
 
 test('切换：点名写入软钉，下一轮就按它服务；来源记为 tray', () => {

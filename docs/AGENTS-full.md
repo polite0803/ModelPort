@@ -1504,25 +1504,35 @@ narrow the query).
 
 ### Star ratings on the pool (2026-11-15)
 
-Each pool row on `/routes` carries a 1–5 star recommendation (`StarRating` in `Routes.tsx`): click the
-Nth star to set N, click the same star again to clear, hover/focus previews the pending value. The
-write is a fourth wire, `routes:rate` (`RouteRateRequest { route, providerId, model, stars }`, `0` =
-clear), persisted as `ModelRoute.modelRatings` (`RouteModelRating[]`, ref key + `stars`). It is a
-**pure annotation**: it never enters ranking, never pins, and does not require the model to be in the
-dispatchable pool right now - cooldown/quota are transient states and must not refuse a user's
+Each pool row on `/routes` carries a 1–5 star recommendation (`StarRating` in `Routes.tsx`). By
+default the star is a **system recommendation** (`recommendedStars`, computed by
+`shared/modelRecommendation.ts` from capability tier + observed first-token latency + current
+health: strong=4 / balanced=3 / fast=2 base, ≤1s +1 / ≥4s −1 when a reading exists, −2 while
+circuited, −2 at zero dispatchable accounts, clamped 1..5; context is capability not quality and is
+deliberately excluded). It is display-only and never enters ranking. Clicking the Nth star overrides
+it with a **manual** rating (gold fill vs the recommendation's muted fill); clicking the same manual
+star again clears back to the system recommendation, hover/focus previews the pending value. The
+manual write is a fourth wire, `routes:rate` (`RouteRateRequest { route, providerId, model, stars }`,
+`0` = clear), persisted as `ModelRoute.modelRatings` (`RouteModelRating[]`, ref key + `stars`). It is
+a **pure annotation**: it never enters ranking, never pins, and does not require the model to be in
+the dispatchable pool right now - cooldown/quota are transient states and must not refuse a user's
 recommendation. Overwrite matches the ref case-insensitively (same dedup rule as the manual refs);
 an empty list normalizes to the key being absent. Read-side normalization drops invalid entries
 (stars must be an integer `1..ROUTE_RATING_MAX_STARS`), write-side validation returns a readable
-error instead of silently filtering. `routeMenu` projects the rating onto each row as `rating`
-(omitted when unrated); the tray ignores the field. The page updates optimistically and re-reads on
-failure; a "星级优先 / Stars first" toggle sorts the **display** only (stable, unrated last) and says
-so in its tooltip - routing order stays the snapshot order.
+error instead of silently filtering. `routeMenu` projects the manual rating onto each row as `rating`
+(omitted when unrated) plus `recommendedStars` on every row; the tray ignores both. The page updates
+optimistically and re-reads on failure; a "星级优先 / Stars first" toggle sorts the **display** only
+(stable, by displayed value = manual ?? system recommendation) and says so in its tooltip - routing
+order stays the snapshot order.
 
-Tests: `tests/routes/route-model-ratings.test.ts` (normalize/check/whole-table write validation),
+Tests: `tests/routes/recommend-model-stars.test.ts` (the derivation: tier base, latency bump/drop,
+health penalties, clamp, no-reading neutrality), `tests/routes/route-model-ratings.test.ts`
+(normalize/check/whole-table write validation),
 `tests/routes/model-scope-pin-circuit.test.ts` (menu projection, rating never reorders selection,
-clear drops the key), `tests/ipc/routes-menu-wire.test.ts` (the fourth channel, shape/range guards,
-overwrite-not-append, no pin side effects), `tests/renderer/routes-console-surface.test.mjs` (the
-control, the shared star constant, display-only sort, locale slots).
+clear drops the key, recommendedStars present on unrated rows), `tests/ipc/routes-menu-wire.test.ts`
+(the fourth channel, shape/range guards, overwrite-not-append, no pin side effects),
+`tests/renderer/routes-console-surface.test.mjs` (the control, manual-vs-recommended display, the
+shared star constant, display-only sort, locale slots).
 
 ### An empty pool: three causes, three answers (2026-11-13)
 

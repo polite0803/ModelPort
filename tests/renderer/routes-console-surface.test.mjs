@@ -94,10 +94,14 @@ test('星级推荐走 routes:rate：纯标注控件，星数共用常量，排�
   assert.match(page, /await api\.rate\(\{/, '评分必须是命名方法 routes:rate，不是页面自己拼配置')
   assert.match(page, /providerId: model\.providerId/, '同名模型多家服务，评分落在「这一家的这个模型」')
   assert.match(page, /onChange=\{stars => void runRate\(model, stars\)\}/)
+  assert.match(page, /value=\{model\.rating \?\? model\.recommendedStars\}/, '默认显示系统推荐星，手动评分优先')
+  assert.match(page, /manual=\{model\.rating !== undefined\}/, '区分手动（金色）与系统推荐（灰色实心）')
+  assert.match(page, /t\('routes\.recommendedHint', \{ n: current \}\)/, '系统推荐态要说明依据与可覆盖')
   assert.match(page, /stars === 0 \? undefined : stars/, '清除 = 行上不再带 rating（乐观更新）')
-  assert.match(page, /star === current \? 0 : star/, '再点同一颗星清除，不是永远只能加星')
-  // 「星级优先」只改显示顺序：真实选路仍按快照原序。
-  assert.match(page, /\(b\.rating \?\? 0\) - \(a\.rating \?\? 0\)/, '同星保持快照原序（稳定排序）')
+  assert.match(page, /isClear \? 0 : star/, '再点同一颗手动星清除；系统推荐态点同星是确认覆盖，不是清除')
+  // 「星级优先」只改显示顺序：真实选路仍按快照原序；排序读显示值（手动优先、回落系统推荐）。
+  assert.match(page, /\(b\.rating \?\? b\.recommendedStars \?\? 0\) - \(a\.rating \?\? a\.recommendedStars \?\? 0\)/,
+    '同星保持快照原序（稳定排序）')
   assert.match(page, /sortByRating \? t\('routes\.sortByRating'\) : t\('routes\.sortByRouting'\)/)
   assert.match(page, /t\('routes\.sortHint'\)/, '排序按钮要说明「只改显示、不改选路」')
   // 写失败要回读真相，不能让乐观更新的星星停在屏幕上骗人。
@@ -169,7 +173,8 @@ test('两种语言写全，插值槽一致', () => {
     sortByRating: '',
     sortByRouting: '',
     sortHint: '',
-    ratedCount: '{{n}}'
+    ratedCount: '{{n}}',
+    recommendedHint: '{{n}}'
   }
   for (const { name, json } of locales) {
     assert.equal(typeof json.nav.routes, 'string', `${name} 缺 nav.routes`)

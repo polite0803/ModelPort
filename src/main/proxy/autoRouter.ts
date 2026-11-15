@@ -92,6 +92,7 @@ import { aggregateThirdPartyHint } from '../../shared/aggregateCapabilities.ts'
 import { costBucketOf, type CostBucket } from '../../shared/channels.ts'
 import type { ClientSessionKey } from '../../shared/clientSessionKey.ts'
 import { aggregateCostOf, costBucketOfAggregateClass, type AggregateCostClass } from '../../shared/aggregateCost.ts'
+import { recommendModelStars } from '../../shared/modelRecommendation.ts'
 
 /**
  * 对外暴露的虚拟模型 id，保留字：不能作为真实模型或映射名。
@@ -1954,6 +1955,12 @@ class AutoRouter {
           ...(model.costBucket === undefined ? {} : { costBucket: model.costBucket }),
           ...(circuitUntil === undefined ? {} : { circuitUntil }),
           ...(rating === undefined ? {} : { rating }),
+          recommendedStars: recommendModelStars({
+            tier: model.capability.tier,
+            ...(model.ewmaFirstTokenMs === undefined ? {} : { ewmaFirstTokenMs: model.ewmaFirstTokenMs }),
+            accountCount,
+            circuitActive: circuitUntil !== undefined,
+          }),
           current: current !== undefined && current.displayName === model.displayName,
           pinned: pinnedName !== undefined && pinnedName === model.displayName,
         } satisfies RouteMenuModel

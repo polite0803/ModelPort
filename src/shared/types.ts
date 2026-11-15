@@ -557,6 +557,11 @@ export interface RouteMenuModel {
   pinned: boolean
   /** 用户给的星级推荐（1–5）；没评过不写。 */
   rating?: number
+  /**
+   * 系统按档位/首字延迟/当前健康推导的默认推荐星（1–5，`shared/modelRecommendation.ts`）。
+   * 手动 `rating` 优先显示；只作展示，不参与选路排序。
+   */
+  recommendedStars?: number
 }
 
 /** 一条路由的托盘/界面菜单快照。 */
