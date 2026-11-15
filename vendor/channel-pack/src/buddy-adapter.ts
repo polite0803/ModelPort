@@ -46,6 +46,9 @@ import {
 } from './llm-register-compat.js'
 import { reportLedgerAccount } from './token-ledger.js'
 import { isAccountStoppedMessage, parkStoppedAccount } from './account-stop.js'
+import { deriveBuddyCacheKey } from './buddy-session.js'
+import { firstUserTextOf, qoderContentText } from './qoder-session.js'
+import { readCachedInput, uncachedInput } from './usage-cache.js'
 
 /**
  * CodeBuddy（中国版）的 chat completions 基址。
@@ -852,8 +855,13 @@ export class BuddyAdapter extends LlmAdapter {
   private readonly product: BuddyProduct
   private readonly fetchImpl: typeof fetch
   /**
-   * 前缀缓存会话标识（prompt_cache_key）。同一会话内所有请求复用同一 key，
-   * 服务端据此把相同前缀的 KV 缓存跨请求复用；缺失时缓存命中恒为 0。
+   * 前缀缓存会话标识的**覆盖值 / 无会话信号时的回落值**。
+   *
+   * ⚠️ 不再直接当 `prompt_cache_key` 用：旧实现把这个构造时生成的随机 UUID
+   * 发给所有账号、所有会话，两条并发会话挤在同一缓存命名空间里互相驱逐，
+   * 命中率被压到 128 token 地板（2026-11-15 实测）。现在每请求按会话身份
+   * 派生（见 {@link promptCacheKey}）；仅当调用方显式钉了 `options.sessionId`，
+   * 或请求没有任何会话信号（无 system、无 user 文本）时才回落到本值。
    */
   private readonly sessionId: string
   /** 动态模型缓存（首次 listModels 成功后填充）。 */
@@ -1265,6 +1273,30 @@ export class BuddyAdapter extends LlmAdapter {
     }
   }
 
+  /**
+   * 本请求的 `prompt_cache_key`：按会话身份派生，跨轮稳定、跨会话隔离。
+   *
+   * 维度与 `qoder-session.ts` / `gemini.ts` 对齐（模型 / 账号 / system / 首条
+   * user 文本）。`messages` 是序列化后的 wire 形状（`options.system` 已并入），
+   * 故 system 文本直接从其中取，不依赖 `options.system` —— 网关流量里它常缺省，
+   * system 落在 messages 内。显式 `options.sessionId` 优先；没有任何会话信号
+   * （无 system、无 user 文本）时回落随机单例，保持旧行为。
+   */
+  private promptCacheKey(
+    options: GenerateOptions,
+    messages: readonly Record<string, unknown>[],
+    accountSeed: string,
+  ): string {
+    if (this.options.sessionId !== undefined) return this.sessionId
+    const firstUserText = firstUserTextOf(messages)
+    const systemText = messages
+      .filter((message) => message.role === 'system')
+      .map((message) => qoderContentText(message.content))
+      .join('\n')
+    if (firstUserText === '' && systemText === '') return this.sessionId
+    return deriveBuddyCacheKey({ model: options.model, accountSeed, systemText, firstUserText })
+  }
+
   async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     // 1. 获取凭据（过期则先静默续期）
     let credential = await this.options.resolveCredential(options.model)
@@ -1384,7 +1416,9 @@ export class BuddyAdapter extends LlmAdapter {
       //   不带该字段 → prompt_tokens=8027, prompt_cache_hit_tokens=0,    credit=0.34
       //   带该字段   → prompt_tokens=8027, prompt_cache_hit_tokens=7808, credit=0.02
       // 仅此一个字段的差异，费用差约 17 倍。同 key 重复请求稳定命中同一前缀。
-      prompt_cache_key: this.sessionId,
+      // ⚠️ 按会话身份派生（见 promptCacheKey），不再用全局单例：两条并发会话
+      // 共用一个 key 会互相驱逐缓存前缀，只剩共有的系统块（128 token 地板）。
+      prompt_cache_key: this.promptCacheKey(options, messages, currentAccountId),
     }
     if (tools !== undefined && tools.length > 0) bodyObj.tools = tools
     if (options.temperature !== undefined) bodyObj.temperature = options.temperature
@@ -2157,22 +2191,23 @@ export class BuddyAdapter extends LlmAdapter {
           }
           if (data.usage) {
             const promptTokens = data.usage.prompt_tokens ?? 0
-            // 后端在六处回传缓存信息，其中 cached_tokens 同时出现在
-            // prompt_tokens_details 与 completion_tokens_details 里，但后者
-            // **恒为 0**（实测）——只认 prompt_tokens_details，误取会永远读到 0。
-            const cachedTokens = data.usage.prompt_tokens_details?.cached_tokens
-              ?? data.usage.prompt_cache_hit_tokens
-              ?? 0
+            // 缓存命中按 usage-cache.ts 的口径判定读取（与 trae 同一份实现）：
+            // OpenAI 系字段（prompt_tokens_details.cached_tokens / prompt_cache_hit_tokens）
+            // 是 prompt 的子集，inputTokens 必须减掉命中 —— 网关 toOpenAiUsage 会加回，
+            // 不减就是双计。readCachedInput 只认 prompt_tokens_details，不认
+            // completion_tokens_details 里的 cached_tokens（后者恒为 0，实测）。
+            // ⚠️ 显式 0 必须原样保留（2026-11-15 报障）：旧的 `?? 0` + `> 0` 把
+            // 「报了且零命中」折成缺省，下游 cacheReported 随之变 false，零命中请求
+            // 从命中率分母里消失，仪表盘把真实约 18% 显示成约 41%。
+            const cached = readCachedInput(data.usage as Record<string, unknown>)
             const cacheWriteTokens = data.usage.prompt_tokens_details?.cache_write_tokens
             const reasoningTokens = data.usage.completion_tokens_details?.reasoning_tokens
             yield {
               type: 'usage',
               usage: {
-                // 与 codearts 一致：inputTokens 只计**未命中缓存**的部分，
-                // 命中部分单列 cacheReadTokens，否则缓存命中率显示会偏大。
-                inputTokens: cachedTokens > 0 ? promptTokens - cachedTokens : promptTokens,
+                inputTokens: uncachedInput(promptTokens, cached),
                 outputTokens: data.usage.completion_tokens ?? 0,
-                ...cachedTokens > 0 ? { cacheReadTokens: cachedTokens } : {},
+                ...cached.cachedTokens !== undefined ? { cacheReadTokens: cached.cachedTokens } : {},
                 ...cacheWriteTokens !== undefined && cacheWriteTokens > 0 ? { cacheWriteTokens } : {},
                 ...reasoningTokens !== undefined && reasoningTokens > 0 ? { reasoningTokens } : {},
               },
