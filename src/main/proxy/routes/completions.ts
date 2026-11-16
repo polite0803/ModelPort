@@ -22,7 +22,8 @@ import { routeHeaderValue, toHeaderValue } from '../utils/headerValue'
 import { clientHeaderValue, identifyClientByUserAgent } from '../../../shared/clientProfile'
 import { nextDailyUsage } from '../../../shared/dailyUsage.ts'
 import { mapForwardFailure, retryAfterHeader, withRequestId } from '../errorMapping'
-import { autoExhaustedResponse, parseRetryAfterSeconds } from '../failover'
+import { autoExhaustedResponse, parseRetryAfterSeconds, SILENT_CHANNEL_SKIP_CODE } from '../failover'
+import { accountRuntime } from '../accountRuntime'
 import { startSseHeartbeat } from '../utils/sseHeartbeat'
 import { normalizeOutputCap } from '../utils/outputCap'
 import { createReasoningEchoObserver, reasoningEchoApplies } from '../reasoningEcho.ts'
@@ -305,14 +306,15 @@ router.post('/completions', async (ctx: Context) => {
       ...(autoDecision.pinMiss === undefined ? {} : { pinMiss: autoDecision.pinMiss }),
       ...(autoDecision.pinStale === undefined ? {} : { pinStale: autoDecision.pinStale }),
       ...(autoDecision.pinCooling === undefined ? {} : { pinCooling: autoDecision.pinCooling }),
+      ...(autoDecision.pinTransient === undefined ? {} : { pinTransient: autoDecision.pinTransient }),
       ...(autoDecision.pinBlocked === undefined ? {} : { pinBlocked: autoDecision.pinBlocked }),
     }
-    // 与 chat 路由同形：钉子指向池外模型时选路已把软钉退役并返回空链，这一轮必须
-    // 明确说出来（503 + `pin_stale`），沉默换模型才是更坏的失败。
+    // 与 chat 路由同形：钉子指向池外模型时钉保留、本轮拒绝（503 + `pin_stale`），
+    // 不回落 —— 沉默换模型才是更坏的失败。
     const stalePin = autoDecision.pinStale
-    if (stalePin !== undefined && stalePin.action === 'retired') {
+    if (stalePin !== undefined && stalePin.action === 'held') {
       const message = `The pinned model '${stalePin.displayName}' is no longer part of route '${autoDecision.routeName}'; ` +
-        'the pin was retired - retry to use the route\'s normal order'
+        'the pin is held - replace it (routes:switch) or clear it (routes:unpin) to serve other models'
       const body = {
         error: {
           message,
@@ -328,7 +330,7 @@ router.post('/completions', async (ctx: Context) => {
       }
       ctx.status = 503
       ctx.body = body
-      ctx.set('X-ModelPort-Pin', toHeaderValue(`stale=${stalePin.displayName};action=retired`))
+      ctx.set('X-ModelPort-Pin', toHeaderValue(`stale=${stalePin.displayName};action=held`))
       const refused = {
         ...selectionRefusalEntry(ctx, {
           statusCode: 503,
@@ -367,6 +369,45 @@ router.post('/completions', async (ctx: Context) => {
       ctx.status = 429
       ctx.body = body
       ctx.set('X-ModelPort-Pin', toHeaderValue(`cooling=${coolingPin.displayName};retry=${coolingPin.retryAfterSeconds}`))
+      const refused = {
+        ...selectionRefusalEntry(ctx, {
+          statusCode: 429,
+          code: 'model_temporarily_unavailable',
+          type: 'rate_limit_error',
+          message,
+          body,
+          requestId,
+          client,
+        }),
+        auto: refusalAuto,
+      }
+      storeManager.addRequestLog(refused)
+      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+      return
+    }
+    const transientPin = autoDecision.pinTransient
+    if (transientPin !== undefined) {
+      // 与 chat 路由同形：模型仍在路由里，只是名下账号全被瞬时状态挡下 ——
+      // 429 可重试、保钉，不报成 pin_stale（那会诱使用户撤掉一颗好钉）。
+      const message = `The pinned model '${transientPin.displayName}' on route '${autoDecision.routeName}' is temporarily unavailable (${describeTransientCause(transientPin.cause)}); retry in ${transientPin.retryAfterSeconds}s`
+      const body = {
+        error: {
+          message,
+          type: 'rate_limit_error',
+          code: 'model_temporarily_unavailable',
+          details: {
+            pin: transientPin.displayName,
+            scope: transientPin.scope,
+            source: transientPin.source,
+            cause: transientPin.cause,
+            retry_after_seconds: transientPin.retryAfterSeconds,
+          },
+        },
+      }
+      ctx.set('Retry-After', String(transientPin.retryAfterSeconds))
+      ctx.status = 429
+      ctx.body = body
+      ctx.set('X-ModelPort-Pin', toHeaderValue(`transient=${transientPin.displayName};retry=${transientPin.retryAfterSeconds}`))
       const refused = {
         ...selectionRefusalEntry(ctx, {
           statusCode: 429,
@@ -519,22 +560,40 @@ router.post('/completions', async (ctx: Context) => {
       // 供应商），直接写头值会让 Node 抛 ERR_INVALID_CHAR 并变成 500。
       ctx.set('X-ModelPort-Route', routeHeaderValue(actualModel, provider.name))
     } else {
-      result = await requestForwarder.forwardChatCompletion(
-        chatRequest,
-        account,
-        provider,
-        actualModel,
-        {
-          requestId,
-          providerId: provider.id,
-          accountId: account.id,
-          model: request.model,
-          actualModel,
-          startTime,
-          isStream: request.stream || false,
-          clientUserAgent: ctx.headers['user-agent'],
+      // 与 chat 具名泳道同形：静默窗口已武装的 (账号, 模型) 不再派发 —— 单候选
+      // 没有下家，首块超时的代价全落在客户端这一次等待上。合成 503 + Retry-After，
+      // 失败路径的 mapForwardFailure 会把 Retry-After 原样带给客户端。
+      const silent = accountRuntime.silentChannel(account.id, actualModel)
+      if (silent !== undefined) {
+        const retryAfterSeconds = Math.max(1, Math.ceil(silent.retryAfterMs / 1000))
+        const message = `渠道连续 ${silent.timeouts} 次在首块前超时、近期没有任何成功，本轮不再空等（${retryAfterSeconds}s 后再试）`
+        result = {
+          success: false,
+          status: 503,
+          error: message,
+          errorDetails: { message, code: SILENT_CHANNEL_SKIP_CODE },
+          retryAfter: String(retryAfterSeconds),
+          latency: Date.now() - startTime,
+          attempts: [],
         }
-      )
+      } else {
+        result = await requestForwarder.forwardChatCompletion(
+          chatRequest,
+          account,
+          provider,
+          actualModel,
+          {
+            requestId,
+            providerId: provider.id,
+            accountId: account.id,
+            model: request.model,
+            actualModel,
+            startTime,
+            isStream: request.stream || false,
+            clientUserAgent: ctx.headers['user-agent'],
+          }
+        )
+      }
     }
 
     const latency = Date.now() - startTime

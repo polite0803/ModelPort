@@ -309,7 +309,7 @@ function autoLogRecord(
     // 流结束时同一格用来判「慢到该撤锚点」；`stickyGated` 说明这一轮硬粘性被跳过。
     ...(decision.latencyGateMs === undefined ? {} : { latencyGateMs: decision.latencyGateMs }),
     ...(decision.stickyGated === true ? { stickyGated: true as const } : {}),
-    // 架构 A：这一轮的作用域、选定的模型、软钉与熔断读数。没有这四格，日志里
+    // 架构 A：这一轮的作用域、选定的模型、钉与熔断读数。没有这四格，日志里
     // `chainLength` 从「池子大小」缩到「同模型账号数」会被读成池子塌了。
     ...(decision.modelScope === undefined ? {} : { modelScope: decision.modelScope }),
     ...(decision.model === undefined ? {} : { model: decision.model }),
@@ -317,6 +317,7 @@ function autoLogRecord(
     ...(decision.pinMiss === undefined ? {} : { pinMiss: decision.pinMiss }),
     ...(decision.pinStale === undefined ? {} : { pinStale: decision.pinStale }),
     ...(decision.pinCooling === undefined ? {} : { pinCooling: decision.pinCooling }),
+    ...(decision.pinTransient === undefined ? {} : { pinTransient: decision.pinTransient }),
     ...(decision.pinBlocked === undefined ? {} : { pinBlocked: decision.pinBlocked }),
     ...(decision.circuited === undefined || decision.circuited.length === 0
       ? {}
@@ -769,7 +770,7 @@ router.post('/completions', async (ctx: Context) => {
         if (!preflightSkipped.includes(marker)) preflightSkipped.push(marker)
       }
       if (decision.candidates.length > 0) break
-      // 钉子（软钉或持久 `preferredModel`）不许被重选绕开：那等于静默换模型。
+      // 钉（持久 `preferredModel` 或请求头钉）不许被重选绕开：那等于静默换模型。
       // 这颗钉此刻不可用由下面的 429/503 投影说明，清钉仍是 `routes:unpin` 的事。
       if (decision.pin !== undefined || route === undefined || attempt >= MAX_PREFLIGHT_RESEELECTS) break
       const retry = autoRouter.select(
@@ -1045,14 +1046,13 @@ router.post('/completions', async (ctx: Context) => {
           providerName: strippedHead.providerName,
           actualModel: strippedHead.actualModel,
         }
-    // 钉子失效（模型根本不在池里）时选路已经**把软钉撤了**并返回了空链：这一轮
-    // 快速失败，下一次请求就走自动排序。原先「照常按池服务」实测是 3× 504 ——
-    // 客户端以为还在跟钉住的模型对话，其实每一轮都在换实现。这里必须把这件事
-    // 明确说出来（503 + `pin_stale` + 模型名），沉默换模型才是更坏的失败。
+    // 钉子指向池外模型：钉保留（裁定 2026-11-15，只有用户手动替换/解除能改），
+    // 本轮拒绝服务，不回落。必须把这件事明确说出来（503 + `pin_stale` + 模型名），
+    // 沉默换模型才是更坏的失败。
     const stalePin = autoDecision.pinStale
-    if (stalePin !== undefined && stalePin.action === 'retired') {
+    if (stalePin !== undefined && stalePin.action === 'held') {
       const message = `The pinned model '${stalePin.displayName}' is no longer part of route '${autoDecision.routeName}'; ` +
-        'the pin was retired - retry to use the route\'s normal order'
+        'the pin is held - replace it (routes:switch) or clear it (routes:unpin) to serve other models'
       const body = {
         error: {
           message,
@@ -1069,7 +1069,7 @@ router.post('/completions', async (ctx: Context) => {
       }
       ctx.status = 503
       ctx.body = body
-      ctx.set('X-ModelPort-Pin', toHeaderValue(`stale=${stalePin.displayName};action=retired`))
+      ctx.set('X-ModelPort-Pin', toHeaderValue(`stale=${stalePin.displayName};action=held`))
       const refused = {
         ...selectionRefusalEntry(ctx, {
           statusCode: 503,
@@ -1110,6 +1110,47 @@ router.post('/completions', async (ctx: Context) => {
       ctx.body = body
       ctx.set('Retry-After', String(coolingPin.retryAfterSeconds))
       ctx.set('X-ModelPort-Pin', toHeaderValue(`cooling=${coolingPin.displayName};retry=${coolingPin.retryAfterSeconds}`))
+      const refused = {
+        ...selectionRefusalEntry(ctx, {
+          statusCode: 429,
+          code: 'model_temporarily_unavailable',
+          type: 'rate_limit_error',
+          message,
+          body,
+          requestId,
+          client,
+        }),
+        ...(refusalAuto === undefined ? {} : { auto: refusalAuto }),
+      }
+      storeManager.addRequestLog(refused)
+      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+      return
+    }
+    const transientPin = autoDecision.pinTransient
+    if (transientPin !== undefined) {
+      // 钉子还在，模型也仍在路由里 —— 只是名下账号全被瞬时状态挡下（限流窗口/
+      // 额度耗尽/当日上限），窗口复位就自己回来。与 pinCooling 同形：429 +
+      // Retry-After、不清钉；报成 pin_stale 会诱使用户撤掉一颗好钉。
+      const message = `The pinned model '${transientPin.displayName}' on route '${autoDecision.routeName}' is temporarily unavailable (${describeTransientCause(transientPin.cause)}); retry in ${transientPin.retryAfterSeconds}s`
+      const body = {
+        error: {
+          message,
+          type: 'rate_limit_error',
+          param: null,
+          code: 'model_temporarily_unavailable',
+          details: {
+            pin: transientPin.displayName,
+            scope: transientPin.scope,
+            source: transientPin.source,
+            cause: transientPin.cause,
+            retry_after_seconds: transientPin.retryAfterSeconds,
+          },
+        },
+      }
+      ctx.status = 429
+      ctx.body = body
+      ctx.set('Retry-After', String(transientPin.retryAfterSeconds))
+      ctx.set('X-ModelPort-Pin', toHeaderValue(`transient=${transientPin.displayName};retry=${transientPin.retryAfterSeconds}`))
       const refused = {
         ...selectionRefusalEntry(ctx, {
           statusCode: 429,
@@ -1363,7 +1404,7 @@ router.post('/completions', async (ctx: Context) => {
       if (switched !== null) {
         ctx.set('X-ModelPort-Switch', toHeaderValue(`${switched.from} -> ${switched.to}`))
       }
-      // 软钉的客户端可见形态：命中说明「这一轮是因你点名才跑的它」，失配说明
+      // 钉的客户端可见形态：命中说明「这一轮是因你点名才跑的它」，失配说明
       // 「点了但没生效」。失配静默是这类功能最坏的失败方式 —— 用户会以为切换坏了。
       // 失效（模型已经不在池里）单独一种写法：它与「此刻没账号」不是一回事，
       // 客户端据此判断该不该继续按这颗钉重试。

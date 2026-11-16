@@ -612,7 +612,7 @@ test('autoRouter 必须收集 maxTools 与额度门控的剔除原因（源码�
   )
   assert.match(
     autoRouterSource,
-    /skipped\.add\(`\$\{provider\.id\}\/\$\{model\.displayName\}:\$\{quotaBlocked\}`\)/,
+    /skipped\.add\(`\$\{provider\.id\}\/\$\{model\.displayName\}:\$\{quotaBlocked\.reason\}`\)/,
     'quota-gated candidates must be recorded as skipped with the block reason',
   )
 })
@@ -984,8 +984,13 @@ test('限流退避的键必须带到模型粒度（接线门）', () => {
   )
   assert.match(
     autoRouterSource,
-    /accountRuntime\.recordFailure\(\s*accountId\s*,\s*status\s*,\s*Date\.now\(\)\s*,\s*model\s*,\s*details\.retryAfterMs\s*,/,
+    /accountRuntime\.recordFailure\(\s*accountId\s*,\s*status\s*,\s*now\s*,\s*model\s*,\s*retryAfterMs\s*,/,
     'markAccountCooldown must pass the model key and Retry-After through to recordFailure',
+  )
+  assert.match(
+    autoRouterSource,
+    /Math\.max\(details\.retryAfterMs \?\? 0, resetMs\)/,
+    'the upstream quota-window reset time must be maxed with Retry-After, not replace it',
   )
   assert.match(
     forwarderSource,

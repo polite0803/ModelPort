@@ -16,7 +16,7 @@ import { IpcChannels } from '../../src/main/ipc/channels.ts'
  * 1. **读失败 ≠ 没有路由**。托盘把 `error` 画成一行灰字，把「存储没起来」画成「没有启用的
  *    路由」，用户会以为自己的配置被清了 —— 所以 catch 分支必须带回 `error`。
  * 2. **切换前先验形状**。一个坏请求不该让 `switchModel` 去猜 `request.route`。
- * 3. **恢复自动排序要清两份**。只清内存软钉的话，重启后 `preferredModel` 又把它钉回来，
+ * 3. **恢复自动排序要清两份**。只清内存残留钉的话，重启后 `preferredModel` 又把它钉回来，
  *    用户会认为这个按钮时灵时不灵。
  */
 const read = (path: string): string => readFileSync(path, 'utf8').replace(/\r\n/g, '\n')
@@ -104,24 +104,24 @@ test('切换请求先验形状：缺路由名直接给可读原因', () => {
   )
 })
 
-test('恢复自动排序清两份：内存软钉 + 持久 preferredModel', () => {
+test('恢复自动排序清两份：内存残留钉 + 持久 preferredModel', () => {
   const block = handlerBlock('ROUTES_UNPIN')
   assert.match(block, /autoRouter\.clearPin\(routeName\)/)
   assert.match(block, /updateRoute\(routeName, \{ preferredModel: undefined \}\)/,
-    '只清内存的话，重启后持久偏好又把模型钉回来')
+    '只清内存的话，重启后持久钉又把模型钉回来')
   assert.match(block, /broadcastConfigChanged\(/, '持久那一份改了要广播，页面才不会显示旧值')
 })
 
 /**
- * 「长期固定」是同一个通道的 `persist` 档：软钉管 30 分钟，落盘管到用户自己撤销。
- * 三处容易写错：
- * 1. 缺省也落盘 —— 托盘每次「换下一个」都会改写用户配置；
- * 2. 先撤钉再落盘 —— 写失败时用户看到的是「点了没反应」；
- * 3. 落盘后不撤软钉 —— 菜单里显示的还是 30 分钟倒计时，「一直」被钉子盖住。
+ * 「固定」是切换的唯一语义（裁定 2026-11-15）：控制台与托盘写同一颗持久硬钉，
+ * 统一落盘成路由的 `preferredModel`，没有软钉/长期两档。三处容易写错：
+ * 1. 不落盘 —— 重启后钉没了，两个表面各持一颗钉；
+ * 2. 先清钉再落盘 —— 写失败时用户看到的是「点了没反应」；
+ * 3. 落盘后不清内存残留 —— 请求头钉会盖住配置钉。
  */
-test('长期固定：显式 persist 才落盘，先写配置再撤软钉，写完广播', () => {
+test('固定 = 落盘：先写配置再清内存残留，写完广播', () => {
   const block = handlerBlock('ROUTES_SWITCH')
-  assert.match(block, /request\.persist !== true/, '缺省（托盘/软钉）不许走到落盘那一支')
+  assert.doesNotMatch(block, /request\.persist/, 'persist 档已退役：切换即落盘，没有第二种语义')
   assert.match(
     block,
     /preferredModel: \{ providerId: result\.providerId, displayName: result\.model \}/,
@@ -130,9 +130,9 @@ test('长期固定：显式 persist 才落盘，先写配置再撤软钉，写�
 
   const writeAt = block.indexOf('updateRoute(result.route')
   const clearAt = block.indexOf('autoRouter.clearPin(result.route)')
-  assert.ok(writeAt >= 0, 'persist 分支必须写路由配置')
-  assert.ok(clearAt > writeAt, '先落盘再撤软钉：写失败时那颗 30 分钟的钉子还在')
-  assert.match(block, /broadcastConfigChanged\(/, '配置改了要广播，路由页/托盘才会看到「一直」')
+  assert.ok(writeAt >= 0, '切换必须写路由配置')
+  assert.ok(clearAt > writeAt, '先落盘再清内存残留：写失败时界面显示的还是用户刚点的结果')
+  assert.match(block, /broadcastConfigChanged\(/, '配置改了要广播，路由页/托盘才会看到新钉')
   assert.match(block, /written\.ok/, '落盘失败要原样报错，不能回一个成功')
 })
 

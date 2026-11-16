@@ -180,11 +180,23 @@ test('钉池这条链的每一环都在：类型 → 归一 → 写校验 → �
   const routing = readFileSync(join(root, 'src/main/proxy/autoRouting.ts'), 'utf8')
   assert.match(routing, /export function applyModelNamePin/)
 
-  // 折叠有三处消费（选路、广告下界、预览）。规则只写一遍，但三处都必须折到 ——
-  // 少一处就会出现「预览说没有、实际却发得出去」或「广告了一个池里根本没有的窗口」。
+  // 折叠有四个调用点，但只有三个**用途**（选路、广告下界、预览）：预览折两次，因为
+  // 它要为两份基底各算一遍配置结论 —— `rankInputs`（能派的，决定选路次序）与
+  // `rankInputs ∪ blockedCandidates`（整家账号被额度挡住时只剩这一份，决定每行
+  // `status` 怎么说）。少一处就会出现「预览说没有、实际却发得出去」或「广告了一个
+  // 池里根本没有的窗口」；只折一份，则整家被挡的模型会从列表里整体消失。
   const router = readFileSync(join(root, 'src/main/proxy/autoRouter.ts'), 'utf8')
   const folded = router.match(/applyModelNamePin\(/g) ?? []
-  assert.equal(folded.length, 3, `钉池应在三处被折叠，实际 ${folded.length} 处`)
+  assert.equal(
+    folded.length,
+    4,
+    `钉池应在四个调用点被折叠（选路 / 广告 / 预览的派发基底 / 预览的配置基底），实际 ${folded.length} 处`,
+  )
+  assert.match(
+    router,
+    /const configBase = \[\.\.\.rankInputs, \.\.\.blockedCandidates\]\s*\n\s*const configPinned = applyModelNamePin\(configBase, pool\.pinModels\)/,
+    '预览的第二处折叠必须作用在「派发基底 ∪ 被挡候选」上，否则整家被挡时配置层无从判定',
+  )
 
   const fields = readFileSync(join(root, 'src/renderer/src/components/proxy/ModelRouteFields.tsx'), 'utf8')
   assert.match(fields, /pinModels: RouteModelRef\[\]/)

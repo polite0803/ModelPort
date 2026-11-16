@@ -11,6 +11,7 @@
  *   未写，而不是存一个 `unknown` 进去再遮住自动证据。
  */
 import type { InputModality, ModelCapabilityHint } from '../../shared/types.ts'
+import { parseSlotBoundary, type DiscountSlot, type DiscountWindow } from '../../shared/discountWindow.ts'
 
 const TIERS = new Set(['fast', 'balanced', 'strong'])
 const STATES = new Set(['yes', 'no'])
@@ -29,6 +30,55 @@ function positiveInt(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value > 0
     ? value
     : undefined
+}
+
+/** 倍率一类的读数：非负有限数，其它一律丢弃。`0` 是合法值（免费）。 */
+function nonNegativeFinite(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/**
+ * 手工折扣窗口：{@link normalizeModelMark} 的边界收敛。
+ *
+ * 手工窗口存在的理由是「渠道没报窗口，但用户知道折扣几点开」—— 所以它可以
+ * 单独出现，不必配 `promoWeight`（那种情况窗口只是把 `weight` 变成时变的）。
+ * 非法时段一律丢弃而不是猜：一个读不懂的时段按宿主规则会被读成「一直生效」，
+ * 于是整天的价格都按折后算。
+ */
+function normalizeDiscountWindow(value: unknown): DiscountWindow | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const raw = value as Record<string, unknown>
+  const window: DiscountWindow = {}
+
+  if (Array.isArray(raw.daily)) {
+    const daily: DiscountSlot[] = []
+    for (const entry of raw.daily as unknown[]) {
+      if (typeof entry !== 'object' || entry === null) continue
+      const slot = entry as Record<string, unknown>
+      const start = parseSlotBoundary(slot.start)
+      const end = parseSlotBoundary(slot.end)
+      if (start === undefined || end === undefined) continue
+      daily.push({
+        start: String(slot.start).trim(),
+        end: String(slot.end).trim(),
+      })
+    }
+    if (daily.length > 0) window.daily = daily
+  }
+  if (typeof raw.timezone === 'string' && raw.timezone.trim().length > 0) {
+    window.timezone = raw.timezone.trim()
+  }
+  const validFrom = epochMs(raw.validFrom)
+  if (validFrom !== undefined) window.validFrom = validFrom
+  const validUntil = epochMs(raw.validUntil)
+  if (validUntil !== undefined) window.validUntil = validUntil
+
+  // 一个字段都没有的窗口等于没写：存下去只会遮住渠道报的那份。
+  return Object.keys(window).length === 0 ? undefined : window
+}
+
+function epochMs(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : undefined
 }
 
 /**
@@ -69,6 +119,12 @@ export function normalizeModelMark(input: unknown): ModelCapabilityHint | undefi
   if (typeof raw.weight === 'number' && Number.isFinite(raw.weight) && raw.weight >= 0) {
     mark.weight = raw.weight
   }
+  const baseWeight = nonNegativeFinite(raw.baseWeight)
+  if (baseWeight !== undefined) mark.baseWeight = baseWeight
+  const promoWeight = nonNegativeFinite(raw.promoWeight)
+  if (promoWeight !== undefined) mark.promoWeight = promoWeight
+  const discountWindow = normalizeDiscountWindow(raw.discountWindow)
+  if (discountWindow !== undefined) mark.discountWindow = discountWindow
   if (typeof raw.free === 'boolean') {
     mark.free = raw.free
   }

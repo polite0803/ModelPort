@@ -46,19 +46,34 @@ function charsPerTokenFor(contentType: ContentType | undefined): number {
 }
 
 /**
- * Estimate the token count of `text`, pricing CJK codepoints separately from
- * the bulk of the payload.
+ * Count CJK codepoints in `text`.
+ *
+ * Exported because this module owns the one calibrated ratio table, and history
+ * trimming prices message sizes with its own (deliberately conservative) ASCII
+ * divisor. It must still price dense scripts by THIS table: a flat 3 chars/token
+ * under-counts Chinese 2x, and a budget computed from an under-count does not
+ * bind — 2026-11-16 a request reached 1.9x its configured cap while the trimmer
+ * logged `Trimmed from 4 to 4`.
  */
-export function estimateTokens(text: string, contentType?: ContentType): number {
+export function countCjkChars(text: string): number {
   if (!text) return 0
-
   let cjk = 0
   // `String.length` counts UTF-16 code units; CJK BMP chars are 1 unit and the
   // astral range is 2, which the ratio difference absorbs.
   for (const match of text.matchAll(CJK_PATTERN)) {
     cjk += match[0].length
   }
+  return cjk
+}
 
+/**
+ * Estimate the token count of `text`, pricing CJK codepoints separately from
+ * the bulk of the payload.
+ */
+export function estimateTokens(text: string, contentType?: ContentType): number {
+  if (!text) return 0
+
+  const cjk = countCjkChars(text)
   const rest = text.length - cjk
   const ratio = charsPerTokenFor(contentType)
   return Math.max(1, Math.ceil(rest / ratio + cjk / CHARS_PER_TOKEN_CJK))

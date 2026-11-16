@@ -16,6 +16,8 @@
  *    那一刻；没打满的账号报的是窗口边界，不能拿它当"还能用多久"。
  */
 
+import type { DeclaredQuotaUnit, DeclaredQuotaWindow } from './declaredQuota.ts'
+
 export type QuotaWindowMetric = 'rpm' | 'rpd' | 'tpm' | 'tpd' | 'monthlyTokens'
 
 /** 各窗口的长度（毫秒）。月度按 UTC 自然月，单独算。 */
@@ -26,6 +28,23 @@ export const WINDOW_MS: Record<Exclude<QuotaWindowMetric, 'monthlyTokens'>, numb
   tpd: 24 * 60 * 60_000,
 }
 
+/**
+ * 一条**用户声明**的窗口（`shared/declaredQuota.ts`）。
+ *
+ * 与五个官方指标分开列，因为两者的窗口口径不同：官方指标只有分钟 / 日 / 月三种，
+ * 复位时刻一向由 `WINDOW_MS` 反推；声明的 5 小时 / 自然周在 `WINDOW_MS` 里根本没有
+ * 对应项，复位时刻由账本与实际账号配置给出。混进同一张表就得替它编一个窗口长度。
+ *
+ * `resetAt` 缺席 = 算不出来（窗口里还没有用量），策略按「未知」处理，不猜。
+ */
+export interface DeclaredQuotaFact {
+  window: DeclaredQuotaWindow
+  unit: DeclaredQuotaUnit
+  used: number
+  limit: number
+  resetAt?: number
+}
+
 /** 一个账号在某一家的用量与上限，策略只看这些。 */
 export interface AccountQuotaFacts {
   accountId: string
@@ -33,10 +52,17 @@ export interface AccountQuotaFacts {
   used: Partial<Record<QuotaWindowMetric, number>>
   /** 该窗口上限；`undefined` = 没有可执行的帽 */
   limit: Partial<Record<QuotaWindowMetric, number>>
+  /**
+   * 用户声明的窗口。它是第五层额度证据：套餐页一个数字都不公布的家（20 个订阅
+   * 条目全是 `undocumented`）在此之前只能退回 fill-first —— 不是策略不灵，是手里
+   * 没有数字。声明在这里，`smart` / `pace` 就有得算。
+   */
+  declared?: readonly DeclaredQuotaFact[]
 }
 
 export interface ResetProjection {
-  metric: QuotaWindowMetric
+  /** 官方指标，或用户声明的窗口名。两者不互换：单位与复位口径都不同。 */
+  metric: QuotaWindowMetric | DeclaredQuotaWindow
   /** 该窗口解封的时刻（毫秒时间戳） */
   resetAt: number
   /** 该窗口还剩多少（非负） */
@@ -71,29 +97,45 @@ export function projectReset(facts: AccountQuotaFacts, nowMs: number): ResetProj
   let best: ResetProjection | undefined
   let bestIsFull = false
 
-  for (const metric of Object.keys(facts.limit) as QuotaWindowMetric[]) {
-    const limit = facts.limit[metric]
-    const used = facts.used[metric] ?? 0
-    if (limit === undefined || limit <= 0) continue
-
-    const resetAt =
-      metric === 'monthlyTokens'
-        ? nextUtcMonthStart(nowMs)
-        : nextRollingBoundary(nowMs, WINDOW_MS[metric])
-    const remaining = Math.max(0, limit - used)
-    const isFull = used >= limit
-
+  const consider = (projection: ResetProjection): void => {
+    const isFull = projection.remaining <= 0
     // 打满的窗口优先；同为打满时取最早解封；都没打满时取最近的边界。
     const better = best === undefined
       ? true
       : isFull && !bestIsFull
         ? true
-        : isFull === bestIsFull && resetAt < best.resetAt
-
+        : isFull === bestIsFull && projection.resetAt < best.resetAt
     if (better) {
-      best = { metric, resetAt, remaining, limit }
+      best = projection
       bestIsFull = isFull
     }
+  }
+
+  for (const metric of Object.keys(facts.limit) as QuotaWindowMetric[]) {
+    const limit = facts.limit[metric]
+    const used = facts.used[metric] ?? 0
+    if (limit === undefined || limit <= 0) continue
+
+    consider({
+      metric,
+      resetAt: metric === 'monthlyTokens'
+        ? nextUtcMonthStart(nowMs)
+        : nextRollingBoundary(nowMs, WINDOW_MS[metric]),
+      remaining: Math.max(0, limit - used),
+      limit,
+    })
+  }
+
+  // 用户声明的窗口同台竞技。复位时刻由调用方按窗口性质给（滚动估算 / UTC 自然边界），
+  // 这里不替它编一个窗口长度；算不出来的（`resetAt` 缺席）直接跳过 —— 「推不出来就不猜」。
+  for (const entry of facts.declared ?? []) {
+    if (!(entry.limit > 0) || entry.resetAt === undefined) continue
+    consider({
+      metric: entry.window,
+      resetAt: entry.resetAt,
+      remaining: Math.max(0, entry.limit - entry.used),
+      limit: entry.limit,
+    })
   }
 
   return best

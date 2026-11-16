@@ -36,7 +36,7 @@ import {
   setSseHeaders,
 } from '../utils/inboundLoopback'
 import { clientSessionKey } from '../../../shared/clientSessionKey.ts'
-import { mapForwardFailure, withRequestId } from '../errorMapping'
+import { describeTransportError, mapForwardFailure, withRequestId } from '../errorMapping'
 import { startSseHeartbeat } from '../utils/sseHeartbeat'
 import {
   chatResponseToResponseBody,
@@ -163,7 +163,12 @@ router.post('/responses', async (ctx: Context) => {
     })
   } catch (error) {
     if (abort.signal.aborted) return
-    const message = `Cannot reach internal chat endpoint: ${error instanceof Error ? error.message : String(error)}`
+    const detail = error instanceof Error ? error.message : String(error)
+    const cause = (error as { cause?: unknown }).cause
+    // Node 的 `fetch failed` 把真正的原因（ECONNREFUSED / ENETUNREACH）藏在 cause 里，
+    // 只印 message 会让回环失败在日志里永远是一句查不下去的「fetch failed」。
+    const reason = cause === undefined ? detail : `${detail} (${describeTransportError(cause)})`
+    const message = `Cannot reach internal chat endpoint: ${reason}`
     failWith(ctx, 502, message, 'internal_relay_failed')
     recordRejection(ctx, 502, 'internal_relay_failed', message)
     return

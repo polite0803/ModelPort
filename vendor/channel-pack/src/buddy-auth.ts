@@ -326,7 +326,7 @@ export class BuddyAuth extends Service {
   /**
    * 批量续期本产品的所有账号。
    *
-   * **包含已停用账号**（只按 `refreshable` 过滤）。
+   * **包含已停用账号**（判据只读凭据，不读 `enabled`，也不读池里的 `refreshable`）。
    *
    * 为什么不能跳过停用账号（真实缺陷）：停用只应影响「账号池的自动选号」，
    * 不该让凭据烂掉。早期实现有 `if (!entry.enabled ...) continue`，于是停用
@@ -341,23 +341,39 @@ export class BuddyAuth extends Service {
    *
    * ⚠️ **lead-time 过滤**（issue !IKIRTT）：距过期不足 1 小时才发续期请求，
    * 跳过的账号只做有效期对账。详见 `refreshAccountWithReconcile`。
+   *
+   * ## ⚠️ 调度判据读**凭据**，不读账号池里的 `refreshable`
+   *
+   * 旧实现第一行是 `if (!entry.refreshable) continue`，那让这个布尔变成一道
+   * **单向门**：任何一次把它写成 false 的路径都会让该账号此后**永远不进本循环**
+   * （定时续期跳过它、启动首轮也跳过它），而凭据本体可能完全健康 ——
+   * 表现为「自动续期没工作、重启还是过期」，只能手动重新登录。
+   * 口径同 codearts：`refreshable` 只是凭据材料的镜像，每轮由本方法对账得出；
+   * 被误写成 false 而凭据齐全时，本轮自动改回 true。
    */
   async refreshAll(pool: AccountPool): Promise<void> {
     const accounts = await pool.listAccounts(this.product.id)
     for (const entry of accounts) {
-      // 只跳过「不可续期」的账号；enabled 与续期无关（见方法注释）。
-      if (!entry.refreshable) continue
+      // enabled 与续期无关（见方法注释）；这里也不看池里的 refreshable。
       try {
         const ref = credentialRef(entry.credentialRef)
         const resolved = await this.ctx.credentials.resolve(ref)
         if (!resolved) {
-          await pool.updateAccount(entry.id, { refreshable: false })
+          // 凭据确实不存在：这才是「不可续期」的真实含义（写盘前先判，避免每轮重复写）。
+          if (entry.refreshable) await pool.updateAccount(entry.id, { refreshable: false })
           continue
         }
         const credential = parseCredential(resolved.value)
         if (!credential || !isRefreshable(credential)) {
-          await pool.updateAccount(entry.id, { refreshable: false })
+          if (entry.refreshable) await pool.updateAccount(entry.id, { refreshable: false })
           continue
+        }
+        // 池里说不能续、凭据说能续 —— 以**凭据**为准（判据不能读池里的布尔，见方法注释）。
+        // 这里只记日志不回写：下面的有效期对账本来就会把 `refreshable` 改回来。
+        if (!entry.refreshable) {
+          this.ctx.logger?.info?.(
+            `[${this.product.id}] 账号 ${entry.id} 的凭据具备续期材料，本轮恢复自动续期（此前的标记与凭据不符）`,
+          )
         }
         await refreshAccountWithReconcile({
           pool,

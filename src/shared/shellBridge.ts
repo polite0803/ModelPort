@@ -24,7 +24,7 @@ import type { RouteMenuResult } from './types'
  * the page answers with the RPC plus a fresh menu snapshot.
  */
 export interface ShellRouteCommand {
-  /** `reset` = 恢复自动排序（清软钉 + 持久偏好）；`switch` = 换下一个 / 点名。 */
+  /** `reset` = 恢复自动排序（清钉）；`switch` = 换下一个 / 点名（= 钉住）。 */
   action: 'switch' | 'reset'
   route: string
   model?: string

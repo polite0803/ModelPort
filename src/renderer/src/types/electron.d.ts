@@ -718,6 +718,14 @@ interface StrategyConfig {
   tokenLimit: {
     enabled: boolean
     maxTokens: number
+    /** 按渠道上限；缺省＝沿用全局值。 */
+    maxTokensByProvider?: Record<string, number>
+    /** 按渠道的 system 块截断上限；缺省＝不动 system 消息。 */
+    maxSystemTokensByProvider?: Record<string, number>
+    /** 未标注模型的兜底档位；模型自己的标注优先。 */
+    contextWindowTier?: '200k' | '400k' | '1m'
+    /** 按渠道的成本目标（token），是开销上限而不是窗口；装不下最小可用量时退回窗口。 */
+    costBudgetByProvider?: Record<string, number>
   }
 }
 

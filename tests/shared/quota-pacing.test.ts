@@ -88,3 +88,83 @@ test('an unknown-usage account is not treated as unlimited', () => {
   assert.equal(projection!.remaining, 10)
   assert.equal(pickBestPace([unknownUsage], T0), 'u')
 })
+
+// —— 第五层：用户声明的窗口（`shared/declaredQuota.ts`）。套餐页一个数字都不公布的
+// 家里，`smart` / `pace` 手里只有这一份证据；它必须真的进来参与排序。
+
+test('a declared window projects on its own reset instant', () => {
+  const projection = projectReset(
+    {
+      accountId: 'declared',
+      used: {},
+      limit: {},
+      declared: [{ window: 'day', unit: 'requests', used: 40, limit: 100, resetAt: T0 + 6 * 3_600_000 }],
+    },
+    T0,
+  )
+  assert.ok(projection)
+  assert.equal(projection!.metric, 'day', 'the window is reported by its own name, not folded into an official metric')
+  assert.equal(projection!.remaining, 60)
+  assert.equal(projection!.resetAt, T0 + 6 * 3_600_000)
+})
+
+test('a declared window with no derivable reset is skipped, not guessed', () => {
+  // 窗口里还没有用量 = 推不出复位时刻。给一个假的边界会把这家的 waiting 说小。
+  const factsNoReset: AccountQuotaFacts = {
+    accountId: 'nodate',
+    used: {},
+    limit: {},
+    declared: [{ window: 'fiveHour', unit: 'requests', used: 0, limit: 10 }],
+  }
+  assert.equal(projectReset(factsNoReset, T0), undefined)
+  assert.equal(pickSoonestReset([factsNoReset], T0), undefined)
+  assert.equal(pickBestPace([factsNoReset], T0), undefined)
+})
+
+test('declared windows compete with official caps inside the same account', () => {
+  // 官方分钟窗口已打满（解封在 1 分钟后），声明的月窗口还有余量。
+  // 打满的窗口决定"最早何时能接活" —— 声明的余量不能把它盖掉。
+  const projection = projectReset(
+    {
+      accountId: 'mixed',
+      used: { rpm: 10 },
+      limit: { rpm: 10 },
+      declared: [{ window: 'month', unit: 'tokens', used: 1000, limit: 1_000_000, resetAt: nextUtcMonthStart(T0) }],
+    },
+    T0,
+  )
+  assert.equal(projection!.metric, 'rpm', 'a full official window is still the binding one')
+  assert.equal(projection!.remaining, 0)
+})
+
+test('declared-only accounts get a real opinion out of smart and pace', () => {
+  // 两家都没有官方帽：一家只有声明，另一家什么数字都没有。
+  const declared: AccountQuotaFacts = {
+    accountId: 'declared',
+    used: {},
+    limit: {},
+    declared: [{ window: 'day', unit: 'requests', used: 10, limit: 100, resetAt: T0 + 6 * 3_600_000 }],
+  }
+  const silent: AccountQuotaFacts = { accountId: 'silent', used: {}, limit: {} }
+
+  assert.equal(pickSoonestReset([silent, declared], T0), 'declared', 'smart has evidence for exactly one of them')
+  assert.equal(pickBestPace([silent, declared], T0), 'declared', 'and pace agrees')
+  assert.equal(pickBestPace([silent], T0), undefined, 'with no evidence at all it says nothing and the caller falls back')
+})
+
+test('pace spreads a declared rolling window by its own remaining per hour', () => {
+  // 同为日窗口、6 小时后复位：A 还剩 60，B 还剩 6 —— A 每小时能花 10 次，B 只有 1 次。
+  const roomy: AccountQuotaFacts = {
+    accountId: 'roomy',
+    used: {},
+    limit: {},
+    declared: [{ window: 'day', unit: 'requests', used: 40, limit: 100, resetAt: T0 + 6 * 3_600_000 }],
+  }
+  const tight: AccountQuotaFacts = {
+    accountId: 'tight',
+    used: {},
+    limit: {},
+    declared: [{ window: 'day', unit: 'requests', used: 94, limit: 100, resetAt: T0 + 6 * 3_600_000 }],
+  }
+  assert.equal(pickBestPace([tight, roomy], T0), 'roomy')
+})

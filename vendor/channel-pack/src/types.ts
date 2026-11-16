@@ -939,6 +939,53 @@ export interface RpcModelListRequest {
 }
 
 /**
+ * 定时折扣：一档在给定时段生效的倍率。
+ *
+ * ## 形状为什么是「时段 + 倍率」而不是「价格列表」
+ *
+ * 上游给的本来就是时段：qoder 的 `window_start`/`window_end`（22:00–08:00）、
+ * buddy 的 `schedule.daily[]` + `timezone` + `validFrom`/`validUntil`、trae 的
+ * `end_at`。把它们折算成「此刻是哪个价」再上抛，就把时间信息丢在了适配器里 ——
+ * 而宿主缓存目录的时间远长于一个时段，这正是「窗口外仍显示折后价」的来路。
+ *
+ * 时段的**语义**（是否跨零点、时区如何换算）只在这里定义一次，宿主侧
+ * `shared/discountWindow.ts` 按同一套规则推算 —— 两边各写一遍就会在跨零点
+ * 或非 +8 时区的活动上分叉。
+ */
+export interface RpcDiscountWindow {
+  /**
+   * 每日时段（`HH:MM`，可多条，任一命中即生效）。小时可能不补零（实测 `7:50`）。
+   *
+   * 缺失 = 没有每日时段（配合 `validFrom`/`validUntil` 可用于「整段限时」）。
+   */
+  daily?: readonly { start: string; end: string }[]
+  /** 时段的 IANA 时区（实测 `Asia/Shanghai` / `Asia/Singapore`）；缺失按 UTC。 */
+  timezone?: string
+  /** 活动起点（epoch ms，含）。 */
+  validFrom?: number
+  /** 活动终点（epoch ms，不含）。 */
+  validUntil?: number
+}
+
+/**
+ * 折扣的**时段**部分单独成类型：适配器手里的原始字段是一份日程，不是「一个价」。
+ *
+ * `buddy` 的 `schedule` 就是它（{@link RpcModelDiscount} 再配上价）；分开命名
+ * 是为了让适配器在「还不知道价」的阶段也能先把日程搬出来，而不必伪造一个
+ * 占位的 `weight`。
+ */
+export interface RpcModelDiscount extends RpcDiscountWindow {
+  /** 折后倍率（窗口内生效）。`0` 是合法值 = 限时免费。 */
+  weight: number
+  /**
+   * 窗口外的原价倍率。
+   *
+   * 缺失 = 上游没给原价，宿主把 `weight` 当作唯一价格使用。
+   */
+  baseWeight?: number
+}
+
+/**
  * 单个模型在设置页的展示条目。
  *
  * `disabled` 由服务端按黑名单回填，`name` 是适配器播报的展示名 ——
@@ -965,6 +1012,29 @@ export interface RpcModelListEntry {
    * ⚠️ **缺失 = 适配器没有这份信息**（不是「确认纯文本」），与 `isFree` 同一口径。
    */
   supportsImage?: boolean
+  /**
+   * 一档**定时生效**的折扣价（错峰折扣 / 限时促销），带它的生效时段。
+   *
+   * ## 为什么要有独立字段（2026-11-16）
+   *
+   * 二十多个适配器里已有五个真在卖两种价：qoder 22:00–08:00、buddy 夜间
+   * `23:00–7:50`、trae 活动、raccoon 促销、raccoon-product 的
+   * `x0.2→x0.1`。它们各自把「原价→折后价」拼进 `name`，而且**只在窗口内**
+   * 才拼 —— 于是宿主在白天拿到的目录里根本没有夜间那个价，也没有任何字段
+   * 说「什么时候会变」。宿主据此缓存 30s 到一周，跨窗口边界的请求就按错的
+   * 那一侧定价。
+   *
+   * 现在窗口本身成为目录事实：宿主拿它按**本地时钟**推算此刻的生效价，
+   * 渠道页与选路读同一个函数，同一个瞬间不会给出两个价。
+   *
+   * ⚠️ **缺失 = 该适配器没报窗口**，不是「长期不打折」。没有窗口时宿主按
+   * `weight`（采集那一刻的生效价）原样使用 —— 那是当时最好的答案。
+   *
+   * ⚠️ 目前只有 `name` 是宿主解析倍率的唯一来源（`· x0.5→x0.2`）。字段化
+   * 这一段的意义在于：宿主**不必**在窗口外也猜折后价，也不必靠名字里箭头
+   * 是否出现来反推窗口。
+   */
+  discount?: RpcModelDiscount
   /**
    * 该模型是否已被判定为**上游下架**（`dead-models.json` 命中）。
    *

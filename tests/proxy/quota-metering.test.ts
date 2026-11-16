@@ -117,14 +117,18 @@ test('both exits feed the quota learner from what upstream already sent back', (
     'the success branch learns from the rate-limit headers')
 
   const autoRouter = readFileSync('src/main/proxy/autoRouter.ts', 'utf-8')
-  assert.match(autoRouter, /const quotaBlocked = quotaBlockReason\(provider, account\.id, model\.actualModelId, gateContext\)\r?\n\s*if \(quotaBlocked !== undefined\) \{\r?\n\s*skipped\.add\(`\$\{provider\.id\}\/\$\{model\.displayName\}:\$\{quotaBlocked\}`\)[\s\S]{0,400}?\n\s*continue\n/,
-    'exhausted aggregate candidates must not enter the ranking at all (and their skip reason must be recorded)')
-  assert.match(autoRouter, /const quotaBlocked = quotaBlockReason\(provider, account\.id, model\.actualModelId, gateContext\)[\s\S]{0,400}?transientSkips\.push\(\{\s*providerId: provider\.id,\s*accountId: account\.id,\s*model: model\.actualModelId,\s*reason: quotaBlocked,\s*\}\)/,
-    'the same prune keeps the structured record the empty-pool 429 derives its retry instant from')
+  // 判据返回的是「原因 + 解禁时刻」（`quotaBlockDetail`），不再只是一个原因：
+  // 菜单要写出「约 N 小时后回来」，而那个时刻的出处必须跟着原因一起给。
+  assert.match(autoRouter, /const quotaBlocked = quotaBlockDetail\(provider, account\.id, model\.actualModelId, gateContext, now\)\r?\n\s*if \(quotaBlocked !== undefined\) \{\r?\n\s*skipped\.add\(`\$\{provider\.id\}\/\$\{model\.displayName\}:\$\{quotaBlocked\.reason\}`\)[\s\S]{0,500}?transientSkips\.push\(\{\s*providerId: provider\.id,\s*accountId: account\.id,\s*model: model\.actualModelId,\s*displayName: model\.displayName,\s*reason: quotaBlocked\.reason,\s*\}\)[\s\S]{0,300}?if \(!options\.collectBlocked\) continue\n/,
+    'exhausted candidates must not enter the ranking (skip reason + the 429 record are both kept)')
+  assert.match(autoRouter, /if \(block === undefined\) \{\r?\n\s*rankInputs\.push\(candidate\)\r?\n\s*\} else \{/,
+    'the blocked ones only ever land in the side list, never in rankInputs')
 
   const gate = readFileSync('src/main/proxy/quota/gate.ts', 'utf-8')
-  assert.match(gate, /if \(provider\.type !== 'aggregate'\) return undefined/,
-    'the gate stays scoped to the aggregate catalogue')
+  assert.match(gate, /if \(provider\.type === 'aggregate'\) \{\r?\n\s*\/\/ 没钱比/,
+    'the first four layers stay scoped to the aggregate catalogue')
+  assert.match(gate, /return declaredBlock\(provider\.id, accountId, context, nowMs\)/,
+    'the declared (fifth) layer applies to every provider type — it rides on the account record')
   assert.match(gate, /if \(!caps\.enforceable\) return 0\.5/,
     'undocumented entries stay neutral instead of ranking last')
   assert.match(gate, /return worst >= 1 \? -1 : 1 - worst/, 'an exhausted entry sorts behind a healthy one')

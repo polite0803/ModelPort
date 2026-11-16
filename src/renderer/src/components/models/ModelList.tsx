@@ -30,6 +30,13 @@ import type { Account, CatalogueModel } from '@/types/electron'
 import type { ProviderModelTestResult, ProviderModelSyncResult, ModelCapabilityHint } from '@shared/types'
 import type { ChannelCredits, CostBucket } from '@shared/channels'
 import { costBucketOf } from '@shared/channels'
+import {
+  discountWindowLabel,
+  effectiveCostOf,
+  isDiscountWindowActive,
+  type DiscountWindow,
+} from '@shared/discountWindow'
+import { useDiscountClock } from '@/hooks/useDiscountClock'
 import type { AggregateCostClass } from '@shared/aggregateCost'
 import { aggregateCostOf, costBucketOfAggregateClass } from '@shared/aggregateCost'
 import modelMappingIcon from '@/assets/providers/model-mapping.svg'
@@ -43,6 +50,19 @@ const providerIcons: Record<string, string> = {
  * 明确声明不支持时才是 `text`，其余一律 `unknown` —— 不按模型名猜。
  */
 type Modality = 'multimodal' | 'text' | 'unknown'
+
+/**
+ * 一个模型的价格读数里**随时间变**的那部分：窗口 + 两侧的价。
+ *
+ * 与 `weight` 分开存是因为两者的时态不同：`weight` 是采集那一刻的价，
+ * 这三格说明「另一个价什么时候生效」。行上印的必须是按本地时钟算出的此刻价
+ * （`effectiveCostOf`），否则夜里折扣开着时行上还印白天的数。
+ */
+interface TimeVaryingTags {
+  window?: DiscountWindow
+  promoWeight?: number
+  baseWeight?: number
+}
 
 function toModality(declared: boolean | undefined): Modality {
   if (declared === true) return 'multimodal'
@@ -70,8 +90,21 @@ interface ModelInfo {
   free?: boolean
   /** 上游生效倍率；缺失表示渠道没报，不能当成 0 */
   weight?: number
+  /**
+   * 折扣窗口（渠道报的或手工标注的）。有窗口时 `weight` 只是**采集那一刻**的价，
+   * 行上要印的是 `effectiveCostOf` 算出来的此刻价 —— 否则夜里折扣开着，本页
+   * 还写着白天的价，与真正决定派发的那一侧相反。
+   */
+  discountWindow?: DiscountWindow
+  /** 窗口内价与窗口外价，供行上印 `x原→x折` 与「到点切换」的说明。 */
+  promoWeight?: number
+  baseWeight?: number
   /** 倍率来自手工标注（manual > 渠道）；界面要说清出处，否则「同步会覆盖标注」会被误解 */
   weightManual?: boolean
+  /** 折扣窗口的可读说明（`discountWindowLabel`）；没有时变价时缺省。 */
+  priceWindow?: string
+  /** 窗口此刻是否开着：徽标据此换色，开着才算「现在就是这个价」。 */
+  priceWindowOpen?: boolean
   /** 这一行有没有「倍率」这个概念：账号渠道有，聚合走成本分类，别名/自定义没有 */
   weightApplicable: boolean
   /** 聚合条目的成本分类（只有聚合行有），行上按它显示免费/套餐内/按量/未标注 */
@@ -198,12 +231,18 @@ const ModelRow = memo(({
               别名/自定义供应商没有倍率这个概念 —— 显示「不适用」而不是「未标注」，
               否则「按构造补不上」的行会把缺口统计撑成一个假的待办。 */}
           {model.weight !== undefined ? (
+            // 印「此刻生效」的价：窗口开着是本该印折后价的那一刻，窗口外是原价。
+            // `x原→x折` 的形状只在两侧都报过、且确实不同时出现。
             <Badge
               variant="outline"
               className={model.free === true ? 'text-success' : weightTone(model.weight)}
               title={model.weightManual === true ? t('models.weightManualHint') : undefined}
             >
-              {`x${model.weight}`}
+              {model.baseWeight !== undefined
+                && model.baseWeight !== model.weight
+                && model.priceWindowOpen === true
+                ? `x${model.baseWeight}→x${model.weight}`
+                : `x${model.weight}`}
             </Badge>
           ) : model.costClass !== undefined ? (
             <Badge
@@ -243,6 +282,15 @@ const ModelRow = memo(({
           {model.free === true && model.costClass === undefined && (
             <Badge variant="outline" className="text-success">
               {t('models.free')}
+            </Badge>
+          )}
+          {model.priceWindow !== undefined && (
+            <Badge
+              variant="outline"
+              className={`text-[10px] ${model.priceWindowOpen === true ? 'text-info' : 'text-muted-foreground'}`}
+              title={t('channels.models.offPeakHint')}
+            >
+              {t('channels.models.offPeak', { window: model.priceWindow })}
             </Badge>
           )}
           {model.modality === 'multimodal' && (
@@ -380,6 +428,13 @@ export function ModelList() {
   const [freeFlags, setFreeFlags] = useState<Record<string, boolean>>({})
   /** `<provider>/<model>` -> 上游生效倍率；缺失表示渠道没报，不是 0 */
   const [weightFlags, setWeightFlags] = useState<Record<string, number>>({})
+  /**
+   * `<provider>/<model>` -> 时变价（窗口 + 窗口内价 + 窗口外价）。
+   *
+   * 倍率与窗口必须一起存：只存采集那一刻的 `weight` 是旧实现的缺陷 —— 夜里
+   * 折扣开着，行上还印着白天的价，与真正决定派发的那一侧恰好相反。
+   */
+  const [priceFlags, setPriceFlags] = useState<Record<string, TimeVaryingTags>>({})
   /** `<entryId>/<modelId>` -> 聚合成本分类；行上与路由同口径，不拿「未标注倍率」糊过去 */
   const [costClasses, setCostClasses] = useState<Record<string, AggregateCostClass>>({})
   /** providerId -> 展示名 -> 手工标注：倍率/免费按 manual > 渠道目录 合并 */
@@ -389,6 +444,19 @@ export function ModelList() {
   const [modalityFlags, setModalityFlags] = useState<Record<string, boolean>>({})
   /** provider id -> 该供应商当前余额/积分（渠道包 credits.balances） */
   const [credits, setCredits] = useState<Record<string, ChannelCredits | 'loading'>>({})
+
+  /**
+   * 折扣窗口的边界时刻：本页印的是**此刻生效**的倍率，所以窗口一开一关必须重绘。
+   * 固定轮询等于拿整页重渲染换一个一天变两次的数字；`useDiscountClock` 只在
+   * 边界上醒一次（与渠道页同一个 hook，两页不可能在边界上错开）。
+   */
+  const priceWindows = useMemo<DiscountWindow[]>(() => [
+    ...Object.values(priceFlags).map(tags => tags.window).filter((window): window is DiscountWindow => window !== undefined),
+    ...Object.values(modelMarks)
+      .flatMap(byName => Object.values(byName).map(mark => mark.discountWindow))
+      .filter((window): window is DiscountWindow => window !== undefined),
+  ], [priceFlags, modelMarks])
+  const priceClock = useDiscountClock(priceWindows)
   
   /** 该页可能直接由导航进入，供应商与账号得自己取一次 */
   useEffect(() => {
@@ -443,6 +511,7 @@ export function ModelList() {
   const loadCatalogueFacts = useCallback(async () => {
     const free: Record<string, boolean> = {}
     const weights: Record<string, number> = {}
+    const prices: Record<string, TimeVaryingTags> = {}
     const images: Record<string, boolean> = {}
     const classes: Record<string, AggregateCostClass> = {}
     const channelProviders = providers.filter(p => p.enabled && p.type === 'account')
@@ -453,6 +522,14 @@ export function ModelList() {
           const key = `${provider.id}/${model.id}`
           free[key] = model.free
           if (model.weight !== undefined) weights[key] = model.weight
+          // 只有渠道真的报了时变价才登记：没有窗口时 `weight` 就是唯一答案。
+          if (model.discountWindow !== undefined || model.promoWeight !== undefined || model.baseWeight !== undefined) {
+            prices[key] = {
+              ...(model.discountWindow === undefined ? {} : { window: model.discountWindow }),
+              ...(model.promoWeight === undefined ? {} : { promoWeight: model.promoWeight }),
+              ...(model.baseWeight === undefined ? {} : { baseWeight: model.baseWeight }),
+            }
+          }
           if (model.supportsImage !== undefined) images[key] = model.supportsImage
         }
       } catch (error) {
@@ -482,6 +559,7 @@ export function ModelList() {
     }
     setFreeFlags(free)
     setWeightFlags(weights)
+    setPriceFlags(prices)
     setModalityFlags(images)
     setCostClasses(classes)
   }, [providers])
@@ -586,21 +664,41 @@ export function ModelList() {
         // actualModelId）记录，所以先按它查，再回落到展示名（内置供应商两者相同）。
         const channelFree = freeFlags[model.actualModelId] ?? freeFlags[model.displayName]
         const channelWeight = weightFlags[model.actualModelId] ?? weightFlags[model.displayName]
+        const channelPrice = priceFlags[model.actualModelId] ?? priceFlags[model.displayName]
         const supportsImage = modalityFlags[model.actualModelId] ?? modalityFlags[model.displayName]
         // 手工标注只在写了的字段上覆盖渠道（与路由的 manual > record 同序）。
         const manual = modelMarks[provider.id]?.[model.displayName]
         const free = manual?.free ?? channelFree
         const weight = manual?.weight ?? channelWeight
+        // 时变价同序合并：标注写了窗口就整组用标注的，否则用渠道报的。
+        const price: TimeVaryingTags = manual?.discountWindow !== undefined
+          ? {
+              window: manual.discountWindow,
+              ...(manual.promoWeight === undefined ? {} : { promoWeight: manual.promoWeight }),
+              ...(manual.baseWeight === undefined ? {} : { baseWeight: manual.baseWeight }),
+            }
+          : channelPrice ?? {}
+        // 与 `autoRouter::costSignalFor` 同一条推算，读的是**同一个函数**
+        // （`shared/discountWindow.ts::effectiveCostOf`）：有窗口按本地时钟取窗口内/外的
+        // 价，没窗口就是采集价。免费只在没有窗口时才是一句常量 —— 夜里 0 白天 0.29 的
+        // 模型两边都带着 `free: true`，按常量读会把 24 小时都印成免费。
+        const effective = effectiveCostOf({
+          ...(weight === undefined ? {} : { weight }),
+          ...(free === undefined ? {} : { free }),
+          ...(price.window === undefined ? {} : { discountWindow: price.window }),
+          ...(price.promoWeight === undefined ? {} : { promoWeight: price.promoWeight }),
+          ...(price.baseWeight === undefined ? {} : { baseWeight: price.baseWeight }),
+        }, priceClock)
         const costClass =
           provider.type === 'aggregate'
             ? costClasses[model.actualModelId] ?? costClasses[model.displayName]
             : undefined
-        // 与 `autoRouter::costSignalFor` 同一个判定顺序：免费 → 倍率 → 聚合分类 → 未知。
+        // 判定顺序同路由：免费 → 倍率 → 聚合分类 → 未知。
         const costBucket: CostBucket =
-          free === true
+          effective.free
             ? 'free'
-            : weight !== undefined
-              ? costBucketOf(weight, false)
+            : effective.weight !== undefined
+              ? costBucketOf(effective.weight, false)
               : costClass !== undefined
                 ? costBucketOfAggregateClass(costClass)
                 : 'unknown'
@@ -616,8 +714,15 @@ export function ModelList() {
           served: model.served,
           source: model.source,
           modality: toModality(supportsImage),
-          free,
-          weight,
+          free: effective.free || undefined,
+          weight: effective.weight,
+          ...price,
+          ...price.window === undefined
+            ? {}
+            : {
+                priceWindow: discountWindowLabel(price.window, priceClock),
+                priceWindowOpen: isDiscountWindowActive(price.window, priceClock),
+              },
           weightManual: manual?.weight !== undefined,
           weightApplicable: provider.type === 'account',
           costClass,
@@ -653,7 +758,7 @@ export function ModelList() {
     }
     
     return models
-  }, [providers, accounts, modelMappings, catalogueMap, freeFlags, weightFlags, modalityFlags, modelMarks, costClasses, t])
+  }, [providers, accounts, modelMappings, catalogueMap, freeFlags, weightFlags, priceFlags, modalityFlags, modelMarks, costClasses, priceClock, t])
   
   const filteredModels = useMemo(() => {
     let filtered = modelList

@@ -443,13 +443,23 @@ test('autoRouter 必须把账本余量与 Bandit 战绩喂进打分（源码钉�
     /const gateContext = createQuotaGateContext\(\)/,
     'select must build one gate context per candidate pass',
   )
+  // 闸门现在回「原因 + 解禁时刻」（`quotaBlockDetail`），共享上下文照旧只建一次 ——
+  // 逐个候选各建一份就等于把整份加密 store 解密几百遍。
   assert.match(
     autoRouterSource,
-    /quotaBlockReason\(provider, account\.id, model\.actualModelId, gateContext\)/,
-    'quotaBlockReason must use the shared gate context',
+    /quotaBlockDetail\(provider, account\.id, model\.actualModelId, gateContext, now\)/,
+    'the quota gate must use the shared per-pass context',
   )
-  // 打分函数的两个新因子要进总分（钉 balanced 主路径与 fill-first）
-  assert.match(autoRoutingSource, /- penalty - quotaPenalty - operationalPenalty \+ costBonus \+ stickyBonus \+ liveBonus/)
+  // 打分函数的两个新因子要进总分。2026-11-16 起四种口径共用一张因子表，
+  // 扣分项与加分项都写在 `TAIL_FACTORS` 里（权重负 = 扣、正 = 加），不随口径变化 ——
+  // 钉住那张表本身，而不是钉某一条返回式：公式已经只有一处了。
+  const tailStart = autoRoutingSource.indexOf('const TAIL_FACTORS')
+  assert.ok(tailStart > 0, 'TAIL_FACTORS 表必须在：四种口径共用那一段扣分/加分')
+  const tailBody = autoRoutingSource.slice(tailStart)
+  const tail = tailBody.slice(0, tailBody.indexOf('\n]'))
+  for (const id of ['penalty', 'quotaPenalty', 'operational', 'cost', 'sticky', 'live']) {
+    assert.match(tail, new RegExp(`\\['${id}',`), `${id} 必须进总分（TAIL_FACTORS）`)
+  }
   assert.match(autoRoutingSource, /0\.1 \* \(1 - candidate\.quotaHeadroom \/ 0\.1\)/)
   assert.match(autoRoutingSource, /candidate\.ewmaFirstTokenMs \/ 60_000/)
   assert.match(autoRoutingSource, /candidate\.rateLimitedRate \?\? 0/)

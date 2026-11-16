@@ -76,7 +76,10 @@ test('模型行把四类读数写在一行里：上轮服务 / 已固定 / 账�
     assert.ok(main.includes(marker), `模型行少了 ${marker}`)
   }
   assert.match(main, /type: 'checkbox',\s*\n\s*checked: model\.pinned,/, '已固定那个模型要打勾')
-  assert.match(main, /enabled: model\.accountCount > 0,/, '没有可派账号的模型不可点（不是点了没反应）')
+  assert.match(main, /enabled: model\.pinned \|\| model\.accountCount > 0,/,
+    '没有可派账号的模型不可钉，但已固定的行必须点得掉（解钉不需要账号，裁定 2026-11-16）')
+  assert.match(main, /click: \(\) => trayRouteCommand\(model\.pinned\s*\n\s*\? \{ action: 'reset', route: entry\.route \}/,
+    '勾选态再点一下 = 解除固定，回算法排队（不是点了没反应）')
 })
 
 test('三种缺席各说一句：还没读到 / 读失败 / 没有启用的路由', () => {
@@ -126,5 +129,9 @@ test('固定之后两侧一起刷新：控制台发布新快照，托盘命令�
   assert.match(page, /publishTrayRouteMenu\(\)/, '控制台切完必须发布，否则托盘慢一拍')
   assert.match(bridge, /dispatchEvent\(new Event\(ROUTES_CHANGED_EVENT\)\)/, '托盘命令执行完要通知页面')
   assert.match(page, /addEventListener\(ROUTES_CHANGED_EVENT/, '已打开的路由页要跟着重读')
-  assert.match(page, /Math\.max\(1_000, pinUntil - Date\.now\(\) \+ 1_000\)/, '钉子到期按时拉一次，倒计时不能停住')
+  assert.match(main, /已固定：\$\{entry\.pin\.displayName\}（持久）/,
+    '钉住即持久：托盘不再画倒计时（裁定 2026-11-15）')
+  assert.match(main, /已固定：\$\{entry\.pin\.displayName\}（已不在池内·本轮拒绝）/,
+    '钉不在池里要说出来：本轮拒绝、钉保留，不是悄悄换模型')
+  assert.doesNotMatch(page, /pinUntil|setTick/, '页面没有倒计时了：钉是持久的，不需要定时重读')
 })

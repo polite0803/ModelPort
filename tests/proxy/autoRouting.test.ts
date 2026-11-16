@@ -844,17 +844,29 @@ test('cost predicates distinguish free, included, known and unknown', () => {
   assert.equal(STRATEGY_PREDICATES['cost-known'](missing), false) // 缺失不等于已知
 })
 
-test('low-weight requires an annotated weight ≤ 1, never treats missing as 0', () => {
-  const low = poolCandidate({ capabilityHint: { weight: 0.5 } })
-  const exactlyOne = poolCandidate({ capabilityHint: { weight: 1 } })
-  const high = poolCandidate({ capabilityHint: { weight: 4 } })
-  const missing = poolCandidate({ capabilityHint: {} })
+test('low-weight reads the price in force, never a missing weight as 0', () => {
+  const low = poolCandidate({ weight: 0.5 })
+  const exactlyOne = poolCandidate({ weight: 1 })
+  const high = poolCandidate({ weight: 4 })
+  const missing = poolCandidate({})
 
   assert.equal(STRATEGY_PREDICATES['low-weight'](low), true)
   assert.equal(STRATEGY_PREDICATES['low-weight'](exactlyOne), true)
   assert.equal(STRATEGY_PREDICATES['low-weight'](high), false)
   // weight 缺失就是缺失，不能当 0（0 会通过，但缺失必须不通过）
   assert.equal(STRATEGY_PREDICATES['low-weight'](missing), false)
+
+  // 读的是候选上**此刻生效**的那一格（`costSignalFor` 按本地时钟取值），
+  // 不是标注层里的采集快照：夜间折价的模型在窗口内外必须是两种判定。
+  const windowedHint = { weight: 0.29 }
+  const openWindow = poolCandidate({ weight: 0, capabilityHint: windowedHint })
+  const closedWindow = poolCandidate({ weight: 0.29, capabilityHint: windowedHint })
+  assert.equal(STRATEGY_PREDICATES['low-weight'](openWindow), true)
+  assert.equal(STRATEGY_PREDICATES['low-weight'](closedWindow), true)
+  const dearOpen = poolCandidate({ weight: 0.4, capabilityHint: { weight: 4 } })
+  const dearClosed = poolCandidate({ weight: 4, capabilityHint: { weight: 4 } })
+  assert.equal(STRATEGY_PREDICATES['low-weight'](dearOpen), true)
+  assert.equal(STRATEGY_PREDICATES['low-weight'](dearClosed), false)
 })
 
 test('context predicates use explicit thresholds and never default a missing window', () => {
@@ -1060,4 +1072,42 @@ test('cacheAffinityMinutes 默认 60，并夹在 0-1440 之间', () => {
   assert.equal(normalizeAutoRoutingConfig({ cacheAffinityMinutes: 90 }).cacheAffinityMinutes, 90)
   assert.equal(normalizeAutoRoutingConfig({ cacheAffinityMinutes: 99_999 }).cacheAffinityMinutes, 1440)
   assert.equal(normalizeAutoRoutingConfig({ cacheAffinityMinutes: -5 }).cacheAffinityMinutes, 0)
+})
+
+test('成本按连续曲线取值：五档看不见的深浅，倍率看得见', () => {
+  // 旧实现只读 `costBucket`，x0.02 与 x0.9 同属 `below-base`、同分 —— 打折 50 倍
+  // 也换不来一次改派，错峰折扣只能影响星级、影响不了派发。这里把深折价的候选
+  // 故意排在**后面**：它能到队首，只可能是曲线生效了。
+  const profile = profileRequest(textRequest('hi'))
+  const shallow = candidate({ accountId: 'shallow', costBucket: 'below-base', weight: 0.9 })
+  const deep = candidate({ accountId: 'deep', costBucket: 'below-base', weight: 0.02 })
+
+  const ranked = rankCandidates(profile, [shallow, deep], { now: NOW, prefer: 'cheap' })
+  assert.equal(ranked[0].accountId, 'deep')
+
+  // 只在 `below-base` 内比较还不够硬：两档之间也按倍率连续排（x0.02 甚至压过
+  // x0.5 —— 档位表里它们是相邻的两档，曲线上差了 0.47）。
+  const halfBase = candidate({ accountId: 'half', costBucket: 'below-base', weight: 0.5 })
+  const aboveBase = candidate({ accountId: 'above', costBucket: 'above-base', weight: 3 })
+  const ordered = rankCandidates(profile, [aboveBase, halfBase, shallow, deep], { now: NOW, prefer: 'cheap', limit: 4 })
+  assert.deepEqual(ordered.map(entry => entry.accountId), ['deep', 'half', 'shallow', 'above'])
+})
+
+test('免费档不问倍率；没有倍率才回落到档位表', () => {
+  // `costBucket: 'free'` 是**报过的**结论（上游标了免费），倍率缺失在这里只表示
+  // 「没报」—— 所以 free 恒取 1，不会被一个缺省的中性值压低。
+  const profile = profileRequest(textRequest('hi'))
+  const freeNoWeight = candidate({ accountId: 'free', costBucket: 'free' })
+  const paidCheap = candidate({ accountId: 'paid', costBucket: 'below-base', weight: 0.02 })
+  assert.equal(
+    rankCandidates(profile, [paidCheap, freeNoWeight], { now: NOW, prefer: 'cheap' })[0].accountId,
+    'free',
+  )
+
+  // 只有档位（聚合条目、只报了档位的候选）时曲线无从取值，五档表照旧 ——
+  // 未知与基准同取中性 0.5，谁也不吃亏。
+  const unknown = candidate({ accountId: 'unknown', costBucket: 'unknown' })
+  const base = candidate({ accountId: 'base', costBucket: 'base' })
+  const both = rankCandidates(profile, [unknown, base], { now: NOW, prefer: 'cheap' })
+  assert.deepEqual(both.map(entry => entry.accountId).sort(), ['base', 'unknown'])
 })

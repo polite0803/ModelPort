@@ -15,7 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { RefreshCw, Plus, Minus, RotateCcw, Pencil, Pin, Trash2 } from 'lucide-react'
 import { ModelMarkEditor } from '@/components/models/ModelAnnotationDialog'
 import { weightTone } from '@/lib/costTone'
-import { costBucketOf, type CostBucket } from '@shared/channels'
+import { type CostBucket } from '@shared/channels'
 import type {
   CapabilitySource,
   ModelCapability,
@@ -74,10 +74,12 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
   /**
-   * 消耗权重筛选。分档与「模型管理」页**同一套**：
-   * `costBucketOf(weight, free)` —— 免费（0，含渠道标的免费/套餐内）、打折（<1×）、
-   * 基准（=1×）、加价（>1×）、未标注（渠道没报倍率）。`unknown` 自成一档，
+   * 消耗权重筛选。分档与「模型管理」页**同一套**：免费（0，含渠道标的免费/套餐内）、
+   * 打折（<1×）、基准（=1×）、加价（>1×）、未标注（渠道没报倍率）。`unknown` 自成一档，
    * 绝不并进免费或任何付费档。
+   *
+   * 分档本身由主进程 `autoRouter.preview()` 算好（`costSignalFor` 用本地时钟取此刻
+   * 生效的倍率），这里只按它筛 —— 前端重算一遍会在折扣窗口边界上与派发分叉。
    */
   const [costFilter, setCostFilter] = useState<'all' | CostBucket>('all')
   /** 供应商筛选：按候选模型的 providerId 精确过滤，选项来自当前预览里出现过的供应商。 */
@@ -265,9 +267,11 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
       if (statusFilter === 'dropped' && model.status !== 'filtered' && model.status !== 'excluded' && model.status !== 'not-pinned' && model.status !== 'below-tier') return false
       if (statusFilter === 'unavailable' && model.status !== 'unavailable') return false
       if (providerFilter !== 'all' && model.providerId !== providerFilter) return false
-      // 与模型管理页同一个判据：渠道报的倍率 + 是否免费（聚合侧由成本台账给出免费标记）。
-      // 没有倍率也不是免费的模型自成一档 —— 折进免费会让人以为不要钱，折进付费则是凭空定价。
-      if (costFilter !== 'all' && costBucketOf(model.weight, model.costBucket === 'free') !== costFilter) {
+      // 分档直接用主进程算好的那一格，而不是从 `weight` 重算一遍：`weight` 是
+      // **此刻生效**的倍率（窗口由选路侧按本地时钟取值），用 `costBucketOf` 再推一次
+      // 会把「窗口开着、价是 0」与「静态免费」两类合成一档 —— 而这个筛选要回答的是
+      // 「这一轮的价格类就是它」。没有倍率也不是免费的模型自成一档，绝不折进免费。
+      if (costFilter !== 'all' && (model.costBucket ?? 'unknown') !== costFilter) {
         return false
       }
       if (query === '') return true

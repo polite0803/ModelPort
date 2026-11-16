@@ -1812,21 +1812,21 @@ const zcodeAdapter = registerZcodeLlm(ctx, {
     ['cline', (p) => cline.refreshAll(p)],
     // ⚠️ Loomy 不可续期：这里只探测**已过期**的账号（见 LoomyAuth.refreshAll）。
     ['loomy', (p) => loomy.refreshAll(p)],
-    // raccoon **可续期**：只按 refreshable 过滤，且只续进入 lead 窗口的账号。
+    // raccoon **可续期**：判据读凭据（不读池里的 refreshable），且只续到期的账号。
     ['raccoon', (p) => raccoon.refreshAll(p)],
     // MiniMax **可续期**（refresh_token 授权，会轮换 refresh_token）。
-    // 与 raccoon 同款：只按 refreshable 过滤，不看 enabled。
+    // 与 raccoon 同款：判据读凭据、不看 enabled。
     ['minimax', (p) => minimax.refreshAll(p)],
     // zcode **不可续期**（凭据是静态的）—— 但这个方法仍做实事：
     // 把各账号 ref 下最新的凭据回写一遍，让用户重新登录后无需重启 DSH。
-    // ⚠ 只按 `refreshable` 过滤、**不看 `enabled`**（AGENTS.md 既有约定）。
+    // ⚠ **不看 `enabled`**（AGENTS.md 既有约定）；本家凭据静态，只回写最新值。
     ['zcode', (p) => zcode.refreshAll(p)],
     // ⚠️ Gemini **可续期**（Google OAuth 的 refresh_token，且会轮换）。
     // ⚠️ 漏了这一行定时器不武装：凭据到期后**不会自动续期**，
     // 用户会看到「每隔一小时就要重新登录」，且日志里一个字都没有。
     ['gemini', (p) => gemini.refreshAll(p)],
-    // WorkBuddy 可续期（refresh_token 轮换）：与 raccoon/minimax 同款，只按
-    // refreshable 过滤、不看 enabled。
+    // WorkBuddy 可续期（refresh_token 轮换）：与 raccoon/minimax 同款，
+    // 判据读凭据、不看 enabled。
     ['workbuddy', (p) => workbuddy.refreshAll(p)],
     // CodeBuddy 同协议；独立实例，绝不能复用 workbuddy 的凭据/池。
     ['buddy', (p) => buddy.refreshAll(p)],

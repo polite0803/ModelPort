@@ -30,12 +30,18 @@ import type {
   ChannelView,
 } from '../../../shared/channels'
 import { channelAddFlowOf, channelModelDisplayName } from '../../../shared/channels'
+import {
+  discountWindowLabel,
+  effectiveWeightOf,
+  isDiscountWindowActive,
+} from '../../../shared/discountWindow'
 import { channelUsesSystemProxy } from '../../../shared/channelProxy'
 import type { CatalogAdoption } from '../../../shared/modelCatalog'
 import type { ModelMetadata } from '../../../shared/modelMetadata'
 import { CatalogScopeBatchButton } from '@/components/models/CatalogScopeBatchButton'
 import { ModelAnnotationDialog } from '@/components/models/ModelAnnotationDialog'
 import { ModelAnnotationSummary } from '@/components/models/ModelAnnotationSummary'
+import { useDiscountClock } from '@/hooks/useDiscountClock'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
@@ -289,6 +295,17 @@ export function Channels() {
    * 模型行要能显示「已采用 N 项」，否则一次几十毫秒跑完的批量只剩一条一闪而过的提示。
    */
   const [adoptions, setAdoptions] = useState<CatalogAdoption[]>([])
+  /**
+   * 折扣窗口的边界时刻。渠道页印的是**此刻生效**的倍率（`effectiveWeightOf`
+   * 与主进程选路读同一个函数），所以窗口一开一关必须重绘 —— 用固定 1s 轮询
+   * 是拿整页重渲染换一个一天变两次的数字，这里改为在边界上醒一次。
+   */
+  const modelDiscountWindows = useMemo(
+    () => Object.values(models)
+      .flatMap(entry => entry === 'loading' ? [] : entry.map(model => model.discountWindow)),
+    [models],
+  )
+  const priceClock = useDiscountClock(modelDiscountWindows)
   const refreshAdoptions = useCallback(async () => {
     const api = window.electronAPI?.providers
     if (!api?.getCatalogAdoptions) return
@@ -1794,6 +1811,21 @@ export function Channels() {
                           <div className="max-h-56 space-y-1 overflow-y-auto rounded-md border p-2">
                             {modelList.map(model => {
                               const displayName = channelModelDisplayName(channel.name, channel.id, model)
+                              // 与主进程 `costSignalFor` 同一条推算：有窗口按本地时钟取窗口内/外的价，
+                              // 没窗口就是采集价。免费只在**没有窗口**时才是一句常量（夜里 0、
+                              // 白天 0.29 的模型两边都是 `free: true`）。
+                              const weight = effectiveWeightOf(model, priceClock)
+                              const open = model.discountWindow !== undefined
+                                && isDiscountWindowActive(model.discountWindow, priceClock)
+                              const effectivePrice = {
+                                weight,
+                                base: model.baseWeight,
+                                free: weight === 0,
+                                window: model.discountWindow === undefined
+                                  ? undefined
+                                  : discountWindowLabel(model.discountWindow, priceClock),
+                                open,
+                              }
                               return (
                               <div key={model.id} className="flex items-center gap-2 text-sm">
                                 <div className="flex min-w-0 flex-1 flex-col gap-0.5">
@@ -1802,16 +1834,33 @@ export function Channels() {
                                   </span>
                                   <ModelAnnotationSummary metadata={metadataByChannel[channel.id]?.[displayName]} />
                                 </div>
-                                {model.free && (
+                                {/*
+                                  价格必须按**此刻**印，不能印采集那一刻的快照：
+                                  夜间折扣模型在目录里同时带着两个价与时段，印快照就是
+                                  白天显示折后价、夜里显示原价 —— 与真正计费的那一侧
+                                  恰好相反（选路读的是 `effectiveWeightOf`）。
+                                */}
+                                {effectivePrice.free && (
                                   <Badge variant="outline" className="shrink-0 border-emerald-500/40 text-emerald-600">
                                     {t('channels.models.free')}
                                   </Badge>
                                 )}
-                                {model.weight !== undefined && !model.free && (
+                                {effectivePrice.weight !== undefined && !effectivePrice.free && (
                                   <Badge variant="secondary" className="shrink-0">
-                                    {model.baseWeight === undefined
-                                      ? `x${model.weight}`
-                                      : `x${model.baseWeight}→x${model.weight}`}
+                                    {effectivePrice.base === undefined || effectivePrice.base === effectivePrice.weight
+                                      ? `x${effectivePrice.weight}`
+                                      : `x${effectivePrice.base}→x${effectivePrice.weight}`}
+                                  </Badge>
+                                )}
+                                {effectivePrice.window !== undefined && (
+                                  <Badge
+                                    variant="outline"
+                                    className={`shrink-0 text-[10px] ${open ? 'text-info' : 'text-muted-foreground'}`}
+                                    title={t('channels.models.offPeakHint')}
+                                  >
+                                    {t('channels.models.offPeak', {
+                                      window: effectivePrice.window,
+                                    })}
                                   </Badge>
                                 )}
                                 {model.dead && (

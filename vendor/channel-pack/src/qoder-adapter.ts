@@ -32,6 +32,7 @@ import { isQoderExpired, type QoderCredential } from './qoder.js'
 import { QoderEncryptedInfer, decryptServerResponse, type QoderInferMessage, type QoderInferRequest, type QoderInferTool, type QoderInferToolCall } from './qoder-wasm.js'
 import { unwrapQoderEnvelopeStream } from './qoder-envelope.js'
 import { QODER, type QoderFallbackModel, type QoderModelPromotion, type QoderProduct } from './qoder-product.js'
+import type { RpcModelDiscount } from './types.js'
 import { RemoteCatalogGate } from './remote-catalog-gate.js'
 import { reasoningRankOf } from './reasoning-ladder.js'
 import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
@@ -859,17 +860,27 @@ export class QoderAdapter extends LlmAdapter {
    * 之前一定先走 `ctx.llm.listModels()`（那会 await 加载完成），故实际不会读空。
    * 在线目录不可用时回退兜底表（界面不会因此少模型）。
    */
-  listAllModels(): readonly { id: string; name: string; supportsImage?: boolean }[] {
+  listAllModels(): readonly {
+    id: string
+    name: string
+    supportsImage?: boolean
+    discount?: RpcModelDiscount
+  }[] {
     const source = this.remoteModels ?? this.product.fallbackModels
     if (this.remoteModels === undefined || this.now() - this.remoteModelsAtMs >= QODER_CATALOG_TTL_MS) {
       void this.ensureRemoteModels()
     }
     // 逐条声明 `supportsImage`（目录 `is_vl`）；缺失时保持未知。
-    return source.map((model) => ({
-      id: model.id,
-      name: qoderDisplayName(model),
-      ...model.supportsImage === undefined ? {} : { supportsImage: model.supportsImage },
-    }))
+    return source.map((model) => {
+      const discount = qoderDiscountOf(model)
+      return {
+        id: model.id,
+        name: qoderDisplayName(model),
+        ...model.supportsImage === undefined ? {} : { supportsImage: model.supportsImage },
+        // 展示名只在窗口开着时带折后价；窗口本身必须一直上抛（见 qoderDiscountOf）。
+        ...discount === undefined ? {} : { discount },
+      }
+    })
   }
 
   /**
@@ -1698,22 +1709,78 @@ export class QoderAdapter extends LlmAdapter {
 export function promotionActiveNow(promotion: QoderModelPromotion, now: Date): boolean {
   const { windowStart, windowEnd } = promotion
   if (windowStart === undefined || windowEnd === undefined) return promotion.active
-  const toMinutes = (hhmm: string): number | undefined => {
-    const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm.trim())
-    if (m === null) return undefined
-    const h = Number(m[1]); const min = Number(m[2])
-    return h < 24 && min < 60 ? h * 60 + min : undefined
-  }
-  const start = toMinutes(windowStart)
-  const end = toMinutes(windowEnd)
+  const start = slotMinutes(windowStart)
+  const end = slotMinutes(windowEnd)
   if (start === undefined || end === undefined) return promotion.active
 
-  // 取 UTC+8 的「墙上时间」（目录时区与用户一致，故无需真实时区换算）
-  const utc8 = new Date(now.getTime() + 8 * 3_600_000)
-  const minutes = utc8.getUTCHours() * 60 + utc8.getUTCMinutes()
+  const minutes = zonedMinutes(now, QODER_PROMOTION_TIMEZONE)
+  // 时区解析不了时不误杀：宁可多算一次折后价，也不要让折扣凭空消失。
+  if (minutes === undefined) return true
   return start <= end
     ? minutes >= start && minutes < end
     : minutes >= start || minutes < end
+}
+
+/**
+ * 折扣窗口的时区（目录 `timezone` 声明的同一取值）。
+ *
+ * 曾经这里写的是 `+ 8 * 3_600_000`，理由是「目录时区与用户一致」。那是把
+ * **时区当成常数**：IANA 名 `Asia/Singapore` 的含义是「按新加坡的墙上时间」，
+ * 哪天官方把窗口改成别处的活动（或本机与 Activity 的时区不同），硬编码就会
+ * 整天算错一小时以上。用 `Intl` 换算与 `buddy.ts` 同口径。
+ */
+export const QODER_PROMOTION_TIMEZONE = 'Asia/Singapore'
+
+/** `HH:MM`（容忍不补零）→ 当日分钟数。 */
+function slotMinutes(value: string): number | undefined {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(value.trim())
+  if (m === null) return undefined
+  const h = Number(m[1]); const min = Number(m[2])
+  return h < 24 && min < 60 ? h * 60 + min : undefined
+}
+
+/** 指定时区「此刻墙上时间」的当日分钟数；时区非法时 undefined。 */
+function zonedMinutes(now: Date, timeZone: string): number | undefined {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(now)
+    const h = Number(parts.find((p) => p.type === 'hour')?.value)
+    const m = Number(parts.find((p) => p.type === 'minute')?.value)
+    return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 模型的促销时段 + 窗口内价，供宿主按本地时钟推算生效价。
+ *
+ * 与 {@link qoderDisplayName} 是同一份数据的两种投影：展示名只在窗口**开着**时
+ * 写折后价，宿主却任何时刻都需要知道「几点会便宜」。缺了这条，夜间折扣在白天
+ * 采集的目录里就彻底消失（只剩原价，看不出有折扣），而夜间采集的目录又会把
+ * 折后价当成全天价 —— 两侧都错，方向相反。
+ *
+ * 免费模型不报窗口：`priceFactor === 0` 是常态免费，没有「窗口外更贵」的一侧。
+ */
+export function qoderDiscountOf(model: QoderFallbackModel): RpcModelDiscount | undefined {
+  const promo = model.promotion
+  if (promo === undefined) return undefined
+  const before = promo.beforePromotionPriceFactor
+  const factor = promo.discountFactor
+  if (before === undefined || factor === undefined) return undefined
+  if (model.priceFactor === 0) return undefined
+  const { windowStart, windowEnd } = promo
+  if (windowStart === undefined || windowEnd === undefined) return undefined
+  if (slotMinutes(windowStart) === undefined || slotMinutes(windowEnd) === undefined) return undefined
+
+  const weight = Number((before * factor).toFixed(4))
+  return {
+    weight,
+    baseWeight: before,
+    daily: [{ start: windowStart.trim(), end: windowEnd.trim() }],
+    timezone: QODER_PROMOTION_TIMEZONE,
+  }
 }
 
 /**

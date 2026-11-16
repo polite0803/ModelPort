@@ -160,3 +160,57 @@ test('纯读与统计写：不推 routes:pool-changed', () => {
   sm.updateStatistics({})
   assert.equal(poolChangedCount(), 0, '读与每请求统计写都不该触发池重取')
 })
+
+// 2026-11-15 现网：每笔成功请求都写 accounts 的 lastUsed/requestCount/todayUsed，
+// 而 accounts 是结构键 ⇒ 每请求 bump 修订号 + 推一次 pool-changed。路由页一次刷新
+// 发两条全池扫描（实测 6.6 / 10.9 / 14.1s），12 分钟 56 条把主线程占满，回环转发
+// 饿死成 read ECONNRESET（半小时 16 笔 502）。修订号还折在 preview 的 15s 缓存键里，
+// 每请求 +1 等于缓存永远命中不了 —— 与 preview 注释声明的「每请求的写不 bump」相反。
+test('每请求记账写：不推 pool-changed，也不 bump 结构修订号', () => {
+  frames.length = 0
+  const before = sm.getStructuralRevision()
+  for (let i = 0; i < 5; i++) {
+    sm.updateAccount('p1-acct1', {
+      lastUsed: Date.now() + i,
+      requestCount: i + 1,
+      todayUsed: i + 1,
+      todayUsedDay: '2026-11-15',
+    })
+  }
+  assert.equal(poolChangedCount(), 0, '记账不改池成员，不该让路由页整池重扫')
+  assert.equal(
+    sm.getStructuralRevision(),
+    before,
+    '修订号折在 preview 缓存键里：记账 bump 会让 15s 短缓存永远失效',
+  )
+})
+
+test('账号启停 / 凭据 / 每日上限：仍然推事件并 bump 修订号', () => {
+  frames.length = 0
+  const before = sm.getStructuralRevision()
+  sm.updateAccount('p1-acct1', { status: 'inactive' })
+  assert.ok(poolChangedCount() >= 1, '启停真的改池成员，投影不许把它一起摘掉')
+  assert.ok(sm.getStructuralRevision() > before)
+
+  frames.length = 0
+  const mid = sm.getStructuralRevision()
+  sm.updateAccount('p1-acct1', { status: 'active', dailyLimit: 500 })
+  assert.ok(poolChangedCount() >= 1, 'dailyLimit 参与选路，不是记账')
+  assert.ok(sm.getStructuralRevision() > mid)
+
+  frames.length = 0
+  const last = sm.getStructuralRevision()
+  sm.updateAccount('p1-acct1', { credentials: { token: 'rotated-token' } })
+  assert.ok(poolChangedCount() >= 1, '凭据轮换改可用性')
+  assert.ok(sm.getStructuralRevision() > last)
+})
+
+test('记账写之后的真结构写仍然 bump（投影不许把快照写脏）', () => {
+  sm.updateAccount('p1-acct1', { lastUsed: Date.now(), requestCount: 99 })
+  frames.length = 0
+  const before = sm.getStructuralRevision()
+  sm.updateAccount('p1-acct1', { status: 'expired' })
+  assert.ok(poolChangedCount() >= 1)
+  assert.ok(sm.getStructuralRevision() > before)
+  sm.updateAccount('p1-acct1', { status: 'active' })
+})

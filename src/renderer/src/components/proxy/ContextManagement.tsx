@@ -5,8 +5,11 @@ import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useToast } from '@/hooks/use-toast'
 import { Layers } from 'lucide-react'
+
+type ContextWindowTier = '200k' | '400k' | '1m'
 
 interface StrategyConfig {
   slidingWindow: {
@@ -16,6 +19,8 @@ interface StrategyConfig {
   tokenLimit: {
     enabled: boolean
     maxTokens: number
+    contextWindowTier?: ContextWindowTier
+    costBudgetByProvider?: Record<string, number>
   }
 }
 
@@ -31,6 +36,27 @@ function parseChannelIds(text: string): string[] {
   return [...new Set(text.split(/[,\s，、]+/).map(id => id.trim()).filter(Boolean))]
 }
 
+/** `渠道: token` 每行一条。坏行整条丢弃 —— 落一个 0 会把历史裁到只剩最新一条。 */
+function parseCostBudget(text: string): Record<string, number> {
+  const out: Record<string, number> = {}
+  for (const line of text.split(/\r?\n/)) {
+    const at = line.lastIndexOf(':')
+    if (at < 0) continue
+    const id = line.slice(0, at).trim()
+    const value = Number(line.slice(at + 1).trim())
+    if (id.length === 0 || !Number.isFinite(value)) continue
+    const tokens = Math.floor(value)
+    if (tokens <= 0) continue
+    out[id] = tokens
+  }
+  return out
+}
+
+/** 反向：把存着的那张表摊成可编辑文本（界面只此一份形态，不改它的形状）。 */
+function formatCostBudget(table?: Record<string, number>): string {
+  return Object.entries(table ?? {}).map(([id, tokens]) => `${id}: ${tokens}`).join('\n')
+}
+
 export function ContextManagement() {
   const { t } = useTranslation()
   const { toast } = useToast()
@@ -39,6 +65,7 @@ export function ContextManagement() {
     enabled: false,
     strategies: {
       slidingWindow: { enabled: true, maxMessages: 20 },
+      // 出厂不带档位：与 `DEFAULT_TOKEN_LIMIT_CONFIG` 同形，老配置读进来也不必先被改一次。
       tokenLimit: { enabled: false, maxTokens: 4000 },
     },
     executionOrder: ['slidingWindow', 'tokenLimit'],
@@ -46,6 +73,7 @@ export function ContextManagement() {
 
   const [hasChanges, setHasChanges] = useState(false)
   const [channelIdsText, setChannelIdsText] = useState('')
+  const [costBudgetText, setCostBudgetText] = useState('')
 
   useEffect(() => {
     loadConfig()
@@ -56,6 +84,7 @@ export function ContextManagement() {
       const contextConfig = await window.electronAPI.contextManagement.getConfig()
       setConfig(contextConfig)
       setChannelIdsText((contextConfig.channelIds ?? []).join(', '))
+      setCostBudgetText(formatCostBudget(contextConfig.strategies?.tokenLimit?.costBudgetByProvider))
     } catch (error) {
       console.error('Failed to load context management config:', error)
     }
@@ -88,6 +117,13 @@ export function ContextManagement() {
       await window.electronAPI.contextManagement.updateConfig({
         ...config,
         channelIds: parseChannelIds(channelIdsText),
+        strategies: {
+          ...config.strategies,
+          tokenLimit: {
+            ...config.strategies.tokenLimit,
+            costBudgetByProvider: parseCostBudget(costBudgetText),
+          },
+        },
       })
       setHasChanges(false)
       toast({
@@ -212,22 +248,54 @@ export function ContextManagement() {
                   {config.strategies.tokenLimit.enabled && (
                     <div className="flex items-center gap-4 pl-4 border-l-2">
                       <div className="flex-1 space-y-2">
-                        <Label htmlFor="max-tokens">{t('contextManagement.tokenLimit.maxTokens')}</Label>
-                        <Input
-                          id="max-tokens"
-                          type="number"
-                          min={100}
-                          max={100000}
-                          value={config.strategies.tokenLimit.maxTokens}
-                          onChange={(e) =>
+                        <Label htmlFor="context-window-tier">
+                          {t('contextManagement.tokenLimit.tierFallbackLabel')}
+                        </Label>
+                        <Select
+                          value={config.strategies.tokenLimit.contextWindowTier ?? 'none'}
+                          onValueChange={(value) =>
                             handleStrategyChange('tokenLimit', {
-                              maxTokens: parseInt(e.target.value) || 4000,
+                              contextWindowTier:
+                                value === 'none' ? undefined : (value as ContextWindowTier),
                             })
                           }
-                          className="w-32"
+                        >
+                          <SelectTrigger id="context-window-tier" className="w-48">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {/* 不选也要能表达：留空＝继续沿用按供应商/全局的旧数。 */}
+                            <SelectItem value="none">
+                              {t('contextManagement.tokenLimit.tierUnset')}
+                            </SelectItem>
+                            <SelectItem value="200k">200K</SelectItem>
+                            <SelectItem value="400k">400K</SelectItem>
+                            <SelectItem value="1m">1M</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <p className="text-xs text-muted-foreground">
+                          {t('contextManagement.tokenLimit.contextWindowTierHint')}
+                        </p>
+                      </div>
+                      <div className="flex-1 space-y-2">
+                        <Label htmlFor="context-cost-budget">
+                          {t('contextManagement.tokenLimit.costBudget')}
+                        </Label>
+                        <textarea
+                          id="context-cost-budget"
+                          value={costBudgetText}
+                          onChange={(e) => {
+                            setCostBudgetText(e.target.value)
+                            handleStrategyChange('tokenLimit', {
+                              costBudgetByProvider: parseCostBudget(e.target.value),
+                            })
+                          }}
+                          placeholder={t('contextManagement.tokenLimit.costBudgetPlaceholder')}
+                          rows={3}
+                          className="flex w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring font-mono"
                         />
                         <p className="text-xs text-muted-foreground">
-                          {t('contextManagement.tokenLimit.maxTokensHint')}
+                          {t('contextManagement.tokenLimit.costBudgetHint')}
                         </p>
                       </div>
                     </div>

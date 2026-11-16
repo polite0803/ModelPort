@@ -503,6 +503,7 @@ export function Providers() {
     email?: string
     credentials: Record<string, string>
     dailyLimit?: number
+    declaredQuota?: Account['declaredQuota']
   }) => {
     if (!store.selectedProviderId) return
     
@@ -513,6 +514,7 @@ export function Providers() {
         email: data.email,
         credentials: data.credentials,
         dailyLimit: data.dailyLimit,
+        ...(data.declaredQuota === undefined ? {} : { declaredQuota: data.declaredQuota }),
       })
       store.addAccount(account)
       

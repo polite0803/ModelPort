@@ -1,12 +1,17 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
   pickUpstreamErrorDetails,
   pickUpstreamErrorMessage,
   summarizeUpstreamErrorBody,
 } from '../../src/main/proxy/upstreamErrorBody.ts'
-import { mapForwardFailure, withRequestId } from '../../src/main/proxy/errorMapping.ts'
+import {
+  describeTransportError,
+  mapForwardFailure,
+  withRequestId,
+} from '../../src/main/proxy/errorMapping.ts'
 
 test('OpenAI 错误体：message/type/param/code/metadata 全部保留', () => {
   const details = pickUpstreamErrorDetails({
@@ -151,4 +156,74 @@ test('request_id 只追加一次', () => {
   assert.equal(withRequestId('boom', 'req-1'), 'boom [request_id: req-1]')
   assert.equal(withRequestId('boom [request_id: req-1]', 'req-1'), 'boom [request_id: req-1]')
   assert.equal(withRequestId('boom', ''), 'boom')
+})
+
+// 2026-11-15 现网：火山聚合线路 16 笔里 7 笔落 500，请求行的 `errorMessage` 是**空串**、
+// `attempts[0]` 没有 status，客户端只看到「Request failed after retries」。根因是 Node 的
+// happy-eyeballs 在两个地址族都连不上时抛 `new AggregateError(errors)`（message 为空），
+// axios 原样保留空串。下面这组判据钉住「空消息必须挖出真因」与「有消息一律不改写」。
+test('空消息 AggregateError：挖出 errors[] 里的真实连接原因', () => {
+  const v6 = Object.assign(new Error('connect ENETUNREACH 2406:d440::5184:443 - Local (:::0)'), { code: 'ENETUNREACH' })
+  const v4 = Object.assign(new Error('connect ECONNREFUSED 101.126.7.76:443'), { code: 'ECONNREFUSED' })
+  const aggregate = new AggregateError([v6, v4])
+  assert.equal(aggregate.message, '', '夹具前提：Node 的 AggregateError 自身消息就是空串')
+
+  const described = describeTransportError(aggregate)
+  assert.match(described, /ENETUNREACH/)
+  assert.match(described, /ECONNREFUSED/)
+  assert.ok(!described.startsWith('Unknown error'), '不得再落回不明故障')
+})
+
+test('只有 code 没有 message 的子异常也要报出 code', () => {
+  const bare = Object.assign(new Error(''), { code: 'ETIMEDOUT' })
+  assert.match(describeTransportError(new AggregateError([bare])), /ETIMEDOUT/)
+})
+
+test('有消息的异常逐字返回：上游文案是分类器判据，不许加前缀', () => {
+  const upstream = new Error('You have exceeded the 5-hour usage quota.')
+  assert.equal(describeTransportError(upstream), upstream.message)
+  const wrapped = Object.assign(new Error('Network Error'), {
+    code: 'ERR_NETWORK',
+    cause: new Error('connect ECONNRESET 1.2.3.4:443'),
+  })
+  assert.equal(describeTransportError(wrapped), 'Network Error')
+})
+
+test('cause 链与自引用：挖得下去也停得下来', () => {
+  const leaf = new Error('connect ECONNREFUSED 127.0.0.1:8080')
+  const middle = Object.assign(new Error(''), { cause: leaf })
+  assert.match(describeTransportError(middle), /ECONNREFUSED 127\.0\.0\.1:8080/)
+
+  const cyclic = Object.assign(new Error(''), {})
+  cyclic.cause = cyclic
+  assert.equal(describeTransportError(cyclic), '')
+})
+
+test('非 Error 抛掷物与空异常：保持旧兜底口径', () => {
+  assert.equal(describeTransportError('boom'), 'Unknown error')
+  assert.equal(describeTransportError(undefined), 'Unknown error')
+  assert.equal(describeTransportError(new Error('')), '')
+})
+
+test('接线门：三条转发 catch 与两条回环 catch 都必须走真因描述', () => {
+  const forwarder = readFileSync(new URL('../../src/main/proxy/forwarder.ts', import.meta.url), 'utf8')
+  assert.equal(
+    (forwarder.match(/error: describeTransportError\(error\)/g) ?? []).length,
+    4,
+    'doForward 与 forwardResponsesWire 各有 AxiosError / 通用两条返回',
+  )
+  assert.ok(
+    !/error: error\.message,/.test(forwarder),
+    '不得留下直接透传空消息的旧写法',
+  )
+  assert.match(forwarder, /const message = describeTransportError\(error\)/)
+
+  for (const lane of ['messages', 'responses']) {
+    const source = readFileSync(new URL(`../../src/main/proxy/routes/${lane}.ts`, import.meta.url), 'utf8')
+    assert.match(source, /describeTransportError\(cause\)/, `${lane} 泳道必须带上 cause`)
+    assert.ok(
+      !/Cannot reach internal chat endpoint: \$\{error instanceof Error/.test(source),
+      `${lane} 泳道不得只印 error.message`,
+    )
+  }
 })

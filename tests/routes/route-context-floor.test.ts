@@ -165,6 +165,30 @@ test('A：每条路由报**自己池**的下界，同一次响应里出现不同
   sm.setUserModelMark('noann', 'Unknown-W', null)
 })
 
+test('钉住的路由报**钉的那个模型**的窗口，不是整池最小值', async () => {
+  // 钉住之后这条路由只会派这一个模型（`select` 按 `pinRef` 收窄），池里 8K 的小模型
+  // 与它无关。报池最小值等于让客户端按 8K 的压缩点砍断一个 1M 的会话。
+  makeRoute('pinnedbig', { preferredModel: ref('big', 'Big-1M') })
+  assert.equal(await floorOf('pinnedbig'), 1_000_000,
+    '全池最小是 8192，但这条路只会跑 Big-1M')
+
+  makeRoute('pinnedsmall', { preferredModel: ref('small', 'Small-8K') })
+  assert.equal(await floorOf('pinnedsmall'), 8192,
+    '反过来同理：钉小窗模型就如实报小窗，不能借池里大窗模型的光')
+
+  // 钉的模型自己没标注：没有证据就省略键，不退回池里别人的数
+  makeRoute('pinnedunknown', { preferredModel: ref('noann', 'Unknown-W') })
+  assert.equal(await floorOf('pinnedunknown'), undefined)
+
+  // 钉 + 池策略：钉在池外（这里被 long-context 剔掉，实际是 pin_stale 拒答）时
+  // 这条路由一个模型都不会派，报池的下界才是诚实的数
+  makeRoute('pinnedout', {
+    preferredModel: ref('small', 'Small-8K'),
+    poolStrategies: [{ id: 'long-context', operator: 'and' }],
+  })
+  assert.equal(await floorOf('pinnedout'), 128_000, '钉不在池内时不拿钉的窗口说话')
+})
+
 test('池被策略剔空 → 省略键而不是写个默认窗口（与 503 同源）', async () => {
   makeRoute('emptied', { poolStrategies: [{ id: 'aggregate-only', operator: 'and' }] })
   const response = await proxy.request('GET', '/v1/models')

@@ -39,10 +39,13 @@ import {
   isRefreshable,
   parseAccountData,
   parseModelsFromConfig,
+  parsePromotionWindows,
   parsePromotions,
   parseTokenData,
+  creditsRateWeight,
 } from './buddy.js'
 import type { BuddyAccount, BuddyCredential, BuddyRemoteModel, BuddyToken } from './buddy.js'
+import type { RpcModelDiscount } from './types.js'
 import { CODEBUDDY, type BuddyProduct } from './product.js'
 import { workbuddyClientVersion } from './client-identity.js'
 
@@ -406,7 +409,8 @@ export async function fetchModels(
     // 促销与补充模型都只是增强。
     const config = await requestConfig(headers, fetcher, signal, product)
     const merged = mergeRemoteModels(scoped, config.models)
-    return config.promotions.size === 0 ? merged : applyPromotions(merged, config.promotions)
+    if (config.promotions.size === 0 && config.promotionWindows.size === 0) return merged
+    return applyPromotions(merged, config.promotions, config.promotionWindows)
   }
 
   // 第二优先：/v3/config（结果同样是 data.models / data.agents 结构）
@@ -438,10 +442,12 @@ function mergeRemoteModels(
   return [...primary, ...extra.filter((model) => !known.has(model.id))]
 }
 
-/** `/v3/config` 的解析结果：模型 + 促销表。 */
+/** `/v3/config` 的解析结果：模型 + 促销表 + 促销时段。 */
 interface BuddyConfigSnapshot {
   models: BuddyRemoteModel[]
   promotions: Map<string, string>
+  /** 时段视图（不按当前时刻过滤），见 `buddy.ts::parsePromotionWindows`。 */
+  promotionWindows: Map<string, RpcModelDiscount>
 }
 
 /**
@@ -456,7 +462,7 @@ async function requestConfig(
   signal: AbortSignal | undefined,
   product: BuddyProduct,
 ): Promise<BuddyConfigSnapshot> {
-  const empty: BuddyConfigSnapshot = { models: [], promotions: new Map() }
+  const empty: BuddyConfigSnapshot = { models: [], promotions: new Map(), promotionWindows: new Map() }
   try {
     const { status, body } = await request('GET', `${product.endpoint}${CONFIG_PATH}`, headers, {
       fetcher, timeoutMs: REQUEST_TIMEOUT_MS, ...signal !== undefined ? { signal } : {},
@@ -467,20 +473,42 @@ async function requestConfig(
     return {
       models: parseModelsFromConfig(body),
       promotions: parsePromotions(data as Record<string, unknown>),
+      promotionWindows: parsePromotionWindows(data as Record<string, unknown>),
     }
   } catch {
     return empty
   }
 }
 
-/** 把促销表并入模型列表（只补 `discountedCreditsRate`，其余字段不动）。 */
+/**
+ * 把促销表并入模型列表（补 `discountedCreditsRate` 与 `discount`，其余字段不动）。
+ *
+ * 两条来源缺一不可：scoped 端点带原价（`credits`）但没有活动表，`/v3/config`
+ * 带活动表但不覆盖全部 id —— 所以这种「补」发生在合并**之后**，让每个 id 都能
+ * 同时拿到原价与时段。
+ */
 function applyPromotions(
   models: BuddyRemoteModel[],
   promotions: Map<string, string>,
+  promotionWindows: Map<string, RpcModelDiscount>,
 ): BuddyRemoteModel[] {
   return models.map((model) => {
     const discounted = promotions.get(model.id)
-    return discounted === undefined ? model : { ...model, discountedCreditsRate: discounted }
+    const window = promotionWindows.get(model.id)
+    if (discounted === undefined && window === undefined) return model
+    // 原价取自**合并后**的模型：`/v3/config` 的活动表不带原价，而 scoped 端点的
+    // `credits` 才是那个价 —— 此刻两边都在手里，正好补齐。
+    const baseWeight = creditsRateWeight(model.creditsRate)
+    const discount = window === undefined
+      ? undefined
+      : baseWeight === undefined || window.baseWeight !== undefined
+        ? window
+        : { ...window, baseWeight }
+    return {
+      ...model,
+      ...discounted !== undefined ? { discountedCreditsRate: discounted } : {},
+      ...discount !== undefined ? { discount } : {},
+    }
   })
 }
 

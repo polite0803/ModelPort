@@ -5,8 +5,9 @@
  * 1. **作用域裁剪**（`ModelRoute.modelScope`）：`single`（缺省）只留队首模型的账号，
  *    `family` 留同一份实现的同名家族，`pool` 才是原来那套全池换家。裁剪之后一轮里
  *    换家只换账号 —— 中途换模型是「客户端莫名其妙崩掉」的主要来源。
- * 2. **软钉**（`setPin` / `preferredModel`）：用户点名的模型排到队首，优先于粘性、
- *    优先于熔断；钉不上时不静默（`pinMiss`），否则托盘显示的选择与实际行为会长期不一致。
+ * 2. **钉**（`setPin` / `preferredModel`，裁定 2026-11-15：持久硬钉、固定即独占）：
+ *    有钉时这一轮只派被钉的模型（`pool` 的跨模型换家也关掉），优先于粘性、优先于
+ *    熔断；钉不上时不静默（`pinMiss`）且拒答保钉，否则托盘显示的选择与实际行为会长期不一致。
  * 3. **模型级熔断**（`tripModelCircuit`）：退化过的模型在**下一轮**排到队尾 —— 这是
  *    `single` 下唯一的中途换家通道。全池都在熔断时这张票不生效（跳过没有落脚点就
  *    等于把这一轮变成空池），成功一次即清票。
@@ -163,9 +164,9 @@ test('pool：不裁剪（对照组，证明上面两条不是「什么都没做�
   assert.equal(decision.wallClockBudgetMs, undefined)
 })
 
-// ---------------------------------------------------------- 2. 软钉与持久偏好
+// ---------------------------------------------------------- 2. 钉（持久硬钉）
 
-test('软钉：点名的模型排到队首，并压过粘性（用户意图高于历史惯性）', () => {
+test('钉：点名的模型排到队首，并压过粘性（用户意图高于历史惯性）', () => {
   const route = makeRoute({ modelScope: 'pool' })
   const fresh = select(route)
   // 先让上一轮锚在 Alpha-Flash：没有钉子时它会被硬粘性提到队首
@@ -181,7 +182,7 @@ test('软钉：点名的模型排到队首，并压过粘性（用户意图高�
   })
   const decision = select(route)
 
-  assert.equal(decision.candidates[0].displayName, 'Beta-Lite', '软钉优先于粘性')
+  assert.equal(decision.candidates[0].displayName, 'Beta-Lite', '钉优先于粘性')
   assert.deepEqual(decision.pin, {
     displayName: 'Beta-Lite',
     scope: 'route',
@@ -191,7 +192,7 @@ test('软钉：点名的模型排到队首，并压过粘性（用户意图高�
   assert.equal(decision.pinMiss, undefined)
 })
 
-test('软钉优先于熔断：用户点了它，熔断票不是否决权', () => {
+test('钉优先于熔断：用户钉了它，熔断票不是否决权', () => {
   const route = makeRoute({ modelScope: 'pool' })
   autoRouter.tripModelCircuit(route.name, 'Beta-Lite', 'empty-turn')
   assert.deepEqual(select(route).circuited, ['Beta-Lite'], '前置：熔断票在生效，Beta 被排到队尾')
@@ -203,7 +204,7 @@ test('软钉优先于熔断：用户点了它，熔断票不是否决权', () =>
   assert.equal(decision.circuited, undefined, '有显式选择时熔断不参与排序')
 })
 
-test('钉不上不静默：软钉当场退役，本轮快速失败', () => {
+test('钉不上不静默：拒答保钉（held），本轮快速失败、下一轮仍然拒绝', () => {
   const route = makeRoute({ modelScope: 'pool' })
   autoRouter.setPin({ route: route.name, displayName: 'Ghost-Not-Served', scope: 'route', source: 'tray' })
 
@@ -211,15 +212,15 @@ test('钉不上不静默：软钉当场退役，本轮快速失败', () => {
 
   assert.equal(decision.pinMiss, 'Ghost-Not-Served', '钉子没命中要能被日志与响应头读到')
   assert.equal(decision.pin?.displayName, 'Ghost-Not-Served', '「生效中的选择」如实回显，便于托盘对账')
-  assert.equal(decision.pinStale?.action, 'retired', '一触即退役，不在进程里挂满 30 分钟')
-  assert.deepEqual(decision.candidates, [], '不派候选 = 不产生上游调用（第 1 条，2026-11-13）')
+  assert.equal(decision.pinStale?.action, 'held', '钉保留：只有用户手动替换/解除能改（裁定 2026-11-15）')
+  assert.deepEqual(decision.candidates, [], '不派候选 = 不产生上游调用，也不回落别的模型')
 
   const next = select(route)
-  assert.equal(next.pin, undefined, '退役之后下一轮走自动排序')
-  assert.equal(next.candidates[0].displayName, 'Alpha-Flash')
+  assert.equal(next.pin?.displayName, 'Ghost-Not-Served', '钉不自动退役')
+  assert.deepEqual(next.candidates, [], '下一轮仍然拒绝，不会悄悄回到自动排序')
 })
 
-test('持久偏好 preferredModel：与软钉同效，但价格是「不会到期」（until 0）', () => {
+test('持久钉 preferredModel：与内存钉同效，until 0 = 没有倒计时', () => {
   const route = makeRoute({
     modelScope: 'pool',
     preferredModel: { providerId: 'pc', displayName: 'Gamma-Mini' },
@@ -232,14 +233,14 @@ test('持久偏好 preferredModel：与软钉同效，但价格是「不会到�
     scope: 'route',
     source: 'console',
     until: 0,
-  }, '持久偏好没有倒计时：until 0 在界面上读作「一直」')
+  }, '持久钉没有倒计时：until 0 在界面上读作「一直」')
 
   const menu = autoRouter.routeMenu(route)
   assert.equal(menu.pin?.until, 0)
   assert.equal(menu.models.find(model => model.displayName === 'Gamma-Mini')?.pinned, true)
 })
 
-test('持久偏好可写可清：控制台「长期」走的 updateRoute 这一来一回', () => {
+test('钉可写可清：控制台「固定」走的 updateRoute 这一来一回', () => {
   const route = makeRoute()
   const written = sm.updateRoute(route.name, {
     preferredModel: { providerId: 'pc', displayName: 'Gamma-Mini' },
@@ -249,7 +250,7 @@ test('持久偏好可写可清：控制台「长期」走的 updateRoute 这一�
   const pinned = sm.listModelRoutes().find(candidate => candidate.name === route.name)!
   assert.deepEqual(pinned.preferredModel, { providerId: 'pc', displayName: 'Gamma-Mini' })
   assert.equal(select(pinned).candidates[0].displayName, 'Gamma-Mini',
-    '写进配置就生效，不需要再点一次软钉')
+    '写进配置就生效，不需要再点一次')
 
   const cleared = sm.updateRoute(route.name, { preferredModel: undefined })
   assert.equal(cleared.ok, true, JSON.stringify(cleared.error))
@@ -259,7 +260,7 @@ test('持久偏好可写可清：控制台「长期」走的 updateRoute 这一�
   assert.equal(select(after).candidates[0].displayName, 'Alpha-Flash', '清掉后回到打分顺序')
 })
 
-test('客户端点名（第 6 个参数）落成会话级软钉：只影响这一段会话', () => {
+test('客户端点名（第 6 个参数）落成会话级持久钉：只影响这一段会话', () => {
   const route = makeRoute({ modelScope: 'pool' })
   const session = { value: 'thread-pin', source: 'prompt_cache_key' } as const
 
@@ -434,7 +435,7 @@ test('菜单：未评分的行也带系统推荐星 recommendedStars（1–5）�
 
 // ------------------------------------------------------------ 5. 切换入口
 
-test('切换：点名写入软钉，下一轮就按它服务；来源记为 tray', () => {
+test('切换：命中校验返回 providerId，落盘后下一轮就按它服务', () => {
   const route = makeRoute()
   const result = autoRouter.switchModel(
     { route: route.name, model: 'Gamma-Mini', source: 'tray' },
@@ -443,9 +444,20 @@ test('切换：点名写入软钉，下一轮就按它服务；来源记为 tray
 
   assert.equal(result.ok, true, result.reason)
   assert.equal(result.model, 'Gamma-Mini')
-  assert.equal(result.providerId, 'pc', '落盘 write（persist）要的就是这个解析结果，不是请求里的猜测')
-  assert.equal(result.menu?.pin?.source, 'tray')
-  assert.equal(select(route).candidates[0].displayName, 'Gamma-Mini')
+  assert.equal(result.providerId, 'pc', '落盘 write 要的就是这个解析结果，不是请求里的猜测')
+  assert.equal(autoRouter.pinFor(route.name), undefined,
+    '路由级钉不写内存：控制台与托盘统一落盘成 preferredModel（裁定 2026-11-15）')
+
+  // routes:switch 的落盘分支（handlers.ts）：写配置 + 广播，这里证明写后生效。
+  const written = sm.updateRoute(route.name, {
+    preferredModel: { providerId: result.providerId!, displayName: result.model! },
+  })
+  assert.equal(written.ok, true, JSON.stringify(written.error))
+  const fresh = sm.listModelRoutes().find(candidate => candidate.name === route.name)!
+  assert.equal(select(fresh).candidates[0].displayName, 'Gamma-Mini')
+  const menu = autoRouter.routeMenu(fresh)
+  assert.equal(menu.pin?.displayName, 'Gamma-Mini')
+  assert.equal(menu.pin?.until, 0, '钉住即持久')
 })
 
 test('切换：「换下一个」从当前服务的模型往前走一格并绕回', () => {
@@ -489,7 +501,7 @@ test('切换：失败一定带原因（不存在 / 已停用 / 空池 / 不在�
   assert.ok(outside.menu !== undefined, '失败也带最新菜单：托盘可以就地刷新，不用再问一次')
 })
 
-test('切换：托盘只能按路由切换，会话级作用域要回到控制台', () => {
+test('切换：会话级作用域被拒（会话钉只由请求头写入）', () => {
   const route = makeRoute()
   const result = autoRouter.switchModel(
     { route: route.name, model: 'Beta-Lite', scope: 'session' },

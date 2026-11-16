@@ -25,6 +25,9 @@ import { providerDefaultCapability, staticCapabilityHint } from './modelCapabili
 import { familyRuleLayer } from '../../shared/modelFamilyRules.ts'
 import { AUTO_POOL_STRATEGIES } from '../../shared/types.ts'
 import { banditAdjustment, createBanditRandom, type BanditStats } from './autoBandit.ts'
+import { STAR_SCORE_STEP, starsFromScore } from '../../shared/modelRecommendation.ts'
+import { costScoreOfWeight } from '../../shared/discountWindow.ts'
+import { isMoneyBlock, type RouteBlockReason } from '../../shared/routeQuotaView.ts'
 
 export type AutoComplexity = 'simple' | 'standard' | 'complex'
 /** 与 loadBalanceStrategy 保持一致，用于选择打分口径 */
@@ -187,10 +190,13 @@ export const STRATEGY_PREDICATES: Record<AutoPoolStrategyId, (candidate: PoolStr
   },
   // 成本类
   'free-only': c => c.costBucket === 'free',
-  'low-weight': c => {
-    const weight = mergedHintOf(c)?.weight
-    return weight !== undefined && weight <= 1
-  },
+  /**
+   * 倍率不高于基准价。读**候选上那一格**而不是从标注层重取：`RankCandidate.weight`
+   * 是 `costSignalFor` 按本地时钟算出的此刻生效价（`discountWindow.ts`），而
+   * `mergedHintOf(c).weight` 是采集那一刻的快照 —— 一个有夜间折价的模型，用它
+   * 会把窗口内/外的两段时间判成同一档，这个策略就跟不上价了。
+   */
+  'low-weight': c => c.weight !== undefined && c.weight <= 1,
   /** 订阅额度内：聚合条目的原始分类为 included（额度买断在套餐里，用完就停） */
   'included-plan': c => c.costClass === 'included',
   /** 已知成本：costBucket 既不是 undefined 也不是 unknown */
@@ -507,8 +513,13 @@ export interface RankCandidate {
   /** 成本档；缺省按 unknown 参与打分（中性） */
   costBucket?: CostBucket
   /**
-   * 渠道目录报的原始倍率（`channels.ts` 从 `· x0.2` 解析出来的数）。
-   * 只用于预览展示「这条要花多少」，打分仍然只读 `costBucket`。
+   * **此刻生效**的消耗倍率（`channels.ts` 从 `· x0.2` 解析，再按渠道报的折扣
+   * 窗口在评估时刻取值）。
+   *
+   * 它同时做两件事：预览显示「这条要花多少」，以及成本因子在连续曲线上取值
+   * （见 `costScoreOfWeight`）。旧实现只把它用于显示、打分只读 `costBucket` ——
+   * 于是 `below-base` 这一档里 x0.02 与 x0.9 得分完全相同，50 倍的价差不能
+   * 改变一次选路决策，错峰折扣因此只能影响星级、影响不了派发。
    */
   weight?: number
   /**
@@ -637,6 +648,11 @@ const IDLE_WINDOW_MS = 5 * 60 * 1000
 /**
  * 成本档 → 打分因子。口径同 `costBucketOf`：未知单独成档，取中性 0.5，
  * 既不奖励也不惩罚（没有倍率不等于免费）。
+ *
+ * ⚠️ 这张表**只在拿不到具体倍率时**使用（聚合条目、只报了档位的候选）。
+ * 有倍率时改走 `costScoreOfWeight` 的连续曲线 —— 五档看不见深浅，x0.02 与
+ * x0.9 同分，打折到 1/50 也换不来一次改派。曲线的三个锚点就是这里的
+ * 1 / 0.5 / 0.25，所以两种口径在基准价上仍然一致。
  */
 const COST_SCORE: Record<CostBucket, number> = {
   free: 1,
@@ -644,6 +660,18 @@ const COST_SCORE: Record<CostBucket, number> = {
   base: 0.5,
   unknown: 0.5,
   'above-base': 0.25,
+}
+
+/**
+ * 一个候选的成本因子读数（0..1，中性 0.5）。
+ *
+ * 有倍率 → 连续曲线；只有档位 → 五档表。免费始终是 1（上游标了免费就不问倍率：
+ * 倍率缺失在这里的语义是「没报」，而 `free: true` 是**报过的**结论）。
+ */
+function costScoreOf(candidate: Pick<RankCandidate, 'costBucket' | 'weight'>): number {
+  if (candidate.costBucket === 'free') return COST_SCORE.free
+  if (candidate.weight !== undefined) return costScoreOfWeight(candidate.weight)
+  return COST_SCORE[candidate.costBucket ?? 'unknown']
 }
 
 function isVisionPart(part: unknown): boolean {
@@ -1138,17 +1166,97 @@ export function hashString(value: string): number {
   return hash >>> 0
 }
 
-function scoreCandidate(
+/**
+ * 打分的**因子表**：一个候选在这个口径下，每一项读数的取值与它值多少分。
+ *
+ * 为什么是表而不是一个公式：池内模型的「推荐星级」以前是一套独立推导
+ * （`shared/modelRecommendation.ts` 旧版：档位基线 + 延迟 ±1 + 健康 −2），与这里的排序
+ * 规则**并行且互不相干** —— 于是同一个模型可以在推荐星里排第一、在真实派发里排第五，
+ * 而用户照着星点「固定」时拿到的正是后者。现在只有一条尺子：星级是**这张表**在参考
+ * 画像下的求值（见 {@link recommendModelStars}），改权重则两处一起动。
+ *
+ * 取值 `value` 都归一化到 0..1（扣分项是正的量、权重为负）；`weight` 是口径给的份量，
+ * 四种口径的基础份量之和恒为 1，所以分数天然落在 0..1（再叠加减项）。
+ */
+export type ScoreFactorId =
+  | 'quota'
+  | 'usageRatio'
+  | 'tierFit'
+  | 'headroom'
+  | 'concurrency'
+  | 'idleness'
+  | 'dispersion'
+  | 'penalty'
+  | 'quotaPenalty'
+  | 'operational'
+  | 'cost'
+  | 'sticky'
+  | 'live'
+
+export interface ScoreFactor {
+  id: ScoreFactorId
+  /** 归一化读数（0..1）；`penalty` 一类的扣分项这里存正量，由负权重扣掉。 */
+  value: number
+  weight: number
+}
+
+/**
+ * 每种口径的**基础因子及份量，按求和次序排列**。
+ *
+ * 次序与份量逐位照抄拆分前的四段返回式：求和顺序不变，浮点结果就一个 ulp 都不差，
+ * 拆分才敢说是「行为不变」。基础份量各自和为 1（1 / 1 / 1 / 1 / 1）。
+ */
+const STRATEGY_FACTORS: Record<AutoRoutingStrategy, readonly (readonly [ScoreFactorId, number])[]> = {
+  // round-robin 另加 dispersion（同分时轮转），次序在 idleness 之后
+  'round-robin': [['quota', 0.3], ['tierFit', 0.3], ['headroom', 0.15], ['concurrency', 0.15], ['idleness', 0.1], ['dispersion', 1]],
+  'fill-first': [['usageRatio', 0.35], ['tierFit', 0.4], ['headroom', 0.15], ['concurrency', 0.1]],
+  failover: [['quota', 0.45], ['tierFit', 0.35], ['headroom', 0.1], ['concurrency', 0.1]],
+  // smart / pace 在这个分数里表达的是同一件事：**余量比已经用掉的重要**。
+  // 两者真正的差别（谁先重置、每小时还剩多少）需要重置时刻，而打分函数拿不到它，
+  // 所以这里不假装区分：选号阶段由 loadbalancer 的重置推算做最后一步，
+  // auto 只负责把"余量多、配额健康"的候选排到前面。
+  smart: [['headroom', 0.4], ['quota', 0.3], ['tierFit', 0.2], ['concurrency', 0.1]],
+  pace: [['headroom', 0.4], ['quota', 0.3], ['tierFit', 0.2], ['concurrency', 0.1]],
+}
+
+/**
+ * 四种口径共用的尾段，次序即求和次序：扣分项权重为负，加分项为正。
+ * 这一段的份量不随口径变 —— 罚项是安全底线，不该被某个策略稀释。
+ */
+const TAIL_FACTORS: readonly (readonly [ScoreFactorId, number])[] = [
+  ['penalty', -1],
+  ['quotaPenalty', -1],
+  ['operational', -1],
+  ['cost', 1],
+  ['sticky', 1],
+  ['live', 1],
+]
+
+/** 因子表按权求和。次序即入参次序 —— 这是「拆分不改变行为」的全部依据。 */
+export function sumScoreFactors(factors: readonly ScoreFactor[]): number {
+  let total = 0
+  for (const factor of factors) total += factor.weight * factor.value
+  return total
+}
+
+/** 打分只需要能力里的这几项；星级投影因此不必伪造整份 `ModelCapability`。 */
+type ScoreCapability = Pick<ModelCapability, 'tier' | 'tools' | 'reasoning' | 'contextTokens' | 'maxOutputTokens'>
+
+/**
+ * 一次求值：把候选的全部读数折算成因子表。`scoreCandidate` 与 `recommendModelStars`
+ * 是这张表的两个调用点，别处不要再写第三份公式。
+ */
+export function scoreFactors(
   profile: RequestProfile,
   candidate: RankCandidate,
-  capability: ModelCapability,
+  capability: ScoreCapability,
   now: number,
   seed: number,
   strategy: AutoRoutingStrategy,
   maxRpmInPool: number,
   prefer: AutoPreference,
   sticky?: StickyHint
-): number {
+): ScoreFactor[] {
   // 优化目标改的是"想要多强的模型"，以及成本在打分里占多大份量
   const requestedRank = prefer === 'fast'
     ? TIER_RANK.fast
@@ -1237,7 +1345,7 @@ function scoreCandidate(
   // 跑完长工具链的强模型。
   const requestedCostWeight = prefer === 'cheap' ? 0.6 : prefer === 'strong' ? 0.1 : 0.2
   const costWeight = profile.needsTools ? Math.min(requestedCostWeight, 0.15) : requestedCostWeight
-  const costBonus = costWeight * (COST_SCORE[candidate.costBucket ?? 'unknown'] - 0.5)
+  const costBonus = costWeight * (costScoreOf(candidate) - 0.5)
 
   // 配额余量降权（PLAN P1-3）：账本显示剩余 <10% 的候选靠后排。线性递增的
   // 小扣分 —— 0 剩余扣 0.1，9% 剩余扣 0.01。无帽（0.5）与余量充足的不调整。
@@ -1262,27 +1370,168 @@ function scoreCandidate(
       ? 0
       : sticky.accountId === candidate.accountId ? 0.12 : 0.06
 
-  if (strategy === 'fill-first') {
-    return 0.35 * usageRatio + 0.4 * tierFit + 0.15 * headroom + 0.1 * concurrency
-      - penalty - quotaPenalty - operationalPenalty + costBonus + stickyBonus + liveBonus
+  const values: Record<ScoreFactorId, number> = {
+    quota,
+    usageRatio,
+    tierFit,
+    headroom,
+    concurrency,
+    idleness,
+    dispersion,
+    penalty,
+    quotaPenalty,
+    operational: operationalPenalty,
+    cost: costBonus,
+    sticky: stickyBonus,
+    live: liveBonus,
   }
 
-  if (strategy === 'failover') {
-    return 0.45 * quota + 0.35 * tierFit + 0.1 * headroom + 0.1 * concurrency
-      - penalty - quotaPenalty - operationalPenalty + costBonus + stickyBonus + liveBonus
-  }
+  const table = [...STRATEGY_FACTORS[strategy], ...TAIL_FACTORS]
+  return table.map(([id, weight]) => ({ id, value: values[id], weight }))
+}
 
-  // smart / pace 在这个分数里表达的是同一件事：**余量比已经用掉的重要**。
-  // 两者真正的差别（谁先重置、每小时还剩多少）需要重置时刻，而打分函数拿不到它，
-  // 所以这里不假装区分：选号阶段由 loadbalancer 的重置推算做最后一步，
-  // auto 只负责把"余量多、配额健康"的候选排到前面。
-  if (strategy === 'smart' || strategy === 'pace') {
-    return 0.4 * headroom + 0.3 * quota + 0.2 * tierFit + 0.1 * concurrency
-      - penalty - quotaPenalty - operationalPenalty + costBonus + stickyBonus + liveBonus
-  }
+/** 打分 = 因子表按权求和。行为与拆分前的四段返回式逐位相同。 */
+function scoreCandidate(
+  profile: RequestProfile,
+  candidate: RankCandidate,
+  capability: ModelCapability,
+  now: number,
+  seed: number,
+  strategy: AutoRoutingStrategy,
+  maxRpmInPool: number,
+  prefer: AutoPreference,
+  sticky?: StickyHint
+): number {
+  return sumScoreFactors(
+    scoreFactors(profile, candidate, capability, now, seed, strategy, maxRpmInPool, prefer, sticky)
+  )
+}
 
-  return 0.3 * quota + 0.3 * tierFit + 0.15 * headroom + 0.15 * concurrency + 0.1 * idleness
-    + dispersion - penalty - quotaPenalty - operationalPenalty + costBonus + stickyBonus + liveBonus
+/**
+ * 推荐星级的**参考画像**：一次「复杂的普通请求」。
+ *
+ * 选路打分要读请求画像（要不要视觉/工具/推理、多长、多复杂），而星级是给**模型**
+ * 打的，不是给某一条请求打的 —— 所以投影时固定一个画像。
+ *
+ * 为什么复杂度取 `complex` 而不是 `standard`：档位匹配在标准复杂度下是**对称**的
+ * （目标档 balanced，`strong` 与 `fast` 的 `tierFit` 都是 0.5），强者与弱者会同分
+ * 同星 —— 一把分辨不出强弱的尺子没有意义。复杂度取 `complex` 时目标档是 strong，
+ * 星数随能力单调上升。这也正是星级该回答的问题：**难的活交给谁**。
+ *
+ * 优化目标保持默认的 `balanced`（不是 `cheap`/`strong` 那种用户偏好）：偏好是用户
+ * 的选择，参考画像不该预设一个。`balanced` 下成本的份量是 0.2，于是「免费模型」
+ * 值 0.8 颗星——折扣进得来，但压不过能力档。
+ *
+ * 口径固定 `round-robin` + 无会话粘性：`round-robin` 是新装默认的策略，粘性是会话
+ * 历史（投影里没有会话）。用户改了某条路由的 `prefer` 或策略，真实派发的次序会跟着
+ * 变，而星级保持同一个中性读数 —— 星级回答的是「这个模型本身怎么样」，不是「在这条
+ * 路由的当前配置下排第几」。**两者仍然同尺**：同一张因子表、同一组权重、同一个求和式。
+ */
+export const STAR_REFERENCE_PROFILE: RequestProfile = {
+  needsVision: false,
+  needsTools: false,
+  needsReasoning: false,
+  estimatedTokens: 0,
+  complexity: 'complex',
+  stream: false,
+}
+export const STAR_REFERENCE_PREFER: AutoPreference = 'balanced'
+export const STAR_REFERENCE_STRATEGY: AutoRoutingStrategy = 'round-robin'
+
+/**
+ * 投影时**刻意丢掉**的因子：它们按定义不是模型的属性。
+ *
+ * - `dispersion`：同一个分数下的轮转打散（按账号 id 散列），存在就是为了让同分的
+ *   账号轮流上。投影没有账号，把它算进来等于给每个模型加一个假的抖动。
+ * - `sticky`：这段会话的历史惯性，投影里没有会话。
+ *
+ * 其余因子全部保留 —— 包括 Bandit 战绩与延迟罚分，它们确实是这个模型的表现。
+ */
+const STAR_EXCLUDED_FACTORS: ReadonlySet<ScoreFactorId> = new Set(['dispersion', 'sticky'])
+
+/**
+ * 系统给池内模型的默认星级推荐（1–5）：**选路打分的投影**，不是第二套推导。
+ *
+ * 取 `scoreFactors` 在 {@link STAR_REFERENCE_PROFILE} + {@link STAR_REFERENCE_PREFER}
+ * 下的求值，再经 `starsFromScore` 压到 1..5。于是：
+ *
+ * - 与选路同一张因子表、同一组权重、同一个求和式 —— 改权重则星随之改，不会出现
+ *   「推荐第一、派发第五」那种两套规则打架；
+ * - 「星级优先」的显示排序与 `balanced`/`strong` 口径下的真实派发次序**同向**
+ *   （单调映射），不再是一个独立排序；
+ * - 参考口径下 strong/balanced/fast 恰好落在 4/3/2 星，与拆分前的档位直觉一致：
+ *   不是凑的，是因为基础因子份量之和为 1、而参考分数带取 0.5..1。
+ *
+ * **不在表里的读数**（进不了排序的资格事实：熔断、零账号、这一轮被跳过、余量见底）
+ * 仍然扣星，但换算走 `STAR_SCORE_STEP` —— 一颗星在两种情况下是同一个量，所以
+ * 「扣 2 颗」在这里就是「扣 0.25 分」，不引入第二把尺子。
+ *
+ * **钱不参与**（`isMoneyBlock`）：余额是 USD / CNY，与档位、延迟、token 余量互不可比；
+ * 把「这 Key 没钱了」换算成减几颗星，等于替厂商发明换算率。余额耗尽作为一条原因
+ * 显示在行上（「去充值」），但不改星。
+ */
+export interface ModelRecommendationInput {
+  tier: AutoModelTier
+  /** 该模型各账号 EWMA 首字的最小值；没有读数时缺省（不猜）。 */
+  ewmaFirstTokenMs?: number
+  /** 当前可派发的账号数；0 表示此刻派不出去。 */
+  accountCount: number
+  /** 模型断路器是否正在生效（熔断中）。 */
+  circuitActive: boolean
+  /** 这一轮会被跳过（额度窗口打满 / 当日上限 / 渠道限流）；`no-credit` 免责。 */
+  blocked?: RouteBlockReason
+  /** 额度余量档（`undocumented` 与 `ample` 都不扣：不知道不等于不够）。 */
+  quotaBand?: 'ample' | 'tight' | 'exhausted' | 'undocumented'
+  /** 成本档（`costBucketOf`）；缺省按 unknown 参与（中性，不奖不罚）。 */
+  costBucket?: CostBucket
+  /**
+   * **评估时刻**的生效倍率。带上它星数才看得见折扣深浅（`below-base` 一档里
+   * x0.02 与 x0.9 原本同分）；缺席则退回五档表，口径不变。
+   */
+  weight?: number
+  /** Bandit 24h 战绩；缺席 = 冷启动，不调整。 */
+  live?: BanditStats
+  /** Bandit 采样的候选身份（`banditKeyOf` 的同源三项）；缺席时仍然确定，只是不分模型。 */
+  providerId?: string
+  displayName?: string
+  actualModelId?: string
+}
+
+export function recommendModelStars(input: ModelRecommendationInput): number {
+  // 投影用的候选：只有**模型级**读数，没有账号级的日限/在途/最近使用 —— 那些是
+  // 账号属性，星级问的是模型。缺席即按因子表的缺省值参与（不猜、不奖励）。
+  const reference: RankCandidate = {
+    providerId: input.providerId ?? '',
+    providerName: '',
+    displayName: input.displayName ?? '',
+    actualModelId: input.actualModelId ?? input.displayName ?? '',
+    accountId: '',
+    ...(input.costBucket === undefined ? {} : { costBucket: input.costBucket }),
+    ...(input.weight === undefined ? {} : { weight: input.weight }),
+    ...(input.ewmaFirstTokenMs === undefined ? {} : { ewmaFirstTokenMs: input.ewmaFirstTokenMs }),
+    ...(input.live === undefined ? {} : { live: input.live }),
+  }
+  const capability: ScoreCapability = { tier: input.tier, tools: 'unknown', reasoning: 'unknown' }
+  const factors = scoreFactors(
+    STAR_REFERENCE_PROFILE,
+    reference,
+    capability,
+    0,
+    0,
+    STAR_REFERENCE_STRATEGY,
+    0,
+    STAR_REFERENCE_PREFER,
+  )
+  let score = sumScoreFactors(factors.filter(factor => !STAR_EXCLUDED_FACTORS.has(factor.id)))
+
+  // 资格事实：这些候选根本进不了排序，所以不在因子表里；但扣分的单位仍是「分」。
+  if (input.circuitActive) score -= 2 * STAR_SCORE_STEP
+  if (input.accountCount === 0) score -= 2 * STAR_SCORE_STEP
+  if (input.blocked !== undefined && !isMoneyBlock(input.blocked)) score -= 2 * STAR_SCORE_STEP
+  // 余量见底：还能派，但下一笔就可能撞墙。只扣一颗，不吞掉它的质量优势。
+  if (input.quotaBand === 'tight') score -= STAR_SCORE_STEP
+
+  return starsFromScore(score)
 }
 
 /**

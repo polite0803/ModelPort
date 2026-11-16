@@ -11,9 +11,10 @@
  *
  * ## 两条硬约束（来自 AGENTS.md 的真实缺陷）
  *
- * 1. **`refreshAll` 只按 `refreshable` 过滤，绝不看 `enabled`** ——
- *    停用只影响账号池的自动选号，与「凭据是否需要保持新鲜」无关。
- *    早期按 `enabled` 过滤导致两个停用账号的 refresh_token 被放到失效。
+ * 1. **`refreshAll` 的判据是凭据，`enabled` 与池里的 `refreshable` 都不看** ——
+ *    停用只影响账号池的自动选号，与「凭据是否需要保持新鲜」无关（早期按
+ *    `enabled` 过滤导致两个停用账号的 refresh_token 被放到失效）；而池里的
+ *    `refreshable` 只是凭据材料的镜像，拿它当判据会让一次误标永久挡住续期。
  * 2. **`refreshAccountCredential(refName)` 只读写传入的 ref** ——
  *    账号卡片要刷的是 `RACCOON_ACCOUNT_XXX`，而 `refresh()` 读写默认单凭据 ref。
  *    错配的后果是「刷了另一个凭据」（本插件在 Cline 上踩过同类坑）。
@@ -390,9 +391,18 @@ export class RaccoonAuth extends Service {
   /**
    * 批量续期本产品的账号。
    *
-   * ⚠️ **只按 `refreshable` 过滤，不看 `enabled`**：停用只影响账号池的
-   * 自动选号，与「凭据是否需要保持新鲜」无关。早期按 `enabled` 过滤导致
-   * 两个停用账号的 refresh_token 在停用期间被放到失效（真实缺陷，见 AGENTS.md）。
+   * ⚠️ **不看 `enabled`**：停用只影响账号池的自动选号，与「凭据是否需要保持新鲜」
+   * 无关。早期按 `enabled` 过滤导致两个停用账号的 refresh_token 在停用期间被放到
+   * 失效（真实缺陷，见 AGENTS.md）。
+   *
+   * ## ⚠️ 调度判据读**凭据**，不读账号池里的 `refreshable`
+   *
+   * 旧实现第一行是 `if (!entry.refreshable) continue`，那让这个布尔变成一道
+   * **单向门**：任何一次把它写成 false 的路径都会让该账号此后**永远不进本循环**
+   * （定时续期跳过它、启动首轮也跳过它），而凭据本体可能完全健康 ——
+   * 表现为「自动续期没工作、重启还是过期」，只能手动重新登录。
+   * 口径同 codearts：`refreshable` 只是凭据材料的镜像，每轮由本方法对账得出；
+   * 被误写成 false 而凭据齐全时，本轮自动改回 true。
    *
    * 单账号失败不影响其他账号（且**必须留日志**：曾完全静默的实现
    * 让「续期永远失败但 UI 显示可续期」无法排查）。
@@ -400,13 +410,34 @@ export class RaccoonAuth extends Service {
   async refreshAll(pool: AccountPool): Promise<void> {
     const accounts = await pool.listAccounts(this.product.id)
     for (const entry of accounts) {
-      // ⚠️ 判据只看 refreshable
-      if (!entry.refreshable) continue
-
-      const resolved = await this.ctx.credentials.resolve(credentialRef(entry.credentialRef))
-      if (!resolved) continue
+      // ⚠️ 判据是凭据，不是池里的 refreshable
+      let resolved: { value: string } | undefined
+      try {
+        resolved = await this.ctx.credentials.resolve(credentialRef(entry.credentialRef))
+      } catch (error) {
+        // 读凭据本身失败（IO 抖动等）不是「不可续期」，绝不写 false。
+        this.ctx.logger?.warn?.(
+          `[raccoon] 账号 ${entry.id} 读取凭据失败：`
+          + `${error instanceof Error ? error.message : String(error)}`,
+        )
+        continue
+      }
+      if (!resolved) {
+        // 凭据确实不存在：这才是「不可续期」的真实含义（写盘前先判，避免每轮重复写）。
+        if (entry.refreshable) await pool.updateAccount(entry.id, { refreshable: false })
+        continue
+      }
       const credential = parseRaccoonCredential(resolved.value)
-      if (credential === undefined) continue
+      if (credential === undefined || !isRaccoonRefreshable(credential)) {
+        if (entry.refreshable) await pool.updateAccount(entry.id, { refreshable: false })
+        continue
+      }
+      // 池里说不能续、凭据说能续 —— 以**凭据**为准（判据不能读池里的布尔，见方法注释）。
+      if (!entry.refreshable) {
+        this.ctx.logger?.info?.(
+          `[raccoon] 账号 ${entry.id} 的凭据具备续期材料，本轮恢复自动续期（此前的标记与凭据不符）`,
+        )
+      }
 
       // ⚠️ **凭据仍在有效期内时也要校正账号池的 `expiresAt`**（真实缺陷的完整修法）：
       //
@@ -426,14 +457,23 @@ export class RaccoonAuth extends Service {
       if (!isRaccoonExpired(credential)) {
         const actual = raccoonCredentialExpiresAtMs(credential)
         // 容忍 1 秒误差（毫秒时间戳来自 JWT 的秒级 exp，换算后可能有舍入）
-        if (actual !== undefined && Math.abs((entry.expiresAt ?? 0) - actual) > 1000) {
+        const staleExpiry = actual !== undefined && Math.abs((entry.expiresAt ?? 0) - actual) > 1000
+        // 走到这里 `isRaccoonRefreshable(credential)` 必为 true，故池里的 false 是误标：
+        // 本分支不续期，只能在这里顺手把标记改回来，否则它要等到真正过期才自愈。
+        const staleRefreshable = !entry.refreshable
+        if (staleExpiry || staleRefreshable) {
           try {
-            await pool.updateAccount(entry.id, { expiresAt: actual })
-            this.ctx.logger?.info?.(
-              `[raccoon] 已校正账号 ${entry.id} 的有效期显示`
-              + `（账号池 ${entry.expiresAt === undefined ? '无' : new Date(entry.expiresAt).toISOString()}`
-              + ` → ${new Date(actual).toISOString()}）`,
-            )
+            await pool.updateAccount(entry.id, {
+              ...(staleExpiry ? { expiresAt: actual } : {}),
+              ...(staleRefreshable ? { refreshable: true } : {}),
+            })
+            if (staleExpiry) {
+              this.ctx.logger?.info?.(
+                `[raccoon] 已校正账号 ${entry.id} 的有效期显示`
+                + `（账号池 ${entry.expiresAt === undefined ? '无' : new Date(entry.expiresAt).toISOString()}`
+                + ` → ${new Date(actual as number).toISOString()}）`,
+              )
+            }
           } catch (error) {
             this.ctx.logger?.warn?.(
               `[raccoon] 校正账号 ${entry.id} 的有效期失败（不影响使用）：`
@@ -450,6 +490,15 @@ export class RaccoonAuth extends Service {
         await this.refreshAccountCredential(entry.credentialRef, pool, entry.id)
       } catch (error) {
         if (error instanceof RefreshTokenExpiredError) {
+          // 终态：凭据里确实没有可用的续期材料。只写一次，且**下一轮会按凭据重新判定**——
+          // 若他处已把凭据换新，本方法会把它改回 true（自愈），不会变成单向门。
+          if (entry.refreshable) {
+            try {
+              await pool.updateAccount(entry.id, { refreshable: false })
+            } catch {
+              // 忽略 updateAccount 本身的错误
+            }
+          }
           this.ctx.logger?.warn?.(`[raccoon] 账号 ${entry.id} 的 refresh_token 已失效，需重新登录`)
         } else {
           this.ctx.logger?.warn?.(

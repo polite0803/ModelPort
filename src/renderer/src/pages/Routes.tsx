@@ -11,12 +11,70 @@ import { publishTrayRouteMenu, ROUTES_CHANGED_EVENT } from '@/api/trayRoutes'
 import { cn } from '@/lib/utils'
 import { ROUTE_RATING_MAX_STARS } from '@shared/types'
 import type { RouteMenuEntry, RouteMenuModel } from '@shared/types'
+import {
+  blockReasonKey,
+  describeDelay,
+  type RouteQuotaWindowRow,
+  type RouteQuotaWindow,
+  type RouteModelBlock,
+} from '@shared/routeQuotaView'
 
 /**
  * 一条路由能取到几个模型，就要能列几个：托盘的原生菜单塞不下，这里能翻能搜。
  * 上限只在主进程夹一次（`ROUTE_MENU_MODELS_MAX`），页面不重复写一份。
  */
 const FULL_LIST_LIMIT = 2000
+
+/**
+ * 「还有多久」的刷新节奏。
+ *
+ * 页面上所有时刻都是**绝对毫秒**（主进程给的快照），倒计时由本地这一个时钟算 ——
+ * 每 15 秒重画一次标签，不重取快照、更不轮询 `routes:menu`：那个快照是一次全池扫描
+ * （实测 p50 4.7s），拿它做倒计时等于把界面变成一个定时炸弹。15 秒的粒度与分钟级
+ * 展示相称，也不会让「约 3 分钟」在屏幕上跳来跳去。
+ */
+const CLOCK_TICK_MS = 15_000
+
+/** 相对时长的标签（`3 小时`）：只给时长，前面的「约」「还有」由调用方拼。 */
+function delayLabel(
+  until: number,
+  now: number,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string {
+  const { unit, n } = describeDelay(Math.max(0, until - now))
+  return t(`routes.delay_${unit}`, { n })
+}
+
+/** `estimated` 是估算，「约」必须写出来；`upstream` / `local` 是确定的时刻。 */
+function isApproximate(source: 'upstream' | 'local' | 'estimated' | undefined): boolean {
+  return source === 'estimated'
+}
+
+/** 一个额度窗口的读数行：`每天 12/100 次`。 */
+function quotaRowLabel(
+  row: RouteQuotaWindowRow,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string {
+  const window = t(`routes.window_${row.window as RouteQuotaWindow}`)
+  return t('routes.quotaWindowRow', {
+    window,
+    used: row.used,
+    limit: row.limit,
+    unit: t(`routes.quotaUnit_${row.unit}`),
+  })
+}
+
+/** 一条阻塞原因的人话 + 恢复时刻。`until` 缺席（钱不够）时不编倒计时。 */
+function blockLabel(
+  block: RouteModelBlock,
+  now: number,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string {
+  const reason = t(blockReasonKey(block.reason))
+  if (block.until === undefined) return reason
+  const when = delayLabel(block.until, now, t)
+  return `${reason} · ${t(isApproximate(block.untilSource) ? 'routes.blockedUntilApprox' : 'routes.blockedUntil', { when })}`
+}
 
 /**
  * 池内模型的星级推荐（1–5）。点第 N 颗设定 N 星，再点同一颗清除；悬停/聚焦
@@ -92,10 +150,9 @@ function StarRating({ model, value, manual, disabled, onChange }: {
  * 用户在托盘里点不到、在控制台里也点不到。
  *
  * 这一页就是那个落点，数据来自托盘同一份 `routes:menu` 快照（`routeMenu`）——
- * 池、当前服务者、软钉、熔断都读同一处，不另算一份，否则菜单与真实选路会长期不一致。
- * 切换写内存软钉（`routes:switch`），「长期」把同一次选择落盘成路由的 `preferredModel`
- * （`routes:switch` + `persist`），「恢复自动排序」两者一起清（`routes:unpin`），
- * 与托盘走的是同一组通道。
+ * 池、当前服务者、钉、熔断都读同一处，不另算一份，否则菜单与真实选路会长期不一致。
+ * 「固定」= 钉住（`routes:switch` 落盘成路由的 `preferredModel`，持久硬钉，与托盘
+ * 同一颗，裁定 2026-11-15），「恢复自动排序」清钉（`routes:unpin`）。
  */
 export function Routes() {
   const { t } = useTranslation()
@@ -110,6 +167,16 @@ export function Routes() {
   const [busy, setBusy] = useState(false)
   // 「星级优先」只改显示顺序：真实选路仍按快照原序，两者不许混为一谈。
   const [sortByRating, setSortByRating] = useState(false)
+  // 走时的钟：快照里的时刻是绝对的，倒计时在这里算。只重画标签，不重取快照。
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), CLOCK_TICK_MS)
+    return () => window.clearInterval(timer)
+  }, [])
+  // 拿到新快照就把钟拨准：否则「约 3 分钟」会按上一次的读数多算或少算一个刻度。
+  useEffect(() => {
+    setNow(Date.now())
+  }, [detail])
 
   const api = window.electronAPI?.routes
   const selectedName = searchParams.get('route')
@@ -201,25 +268,8 @@ export function Routes() {
     return api.onPoolChanged(() => { void refresh() })
   }, [api, refresh])
 
-  // 倒计时是「到点就过期」的东西：没有心跳，页面会一直停在加载那一刻的分钟数。
-  // 到期再拉一次 —— 钉子到点就该从本页和托盘上一起消失，而不是等下次手动刷新。
-  const [, setTick] = useState(0)
-  const pinUntil = detail?.pin !== undefined && detail.pin.until > 0 ? detail.pin.until : undefined
-  useEffect(() => {
-    if (pinUntil === undefined) return
-    const ticker = setInterval(() => setTick(value => value + 1), 30_000)
-    const expiry = setTimeout(() => {
-      void refresh()
-      publishTrayRouteMenu()
-    }, Math.max(1_000, pinUntil - Date.now() + 1_000))
-    return () => {
-      clearInterval(ticker)
-      clearTimeout(expiry)
-    }
-  }, [pinUntil, refresh])
-
   const runSwitch = async (
-    action: 'next' | 'reset' | 'pin' | 'persist',
+    action: 'next' | 'reset' | 'pin',
     model?: RouteMenuModel,
   ): Promise<void> => {
     if (api === undefined || detail === null) return
@@ -230,8 +280,6 @@ export function Routes() {
         : await api.switchModel({
             route: detail.route,
             ...(model === undefined ? {} : { model: model.displayName, providerId: model.providerId }),
-            // 软钉 30 分钟 vs 落盘：同一份「优先模型」判定，只是活多久不同。
-            ...(action === 'persist' ? { persist: true } : {}),
             source: 'console',
           })
       if (!result.ok) {
@@ -242,8 +290,6 @@ export function Routes() {
         })
       } else if (action === 'reset') {
         toast({ title: t('routes.resetDone', { route: detail.route }) })
-      } else if (action === 'persist') {
-        toast({ title: t('routes.persistDone', { model: result.model ?? '' }) })
       } else {
         toast({ title: t('routes.switched', { model: result.model ?? '' }) })
       }
@@ -272,9 +318,19 @@ export function Routes() {
         || model.providerId.toLowerCase().includes(needle)
       )
     if (!sortByRating) return filtered
-    // 稳定排序：同星（含未评分）保持快照原序，即真实选路的先后。
-    return [...filtered].sort((a, b) =>
-      (b.rating ?? b.recommendedStars ?? 0) - (a.rating ?? a.recommendedStars ?? 0))
+    // 推荐队列：能派的在前、被挡的在后，两段内按星级降序。
+    //
+    // 为什么先分两段再比星：星级已经把「这一轮跳过」扣过分（`recommendModelStars`），
+    // 但那个扣分是有限的，一个强档模型扣完仍可能压过一个快档模型。队列要说的是
+    // 「现在点下去会发生什么」，所以能派与不能派之间是一条硬边界，不靠分数暗示。
+    // 段内稳定排序：同星（含未评分）保持快照原序，即真实选路的先后。
+    const rank = (model: RouteMenuModel): number => model.rating ?? model.recommendedStars ?? 0
+    return [...filtered].sort((a, b) => {
+      const aBlocked = a.blocked === undefined ? 0 : 1
+      const bBlocked = b.blocked === undefined ? 0 : 1
+      if (aBlocked !== bBlocked) return aBlocked - bBlocked
+      return rank(b) - rank(a)
+    })
   }, [detail, search, sortByRating])
 
   /**
@@ -326,11 +382,56 @@ export function Routes() {
     }
   }
 
-  // `until: 0` 是持久偏好（`preferredModel`），其余是 30 分钟的软钉：两者在列表里
-  // 必须长得不一样，否则用户点「长期」之后看到的仍是倒计时，会以为没生效。
-  const persistentPin = detail?.pin !== undefined && detail.pin.until === 0
-    ? detail.pin.displayName
-    : undefined
+  /** 这一页里本轮派不出去的模型数（不算搜索过滤：它说的是路由的形状）。 */
+  const blockedCount = useMemo(
+    () => detail?.models.filter(model => model.blocked !== undefined).length ?? 0,
+    [detail],
+  )
+
+  /**
+   * 最近一笔要过期的额度：所有行里 `resetAt` 最小、且还有余量的那个。
+   *
+   * 只取「还有余量」的：已经打满的那一笔不是「即将过期」，是「已经没了」—— 它由
+   * `blocked` 那一行说，混进这里会把两件事说成一件。
+   */
+  const soonestExpiry = useMemo(() => {
+    let best: {
+      model: string
+      window: RouteQuotaWindowRow['window']
+      unit: RouteQuotaWindowRow['unit']
+      remaining: number
+      resetAt: number
+      resetSource: RouteQuotaWindowRow['resetSource']
+    } | undefined
+    for (const model of detail?.models ?? []) {
+      for (const row of model.quota?.rows ?? []) {
+        if (row.resetAt === undefined || row.remaining <= 0) continue
+        if (best !== undefined && row.resetAt >= best.resetAt) continue
+        best = {
+          model: model.displayName,
+          window: row.window,
+          unit: row.unit,
+          remaining: row.remaining,
+          resetAt: row.resetAt,
+          resetSource: row.resetSource,
+        }
+      }
+    }
+    return best
+  }, [detail])
+
+  /**
+   * 完全没有额度数字的模型数（`quota` 缺席或 `band === 'undocumented'`）。
+   *
+   * 它只说一次、放在表头：一行一行写「这家没公布额度」会把列表变成噪声，而这件
+   * 事对**整页**是同一句 —— 「这些模型的余量我们不知道，别把留白读成充裕」。
+   */
+  const undocumentedCount = useMemo(
+    () => detail?.models.filter(model =>
+      model.blocked === undefined
+      && (model.quota === undefined || model.quota.band === 'undocumented')).length ?? 0,
+    [detail],
+  )
 
   // 「上轮服务」是已经发生的事实，「已固定」是下一轮的选择。两者不同时把下一轮
   // 明写出来 —— 否则固定之后列表上仍挂着上一个模型，读起来像「固定了但没生效」。
@@ -459,12 +560,7 @@ export function Routes() {
                     <Pin className="h-3 w-3" />
                     {detail.pin.stale
                       ? t('routes.pinStale', { model: detail.pin.displayName })
-                      : detail.pin.until === 0
-                      ? t('routes.pinPersistent', { model: detail.pin.displayName })
-                      : t('routes.pinUntil', {
-                          model: detail.pin.displayName,
-                          minutes: Math.max(1, Math.round((detail.pin.until - Date.now()) / 60_000)),
-                        })}
+                      : t('routes.pinPersistent', { model: detail.pin.displayName })}
                   </Badge>
                 )}
                 {detail !== null && !detail.enabled && (
@@ -487,9 +583,35 @@ export function Routes() {
               {detail !== null && (
                 <p className="text-xs text-muted-foreground">
                   {t('routes.showing', { shown: visibleModels.length, total: detail.totalModels })}
+                  {blockedCount > 0 && (
+                    <> · {t('routes.queueBlockedCount', { n: blockedCount })}</>
+                  )}
                   {detail.models.some(model => model.rating !== undefined) && (
                     <> · {t('routes.ratedCount', { n: detail.models.filter(model => model.rating !== undefined).length })}</>
                   )}
+                  {sortByRating && <> · {t('routes.queueHint')}</>}
+                </p>
+              )}
+              {/* 「不知道」要说出来。额度行缺席时留白会被读成「额度充裕」，而这里是
+                  相反的意思：这家官方没公布、你也没声明，省不省着用只能靠猜。 */}
+              {undocumentedCount > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  {t('routes.quotaUndocumented', { n: undocumentedCount })}
+                </p>
+              )}
+              {/* 「即将过期」：所有窗口里最近的一个复位时刻。这就是本轮要回答的第二个
+                  问题 —— 哪一笔额度快没了，别等到它过期才发现。 */}
+              {soonestExpiry !== undefined && (
+                <p className="text-xs text-muted-foreground">
+                  {t('routes.expiringSoon', {
+                    model: soonestExpiry.model,
+                    window: t(`routes.window_${soonestExpiry.window as RouteQuotaWindow}`),
+                    remaining: soonestExpiry.remaining,
+                    unit: t(`routes.quotaUnit_${soonestExpiry.unit}`),
+                    when: `${isApproximate(soonestExpiry.resetSource)
+                      ? t('routes.blockedUntilApprox', { when: delayLabel(soonestExpiry.resetAt, now, t) })
+                      : t('routes.blockedUntil', { when: delayLabel(soonestExpiry.resetAt, now, t) })}`,
+                  })}
                 </p>
               )}
             </CardHeader>
@@ -514,7 +636,48 @@ export function Routes() {
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-medium">{model.displayName}</span>
                     <span className="block truncate text-xs text-muted-foreground">{model.providerName}</span>
-                  </span>
+                    {/* 为什么这一轮派不出去 + 什么时候回来。估算带「约」（`isApproximate`），
+                        钱不够这类没有时刻的原因只写原因 —— 不给一个假的倒计时。 */}
+                    {model.blocked !== undefined && (
+                      <span
+                        className="mt-0.5 block truncate text-xs text-[var(--warning)]"
+                        title={t('routes.blockedHint')}
+                      >
+                        {blockLabel(model.blocked, now, t)}
+                      </span>
+                    )}
+                    {/* 额度读数：哪个窗口、还剩多少、什么时候复位、这个数哪来的。
+                        「即将过期」的那一笔就排在这些行的最前面（主进程已按复位时刻排过）。 */}
+                    {model.quota !== undefined && model.quota.rows.length > 0 && (
+                      <span className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+                        {model.quota.rows.map(row => (
+                          <span
+                            key={`${row.window}\u0000${row.unit}\u0000${row.source}\u0000${row.limit}`}
+                            title={t(`routes.quotaSource_${row.source}`)}
+                          >
+                            {quotaRowLabel(row, t)}
+                            {row.resetAt !== undefined ? (
+                              <>
+                                {' · '}
+                                {t(isApproximate(row.resetSource) ? 'routes.quotaResetApprox' : 'routes.quotaResetExact', {
+                                  when: delayLabel(row.resetAt, now, t),
+                                })}
+                              </>
+                            ) : (
+                              // 算不出来就说算不出来：这一行**不写**倒计时，也不给一个猜的时刻。
+                              // 沉默会让人以为「它不会复位」，那比「未知」更糟。
+                              <>{' · '}{t('routes.quotaResetUnknown')}</>
+                            )}
+                          </span>
+                        ))}
+                        {model.quota.windows > model.quota.rows.length && (
+                          <span>
+                            {t('routes.quotaMoreWindows', { n: model.quota.windows - model.quota.rows.length })}
+                          </span>
+                        )}
+                      </span>
+                    )}
+                                      </span>
                   <StarRating
                     model={model.displayName}
                     value={model.rating ?? model.recommendedStars}
@@ -530,14 +693,17 @@ export function Routes() {
                     )}
                     {model.pinned && (
                       <Badge variant="secondary">
-                        {model.displayName === persistentPin
-                          ? t('routes.persistentBadge')
-                          : t('routes.pinnedBadge')}
+                        {t('routes.pinnedBadge')}
+                      </Badge>
+                    )}
+                    {model.blocked !== undefined && (
+                      <Badge variant="destructive" title={t('routes.blockedHint')}>
+                        {t('routes.blockedBadge')}
                       </Badge>
                     )}
                     {model.circuitUntil !== undefined && (
                       <Badge variant="outline">
-                        {t('routes.circuit', { minutes: Math.max(1, Math.round((model.circuitUntil - Date.now()) / 60_000)) })}
+                        {t('routes.circuit', { minutes: Math.max(1, Math.round((model.circuitUntil - now) / 60_000)) })}
                       </Badge>
                     )}
                     {model.costBucket === 'free' && <Badge variant="outline">{t('routes.free')}</Badge>}
@@ -546,29 +712,23 @@ export function Routes() {
                       <span>{t('routes.firstToken', { ms: Math.round(model.ewmaFirstTokenMs) })}</span>
                     )}
                   </span>
+                  {/* 被挡下的模型也能固定（裁定 2026-11-16：手动固定是最高响应）。
+                      点下去不会换别的模型，而是让这一轮明确等额度回来 —— 按钮文案要说清
+                      这一点，否则用户以为点了也没用。 */}
                   <Button
                     size="sm"
                     variant={model.pinned ? 'secondary' : 'outline'}
-                    disabled={busy || model.accountCount === 0 || !detail?.enabled}
-                    title={model.accountCount === 0 ? t('routes.noAccount') : t('routes.pinHint')}
-                    onClick={() => void runSwitch('pin', model)}
+                    disabled={busy || (!model.pinned && (model.accountCount === 0 || !detail?.enabled))}
+                    title={model.pinned
+                      ? t('routes.unpinHint')
+                      : model.accountCount === 0
+                        ? t('routes.noAccount')
+                        : model.blocked !== undefined ? t('routes.pinBlockedHint') : t('routes.pinHint')}
+                    onClick={() => void runSwitch(model.pinned ? 'reset' : 'pin', model)}
                   >
                     <Pin className="mr-1.5 h-4 w-4" />
                     {model.pinned ? t('routes.pinnedBadge') : t('routes.pin')}
                   </Button>
-                  {model.displayName !== persistentPin && (
-                    // 落盘那一档：重启后还在，直到「恢复自动排序」。写的是路由配置
-                    // 里的 `preferredModel`，与软钉共用同一条「优先模型」判定。
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={busy || model.accountCount === 0 || !detail?.enabled}
-                      title={model.accountCount === 0 ? t('routes.noAccount') : t('routes.persistHint')}
-                      onClick={() => void runSwitch('persist', model)}
-                    >
-                      {t('routes.persist')}
-                    </Button>
-                  )}
                 </div>
               ))}
             </CardContent>

@@ -1162,32 +1162,34 @@ function routeMenuSubmenu(entry: RouteMenuEntry): MenuItemConstructorOptions[] {
   const pin = entry.pin === undefined
     ? []
     : [{
-        // 钉子指向的模型不在池里时必须说出来：菜单显示「已固定」而实际每轮都在
-        // 用别的模型，是这类功能最坏的一种沉默。
+        // 钉子指向的模型不在池里时必须说出来：钉保留、本轮拒绝服务，不会换别的
+        // 模型（裁定 2026-11-15）。菜单不说，用户就只看到 503 而不知道是哪颗钉挡的。
         label: entry.pin.stale
-          ? `已固定：${entry.pin.displayName}（已不在池内·不生效）`
-          : entry.pin.until === 0
-            ? `已固定：${entry.pin.displayName}（持久）`
-            : `已固定：${entry.pin.displayName}（${Math.max(1, Math.round((entry.pin.until - Date.now()) / 60_000))} 分钟后到期）`,
+          ? `已固定：${entry.pin.displayName}（已不在池内·本轮拒绝）`
+          : `已固定：${entry.pin.displayName}（持久）`,
         enabled: false,
       } satisfies MenuItemConstructorOptions,
       // 固定是路由级的：这一条路由背后的每个客户端都会跟着换模型。不写这句，
       // 用户会以为只影响自己手上的那个客户端。
       {
-        label: '影响这条路由的全部客户端 · 托盘固定默认 10 分钟',
+        label: '影响这条路由的全部客户端 · 钉住即持久，只有手动替换/解除能改',
         enabled: false,
       } satisfies MenuItemConstructorOptions]
   const models: MenuItemConstructorOptions[] = entry.models.map(model => ({
     label: routeMenuModelLabel(model),
     type: 'checkbox',
     checked: model.pinned,
-    enabled: model.accountCount > 0,
-    click: () => trayRouteCommand({
-      action: 'switch',
-      route: entry.route,
-      model: model.displayName,
-      providerId: model.providerId,
-    }),
+    // 裁定 2026-11-16：勾选态再点一下 = 解除固定（回算法排队）；解钉不需要账号，
+    // 0 账号的已固定模型也必须能点掉。
+    enabled: model.pinned || model.accountCount > 0,
+    click: () => trayRouteCommand(model.pinned
+      ? { action: 'reset', route: entry.route }
+      : {
+          action: 'switch',
+          route: entry.route,
+          model: model.displayName,
+          providerId: model.providerId,
+        }),
   }))
   return [
     { label: current, enabled: false },
@@ -1230,7 +1232,7 @@ function modelMenuItems(): MenuItemConstructorOptions[] {
     ...(stale ? [{ label: '数据稍旧，正在刷新…', enabled: false } as MenuItemConstructorOptions] : []),
     ...routes.slice(0, 12).map(entry => ({
       label: entry.pin !== undefined
-        ? `${entry.pin.displayName}（${entry.route} · ${entry.pin.stale ? '固定已失效' : '已固定'}）`
+        ? `${entry.pin.displayName}（${entry.route} · ${entry.pin.stale ? '已不在池内' : '已固定'}）`
         : entry.current !== undefined
           ? `${entry.current.displayName}（${entry.route}）`
           : `${entry.route}（未服务过）`,

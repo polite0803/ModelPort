@@ -460,6 +460,8 @@ const accountsAPI = {
     email?: string
     credentials: Record<string, string>
     dailyLimit?: number
+    /** 用户声明的额度窗口（第五层）；主进程归一后落盘。见 `Account.declaredQuota`。 */
+    declaredQuota?: Account['declaredQuota']
   }): Promise<Account> => 
     wire.invoke(IpcChannels.ACCOUNTS_ADD, data),
   
@@ -861,7 +863,7 @@ const routesAPI = {
   menu: (request?: RouteMenuRequest): Promise<RouteMenuResult> =>
     wire.invoke(IpcChannels.ROUTES_MENU, request),
 
-  // 缺省只写软钉；`persist: true` 落盘成路由的 `preferredModel`（见 `RouteSwitchRequest`）。
+  // 切换 = 钉住：落盘成路由的 `preferredModel`（持久硬钉，控制台与托盘同一颗）。
   switchModel: (request: RouteSwitchRequest): Promise<RouteSwitchResult> =>
     wire.invoke(IpcChannels.ROUTES_SWITCH, request),
 
@@ -894,10 +896,44 @@ interface ContextManagementConfig {
     slidingWindow: {
       enabled: boolean
       maxMessages: number
+      /** 按渠道窗口，覆盖 `maxMessages`；缺省＝沿用全局值。排在 tokenLimit 之前。 */
+      maxMessagesByProvider?: Record<string, number>
     }
     tokenLimit: {
       enabled: boolean
       maxTokens: number
+      /** 按渠道上限；缺省＝沿用全局值。 */
+      maxTokensByProvider?: Record<string, number>
+      /**
+       * 按渠道的 **system 块**截断上限；缺省＝不动 system 消息。
+       *
+       * system 块是客户自己的提示词，比丢历史更强的动作，因此默认关闭、必须按
+       * 渠道点名。2026-11-16 实测一份 agent 请求里系统块约占 36%（不是大头），
+       * 但它在缓存不降价的订阅端点上是每轮按全价重买的。
+       */
+      maxSystemTokensByProvider?: Record<string, number>
+      /**
+       * 未标注模型的兜底档位（200K / 400K / 1M）。
+       *
+       * 模型自己的标注优先：一条路由可以指向任意模型，同一家供应商也常同时挂
+       * 128K 与 1M 两档，任何按渠道写死的数都会在某个模型上错（2026-11-16 现网：
+       * 按渠道写的 65,536 对着一个声明 1,000,000 的模型，Claude Code 的系统提示
+       * 就 65,880 token，每轮都把整段对话扔掉）。这个键只管剩下的「没人标注」那
+       * 一格；`maxTokensByProvider` 保留为更早的形态，老配置行为不变。
+       */
+      contextWindowTier?: '200k' | '400k' | '1m'
+      /**
+       * 按渠道的**成本目标**（token），是我们自己设的开销上限，不是窗口。
+       *
+       * 窗口是上游事实：超了就是 `context` 400。成本目标是选择：trae 按 prompt
+       * 体量计费且拿不到前缀缓存，所以即使模型窗口有 1M，把 prompt 压小也确实更
+       * 便宜。两者不能共用一个数。
+       *
+       * 正因为它是我们的选择，它**永不能让请求变得不可服务**：目标小到装不下
+       * system 块 + 任务预留 + 可用尾部时，退回窗口并发一条告警，绝不用「丢掉整段
+       * 对话」来兑现它 —— 那个形状就是 2026-11-16 的缺陷。缺省＝没有成本闸。
+       */
+      costBudgetByProvider?: Record<string, number>
     }
   }
   executionOrder: ('slidingWindow' | 'tokenLimit')[]

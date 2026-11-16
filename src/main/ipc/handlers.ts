@@ -70,6 +70,7 @@ import type { TlsStatus, TlsTrustResult } from '../../shared/types'
 import type { RouteMenuRequest, RouteMenuResult, RouteRateRequest, RouteRateResult, RouteSwitchRequest, RouteSwitchResult } from '../../shared/types'
 import { ROUTE_RATING_MAX_STARS } from '../../shared/types'
 import type { ProviderType } from '../oauth/types'
+import type { DeclaredQuotaLimit } from '../../shared/declaredQuota.ts'
 import type { ModelsFetchFailure } from '../store/types'
 
 /**
@@ -522,10 +523,11 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
   )
 
   /**
-   * 切换模型（点名或「换下一个」）。缺省写的是内存软钉，不落盘 —— 一次显式选择
-   * 不该改写持久配置；`persist: true` 是另一件事：用户明确要求「这条路由以后都
-   * 用它」，那就写进路由的 `preferredModel`。「恢复自动排序」是 `routes:unpin`，
-   * 它把软钉与持久偏好一起清掉，三者的边界靠这一个字段区分。
+   * 切换模型（点名或「换下一个」）= 钉住这颗模型（裁定 2026-11-15）。
+   *
+   * 控制台与托盘写的是**同一颗**持久硬钉：落盘成路由的 `preferredModel`，没有
+   * 倒计时，任何算法不得切换它；钉住期间模型不可用时本轮拒绝（429/503），不回落。
+   * 「恢复自动排序」是 `routes:unpin`，把这颗钉清掉。
    */
   registerMainHandler(
     IpcChannels.ROUTES_SWITCH,
@@ -541,13 +543,12 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
           Date.now(),
           channelAccounts,
         )
-        if (!result.ok || request.persist !== true) return result
+        if (!result.ok) return result
         if (result.model === undefined || result.providerId === undefined) {
-          return { ...result, ok: false, reason: '这次选择没有命中任何供应商，无法长期固定' }
+          return { ...result, ok: false, reason: '这次选择没有命中任何供应商，无法固定' }
         }
-        // 先落盘、后撤软钉：写失败时那颗 30 分钟的钉子还在，界面显示的就是用户刚
-        // 点的结果；反过来先撤钉再写，失败会表现成「点了没反应」。
-        // 软钉优先于持久偏好，必须撤掉 —— 否则「一直」会被一颗 30 分钟的钉子盖住。
+        // 先落盘、后清内存残留：写失败时界面显示的就是用户刚点的结果；反过来
+        // 先清再写，失败会表现成「点了没反应」。
         const written = storeManager.updateRoute(result.route, {
           preferredModel: { providerId: result.providerId, displayName: result.model },
         })
@@ -555,6 +556,9 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
           return { ...result, ok: false, reason: written.error.message }
         }
         autoRouter.clearPin(result.route)
+        // 裁定 2026-11-16：换钉是最高响应 —— 新钉名下网关自己开的退避票（冷却/
+        // 静默/熔断/粘性惯性）当场清掉，下一笔立刻派发，不停在「N 秒后重试」。
+        autoRouter.releaseForManualPin(result.route, result.providerId, result.model)
         broadcastConfigChanged(storeManager.getConfig())
         return {
           ...result,
@@ -572,9 +576,9 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
   )
 
   /**
-   * 撤销这条路由的全部显式选择：内存软钉 + 持久 `preferredModel`。
+   * 撤销这条路由的钉：持久 `preferredModel` + 内存里的残留钉（请求头写入的）。
    *
-   * 持久那一份必须一起清 —— 只清内存的话，下一次重启钉子在「恢复自动排序」之后
+   * 两份必须一起清 —— 只清一份的话，下一次重启钉子在「恢复自动排序」之后
    * 又回来了，用户会认为这个按钮时灵时不灵。
    */
   registerMainHandler(
@@ -586,6 +590,9 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
           return { ok: false, route: routeName, reason: `路由 '${routeName}' 不存在` }
         }
         autoRouter.clearPin(routeName)
+        // 裁定 2026-11-16：解钉即回算法排队 —— 粘性/缓存亲和惯性一并清，下一轮
+        // 真按分数排序，不被上一段会话的锚点硬钉在刚解掉的模型上。
+        autoRouter.clearRouteInertia(routeName)
         if (route.preferredModel !== undefined) {
           const result = storeManager.updateRoute(routeName, { preferredModel: undefined })
           if (!result.ok) {
@@ -1764,6 +1771,8 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
     email?: string
     credentials: Record<string, string>
     dailyLimit?: number
+    /** 用户声明的额度窗口（第五层）；`AccountManager.create` 归一后落盘。 */
+    declaredQuota?: DeclaredQuotaLimit[]
   }): Promise<Account> => {
     return AccountManager.create(data)
   })

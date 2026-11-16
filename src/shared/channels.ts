@@ -8,6 +8,8 @@
  * crosses the IPC boundary.
  */
 
+import type { DiscountWindow } from './discountWindow'
+
 /** How the user proves ownership of a channel account. */
 export type ChannelLoginKind = 'browser' | 'device-code' | 'sms' | 'oauth' | 'api-key'
 
@@ -404,6 +406,23 @@ export interface ChannelModelInfo {
   weight?: number
   /** 原价倍率（有促销窗口时才有）。 */
   baseWeight?: number
+  /**
+   * 窗口内生效的折后倍率（渠道包上抛 `discount.weight`）。
+   *
+   * 与 `weight` 的区别是**时态**：`weight` 是采集那一刻的价，`promoWeight` 是
+   * 窗口内恒定成立的那个价。有窗口时两者通常相等（采集时就在窗口内），
+   * 窗口外它们不同 —— 正是后者让宿主能在边界上切换。
+   */
+  promoWeight?: number
+  /**
+   * 折扣生效时段（渠道包上抛 `discount.daily` / `timezone` / `validFrom` /
+   * `validUntil`）。
+   *
+   * ⚠️ 缺失 = 这个渠道没有按时间变的价（或者它没报），**不是**「长期不打折」。
+   * 宿主按 `shared/discountWindow.ts` 用本地时钟推算此刻生效价，渠道页与选路
+   * 因此同一个瞬间给出同一个数。
+   */
+  discountWindow?: DiscountWindow
   /** 是否免费：唯一判据是消耗权重为 0（`isFree` 只在没有倍率标注时等义于权重 0）。 */
   free: boolean
   /**

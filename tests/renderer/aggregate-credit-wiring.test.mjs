@@ -88,7 +88,7 @@ test('the gate reads the stored row and turns it into the exhausted slot, not in
   assert.match(gate, /context\.snapshots\(\)\[entryId\]/,
     'with a selection-scoped context the same row comes from the shared snapshot table')
   assert.match(gate, /creditSnapshotExhausted\(snapshot\)/)
-  assert.match(gate, /if \(creditExhausted\(provider\.id, context\)\) return 'no-credit'/)
+  assert.match(gate, /if \(creditExhausted\(provider\.id, context\)\) return \{ reason: 'no-credit' \}/)
   assert.match(gate, /if \(creditExhausted\(entryId, context\)\) return -1/)
   assert.doesNotMatch(gate, /remaining\s*[*/+-]/, 'a USD/CNY balance is never arithmetically mixed into headroom')
   assert.match(store, /set\('aggregateCreditSnapshots'/)

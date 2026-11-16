@@ -1813,8 +1813,10 @@ export class ZcodeAuth extends Service {
    * `current()` 先读池且**不看 `enabled`**，`getAvailableAccount` **过滤 `enabled`**，
    * 两者可能指向不同账号 ⇒ 「A 的凭据写进 B 的 ref」（见 `src/index.ts` 的 `refresh`）。
    *
-   * ⚠ **只按 `refreshable` 过滤、不看 `enabled`**（`AGENTS.md` 既有约定：
-   * 停用只影响自动选号，与凭据新鲜度无关）。
+   * ⚠ **逐个账号、不加任何过滤**：不看 `enabled`（停用只影响自动选号，与凭据
+   * 新鲜度无关），也**不看池里的 `refreshable`**（那个布尔是各家 `refreshAll`
+   * 对账出来的镜像；ZCode 本来就不续期，拿它当门控只会让「凭据缺失」永远
+   * 得不到告警）。
    */
   async refreshAll(pool: AccountPool): Promise<void> {
     const accounts = pool.listAccountsByProvider(this.product.id)

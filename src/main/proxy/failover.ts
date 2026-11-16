@@ -420,7 +420,38 @@ const SUBSCRIPTION_REQUIRED_PATTERN =
   /subscription (?:is )?required|requires? (?:an? )?(?:active |paid )?subscription|no active subscription|not subscribed|subscription (?:expired|inactive)|订阅(?:已)?(?:过期|失效|到期)|需要订阅|请先订阅|升级(?:到|至)?(?:付费|专业|Pro)/i
 
 const QUOTA_WINDOW_EXHAUSTED_PATTERN =
-  /free[ _-]?usage[ _-]?limit|daily (?:limit|quota|count) (?:exceeded|reached)|billing daily count exceeded|exceeded your current quota|quota (?:exceeded|exhausted|reached)|usage limit (?:reached|exceeded)|所有通道.*均受限|所有账号均受限|账号池中的账号当前均不可用/i
+  /free[ _-]?usage[ _-]?limit|daily (?:limit|quota|count) (?:exceeded|reached)|billing daily count exceeded|exceeded your current quota|quota (?:exceeded|exhausted|reached)|usage limit (?:reached|exceeded)|(?:\d+[ -]?hour|hourly|daily|weekly|monthly) usage quota|所有通道.*均受限|所有账号均受限|账号池中的账号当前均不可用/i
+
+/**
+ * 上游明写的额度窗复位时刻，返回距现在还有多少毫秒。
+ *
+ * 1 小时档是「不知道窗口多长」时的估计。上游把解禁时刻写出来时它比估计权威：
+ * 不解析它的后果是冷却按 60s→10min 指数到期，每次到期放一笔真请求去撞同一堵墙、
+ * 再把冷却翻倍（2026-11-15 现网：20 分钟 45 笔 `model_temporarily_unavailable`，
+ * 而真实解禁在约 2 小时后）。
+ *
+ * 必须带显式时区偏移：`CST` 这类缩写在中国/美国中部之间歧义，无偏移时不猜，
+ * 退回档位估计。月窗最长 31 天，更远的「复位时刻」按坏数据丢弃。
+ */
+export function quotaWindowResetMs(
+  message: string | undefined,
+  now: number = Date.now(),
+): number | undefined {
+  if (!message) return undefined
+  const matched = QUOTA_RESET_AT_PATTERN.exec(message)
+  if (!matched) return undefined
+  const digits = matched[3].replace(':', '')
+  const at = Date.parse(`${matched[1]}T${matched[2]}${digits.slice(0, 3)}:${digits.slice(3)}`)
+  if (!Number.isFinite(at)) return undefined
+  const delta = at - now
+  if (delta <= 0 || delta > QUOTA_RESET_MAX_MS) return undefined
+  return delta
+}
+
+const QUOTA_RESET_MAX_MS = 31 * 24 * 60 * 60 * 1000
+
+const QUOTA_RESET_AT_PATTERN =
+  /reset at (\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s*([+-]\d{2}:?\d{2})/i
 
 /**
  * 哪些状态码值得**换下一家**。

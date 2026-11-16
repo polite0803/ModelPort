@@ -154,3 +154,122 @@ test('qualifyChannelModel never rewrites another channel as the prefix', () => {
 test('qualifyChannelModel leaves an empty name empty instead of inventing one', () => {
   assert.equal(qualifyChannelModel('opencode', '   '), '')
 })
+
+/* ───────────────────────── 时变折价（渠道包上抛 `discount`） ───────────────────────── */
+
+test('a reported discount window survives normalisation with both prices', () => {
+  // 渠道包上抛的形态（`RpcModelDiscount`）：时段 + 窗口内的价 + 窗口外的原价。
+  // 展示名只有窗口**开着**时才印箭头，所以窗口外的目录里只剩原价 —— 窗口与
+  // 折后价必须来自这个字段，不能靠解析名字。
+  const [model] = readModelList({
+    models: [{
+      id: 'glm-5.2',
+      name: 'GLM-5.2 · x0.5',
+      discount: {
+        weight: 0.5,
+        baseWeight: 1,
+        daily: [{ start: '23:00', end: '7:50' }],
+        timezone: 'Asia/Shanghai',
+      },
+    }],
+  })
+  assert.equal(model.weight, 0.5)
+  assert.equal(model.baseWeight, 1)
+  assert.equal(model.promoWeight, 0.5)
+  assert.deepEqual(model.discountWindow, {
+    daily: [{ start: '23:00', end: '7:50' }],
+    timezone: 'Asia/Shanghai',
+  })
+})
+
+test('a discount with no window is not read as an all-day price', () => {
+  // 只给价不给时段：宿主没有「何时生效」的信息，因此**不写窗口** —— 写了空窗口
+  // 会读成「整天生效」，那等于凭空延长一次促销。
+  const [model] = readModelList({
+    models: [{ id: 'x', name: 'X · x0.5', discount: { weight: 0.5, baseWeight: 1 } }],
+  })
+  assert.equal(model.discountWindow, undefined)
+  // 窗口内价仍然记下来（它是渠道明确报过的那个数），但无窗口时它不是时变价。
+  assert.equal(model.promoWeight, 0.5)
+  assert.equal(model.baseWeight, 1)
+})
+
+test('unreadable slot boundaries are dropped, never widened to the whole day', () => {
+  const [model] = readModelList({
+    models: [{
+      id: 'x',
+      name: 'X · x0.5',
+      discount: {
+        weight: 0.5,
+        daily: [{ start: '晚上', end: '早上' }, { start: '23:00', end: '7:50' }],
+      },
+    }],
+  })
+  assert.deepEqual(model.discountWindow?.daily, [{ start: '23:00', end: '7:50' }])
+  // 全部时段都读不懂 → 窗口整个丢弃，而不是留下一个「没有时段」的窗口。
+  const [broken] = readModelList({
+    models: [{ id: 'y', name: 'Y · x0.5', discount: { weight: 0.5, daily: [{ start: 'x', end: 'y' }] } }],
+  })
+  assert.equal(broken.discountWindow, undefined)
+})
+
+test('validity spans are accepted as epoch ms and reject nonsense', () => {
+  const [model] = readModelList({
+    models: [{
+      id: 'x',
+      name: 'X · 免费',
+      discount: { weight: 0, baseWeight: 1, validFrom: 1_700_000_000_000, validUntil: 1_700_100_000_000 },
+    }],
+  })
+  assert.deepEqual(model.discountWindow, {
+    validFrom: 1_700_000_000_000,
+    validUntil: 1_700_100_000_000,
+  })
+  // 负数 / 非数值一律丢弃：一个畸形的截止时间会把窗口读成永久关闭。
+  const [bad] = readModelList({
+    models: [{ id: 'y', name: 'Y · x0.5', discount: { weight: 0.5, validUntil: 'soon' } }],
+  })
+  assert.equal(bad.discountWindow, undefined)
+})
+
+test('the capability hint keeps the time-varying fields instead of only the price', () => {
+  // 这是第二步的核心：`capabilityHintOf` 旧实现只搬 `weight`，把原价与窗口
+  // 一起丢掉，于是宿主手里只有「采集那一刻的价」，无法在边界上切换。
+  const [model] = readModelList({
+    models: [{
+      id: 'qmodel_38max',
+      name: 'Qwen3.8-Max · x0.5',
+      discount: {
+        weight: 0.2,
+        baseWeight: 0.5,
+        daily: [{ start: '22:00', end: '08:00' }],
+        timezone: 'Asia/Singapore',
+      },
+    }],
+  })
+  assert.deepEqual(capabilityHintOf(model), {
+    // `weight` 是**采集那一刻**的展示价（窗口外是 x0.5），不是窗口内的价。
+    weight: 0.5,
+    baseWeight: 0.5,
+    promoWeight: 0.2,
+    discountWindow: { daily: [{ start: '22:00', end: '08:00' }], timezone: 'Asia/Singapore' },
+    free: false,
+  })
+})
+
+test('a zero promo price is kept as free rather than treated as an ended promotion', () => {
+  // `factor: 0` 是真的免费（buddy 的夜间活动），但**必须带窗口**：没有窗口的
+  // 0 价在渠道包侧就是「已结束占位」，到不了这里。
+  const [model] = readModelList({
+    models: [{
+      id: 'hy4-preview',
+      name: 'Hy4 Preview · x0.29',
+      discount: { weight: 0, baseWeight: 0.29, daily: [{ start: '23:00', end: '7:50' }] },
+    }],
+  })
+  assert.equal(model.promoWeight, 0)
+  assert.equal(model.baseWeight, 0.29)
+  // `weight` 仍是采集那一刻的展示价（0.29，窗口外）；免费与否由生效价决定。
+  assert.equal(model.weight, 0.29)
+  assert.equal(model.free, false)
+})

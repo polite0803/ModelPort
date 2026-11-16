@@ -16,6 +16,7 @@ import {
   DEFAULT_REQUEST_TIMEOUT_MS,
   FIRST_ATTEMPT_CAP_MS,
   MIN_REMAINING_FOR_NEXT_ATTEMPT_MS,
+  PLAN_ENTRY_MAX_RETRIES,
   planAttemptDeadline,
   planFirstEventWait,
   planRecoveryWaitMs,
@@ -29,17 +30,48 @@ test('账号渠道只额外试一次，且用短退避', () => {
   assert.deepEqual(profile, { maxRetries: ACCOUNT_CHANNEL_MAX_RETRIES, retryDelayMs: ACCOUNT_CHANNEL_RETRY_DELAY_MS })
 })
 
-test('其余 provider 保持历史预算（这次改动不许顺手改它们）', () => {
+test('其余 provider 保持历史预算（订阅端点那档是单独的，不许顺手外溢）', () => {
   for (const type of ['builtin', 'aggregate', 'custom'] as const) {
     const profile = planForwardRetries(type, 3)
     assert.deepEqual(profile, { maxRetries: 3, retryDelayMs: DEFAULT_FORWARD_RETRY_DELAY_MS })
   }
 })
 
+/**
+ * 订阅套餐端点的原地重试上限（2026-11-16，11-15 火山 Agent Plan 烧穿 5 小时窗驱动）。
+ *
+ * 要钉住的是三件事：
+ * - 订阅端点被封顶到 1（一次 5xx 不再按全价重买三遍 prompt）；
+ * - **只有**订阅端点被封顶：按量聚合端点与内建/自定义仍拿 3，否则这刀会伤到
+ *   那些靠前缀缓存让重发便宜下来的线；
+ * - 「只下调」的方向不变：用户配 0 仍得到 0，不会因为这条被抬到 1。
+ */
+test('订阅套餐端点只额外试一次，且不把 budget 上调', () => {
+  const plan = planForwardRetries('aggregate', 3, { planEntry: true })
+  assert.deepEqual(plan, {
+    maxRetries: PLAN_ENTRY_MAX_RETRIES,
+    retryDelayMs: DEFAULT_FORWARD_RETRY_DELAY_MS,
+  })
+  assert.equal(planForwardRetries('aggregate', 0, { planEntry: true }).maxRetries, 0, '显式 0 仍是 0')
+  assert.equal(planForwardRetries('aggregate', 1, { planEntry: true }).maxRetries, 1)
+  assert.equal(planForwardRetries('aggregate', 9, { planEntry: true }).maxRetries, PLAN_ENTRY_MAX_RETRIES)
+})
+
+test('负控：非订阅聚合端点不受这档影响 —— 上面的封顶因此有分辨力', () => {
+  // 若这一格也变成 1，说明 `planEntry` 判据没被读，全体聚合端点都被误封顶。
+  assert.equal(planForwardRetries('aggregate', 3).maxRetries, 3)
+  assert.equal(planForwardRetries('aggregate', 3, { planEntry: false }).maxRetries, 3)
+  // 内建 / 自定义没有订阅概念，传了也必须无效。
+  for (const type of ['builtin', 'custom'] as const) {
+    assert.equal(planForwardRetries(type, 3, { planEntry: true }).maxRetries, 3, `${type} 不该被订阅档封顶`)
+  }
+})
+
 test('调用方显式给的预算只下调、绝不上调', () => {
-  // `forwardAutoCompletion` / 链式转发传 `{ maxRetries: 0 }`：那是一句指令
-  // （候选链上每个供应商只打一次，失败就换下一个），被上调成 1 会让整条链
-  // 的等待翻倍，并且违背"失败立即换候选"的设计。
+  // 多家候选链传 `{ maxRetries: 0 }`：那是一句指令（每个供应商只打一次，失败就换
+  // 下一个），被上调成 1 会让整条链的等待翻倍，并且违背"失败立即换候选"的设计。
+  // 单候选链（硬钉 / 具名模型只有一个账号）没有下一个可换，改传 1 —— 判据见
+  // `forward-retry-status.test.ts`「单候选链的连接层失败给一次原地重试」。
   assert.equal(planForwardRetries('account', 0).maxRetries, 0)
   assert.equal(planForwardRetries('builtin', 0).maxRetries, 0)
   // 账号渠道被封顶到 1，但用户配得更小时以用户为准。

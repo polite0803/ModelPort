@@ -129,6 +129,41 @@ export function mapForwardFailure(
   }
 }
 
+/**
+ * 传输层异常的可读描述，只在异常自己没有消息时才改写。
+ *
+ * Node 的 happy-eyeballs（`autoSelectFamily`，20+ 默认开）在所有地址族都连不上时抛
+ * `new AggregateError(errors)` —— 它的 `message` 是**空串**，真正的原因
+ * （`ENETUNREACH` / `ECONNREFUSED` / `ETIMEDOUT`）只留在 `errors[]` 里。axios 原样
+ * 保留这个空串，于是请求行落 `errorMessage: ""`、客户端只看到「Request failed after
+ * retries」，一次连不上被读成服务端不明故障，日志里也查不出是哪一层断的。
+ *
+ * 有消息的异常一律原样返回：上游文案是既有分类器（风控/凭据/能力）的判据来源，
+ * 不能为了好看给它加前缀。
+ */
+export function describeTransportError(error: unknown): string {
+  const own = error instanceof Error ? error.message : 'Unknown error'
+  if (own.trim().length > 0) return own
+
+  const parts: string[] = []
+  const seen = new Set<unknown>()
+  const stack: unknown[] = [error]
+  while (stack.length > 0 && parts.length < 8) {
+    const current = stack.pop()
+    if (current === null || typeof current !== 'object' || seen.has(current)) continue
+    seen.add(current)
+    const node = current as { message?: unknown; code?: unknown; errors?: unknown; cause?: unknown }
+    const message = typeof node.message === 'string' ? node.message.trim() : ''
+    const code = typeof node.code === 'string' ? node.code.trim() : ''
+    if (message.length > 0) parts.push(message)
+    else if (code.length > 0) parts.push(code)
+    if (Array.isArray(node.errors)) stack.push(...node.errors)
+    if (node.cause !== undefined) stack.push(node.cause)
+  }
+  const unique = [...new Set(parts)]
+  return unique.length > 0 ? `Transport failure: ${unique.join('; ')}`.slice(0, 500) : own
+}
+
 /** 兼容旧调用点：只有 status/message，没有结构化错误体。 */
 export function mapUpstreamError(status?: number, message?: string): UpstreamErrorShape {
   const mapped = mapForwardFailure({ status, message })

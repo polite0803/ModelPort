@@ -354,6 +354,25 @@ export class AccountRuntime {
   }
 
   /**
+   * 手动换钉/解钉 = 最高响应（裁定 2026-11-16）：网关**自己开的**退避票当场让路
+   * —— 账号故障冷却、这一档的 429 退避、静默窗口。与 `recordSuccess` 的区别是
+   * 不写 `lastSuccessAt`、不动 AIMD/延迟统计：没有成功发生过，伪造成功会污染
+   * 「近期有没有成功」这条静默判据。事实态（当日用量、额度标记、worker 限流、
+   * 目录缺失）不在这条方法的管辖里 —— 那是上游亲口说的，清了只是伪造容量。
+   */
+  clearManualOverride(accountId: string, model: string): void {
+    const state = this.state(accountId)
+    state.consecutiveFailures = 0
+    state.coolingUntil = undefined
+    this.rateLimits.get(accountId)?.delete(model)
+    const flow = this.flows.get(this.flowKey(accountId, model))
+    if (flow !== undefined) {
+      flow.silentTimeouts = 0
+      flow.silentUntil = undefined
+    }
+  }
+
+  /**
    * 记一次「首块前零字节超时」（渠道 30–44s 一个字节都没吐）。
    *
    * 只在具名单候选的流式路径上使用：那条路径没有下家可换，超时的代价全部落在

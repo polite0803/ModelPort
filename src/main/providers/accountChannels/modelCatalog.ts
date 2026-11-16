@@ -19,6 +19,7 @@
  */
 import type { ChannelModelInfo, ChannelModelSource } from '../../../shared/channels'
 import type { ModelCapabilityHint } from '../../../shared/types.ts'
+import { parseSlotBoundary, type DiscountWindow } from '../../../shared/discountWindow.ts'
 
 /** `名称 · 免费` / `名称 · x1.5` / `名称 · x0.2→x0.1`。 */
 const LABEL_SUFFIX = /^(.*?)\s*·\s*(免费|x\d+(?:\.\d+)?(?:\s*→\s*x\d+(?:\.\d+)?)?)$/
@@ -89,10 +90,20 @@ export function readModelList(value: unknown): ChannelModelInfo[] {
 
     const label = splitModelLabel(record.name ?? id)
     const declaredFree = record.isFree === true
+    // 渠道包上抛的定时折扣（`RpcModelDiscount`）：窗口 + 窗口内的价。地址是
+    // **外部数据**，逐字段收敛，读不懂的字段一律丢弃 —— 一个被误读的时段会
+    // 让宿主整天按折后价计分（`discountWindow.ts` 把「读不懂」读成「一直生效」）。
+    const discount = readDiscount(record.discount)
     // 免费的**唯一判据是消耗权重为 0**：上游的 `isFree` 只在没有倍率标注时
     // 等义为权重 0；一旦展示名里写了 `x2`，就以权重为准（权重与标记冲突时
     // 权重优先），否则会把按量计费的模型标成免费。
     const weight = label.weight ?? (declaredFree ? 0 : undefined)
+    // 窗口内生效的价：渠道包明确上抛的那个最权威；只报了 `x0.5→x0.2` 而没报窗口
+    // 时，展示名里的折后价就是窗口价（那是渠道自己印的）。两者都没有 = 没有时变价。
+    const promoWeight = discount?.weight ?? (discount === undefined ? undefined : weight)
+    // 原价：同样以渠道包为准。展示名里的箭头只在窗口**开着**时印出来，所以窗口外
+    // 采集的目录根本看不到原价 —— 恰好 `discount.baseWeight` 补上这一半。
+    const baseWeight = discount?.baseWeight ?? label.baseWeight
     out.push({
       id,
       name: label.name,
@@ -100,7 +111,9 @@ export function readModelList(value: unknown): ChannelModelInfo[] {
       disabled: record.disabled === true,
       dead: record.dead === true,
       ...(weight === undefined ? {} : { weight }),
-      ...(label.baseWeight === undefined ? {} : { baseWeight: label.baseWeight }),
+      ...(baseWeight === undefined ? {} : { baseWeight }),
+      ...(promoWeight === undefined ? {} : { promoWeight }),
+      ...(discount?.window === undefined ? {} : { discountWindow: discount.window }),
       // 模态同样「缺失即未知」，不推导。
       ...(typeof record.supportsImage === 'boolean' ? { supportsImage: record.supportsImage } : {}),
       // `model.list` 目前不带窗口；两种拼写都认，为的是同一份归一化代码也能吃
@@ -139,6 +152,68 @@ export function readModelListSource(value: unknown): ChannelModelSource | undefi
 
 function positiveInt(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.trunc(value) : undefined
+}
+
+/**
+ * 渠道包上抛的 `RpcModelDiscount` → 宿主的 `{ weight, window }`。
+ *
+ * 这是**外部数据**（渠道包是 vendored 的另一套代码，将来还会变），所以逐字段
+ * 收窄，读不懂就丢。宁可当作「没有时变价」，也不要把一个半懂的窗口交给
+ * `discountWindow.ts` —— 那里「读不懂的时段」按「一直生效」处理，一个残缺窗口
+ * 会让整天的价都按折后算。
+ */
+function readDiscount(value: unknown): {
+  weight?: number
+  baseWeight?: number
+  window?: DiscountWindow
+} | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const raw = value as Record<string, unknown>
+
+  const weight = typeof raw.weight === 'number' && Number.isFinite(raw.weight) && raw.weight >= 0
+    ? raw.weight
+    : undefined
+  const baseWeight = typeof raw.baseWeight === 'number' && Number.isFinite(raw.baseWeight)
+    && raw.baseWeight >= 0
+    ? raw.baseWeight
+    : undefined
+
+  const window: {
+    daily?: { start: string; end: string }[]
+    timezone?: string
+    validFrom?: number
+    validUntil?: number
+  } = {}
+  if (Array.isArray(raw.daily)) {
+    const daily: { start: string; end: string }[] = []
+    for (const entry of raw.daily as unknown[]) {
+      if (typeof entry !== 'object' || entry === null) continue
+      const slot = entry as Record<string, unknown>
+      // 两侧都必须能解析成钟点，否则整个时段丢掉（不是「当成整天」）。
+      if (parseSlotBoundary(slot.start) === undefined || parseSlotBoundary(slot.end) === undefined) continue
+      daily.push({ start: String(slot.start).trim(), end: String(slot.end).trim() })
+    }
+    if (daily.length > 0) window.daily = daily
+  }
+  if (typeof raw.timezone === 'string' && raw.timezone.trim().length > 0) {
+    window.timezone = raw.timezone.trim()
+  }
+  const validFrom = epochMs(raw.validFrom)
+  if (validFrom !== undefined) window.validFrom = validFrom
+  const validUntil = epochMs(raw.validUntil)
+  if (validUntil !== undefined) window.validUntil = validUntil
+
+  const hasWindow = Object.keys(window).length > 0
+  if (weight === undefined && baseWeight === undefined && !hasWindow) return undefined
+  return {
+    ...(weight === undefined ? {} : { weight }),
+    ...(baseWeight === undefined ? {} : { baseWeight }),
+    ...(hasWindow ? { window } : {}),
+  }
+}
+
+function epochMs(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.trunc(value) : undefined
 }
 
 /**
@@ -220,6 +295,12 @@ export function capabilityHintOf(model: ChannelModelInfo): ModelCapabilityHint |
   const hint: ModelCapabilityHint = {}
   if (model.supportsImage !== undefined) hint.vision = model.supportsImage ? 'yes' : 'no'
   if (model.weight !== undefined) hint.weight = model.weight
+  // 原价与折后价都要带上（2026-11-16）。旧实现只写 `weight`，把渠道自己印在
+  // 展示名里的 `x0.5→x0.2` 前半段丢掉了 —— 于是宿主只知道此刻的价，不知道
+  // 它在窗口外是多少，也就无从在窗口边界上切换。
+  if (model.baseWeight !== undefined) hint.baseWeight = model.baseWeight
+  if (model.promoWeight !== undefined) hint.promoWeight = model.promoWeight
+  if (model.discountWindow !== undefined) hint.discountWindow = model.discountWindow
   if (model.free) hint.free = true
   else if (model.weight !== undefined && model.weight > 0) hint.free = false
   // 窗口只在渠道包明确说了时才写。写成 0 或猜一个值，会让 `auto` 在长上下文请求上

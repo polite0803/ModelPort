@@ -251,8 +251,8 @@ function normalizeRouteFields(name: string, entry: Record<string, unknown>, opti
   // 能力下限：只认三个档位字面量；手写的怪值按「没配」（不设下限）处理，
   // 而不是猜一个档 —— 猜错会把整条路由的候选筛空，那是比不生效严重得多的失败。
   const minTier = isRouteMinTierValue(entry.minTier) ? entry.minTier : undefined
-  // 软钉：靠 `normalizeRouteModelRefs` 同一套引用归一，只取第一条（一条路由只有一个
-  // 优先模型）。providerId 与 displayName 都要在，缺一个就是配了一半，按没配处理。
+  // 钉：靠 `normalizeRouteModelRefs` 同一套引用归一，只取第一条（一条路由只钉一个
+  // 模型）。providerId 与 displayName 都要在，缺一个就是配了一半，按没配处理。
   const preferredModel = normalizeRouteModelRefs(
     entry.preferredModel === undefined ? [] : [entry.preferredModel]
   )[0]
@@ -785,7 +785,7 @@ export function validateRoutesForWrite(
       && record.modelScope !== 'pool') {
       errors.push(`routes.${name}: 'modelScope' must be one of single, family, pool`)
     }
-    // 软钉是单条引用，不是列表：写成数组等于把「优先集合」与「允许集合」混成一个字段。
+    // 钉是单条引用，不是列表：写成数组等于把「独占一个」与「允许集合」混成一个字段。
     if (record.preferredModel !== undefined && Array.isArray(record.preferredModel)) {
       errors.push(`routes.${name}: 'preferredModel' is a single { providerId, displayName } object`)
     }

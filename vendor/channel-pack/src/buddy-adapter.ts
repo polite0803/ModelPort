@@ -36,6 +36,7 @@ import {
   formatCreditsRate,
 } from './buddy.js'
 import type { BuddyCredential, BuddyRemoteModel } from './buddy.js'
+import type { RpcModelDiscount } from './types.js'
 import { CODEBUDDY, resolveUserAgent, type BuddyFallbackModel, type BuddyProduct } from './product.js'
 import { codebuddyClientVersion, workbuddyClientVersion } from './client-identity.js'
 import { normalizeHarnessMessages } from './message-shape.js'
@@ -1123,6 +1124,9 @@ export class BuddyAdapter extends LlmAdapter {
         ...remote?.discountedCreditsRate !== undefined
           ? { discountedCreditsRate: remote.discountedCreditsRate }
           : {},
+        // 促销时段同理只有远端有；漏搬的结果是宿主永远看不到窗口，只能把采集
+        // 那一刻的价当全天价（这正是「夜间折扣白天仍然生效」的来路）。
+        ...remote?.discount !== undefined ? { discount: remote.discount } : {},
       }
     })
     // ⚠️ 追加「被 agent 引用但不在兜底表」的模型（见本方法注释的例外说明）。
@@ -1215,9 +1219,19 @@ export class BuddyAdapter extends LlmAdapter {
    * 而非 `listed`。用过滤后的集合会让「关掉其中一个同名模型」改变另一个的
    * 变体标记，名字随开关跳变。
    */
-  listAllModels(): readonly { id: string; name: string }[] {
+  listAllModels(): readonly {
+    id: string
+    name: string
+    discount?: RpcModelDiscount
+  }[] {
     const source = this.remoteModels ?? this.staticFallbackModels()
-    return source.map((model) => ({ id: model.id, name: displayNameFor(model, source) }))
+    return source.map((model) => ({
+      id: model.id,
+      name: displayNameFor(model, source),
+      // `discount` 与展示名**互补而不是重复**：名字里那半段折后价只在窗口开着时
+      // 出现，而窗口本身要一直上抛，宿主才能自己算「此刻该用哪个价」。
+      ...model.discount !== undefined ? { discount: model.discount } : {},
+    }))
   }
 
   async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
@@ -1248,7 +1262,7 @@ export class BuddyAdapter extends LlmAdapter {
    * token 未必能取到完整集合（实测 WorkBuddy 国际版经 CLI token 只能拿到
    * 13 个别名，拿不到 GPT 系列）。产品兜底表提供该产品权威的完整清单。
    */
-  private staticFallbackModels(): readonly { id: string; name: string }[] {
+  private staticFallbackModels(): readonly BuddyRemoteModel[] {
     const productModels = this.product.fallbackModels
     if (productModels !== undefined && productModels.length > 0) {
       return productModels.map((model) => ({ id: model.id, name: model.name }))

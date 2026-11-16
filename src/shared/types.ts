@@ -1,14 +1,19 @@
 import type { AggregateWire } from './aggregate'
 import { DEFAULT_PROMPT_CACHING_CONFIG, type PromptCachingConfig } from './promptCache.ts'
 import type { ChannelLoginKind, CostBucket } from './channels'
+import type { DiscountWindow } from './discountWindow.ts'
 import type { AggregateCostClass } from './aggregateCost'
 import type { ClientIdentity } from './clientProfile'
 import { DEFAULT_REPETITION_GUARD, type RepetitionGuardSettings, type StreamRepetitionReading, type StreamEmptyTurnReading } from './streamRepetition.ts'
+import type { DeclaredQuotaLimit } from './declaredQuota.ts'
+import type { RouteModelBlock, RouteQuotaSummary } from './routeQuotaView.ts'
 
 export type { AggregateWire }
 export type { PromptCachingConfig }
 export { DEFAULT_PROMPT_CACHING_CONFIG }
 export type { RepetitionGuardSettings, StreamRepetitionReading, StreamEmptyTurnReading }
+export type { DeclaredQuotaLimit }
+export type { RouteModelBlock, RouteQuotaSummary }
 export { DEFAULT_REPETITION_GUARD }
 
 export type AccountStatus = 'active' | 'inactive' | 'expired' | 'error'
@@ -112,6 +117,25 @@ export interface ModelCapabilityHint {
   maxOutputTokens?: number
   /** Credit multiplier reported by the channel pack; absent means unreported */
   weight?: number
+  /**
+   * Off-peak price schedule, when the channel sells two prices on a clock
+   * (`discountWindow.ts` owns the math). Absent = no window was reported, so
+   * `weight` stands as the only price.
+   */
+  discountWindow?: DiscountWindow
+  /**
+   * Price inside `discountWindow`. Only meaningful together with a window —
+   * without one the host cannot tell which price is in force.
+   */
+  promoWeight?: number
+  /**
+   * Price outside `discountWindow`.
+   *
+   * Also written for a plain `base → effective` display name (`x0.5→x0.2`)
+   * even when no window came with it: it is the number the channel itself
+   * printed as the pre-discount price.
+   */
+  baseWeight?: number
   free?: boolean
 }
 
@@ -213,6 +237,11 @@ export interface RoutePreviewModel {
   providerId: string
   providerName: string
   displayName: string
+  /**
+   * 上游真实模型名。展示用的是 `displayName`，但额度账本、上游拒绝记录、渠道限流
+   * 读数全都按这个键记 —— 菜单要读那些读数，就不能只带显示名。
+   */
+  actualModelId: string
   /** 本机账号表口径的候选数；账号渠道只是那条占位账号（菜单行另行改读 Worker 池）。 */
   accountCount: number
   status: RoutePreviewStatus
@@ -231,13 +260,26 @@ export interface RoutePreviewModel {
   ewmaFirstTokenMs?: number
   costClass?: AggregateCostClass
   /**
-   * 渠道目录报的消耗权重（倍率，`1` 为基准价）。
+   * **此刻生效**的消耗权重（倍率，`1` 为基准价）。
    *
    * 只有账号渠道会在模型名里带这个数（`Kimi-K3 · x0.2`），所以它缺失**不代表免费**，
    * 只代表上游没报价；聚合/内置/自定义供应商没有倍率概念，永远是 `undefined`。
-   * 展示用（路由编辑里直接看到这条要花多少钱），不参与打分——打分读 `costBucket`。
+   *
+   * 有折扣窗口时这里是按**本地时钟**取的那一侧的价（`discountWindow.ts`），不是
+   * 采集那一刻的快照 —— 否则夜里折扣开着，面板还印白天的价，与派发恰好相反。
+   * 它同时进打分（`costScoreOfWeight` 的连续曲线）：五档看不见深浅，x0.02 与
+   * x0.9 同分，错峰折扣因此影响不了派发。
    */
   weight?: number
+  /**
+   * 这一轮因**瞬时**状态被跳过（额度窗口打满 / 上游亲口拒 / 当日上限 / 渠道限流）。
+   *
+   * 与 `status` 是两个正交的口径，这也是推荐队列的地基：`status` 说的是**配置**层
+   * （池策略、手动增删、能力下限），`blocked` 说的是**此刻**能不能派。一个模型可以
+   * 是 `kept` 同时 `blocked` —— 它在池里、用户随时可以「固定」它，只是这一轮派不出去。
+   * 把两者折成一个状态，预览就没法再说「配置没问题，是额度还没回来」。
+   */
+  blocked?: RouteModelBlock
 }
 
 /**
@@ -479,14 +521,16 @@ export interface ModelRoute {
    */
   modelScope?: ModelScope
   /**
-   * 用户的显式偏好：这条路由优先用这个模型（软钉，不改变候选池）。
+   * 用户钉住的模型：这条路由**只**用这个模型（持久硬钉，裁定 2026-11-15）。
    *
-   * 与 `pinModels`（只允许集合）是两件事：那个是**允许**，这个是**优先**。
-   * 命中即提到队首并取代粘性；该模型没有可用账号时**不静默**，日志与响应头
-   * 写明 `pinMiss`，然后照常排序 —— 静默回退正是「不可预知」的来源。
+   * 控制台「固定」与托盘「固定」写的是同一颗：没有倒计时，任何算法（粘性/打分/
+   * 熔断/重选）都不得把它切换走；只有 `routes:switch`（手动替换）或 `routes:unpin`
+   * （手动解除）能改。钉住期间模型不可用（冷却/配额/不在池）时本轮拒绝
+   * （429/503 + `pinCooling`/`pinBlocked`/`pinStale`），**不回落**到其它模型。
    *
-   * 模型根本不在池里时（=`pinMiss` 且不是冷却）这份配置不会被自动删除，但日志与
-   * 菜单会标成「已失效」：配置是用户的，撤销是 `routes:unpin` 的活。
+   * 与 `pinModels`（只允许集合）是两件事：那个是**允许**，这个是**独占**。
+   * 模型不在池里时这份配置不会被自动删除，菜单标成「已不在池内」：配置是用户的，
+   * 撤销是 `routes:unpin` 的活。
    */
   preferredModel?: RouteModelRef
   /**
@@ -523,7 +567,7 @@ export const MODEL_SCOPES: readonly ModelScope[] = ['single', 'family', 'pool']
 /** 一次显式切换的发起者；只用于日志与界面口径，不参与判定。 */
 export type ModelPinSource = 'console' | 'tray' | 'header'
 
-/** 软钉的作用域：本路由（所有会话）或本会话。 */
+/** 钉的作用域：本路由（所有会话）或本会话。 */
 export type ModelPinScope = 'route' | 'session'
 
 /** 管理面/托盘共享的「当前模型」读数（服务者，不是配置意图）。 */
@@ -558,10 +602,25 @@ export interface RouteMenuModel {
   /** 用户给的星级推荐（1–5）；没评过不写。 */
   rating?: number
   /**
-   * 系统按档位/首字延迟/当前健康推导的默认推荐星（1–5，`shared/modelRecommendation.ts`）。
-   * 手动 `rating` 优先显示；只作展示，不参与选路排序。
+   * 系统推荐星（1–5）：**选路打分的投影**，不是独立推导
+   * （`autoRouting.ts::recommendModelStars`，尺子在 `shared/modelRecommendation.ts`）。
+   *
+   * 同一张因子表、同一组权重，在参考画像（复杂请求、默认口径）下求值再压到 1..5，
+   * 外加熔断/零账号/这一轮被跳过/余量见底这类**资格事实**。所以它与真实派发同尺：
+   * 改打分权重则星随之改，「星级优先」的显示排序也与派发次序同向。
+   * 手动 `rating` 优先显示；本字段只作展示，不被选路读取。
    */
   recommendedStars?: number
+  /**
+   * 这一轮会被跳过：原因 + 解禁时刻 + 那个时刻的出处（`shared/routeQuotaView.ts`）。
+   *
+   * 有这个格的行**仍在菜单里**（这正是推荐队列与「池成员」两件事的分界）：它解释
+   * 「为什么这一轮不会走它」，而不是把它藏起来。`untilSource` 区分上游给的时刻与我们
+   * 推的估算，界面据此决定写不写「约」。
+   */
+  blocked?: RouteModelBlock
+  /** 这个模型此刻的额度概况（多账号、多窗口折成一份）。只读展示。 */
+  quota?: RouteQuotaSummary
 }
 
 /** 一条路由的托盘/界面菜单快照。 */
@@ -576,7 +635,8 @@ export interface RouteMenuEntry {
     until: number
     source: ModelPinSource
     /**
-     * 钉子指向的模型已经不在池里（被删/被筛掉），这颗钉不会生效。
+     * 钉子指向的模型已经不在池里（被删/被筛掉）。钉仍然保留（裁定 2026-11-15：
+     * 只有用户手动替换/解除能改），但本轮拒绝服务，不会换别的模型。
      *
      * 菜单必须能说出这一格：否则用户看到的是一颗「已固定」的钉子，而实际每一轮
      * 都在用别的模型 —— 那正是「点了没反应」的形态。
@@ -616,15 +676,6 @@ export interface RouteSwitchRequest {
   model?: string
   providerId?: string
   scope?: ModelPinScope
-  minutes?: number
-  /**
-   * 这次选择要不要**落盘**（写这条路由的 `preferredModel`）。
-   *
-   * 缺省 false = 只是这一次的软钉（30 分钟）。true = 长期固定：软钉被撤掉，
-   * 选择改写进路由配置，重启后仍然是它。两者写的是同一份「优先模型」判定，
-   * 区别只在活多久 —— 所以走同一条通道，不另开一条。
-   */
-  persist?: boolean
   /** 谁发起的：托盘 / 控制台。只用于菜单与日志回显。 */
   source?: ModelPinSource
 }
@@ -633,7 +684,7 @@ export interface RouteSwitchResult {
   ok: boolean
   route: string
   model?: string
-  /** 命中的模型在哪一家：`persist` 要把它原样写进 `preferredModel`。 */
+  /** 命中的模型在哪一家：`routes:switch` 要把它原样写进 `preferredModel`。 */
   providerId?: string
   /** 失败原因，可直接展示。 */
   reason?: string
@@ -835,6 +886,17 @@ export interface Account {
   todayUsed?: number
   /** `todayUsed` 属于哪个本地日期（`YYYY-MM-DD`）；与今天不同即读作 0 */
   todayUsedDay?: string
+  /**
+   * 用户自己声明的额度窗口（`shared/declaredQuota.ts`）。
+   *
+   * 官方不公布、而用户知道的那些窗口（5 小时 / 每周 / 自然月）写在这里：它是**第五层**
+   * 额度证据，与前四层（官方帽 / 本地账本 / 实时余额 / 上游亲口拒）并列且不可折算。
+   * 写下的数会真的挡发车（`quotaBlockReason` 的 `declared-exhausted`），并在路由页
+   * 的推荐队列里显示「还剩多少、什么时候复位」。
+   *
+   * 缺省 = 没有任何声明，行为与既有完全一致。空数组归一时不落键。
+   */
+  declaredQuota?: DeclaredQuotaLimit[]
 }
 
 export interface Provider {
@@ -1604,7 +1666,7 @@ export interface RequestLogEntry {
   auto?: {
     prefer: AutoPreference
     /**
-     * 胜负原因。`pin` = 一次显式选择（软钉/`preferredModel`）把某个模型提到了队首；
+     * 胜负原因。`pin` = 用户的钉（`preferredModel`/请求头钉）把某个模型提到了队首；
      * `only` = **裁剪前**的池里只有一个模型（不是「链被裁到一条」——那是 `single`
      * 作用域，池子可能很大）。
      */
@@ -1674,7 +1736,7 @@ export interface RequestLogEntry {
     modelScope?: ModelScope
     /** 这一轮实际选定的模型（队首候选）。`candidates[0]` 也是它，这里单独写便于检索。 */
     model?: string
-    /** 显式切换（软钉）在本轮生效：谁按的、作用域、到期时间。没有切换时整格不出现。 */
+    /** 钉在本轮生效：谁钉的、作用域。`until` 恒 0 = 持久（裁定 2026-11-15）。没有钉时整格不出现。 */
     pin?: {
       displayName: string
       scope: ModelPinScope
@@ -1689,8 +1751,8 @@ export interface RequestLogEntry {
     /**
      * 钉子指向的模型**不在池里**（不是冷却，是真的不在）。
      *
-     * - `retired`：内存软钉，本轮快速失败并**当场撤钉**，下一次请求回到自动排序；
-     * - `ignored`：持久 `preferredModel` 是配置，不替用户删，照常按池服务但写明。
+     * `held`：钉保留（只有用户手动替换/解除能改），本轮拒绝服务（503），
+     * **不回落**到其它模型 —— 裁定 2026-11-15。
      *
      * 与 `pinMiss` 的区别：`pinMiss` 只说「没命中」，这一格说「没命中的钉子被怎么
      * 处置了」—— 「静默换个模型跑」与「告诉你钉子坏了」在客户端那一侧完全两回事。
@@ -1699,7 +1761,7 @@ export interface RequestLogEntry {
       displayName: string
       scope: ModelPinScope
       source: ModelPinSource
-      action: 'retired' | 'ignored'
+      action: 'held'
     }
     /**
      * 钉子指向的模型**在池里，但账号此刻全在冷却**。与 `pinStale` 互斥：钉子没坏，
@@ -1712,8 +1774,20 @@ export interface RequestLogEntry {
       retryAfterSeconds: number
     }
     /**
-     * 软钉指向的模型这一轮**用不了**（缺视觉/工具/推理/上下文，或被契约过滤挡下）。
-     * 钉子没错，所以不退役；`missing` 是挡下它的能力名（契约过滤时为空数组）。
+     * 钉指向的模型**仍在路由里，只是名下账号全被瞬时状态挡下**（限流窗口/额度
+     * 耗尽/当日上限）。与 `pinStale` 互斥：窗口复位就自己回来，投影成
+     * 429 + `Retry-After`，不清钉。
+     */
+    pinTransient?: {
+      displayName: string
+      scope: ModelPinScope
+      source: ModelPinSource
+      cause: 'quota' | 'daily_limit' | 'mixed' | 'rate_limit'
+      retryAfterSeconds: number
+    }
+    /**
+     * 钉指向的模型这一轮**用不了**（缺视觉/工具/推理/上下文，或被契约过滤挡下）。
+     * 钉保留、本轮拒绝（503），不回落；`missing` 是挡下它的能力名（契约过滤时为空数组）。
      */
     pinBlocked?: {
       displayName: string

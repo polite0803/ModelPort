@@ -9,8 +9,18 @@ import { storeManager } from '../store/store'
 import { isMappingActive, isModelRoutable } from '../store/modelServing'
 import { AGGREGATE_REGISTRY } from '../providers/aggregate/registry'
 import { resolveAggregateChain } from '../../shared/aggregateRouting'
-import { aggregateHeadroom, createQuotaGateContext, quotaBlockReason } from './quota/gate'
+import {
+  aggregateHeadroom,
+  createQuotaGateContext,
+  declaredQuotaOf,
+  declaredResetAt,
+  quotaBlockReason,
+  type QuotaGateContext,
+} from './quota/gate'
 import { resolveCaps } from './quota/limits'
+import type { QuotaLedger } from './quota/ledger'
+import { declaredUsageOf, type DeclaredQuotaWindow } from '../../shared/declaredQuota'
+import type { DeclaredQuotaFact } from '../../shared/quotaPacing'
 import { dailyUsageOf } from '../../shared/dailyUsage.ts'
 import { pickBestPace, pickSoonestReset, type AccountQuotaFacts } from '../../shared/quotaPacing'
 import { debugLog } from '../logging/debugLog'
@@ -107,8 +117,13 @@ export class LoadBalancer {
    * `smart` / `pace` 的实际选号：把每个候选的用量与上限摊成 `AccountQuotaFacts`
    * 交给纯函数排序，再按选出的 accountId 回到候选对象。
    *
-   * 额度只对聚合目录的家有意义；别家没有额度旁表，直接不参与（返回 undefined →
-   * 调用方退回 fill-first），而不是凭空给一个 0.5 的中性分。
+   * 两种证据来源，**并列不换算**：
+   * - 官方帽 + 实测帽（`resolveCaps`）：只对聚合目录的家成立，别家没有额度旁表；
+   * - 用户声明（`account.declaredQuota`）：跟着账号走，任何类型都适用。
+   *
+   * 一条证据都没有的候选不参与（返回 `undefined` → 调用方退回 fill-first），而不是
+   * 凭空给一个 0.5 的中性分。声明之所以必须进来：20 个订阅套餐条目全是
+   * `undocumented`，届时这两条策略在用户最关心的那几家上只能退回 fill-first。
    */
   private selectByQuotaPacing(
     candidates: AccountSelection[],
@@ -117,28 +132,40 @@ export class LoadBalancer {
     const facts: AccountQuotaFacts[] = []
     const byAccountId = new Map<string, AccountSelection>()
     const nowMs = Date.now()
+    const gateContext = createQuotaGateContext()
 
     for (const candidate of candidates) {
-      if (candidate.provider.type !== 'aggregate') continue
-      const entry = AGGREGATE_REGISTRY.find(row => row.id === candidate.provider.id)
-      if (!entry) continue
-
       try {
         const ledger = storeManager.getQuotaLedger()
-        const caps = resolveCaps(entry.id, candidate.actualModel, ledger.learnedFor(entry.id))
-        if (!caps.enforceable) continue
-
-        const snapshot = ledger.snapshot(entry.id, candidate.account.id, candidate.actualModel)
         const used: AccountQuotaFacts['used'] = {}
         const limit: AccountQuotaFacts['limit'] = {}
-        for (const [metric, value] of Object.entries(caps.limits)) {
-          if (typeof value !== 'number' || value <= 0) continue
-          const key = metric as keyof typeof used
-          limit[key] = value
-          used[key] = snapshot[key] ?? 0
+
+        if (candidate.provider.type === 'aggregate') {
+          const entry = AGGREGATE_REGISTRY.find(row => row.id === candidate.provider.id)
+          if (entry !== undefined) {
+            const caps = resolveCaps(entry.id, candidate.actualModel, ledger.learnedFor(entry.id))
+            if (caps.enforceable) {
+              const snapshot = ledger.snapshot(entry.id, candidate.account.id, candidate.actualModel)
+              for (const [metric, value] of Object.entries(caps.limits)) {
+                if (typeof value !== 'number' || value <= 0) continue
+                const key = metric as keyof typeof used
+                limit[key] = value
+                used[key] = snapshot[key] ?? 0
+              }
+            }
+          }
         }
 
-        facts.push({ accountId: candidate.account.id, used, limit })
+        const declared = declaredFactsOf(ledger, candidate, gateContext, nowMs)
+        // 两套证据都为空的候选没有意见可给，不参与排序。
+        if (Object.keys(limit).length === 0 && declared.length === 0) continue
+
+        facts.push({
+          accountId: candidate.account.id,
+          used,
+          limit,
+          ...(declared.length === 0 ? {} : { declared }),
+        })
         byAccountId.set(candidate.account.id, candidate)
       } catch (error) {
         console.error('[LoadBalancer] quota pacing skipped for', candidate.account.id, error)
@@ -213,7 +240,7 @@ export class LoadBalancer {
           continue
         }
         if (account.dailyLimit && dailyUsageOf(account) >= account.dailyLimit) {
-          skips.push({ providerId: provider.id, accountId: account.id, model: actualModel, reason: 'daily_limit' })
+          skips.push({ providerId: provider.id, accountId: account.id, model: actualModel, displayName: chained?.displayName ?? model, reason: 'daily_limit' })
           continue
         }
         if (excludeFailed && this.isAccountInFailure(account.id)) {
@@ -222,7 +249,7 @@ export class LoadBalancer {
         }
         const reason = quotaBlockReason(provider, account.id, actualModel, gateContext)
         if (reason !== undefined) {
-          skips.push({ providerId: provider.id, accountId: account.id, model: actualModel, reason })
+          skips.push({ providerId: provider.id, accountId: account.id, model: actualModel, displayName: chained?.displayName ?? model, reason })
           continue
         }
         // 走到这里 = 这个账号本该进池：空池不是瞬时状态造成的
@@ -487,6 +514,51 @@ export class LoadBalancer {
 
     return [...models]
   }
+}
+
+/**
+ * 账号级声明额度摊成 `DeclaredQuotaFact[]`，供 `smart` / `pace` 排序。
+ *
+ * 三个要点：
+ * - **按账号读，不按模型读**：声明是套餐级的（`declaredWindow` 用 `ALL_MODELS` 汇总），
+ *   所以在同一账号的任意模型上都给同一批事实 —— 与 `quotaBlockDetail` 的判据同源。
+ * - **复位时刻照样只给能算的**：滚动窗口取最老一笔滑出的时刻（估算），自然周/月取
+ *   记账边界（本地）；窗口里还没有用量时不给时刻，`projectReset` 跳过它而不猜。
+ * - **读不到就返回空**：与闸门同一条 fail-open —— 声明缺席不是「不能用」，只是
+ *   "这条策略没有证据可依"，调用方据此退回 fill-first。
+ */
+function declaredFactsOf(
+  ledger: QuotaLedger,
+  candidate: AccountSelection,
+  context: QuotaGateContext,
+  nowMs: number,
+): DeclaredQuotaFact[] {
+  const providerId = candidate.provider.id
+  const accountId = candidate.account.id
+  const declared = declaredQuotaOf(accountId, providerId, context)
+  if (declared.length === 0) return []
+
+  // 同一声明可能同时挂 token 与请求两条上限，读数只取一次（账本扫描不便宜）。
+  const readings = new Map<DeclaredQuotaWindow, ReturnType<QuotaLedger['declaredWindow']>>()
+  const readingOf = (window: DeclaredQuotaWindow): ReturnType<QuotaLedger['declaredWindow']> => {
+    const cached = readings.get(window)
+    if (cached !== undefined) return cached
+    const reading = ledger.declaredWindow(providerId, accountId, window, nowMs)
+    readings.set(window, reading)
+    return reading
+  }
+
+  return declared.map(entry => {
+    const reading = readingOf(entry.window)
+    const { resetAt } = declaredResetAt(reading, entry.window, nowMs)
+    return {
+      window: entry.window,
+      unit: entry.unit,
+      used: declaredUsageOf(reading, entry.unit),
+      limit: entry.limit,
+      ...(resetAt === undefined ? {} : { resetAt }),
+    }
+  })
 }
 
 export const loadBalancer = new LoadBalancer()

@@ -18,6 +18,9 @@
 // 用 CODEBUDDY.userAgent（getter）每次访问都渲染当前版本，而不是模块级
 // 常量 —— IIFE 只在加载时求值一次，长驻进程会僵化在旧版本上。
 import { CODEBUDDY } from './product.js'
+// 只借类型：促销时段要上抛给宿主的那份结构由 `RpcModelDiscount` 定义，
+// 适配器与 RPC 层共用一套字段名（`type` 导入在编译后完全消失，无运行时耦合）。
+import type { RpcDiscountWindow, RpcModelDiscount } from './types.js'
 
 // ── API 端点常量（逆向自 genie 扩展 product.json + index.js） ──
 
@@ -475,6 +478,19 @@ export interface BuddyRemoteModel {
    * 索引），活动结束后服务端会把它改成 `"0x"` 或移除。存在且非 `0x` 时才带上。
    */
   discountedCreditsRate?: string
+  /**
+   * 促销的**时段 + 窗口内价**（`modelPromotions[].schedule` + `factor`）。
+   *
+   * 为什么要单独带一份：{@link discountedCreditsRate} 只在窗口**开着**的时候才写
+   * （见 {@link parsePromotions}），所以窗口外的目录里只剩原价 —— 宿主无从知道
+   * 「几点会便宜」。把窗口上抛后，宿主按本地时钟自己判断此刻该用哪个价，
+   * 跨窗口边界的请求不会按错的一侧计分。
+   *
+   * ⚠️ 与 `discountedCreditsRate` 的时态**不同**：那个字段是「此刻的展示价」，
+   * 本字段是「优惠价何时生效」。窗口关着时本字段仍然存在（只是此刻不生效），
+   * 而那正是宿主需要的全部信息。
+   */
+  discount?: RpcModelDiscount
   /** 可选思考等级（data.models[].reasoning.supportedEfforts）；无等级可选的模型缺省。 */
   reasoningEfforts?: string[]
   /** 默认思考等级（data.models[].reasoning.defaultEffort）。 */
@@ -659,25 +675,8 @@ export function parsePromotions(
     const promotion = item as Record<string, unknown>
     if (promotion.enabled === false) continue
     if (!promotionActiveNow(promotion, now)) continue
-    const discount = promotion.discount
-    if (typeof discount !== 'object' || discount === null) continue
-    const detail = discount as Record<string, unknown>
-    const factor = typeof detail.factor === 'number' ? detail.factor : undefined
-    const rawSchedule = promotion.schedule
-    const windowed = typeof rawSchedule === 'object' && rawSchedule !== null
-      && hasTimeWindow(rawSchedule as PromotionSchedule)
-
-    let rate: string | undefined
-    if (factor === 0) {
-      // 免费额度必须限时；无窗口的 `0x` 视为「已结束」占位（保持旧行为）。
-      if (!windowed) continue
-      rate = '免费'
-    } else {
-      rate = normalizeDiscountedRate(detail.discountedCredits)
-      // 归一化后仍是 `x0` 说明是无 factor 的 `0x` 占位，同样跳过。
-      if (rate === 'x0') continue
-    }
-    if (rate === undefined) continue
+    const entry = readPromotionEntry(promotion)
+    if (entry === undefined) continue
 
     const modelIds = promotion.modelIds
     if (!Array.isArray(modelIds)) continue
@@ -687,10 +686,183 @@ export function parsePromotions(
       const previous = chosen.get(id)
       if (previous !== undefined && previous > priority) continue
       chosen.set(id, priority)
-      result.set(id, rate)
+      result.set(id, entry.rate)
     }
   }
   return result
+}
+
+/**
+ * 从 `data.modelPromotions` 提取「模型 id → 促销时段 + 窗口内价」映射，
+ * **不按当前时刻过滤**。
+ *
+ * ## 为什么它必须与 {@link parsePromotions} 分开
+ *
+ * `parsePromotions` 产的是**展示文本**，只在窗口开着时才有内容 —— 于是窗口外的
+ * 目录里只剩原价，宿主再也看不出「几点会便宜」。本函数反过来：只要上游报了
+ * 一条带时间窗口的活动就上抛，窗口开没开由宿主按本地时钟判断
+ * （`shared/discountWindow.ts::isDiscountWindowActive`）。
+ *
+ * 于是同一个活动在两侧各司其职：窗口外的目录仍带 `x1→x0.5` 里那个 `x0.5` 与
+ * 「23:00–7:50」，宿主在 23:00 那一刻自己把价换成 0.5，不需要任何同步动作。
+ *
+ * 不带时间窗口的活动**不在此列**：那种促销是常态价，展示名里的箭头已经把
+ * 生效价写进去了（`splitModelLabel` 取箭头右侧），再上抛一份同价的窗口只会
+ * 增加歧义。
+ */
+export function parsePromotionWindows(
+  record: Record<string, unknown>,
+): Map<string, RpcModelDiscount> {
+  const result = new Map<string, RpcModelDiscount>()
+  const chosen = new Map<string, number>()
+  const promotions = record.modelPromotions
+  if (!Array.isArray(promotions)) return result
+  const sorted = [...promotions].sort((a, b) => priorityOf(a) - priorityOf(b))
+  for (const item of sorted) {
+    if (typeof item !== 'object' || item === null) continue
+    const promotion = item as Record<string, unknown>
+    if (promotion.enabled === false) continue
+    const entry = readPromotionEntry(promotion)
+    if (entry === undefined || entry.window === undefined) continue
+    if (entry.weight === undefined) continue
+
+    const modelIds = promotion.modelIds
+    if (!Array.isArray(modelIds)) continue
+    const priority = priorityOf(promotion)
+    // 只有一条活动能定义某个模型此刻的价：priority 最高者胜出，与展示文本同口径。
+    const discount: RpcModelDiscount = { weight: entry.weight, ...entry.window }
+    for (const id of modelIds) {
+      if (typeof id !== 'string' || id.length === 0) continue
+      const previous = chosen.get(id)
+      if (previous !== undefined && previous > priority) continue
+      chosen.set(id, priority)
+      result.set(id, discount)
+    }
+  }
+  return result
+}
+
+/**
+ * 补齐窗口外的原价：`modelPromotions` 只报折后价，原价在 `data.models[].credits`
+ * （{@link BuddyRemoteModel.creditsRate}）里。
+ *
+ * 补它是必要的，不是锦上添花：宿主在窗口关闭时要用原价计分，而那时它手里只有
+ * 这份目录 —— 没有 `baseWeight` 就只能把折后价当成全天价，等于给一个只在夜里
+ * 便宜的模型一天 24 小时的折扣。
+ */
+function discountOf(
+  window: RpcModelDiscount | undefined,
+  creditsRate: string | undefined,
+): RpcModelDiscount | undefined {
+  if (window === undefined) return undefined
+  const baseWeight = creditsRate === undefined ? undefined : rateNumber(creditsRate)
+  return baseWeight === undefined ? window : { ...window, baseWeight }
+}
+
+/** 一条已归一的促销：展示文案 + 数值倍率 + 时段（时段缺失 = 常态价）。 */
+interface PromotionEntry {
+  /** 展示文本（`x0.5` / `免费`），与 {@link formatCreditsRate} 同口径。 */
+  rate: string
+  /** 数值倍率；读不出数字时缺省（此时不能当成「窗口内的价」上抛）。 */
+  weight?: number
+  /** 时段；缺失 = 这条活动没有时间窗口。 */
+  window?: RpcDiscountWindow
+}
+
+/**
+ * 单个活动项的归一：停用 / 无折扣 / `0x` 占位一律返回 undefined。
+ *
+ * 这里**不判时段**：展示侧由调用方用 {@link promotionActiveNow} 过滤，上抛侧
+ * 要的正是「窗口关着时也得知道窗口长什么样」。
+ */
+function readPromotionEntry(promotion: Record<string, unknown>): PromotionEntry | undefined {
+  const discount = promotion.discount
+  if (typeof discount !== 'object' || discount === null) return undefined
+  const detail = discount as Record<string, unknown>
+  const factor = typeof detail.factor === 'number' && Number.isFinite(detail.factor)
+    ? detail.factor
+    : undefined
+  const window = readSchedule(promotion.schedule)
+  const windowed = window !== undefined
+
+  let rate: string | undefined
+  if (factor === 0) {
+    // 免费额度必须限时；无窗口的 `0x` 视为「已结束」占位（保持旧行为）。
+    if (!windowed) return undefined
+    rate = '免费'
+  } else {
+    rate = normalizeDiscountedRate(detail.discountedCredits)
+    // 归一化后仍是 `x0` 说明是无 factor 的 `0x` 占位，同样跳过。
+    if (rate === 'x0') return undefined
+  }
+  if (rate === undefined) return undefined
+
+  // 数值倍率：`factor` 是上游的规范字段（`0.5`），`discountedCredits` 是它的
+  // 文本形态（`0.50x`）。优先 `factor`，免得在小数位写法上做出两套解析。
+  const weight = factor !== undefined && factor >= 0 ? factor : rateNumber(rate)
+  return {
+    rate,
+    ...weight !== undefined ? { weight } : {},
+    ...window !== undefined ? { window } : {},
+  }
+}
+
+/** `x0.5` → `0.5`；`免费` → `0`；其它 → undefined。 */
+function rateNumber(rate: string): number | undefined {
+  if (rate === '免费') return 0
+  const value = Number(rate.replace(/^x/, ''))
+  return Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/**
+ * 倍率**文本**（`BuddyRemoteModel.creditsRate` 的形态：`x0.29` / `免费`）→ 数值。
+ *
+ * 导出给 `buddy-oauth.ts` 用：那个文件把 `/v3/config` 的活动表并进 scoped 端点的
+ * 模型列表时，要从后者的 `creditsRate` 里补出窗口外的原价 —— 而 `creditsRate`
+ * 一直是文本（见该字段的注释），数值化只在需要计分时才做。
+ */
+export function creditsRateWeight(rate: string | undefined): number | undefined {
+  return rate === undefined ? undefined : rateNumber(rate)
+}
+
+/**
+ * `modelPromotions[].schedule` → 宿主用的时段。
+ *
+ * 一个字段都读不出来时返回 undefined（= 这条活动没有时间窗口），而不是返回
+ * 空对象：空对象在 `discountWindow.ts` 里读作「整天生效」，那会把一条常态价
+ * 活动变成 24 小时窗口，反而改变另一侧的行为。
+ */
+function readSchedule(value: unknown): RpcDiscountWindow | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const schedule = value as PromotionSchedule
+  const window: RpcDiscountWindow = {}
+  if (Array.isArray(schedule.daily)) {
+    const daily: { start: string; end: string }[] = []
+    for (const slot of schedule.daily) {
+      if (typeof slot !== 'object' || slot === null) continue
+      const start = slot.start
+      const end = slot.end
+      if (parseHHMM(start) === undefined || parseHHMM(end) === undefined) continue
+      daily.push({ start: String(start).trim(), end: String(end).trim() })
+    }
+    if (daily.length > 0) window.daily = daily
+  }
+  if (typeof schedule.timezone === 'string' && schedule.timezone.trim().length > 0) {
+    window.timezone = schedule.timezone.trim()
+  }
+  const validFrom = epochMs(schedule.validFrom)
+  if (validFrom !== undefined) window.validFrom = validFrom
+  const validUntil = epochMs(schedule.validUntil)
+  if (validUntil !== undefined) window.validUntil = validUntil
+  return Object.keys(window).length === 0 ? undefined : window
+}
+
+/** ISO 字符串或 epoch 毫秒 → epoch 毫秒；读不懂返回 undefined（不是 0）。 */
+function epochMs(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) && value >= 0 ? Math.trunc(value) : undefined
+  if (typeof value !== 'string' || value.trim().length === 0) return undefined
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : undefined
 }
 
 /** 读取促销项的 priority；缺失或非法时按 0（最低）处理。 */
@@ -757,6 +929,8 @@ export function parseModelsFromConfig(body: unknown): BuddyRemoteModel[] {
   // 促销折扣是**独立于 data.models 的全局活动表**，故先解析成 id → 促销价映射，
   // 再在 push 时按 id 关联（见 parsePromotions 的注释）。
   const promotions = parsePromotions(record)
+  // 同一张活动表的**时态**视图：窗口开没开不在这里过滤，宿主按自己的时钟判断。
+  const promotionWindows = parsePromotionWindows(record)
 
   // 收集**全部** agent 引用的 id（含 craft/ask/plan/cli）。
   // 用于给模型打 `agentReferenced` 标记 —— 适配器的 `reconcileWithFallback`
@@ -785,12 +959,14 @@ export function parseModelsFromConfig(body: unknown): BuddyRemoteModel[] {
     const remoteName = typeof meta?.name === 'string' && meta.name.length > 0 ? meta.name : undefined
     const rate = normalizeCreditsRate(meta?.credits)
     const discounted = promotions.get(id)
+    const discount = discountOf(promotionWindows.get(id), rate)
     parsed.push({
       id,
       name: remoteName ?? displayNameForModel(id),
       ...parseModelMeta(meta),
       ...rate !== undefined ? { creditsRate: rate } : {},
       ...discounted !== undefined ? { discountedCreditsRate: discounted } : {},
+      ...discount !== undefined ? { discount } : {},
       ...agentReferencedIds.has(id) ? { agentReferenced: true } : {},
     })
   }
@@ -830,12 +1006,14 @@ export function parseModelsFromConfig(body: unknown): BuddyRemoteModel[] {
     const meta = metaById.get(id)
     const rate = normalizeCreditsRate(meta?.credits)
     const discounted = promotions.get(id)
+    const discount = discountOf(promotionWindows.get(id), rate)
     parsed.push({
       id,
       name: displayNameForModel(id),
       ...parseModelMeta(meta),
       ...rate !== undefined ? { creditsRate: rate } : {},
       ...discounted !== undefined ? { discountedCreditsRate: discounted } : {},
+      ...discount !== undefined ? { discount } : {},
       // 试用横幅本身就是「服务端推荐可用」的信号，与 agent 引用同义。
       agentReferenced: true,
     })

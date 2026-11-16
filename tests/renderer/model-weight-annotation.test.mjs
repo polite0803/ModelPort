@@ -57,6 +57,21 @@ test('费用筛选与路由同口径：聚合走成本分类，未知自成一�
     '没有倍率概念的行要显示「不适用」，不能冒充「未标注」')
 })
 
+test('行上印的是此刻生效的价：有窗口时按本地时钟取值，印的不是采集快照', () => {
+  // 缺陷的形状（2026-11-16）：渠道报的是「夜里 x0 白天 x0.29」，行上却只印采集那一刻
+  // 的那一个数 —— 夜里折扣开着，页面写着白天的价，与真正决定派发的那一侧相反。
+  assert.match(modelList, /const \{ free, weight \} = effectiveCostOf\(|effectiveCostOf\(\{/,
+    '倍率必须经 `effectiveCostOf` 取值，不能直接印 `weightFlags` 的快照')
+  assert.match(modelList, /effectiveCostOf\(\{[\s\S]{0,600}?priceClock\)/,
+    '传到 `effectiveCostOf` 的时刻要来自折扣时钟，否则窗口边界上不会重算')
+  assert.match(modelList, /useDiscountClock\(priceWindows\)/,
+    '页面必须在窗口边界上重绘（固定轮询是拿整页重渲染换一天两次的变化）')
+  assert.match(modelList, /priceWindowOpen: isDiscountWindowActive\(price\.window, priceClock\)/,
+    '徽标要知道窗口此刻开没开，否则「错峰」标签在窗口外也像在生效')
+  assert.match(modelList, /t\('channels\.models\.offPeak'/,
+    '时变价必须有可见的时段说明，不能只换数字')
+})
+
 test('上游已报但被变体标记带走的倍率照样拆出来', () => {
   assert.match(catalogParser, /LABEL_SUFFIX_WITH_VARIANT/,
     'buddy 的 `… · x0.03 SG` 形态必须有显式分支')

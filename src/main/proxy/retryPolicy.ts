@@ -30,9 +30,10 @@ import type { ProviderType } from '../store/types'
  *
  * ## 调用方显式给的预算优先
  *
- * `forwardAutoCompletion` 之类的路径会传 `{ maxRetries: 0 }`（候选链上每个
- * 供应商只打一次，失败就换下一个）。那是一句**指令**，不是一句默认值：本函数
- * 只会**下调**、绝不上调，`0` 永远得到 `0`。
+ * 多家候选链会传 `{ maxRetries: 0 }`（每个供应商只打一次，失败就换下一个）。
+ * 那是一句**指令**，不是一句默认值：本函数只会**下调**、绝不上调，`0` 永远得到 `0`。
+ * 单候选链（硬钉 / 具名模型只有一个账号）没有下一个可换，传的是 `1`：连接层失败
+ * 换一次 DNS 解析就可能自愈，零重试等于把可自愈的故障判成 500。
  */
 
 /** 非账号渠道的重试间隔（毫秒）—— 历史值，保持不变。 */
@@ -49,6 +50,23 @@ export const ACCOUNT_CHANNEL_RETRY_DELAY_MS = 500
 
 /** 账号渠道在宿主层最多**额外**尝试几次。 */
 export const ACCOUNT_CHANNEL_MAX_RETRIES = 1
+
+/**
+ * 订阅套餐端点（`isPlanEntry`）在宿主层最多**额外**尝试几次。
+ *
+ * 为什么与内建端点的默认 3 次不同：一次原地重发要把**整份 prompt 重新买一遍**。
+ * 内建/按量端点有前缀缓存，重发的输入大多按折扣价重读；而订阅套餐端点按套餐
+ * token 抵扣，缓存命中**不降价**（官方抵扣表无缓存折扣行，见
+ * `tests/proxy/context-trim-per-provider-cap.test.ts` 的现场记录）。2026-11-15
+ * 火山 Agent Plan 实测：单笔 prompt 73–91 万 token，`retryCount=3` 意味着一笔
+ * 5xx 最多按全价再买三遍——那一天的 5 小时窗就是这样烧穿的。
+ *
+ * 取 1 而不是 0，理由与 {@link ACCOUNT_CHANNEL_MAX_RETRIES} 同：连接层故障
+ * （`connect ETIMEDOUT`，换一次 DNS 解析就可能自愈）需要一次原地重打，清零会把
+ * 可自愈的故障判成必然失败。换家不受影响——那是 `forwardFirstReachable` 的职责，
+ * 换的是**另一家**，不是同一份 prompt 再买一遍。
+ */
+export const PLAN_ENTRY_MAX_RETRIES = 1
 
 /**
  * 等待侧的**唯一决策点**（与 {@link planForwardRetries} 对偶：一个管重试次数，
@@ -358,16 +376,27 @@ function toCount(value: unknown): number {
  * @param type - provider 类型（只需类型字段，不要求整条记录）。
  * @param configuredRetries - 调用方给的预算：`options.maxRetries ?? config.retryCount`。
  *   **只下调不上调**：显式的 `0` 得到 `0`。
+ * @param options.planEntry - 这个端点是否**订阅套餐**（`shared/aggregateCost.isPlanEntry`
+ *   在调用方判定后传进来）。本函数因此不必 import 整份聚合目录，也仍然是一个
+ *   可脱离 electron 与网络单测的纯函数。只有 `aggregate` 会走到它。
  */
 export function planForwardRetries(
   type: ProviderType,
   configuredRetries: number,
+  options: { planEntry?: boolean } = {},
 ): ForwardRetryProfile {
   const budget = toCount(configuredRetries)
   if (type === 'account') {
     return {
       maxRetries: Math.min(budget, ACCOUNT_CHANNEL_MAX_RETRIES),
       retryDelayMs: ACCOUNT_CHANNEL_RETRY_DELAY_MS,
+    }
+  }
+  if (type === 'aggregate' && options.planEntry === true) {
+    // 订阅端点：原地重发要把整份 prompt 按全价再买一遍（套餐对缓存命中不降价）。
+    return {
+      maxRetries: Math.min(budget, PLAN_ENTRY_MAX_RETRIES),
+      retryDelayMs: DEFAULT_FORWARD_RETRY_DELAY_MS,
     }
   }
   return { maxRetries: budget, retryDelayMs: DEFAULT_FORWARD_RETRY_DELAY_MS }

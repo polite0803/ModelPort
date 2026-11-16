@@ -43,6 +43,7 @@ import {
   type TraeRemoteModel,
 } from './trae.js'
 import { TRAE, type TraeFallbackModel, type TraeProduct } from './trae-product.js'
+import type { RpcModelDiscount } from './types.js'
 import { classifyTraeError, recordsTraeRateLimit, shouldRotateTraeAccount } from './trae-errors.js'
 import { isAccountStoppedMessage, parkStoppedAccount } from './account-stop.js'
 import { normalizeHarnessMessages } from './message-shape.js'
@@ -598,6 +599,36 @@ export function traeDisplayName(model: TraeRemoteModel): string {
 }
 
 /**
+ * 活动折扣 → 宿主用的时段（TRAE 的折扣**没有每日时段**，只有截止时间）。
+ *
+ * 与展示名互补：`traeDisplayName` 的箭头只在活动期内出现，而宿主需要知道
+ * 「活动到几点结束」，否则它只能在下次刷新目录时才发现活动没了 —— 而目录的
+ * 缓存时间远长于活动尾段。上抛 `validUntil` 后，宿主按本地时钟在那一刻自己
+ * 切回原价（`shared/discountWindow.ts`），不需要任何同步。
+ *
+ * `readActivityDiscount` 已经把**已过期**的活动滤掉了，所以这里只会在活动期内
+ * 被调用；`validUntil` 缺失（`subsidy` / `off_peak` 型没有 `end_at`）时**仍然
+ * 上抛**，但没有截止时间的窗口等价于「一直生效」—— 那不是我们想要的，故那种
+ * 情况只上抛两个价、不带任何时间字段：宿主会读成「没有窗口」，继续用采集价，
+ * 与旧行为一致，不会凭空延长一次促销。
+ */
+export function traeDiscountOf(model: TraeRemoteModel): RpcModelDiscount | undefined {
+  const base = model.originalCreditsRate
+  const weight = model.creditsRate
+  if (base === undefined || weight === undefined) return undefined
+  // 只有真的降价才算折扣（`readActivityDiscount` 已保证，这里再挡一次防御性重复）。
+  if (base <= weight) return undefined
+  const validUntil = model.discountEndsAtSec === undefined
+    ? undefined
+    : model.discountEndsAtSec * 1000
+  return {
+    weight,
+    baseWeight: base,
+    ...validUntil === undefined || !Number.isFinite(validUntil) ? {} : { validUntil },
+  }
+}
+
+/**
  * TRAE 模型适配器。
  */
 export class TraeAdapter extends LlmAdapter {
@@ -829,7 +860,12 @@ export class TraeAdapter extends LlmAdapter {
    * 每个 id 的**真实展示名（含倍率）**，再自行回填 `disabled` 状态。
    * 对话框模型选择器读的仍是 `listModels`（已过滤），可见性行为不变。
    */
-  listAllModels(): readonly { id: string; name: string; supportsImage?: boolean }[] {
+  listAllModels(): readonly {
+    id: string
+    name: string
+    supportsImage?: boolean
+    discount?: RpcModelDiscount
+  }[] {
     // 过滤逻辑与 `listModels` 的第一、二层一致（usage / config_switch /
     // is_invisible_to_user 已在解析器里剔除；这里再挡 isHidden 与 is_custom_model），
     // **唯一区别是不套用户黑名单**。
@@ -841,15 +877,19 @@ export class TraeAdapter extends LlmAdapter {
     // 未定义时兜底，于是「有 2 条自定义模型」会被当成有效目录、返回空表，
     // 界面刷新模型清单直接报「空」。可调用结果为空时用兜底表接管。
     const source = remote.length > 0 ? remote : this.staticFallbackModels()
-    return source.map((model) => ({
-      id: model.id,
-      name: traeDisplayName(model),
-      // `multimodal` 是远端 `display_config` 的**权威准入判据**（实测，见
-      // `trae.ts` 的注释）；兜底表没有这份信息 —— 缺失即未知。
-      ...'multimodal' in model && typeof model.multimodal === 'boolean'
-        ? { supportsImage: model.multimodal }
-        : {},
-    }))
+    return source.map((model) => {
+      const discount = traeDiscountOf(model)
+      return {
+        id: model.id,
+        name: traeDisplayName(model),
+        // `multimodal` 是远端 `display_config` 的**权威准入判据**（实测，见
+        // `trae.ts` 的注释）；兜底表没有这份信息 —— 缺失即未知。
+        ...'multimodal' in model && typeof model.multimodal === 'boolean'
+          ? { supportsImage: model.multimodal }
+          : {},
+        ...discount === undefined ? {} : { discount },
+      }
+    })
   }
 
   async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {

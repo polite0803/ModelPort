@@ -9,7 +9,7 @@ import { IpcChannels } from '../ipc/channels'
 import type { RendererSink } from '../ipc/logBroadcast'
 import { homedir } from 'os'
 import { join } from 'path'
-import { copyFileSync, existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'fs'
+import { copyFileSync, existsSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'fs'
 import { randomBytes, randomUUID } from 'crypto'
 import { isDeepStrictEqual } from 'util'
 import {
@@ -153,6 +153,40 @@ const STRUCTURAL_KEYS = [
 ] as const
 type StructuralKey = (typeof STRUCTURAL_KEYS)[number]
 
+/**
+ * 账号里纯记账的字段：每笔成功请求都写它们（`chat.ts` / `completions.ts` 的
+ * `lastUsed` + `requestCount` + `nextDailyUsage`），但它们不改池成员。
+ *
+ * 把它们算进「结构变了」有两个后果，2026-11-15 现网都实测到了：
+ * ① 修订号每请求 +1，而它折在 `autoRouter.preview` 的缓存键里 ⇒ 15s 短缓存永远
+ *    命中不了（`preview` 那段注释写的「每请求的日志/统计/额度写不 bump」被这条
+ *    写路径自己违反）；
+ * ② 每请求推一次 `pool-changed` ⇒ 路由页一次刷新发两条全池扫描，实测单条
+ *    6.6 / 10.9 / 14.1s，12 分钟 56 条把主线程占满 ⇒ 回环转发饿死成
+ *    `read ECONNRESET`，半小时 16 笔 502 `internal_relay_failed`。
+ *
+ * `status` / `credentials` / `dailyLimit` 不在这里：启停与凭据真的改池，必须 bump。
+ */
+const ACCOUNT_BOOKKEEPING_FIELDS = [
+  'lastUsed',
+  'lastStatusCheck',
+  'requestCount',
+  'todayUsed',
+  'todayUsedDay',
+  'updatedAt',
+] as const
+
+/** 结构比较用的投影：只有 `accounts` 需要摘掉记账字段，其余键原样比。 */
+function structuralProjection(top: string, value: unknown): unknown {
+  if (top !== 'accounts' || !Array.isArray(value)) return value
+  return value.map((entry) => {
+    if (entry === null || typeof entry !== 'object') return entry
+    const copy: Record<string, unknown> = { ...(entry as Record<string, unknown>) }
+    for (const field of ACCOUNT_BOOKKEEPING_FIELDS) delete copy[field]
+    return copy
+  })
+}
+
 class StoreManager {
   private store: StoreType | null = null
   private structuralRevision = 0
@@ -173,6 +207,64 @@ class StoreManager {
   }
 
   /**
+   * conf 14 的 `get store()` 每次取值都整份读盘 + AES 解密 + JSON.parse，自己没有缓存。
+   * data.json 3.1MB 时单次约 9ms，而请求路径每分钟取值数千次：2026-11-15 现网 12s CPU
+   * 采样里 `_deserialize` 41.2% + `readFileSync` 39.6% + `readFileUtf8` 7.7% —— 89% 的
+   * 一个整核全花在这上面。主线程被占满 ⇒ 回环转发饿死成 `read ECONNRESET`（半小时
+   * 12–16 笔 502 `internal_relay_failed`），连 `/health` 都要 5–17s。
+   *
+   * 按文件 (mtimeMs, size) 缓存解析结果：文件没变就零读盘。可见性与 conf 原本「每次
+   * 重读」等价 —— 外部进程改文件同样被 mtime/size 兜住；本进程的写一律经 `_write`，
+   * 在那里作废缓存。
+   *
+   * 缓存交出去的是同一个对象引用，而 conf 原本每次给新对象。已逐点审过全部就地改写点
+   * （providers / accounts / userModelOverrides 的 push、splice、下标赋值），每一处都
+   * 紧跟 `set` 写回；带凭据的读接口一律 spread 成新对象，不会把明文写进缓存。
+   */
+  private installStoreReadCache(): void {
+    const store = this.store
+    if (store === null) return
+    const descriptor = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(store), 'store')
+    const originalGet = descriptor?.get
+    const originalSet = descriptor?.set
+    if (originalGet === undefined || originalSet === undefined) return
+
+    const filePath: string = store.path
+    let cached: { mtimeMs: number; size: number; value: unknown } | null = null
+
+    Object.defineProperty(store, 'store', {
+      configurable: true,
+      // conf 自己的 `set()` / `delete()` 末尾是 `this.store = store`，走的是原型上的
+      // setter（_ensureDirectory + _validate + _write + change 事件）。只覆盖 getter
+      // 会把它遮成「只有 getter」，第一次写就 TypeError。
+      set: (value: unknown) => originalSet.call(store, value),
+      get: () => {
+        let mtimeMs: number
+        let size: number
+        try {
+          const stamp = statSync(filePath)
+          mtimeMs = stamp.mtimeMs
+          size = stamp.size
+        } catch {
+          // 文件暂时不在（重建 / 恢复中途）：退回 conf 原本的行为，且不缓存。
+          cached = null
+          return originalGet.call(store)
+        }
+        if (cached !== null && cached.mtimeMs === mtimeMs && cached.size === size) return cached.value
+        const value = originalGet.call(store)
+        cached = { mtimeMs, size, value }
+        return value
+      },
+    })
+
+    const originalWrite = store._write.bind(store)
+    store._write = (value: unknown): void => {
+      cached = null
+      originalWrite(value)
+    }
+  }
+
+  /**
    * 结构写拦截（批 A/B）。**刻意不用 conf 的 `onDidChange`**：它的回调 getter 每次都
    * `get store()` —— 整文件读盘 + JSON.parse，加密时还要 pbkdf2(10000 轮) + AES 解密；
    * 而且**任何键**的一次 `set` 都会触发全部订阅。实测把 6 个结构键订阅挂上去，每请求的
@@ -190,8 +282,13 @@ class StoreManager {
     if (store === null) return
 
     // 一次性读盘播种快照：让安装后第一次 no-op 写也不误 bump（初始化期的一次读，非热路径）。
+    // 快照存「投影的深拷贝」而不是原值引用：读缓存让 `get` 交出同一个对象，而写路径是
+    // 就地改（`accounts[index] = …`）后整份 set —— 存引用的话快照会跟着一起变，真的启停
+    // 也会被判成「没变」，事件与修订号双双失效。
     const seed = store.store as Record<string, unknown>
-    for (const key of STRUCTURAL_KEYS) this.structuralSnapshot.set(key, seed[key])
+    for (const key of STRUCTURAL_KEYS) {
+      this.structuralSnapshot.set(key, structuredClone(structuralProjection(key, seed[key])))
+    }
 
     const isStructural = (key: string): key is StructuralKey =>
       (STRUCTURAL_KEYS as readonly string[]).includes(key)
@@ -212,8 +309,9 @@ class StoreManager {
       if (!isStructural(top)) return
       if (dot === -1) {
         // 整对象写：值没真变就不 bump（与 conf watcher 的深比较同语义），并刷新快照。
-        if (isDeepStrictEqual(this.structuralSnapshot.get(top), value)) return
-        this.structuralSnapshot.set(top, value)
+        const next = structuralProjection(top, value)
+        if (isDeepStrictEqual(this.structuralSnapshot.get(top), next)) return
+        this.structuralSnapshot.set(top, structuredClone(next))
       }
       // 点路径写的是片段，无法与整对象快照深比较；结构键今天只整对象写，保守 bump 不动快照。
       bump(top)
@@ -283,6 +381,7 @@ class StoreManager {
         defaults: this.getDefaultData(),
         encryptionKey: this.encryptionKey,
       })
+      this.installStoreReadCache()
       this.installStructuralWriteHook()
       this.orphanSystemPrompts(storagePath)
       this.dropRetiredTopLevelKeys()
@@ -327,6 +426,7 @@ class StoreManager {
           defaults: this.getDefaultData(),
           encryptionKey: this.encryptionKey,
         })
+        this.installStoreReadCache()
         this.installStructuralWriteHook()
         await this.initializeAppLogManager(storagePath)
         await this.initializeRequestLogManager(storagePath)

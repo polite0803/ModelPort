@@ -216,6 +216,7 @@ import type {
   RpcPermanentLockResponse,
   RpcModelListRequest,
   RpcModelListResponse,
+  RpcModelDiscount,
   RpcModelSetDisabledRequest,
   RpcModelSetDisabledResponse,
   RpcModelSetAllDisabledRequest,
@@ -1249,7 +1250,20 @@ export function registerChannelPackRpc(
  * 只声明用到的方法（结构化类型），避免让本模块依赖五个具体适配器类。
  */
 export interface ModelCatalogSource {
-  listAllModels(): readonly { id: string; name: string; isFree?: boolean; supportsImage?: boolean }[]
+  listAllModels(): readonly {
+    id: string
+    name: string
+    isFree?: boolean
+    supportsImage?: boolean
+    /**
+     * 定时折扣（错峰 / 限时）。缺失 = 这个适配器没有会随时段变的价。
+     *
+     * 见 `RpcModelDiscount`：宿主据它按本地时钟推算此刻的生效价，因此适配器
+     * **不必**再把「窗口内才显示折后价」当成本地判断 —— 窗口上抛后，两侧算的是
+     * 同一件事。
+     */
+    discount?: RpcModelDiscount
+  }[]
   /**
    * 这份目录是从哪来的；**缺省 = 上游现取**。
    *
@@ -3662,7 +3676,8 @@ function registerChannelPackEndpoints(
           // 只对已过期/临期（不足 1 小时）的号刷一次；失败不打断查询，
           // 原因随后由 fetchBalanceDetailed 原样透出。
           for (const entry of accounts) {
-            if (entry.refreshable === false) continue
+            // ⚠️ 判据读**凭据**，不读池里的 `refreshable`：那个布尔是凭据材料的镜像，
+            // 被误写成 false 时若在这里也跳过，余额读数就会一直是「未登录」而无人自愈。
             try {
               const resolved = await ctx.credentials.resolve(credentialRef(entry.credentialRef))
               const credential = resolved === undefined ? undefined : parseLobsteraiCredential(resolved.value)
@@ -4210,7 +4225,16 @@ function registerChannelPackEndpoints(
         // 对话框模型选择器读的仍是过滤后的 `listModels`，可见性行为完全不变。
         const catalogSource = modelAdapters?.[req.provider]
         const all = catalogSource?.listAllModels()
-        let catalog: Array<{ id: string; name: string; isFree?: boolean; supportsImage?: boolean }>
+        // `discount` 必须在这一路里原样透传：它是宿主推算「此刻生效价」的唯一
+        // 依据（见 `RpcModelDiscount`）。丢掉它，宿主就只剩展示名里那个采集时刻
+        // 的价格，跨窗口边界的请求会按错的一侧计分。
+        let catalog: Array<{
+          id: string
+          name: string
+          isFree?: boolean
+          supportsImage?: boolean
+          discount?: RpcModelDiscount
+        }>
         if (all !== undefined) {
           catalog = [...all]
           // 全量目录里若仍有黑名单命中却缺失者，一并补上（保底，正常不会发生）。
@@ -4263,6 +4287,8 @@ function registerChannelPackEndpoints(
             // ⚠️ 模态同理**缺失就不写**：适配器没报 ≠ 确认纯文本，客户端据此显示
             // 「未知」而不是编造一个类型。
             ...model.supportsImage === undefined ? {} : { supportsImage: model.supportsImage },
+            // 定时折扣：缺失就不写（= 这个渠道没有会随时段变的价），同样不编造。
+            ...model.discount === undefined ? {} : { discount: model.discount },
           })),
         }
         return { ok: true, value }

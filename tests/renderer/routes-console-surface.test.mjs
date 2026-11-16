@@ -64,14 +64,13 @@ test('搜索作用在满额结果上，按三列匹配', () => {
   assert.match(page, /t\('routes\.noMatch'\)/, '搜不到要有自己的说法，不能显示成「这条路由没有模型」')
 })
 
-test('切换与撤钉走管理面：软钉与落盘都走 routes:switch，页面从不自己写配置', () => {
+test('切换与撤钉走管理面：固定走 routes:switch，页面从不自己写配置', () => {
   assert.match(page, /await api\.switchModel\(\{[\s\S]{0,320}?source: 'console'/,
     '固定必须是 routes:switch，不是页面自己拼一份配置')
   assert.match(page, /providerId: model\.providerId/, '同名模型可能来自不同供应商，必须带上 providerId')
-  // 「长期」是同一个通道的 persist 档：落盘发生在主进程（updateRoute + 广播），
-  // 页面只表达意图。页面要是自己写 routes，就又长出第二套选路。
-  assert.match(page, /action === 'persist' \? \{ persist: true \} : \{\}/,
-    '长期固定 = 同一次选择 + persist，不是另一条通道')
+  // 固定是切换的唯一语义（裁定 2026-11-15）：落盘发生在主进程（updateRoute + 广播），
+  // 页面只表达意图，没有软钉/长期第二档。页面要是自己写 routes，就又长出第二套选路。
+  assert.doesNotMatch(page, /persist/, 'persist 档已退役：切换即固定，页面不带第二种语义')
   assert.doesNotMatch(page, /routes\.update\(|storeManager|saveAppConfig/,
     '页面不碰路由配置：写盘只有主进程那一处')
   assert.match(page, /await api\.unpin\(detail\.route\)/,
@@ -80,12 +79,15 @@ test('切换与撤钉走管理面：软钉与落盘都走 routes:switch，页面
     '选路器给了原因就显示原因，别吞掉')
 })
 
-test('软钉与持久钉在列表里长得不一样', () => {
-  assert.match(page, /detail\.pin\.until === 0/, 'until 0 = 持久偏好，其余是 30 分钟软钉')
-  assert.match(page, /const persistentPin = /)
-  assert.match(page, /model\.displayName === persistentPin[\s\S]{0,120}?routes\.persistentBadge/,
-    '点了「长期」之后 badge 必须变成「长期固定」，否则用户以为没生效')
-  assert.match(page, /model\.displayName !== persistentPin && \(/, '已经长期固定那一行不再显示「长期」按钮')
+test('钉只有一种：持久 badge，没有倒计时、没有长期档', () => {
+  assert.match(page, /detail\.pin\.stale[\s\S]{0,160}?routes\.pinStale[\s\S]{0,160}?routes\.pinPersistent/,
+    '头部 badge 只分两态：已固定（持久）/ 钉已不在池内；没有倒计时态')
+  assert.match(page, /model\.pinned && \([\s\S]{0,120}?routes\.pinnedBadge/,
+    '被钉的行要有「已固定」badge，否则用户以为没生效')
+  assert.match(page, /model\.pinned \? t\('routes\.pinnedBadge'\) : t\('routes\.pin'\)/,
+    '被钉行的按钮读作「已固定」，再点是替换，不是第二档')
+  assert.doesNotMatch(page, /pinUntil|persistentPin|setTick/,
+    '倒计时与长期档已退役：钉住即持久（裁定 2026-11-15）')
 })
 
 test('星级推荐走 routes:rate：纯标注控件，星数共用常量，排序只改显示顺序', () => {
@@ -99,9 +101,12 @@ test('星级推荐走 routes:rate：纯标注控件，星数共用常量，排�
   assert.match(page, /t\('routes\.recommendedHint', \{ n: current \}\)/, '系统推荐态要说明依据与可覆盖')
   assert.match(page, /stars === 0 \? undefined : stars/, '清除 = 行上不再带 rating（乐观更新）')
   assert.match(page, /isClear \? 0 : star/, '再点同一颗手动星清除；系统推荐态点同星是确认覆盖，不是清除')
-  // 「星级优先」只改显示顺序：真实选路仍按快照原序；排序读显示值（手动优先、回落系统推荐）。
-  assert.match(page, /\(b\.rating \?\? b\.recommendedStars \?\? 0\) - \(a\.rating \?\? a\.recommendedStars \?\? 0\)/,
+  // 「星级优先」只改显示顺序：真实选路仍按快照原序；排序读显示值（手动优先、回落系统推荐），
+  // 并且**先分「能不能派」两段**再比星（推荐队列，2026-11-16）。
+  assert.match(page, /const rank = \(model: RouteMenuModel\): number => model\.rating \?\? model\.recommendedStars \?\? 0/,
     '同星保持快照原序（稳定排序）')
+  assert.match(page, /const aBlocked = a\.blocked === undefined \? 0 : 1[\s\S]{0,240}?if \(aBlocked !== bBlocked\) return aBlocked - bBlocked[\s\S]{0,80}?return rank\(b\) - rank\(a\)/,
+    '队列先分「这一轮能派 / 派不出去」两段，段内按星级降序')
   assert.match(page, /sortByRating \? t\('routes\.sortByRating'\) : t\('routes\.sortByRouting'\)/)
   assert.match(page, /t\('routes\.sortHint'\)/, '排序按钮要说明「只改显示、不改选路」')
   // 写失败要回读真相，不能让乐观更新的星星停在屏幕上骗人。
@@ -144,6 +149,36 @@ test('四种缺席各说一句，不合并成一个空页面', () => {
   assert.match(page, /t\('routes\.noModels'\)/, '这条路由当前没有可切换模型')
 })
 
+test('额度「不知道」与「复位时刻算不出来」都要说出来，不许留白', () => {
+  // 留白会被读成「额度充裕」，而这两种情形恰恰相反 —— 一个说「没有数字」，
+  // 一个说「数字有、但什么时候松口我们推不出来」。
+  // 断言按「三分支在同一处」写，不钉注释与换行：中间可以有一段解释为什么不能沉默。
+  const resetBranch = page.slice(page.indexOf('{row.resetAt !== undefined ? ('))
+  const elseAt = resetBranch.indexOf(') : (')
+  assert.ok(elseAt > 0, 'resetAt 必须有 else 分支：缺席时不能什么都不画')
+  assert.match(
+    resetBranch.slice(0, elseAt),
+    /routes\.quotaResetApprox[\s\S]{0,200}?routes\.quotaResetExact/,
+    '有复位时刻时区分「约」与「确定」',
+  )
+  assert.match(
+    resetBranch.slice(elseAt, elseAt + 400),
+    /<>\{' · '\}\{t\('routes\.quotaResetUnknown'\)\}<\/>/,
+    '算不出复位时刻的行必须写「未知」，不能静默省略 —— 省略等于宣称它不会复位',
+  )
+  assert.match(
+    page,
+    /const undocumentedCount = useMemo\([\s\S]{0,300}?model\.quota === undefined \|\| model\.quota\.band === 'undocumented'/,
+    '「没有任何额度数字」的模型要单独计数',
+  )
+  assert.match(page, /t\('routes\.quotaUndocumented', \{ n: undocumentedCount \}\)/,
+    '而且要在表头说一次（逐行说会把列表变成噪声）')
+  assert.match(page, /model\.blocked === undefined\s*\n\s*&& \(model\.quota === undefined/,
+    '被挡下的行不参与这个计数：它已经由 blockLabel 说过原因了，再说一句会自相矛盾')
+  assert.match(page, /t\('routes\.quotaMoreWindows', \{ n: model\.quota\.windows - model\.quota\.rows\.length \}\)/,
+    '折叠掉的窗口要报数，不能只显示前三条就假装那是全部')
+})
+
 test('两种语言写全，插值槽一致', () => {
   const expected = {
     title: '',
@@ -154,17 +189,16 @@ test('两种语言写全，插值槽一致', () => {
     current: '{{model}}',
     currentWithLatency: '{{model}},{{ms}}',
     pinPersistent: '{{model}}',
-    pinUntil: '{{minutes}},{{model}}',
+    pinStale: '{{model}}',
+    listPinnedStale: '{{model}}',
+    pinnedBadge: '',
+    pinHint: '',
     showing: '{{shown}},{{total}}',
     circuit: '{{minutes}}',
     accountCount: '{{n}}',
     firstToken: '{{ms}}',
     switched: '{{model}}',
     resetDone: '{{route}}',
-    persist: '',
-    persistHint: '',
-    persistDone: '{{model}}',
-    persistentBadge: '',
     ratingGroup: '{{model}}',
     rateAria: '{{n}}',
     rateClearAria: '{{model}},{{n}}',
@@ -174,7 +208,45 @@ test('两种语言写全，插值槽一致', () => {
     sortByRouting: '',
     sortHint: '',
     ratedCount: '{{n}}',
-    recommendedHint: '{{n}}'
+    recommendedHint: '{{n}}',
+    blockedBadge: '',
+    blockedUntilApprox: '{{when}}',
+    blockedUntil: '{{when}}',
+    blockedHint: '',
+    queueHint: '',
+    queueBlockedCount: '{{n}}',
+    pinBlockedHint: '',
+    delay_minutes: '{{n}}',
+    delay_hours: '{{n}}',
+    delay_days: '{{n}}',
+    quotaWindowRow: '{{limit}},{{unit}},{{used}},{{window}}',
+    quotaResetApprox: '{{when}}',
+    quotaResetExact: '{{when}}',
+    quotaResetUnknown: '',
+    quotaMoreWindows: '{{n}}',
+    quotaUndocumented: '{{n}}',
+    quotaUnit_requests: '',
+    quotaUnit_tokens: '',
+    quotaSource_documented: '',
+    quotaSource_learned: '',
+    quotaSource_declared: '',
+    window_minute: '',
+    window_day: '',
+    window_fiveHour: '',
+    window_week: '',
+    window_month: '',
+    expiringSoon: '{{model}},{{remaining}},{{unit}},{{when}},{{window}}',
+    // 十条原因各一句：界面按 `routes.block_<reason>` 拼键，少一条就露出原键。
+    'block_no-credit': '',
+    'block_quota-exhausted': '',
+    'block_declared-exhausted': '',
+    'block_monthly_exhausted': '',
+    'block_rpd_exhausted': '',
+    'block_tpd_exhausted': '',
+    'block_rpm_exhausted': '',
+    'block_tpm_exhausted': '',
+    'block_daily_limit': '',
+    'block_rate_limited': ''
   }
   for (const { name, json } of locales) {
     assert.equal(typeof json.nav.routes, 'string', `${name} 缺 nav.routes`)
@@ -188,6 +260,10 @@ test('两种语言写全，插值槽一致', () => {
     // 而这里没有单复数变体，缺键会落到原键上显示成「1 models」。
     for (const key of ['listModelCount', 'accountCount', 'showing', 'ratedCount']) {
       assert.doesNotMatch(json.routes[key], /{{\s*count\s*}}/, `${name} 的 routes.${key} 用了 count 槽`)
+    }
+    // 退役键不许残留：留着它们，旧文案就还能被拼出来（裁定 2026-11-15）。
+    for (const key of ['pinUntil', 'persist', 'persistHint', 'persistDone', 'persistentBadge']) {
+      assert.equal(json.routes?.[key], undefined, `${name} 还留着退役键 routes.${key}`)
     }
   }
 })

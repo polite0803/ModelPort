@@ -29,6 +29,7 @@ import {
   readUpstreamErrorData,
   summarizeUpstreamErrorBody,
 } from './upstreamErrorBody'
+import { describeTransportError } from './errorMapping'
 
 /** 一个可尝试的目标：与 AutoCandidate 同形，供裸名跨家链复用同一个切换循环。 */
 export interface ChainCandidate {
@@ -114,6 +115,7 @@ import { stripUnsupportedForBuiltin } from './parameterPolicy'
 import { ensureAnthropicOutputCap, outputCapFallbackOf } from './utils/outputCap.ts'
 import { opencodeAffinityHeaders } from './utils/opencodeAffinity.ts'
 import { createContextManagementService, trimAppliesToProvider } from './services/contextManagementService'
+import { declaredContextWindowOf } from './modelTrimWindow'
 import { accountChannelManager } from '../providers/accountChannels/manager'
 import {
   formatToolCallPairing,
@@ -123,6 +125,7 @@ import {
 } from '../channelPack/toolCallValidation'
 import { getAggregateEntry } from '../providers/aggregate/registry'
 import { resolveAggregateEndpoint, aggregateEndpointMissingMessage } from '../providers/aggregate/endpoint'
+import { isPlanEntry } from '../../shared/aggregateCost'
 import { applyAggregateDropParams } from './aggregateParams'
 import {
   chatToResponsesRequest,
@@ -156,6 +159,7 @@ import { conversationKey } from './autoRouting.ts'
 import {
   AUTO_WALL_CLOCK_BUDGET_MS,
   FIRST_BLOCK_TIMEOUT_CODE,
+  SILENT_CHANNEL_SKIP_CODE,
   createIdleWatchdog,
   describeAttemptFailure,
   firstStreamEvent,
@@ -355,7 +359,13 @@ export class RequestForwarder {
     const isProbe = options.probe === true
     // 重试预算按 provider 分类：账号渠道的排队/额度/换号退避都在渠道 Worker 里
     // 自己跑过了，宿主再叠一层 5s×3 只是把等待累加（详见 `retryPolicy.ts`）。
-    const retryProfile = planForwardRetries(provider.type, options.maxRetries ?? config.retryCount)
+    // 订阅套餐端点再收一档：它的缓存命中不降价，一次原地重发就是把整份 prompt
+    // 按全价再买一遍（2026-11-15 火山 Agent Plan 单笔 73–91 万 token，实测）。
+    const retryProfile = planForwardRetries(
+      provider.type,
+      options.maxRetries ?? config.retryCount,
+      { planEntry: provider.type === 'aggregate' && isPlanEntry(provider.aggregateId ?? provider.id) }
+    )
     const maxRetries = retryProfile.maxRetries
 
     // stream_options 等客户端默认参数对内建供应商无效，发送前丢弃而不是报 400
@@ -529,7 +539,16 @@ export class RequestForwarder {
           // 摘要压缩那条策略已于 2026-11-03 退役（它会另起一次模型调用、再把产物
           // 包成 `[Conversation Summary]` 塞进历史 —— 那是网关替用户写内容）。
           // 留下的 slidingWindow / tokenLimit 只做删除，不做改写。
-          const contextService = createContextManagementService(config.contextManagement || {})
+          //
+          // 预算按**这一跳真正服务的那个模型**自己的窗口算：路由可以指向任意模型，
+          // 同一家供应商也同时挂 128K 与 1M 两档，任何按供应商或全局写的数都会在
+          // 某个模型上错。标注缺席时（`undefined`）才回落到配置的档位。
+          const declaredContextWindow = declaredContextWindowOf(provider, actualModel)
+          const contextService = createContextManagementService(
+            config.contextManagement || {},
+            provider.id,
+            declaredContextWindow
+          )
 
           const originalCount = modifiedRequest.messages.length
           const contextMessages: ContextChatMessage[] = modifiedRequest.messages.map(msg => ({
@@ -541,7 +560,10 @@ export class RequestForwarder {
 
           const processResult = await contextService.process(contextMessages)
 
-          if (processResult.finalCount !== originalCount) {
+          // 采纳判据是「字节变了」，不是「条数变了」。截断保持条数不变而改写内容
+          // —— 用条数判断会把截断结果整份丢掉，超预算的原文照发（2026-11-16：
+          // 一笔 125,024 token 的请求就这样打在 65,536 的上限上）。
+          if (processResult.changed) {
             console.log(
               `[Forwarder] Context management applied: ${originalCount} -> ${processResult.finalCount} messages`
             )
@@ -549,7 +571,8 @@ export class RequestForwarder {
             processResult.strategyResults.forEach(result => {
               if (result.trimmed) {
                 console.log(
-                  `[Forwarder] Strategy ${result.strategyName}: ${result.originalCount} -> ${result.processedCount} messages`
+                  `[Forwarder] Strategy ${result.strategyName}: ${result.originalCount} -> ` +
+                    `${result.processedCount} messages${result.rewrote === true ? ' (content truncated)' : ''}`
                 )
               }
             })
@@ -608,7 +631,7 @@ export class RequestForwarder {
       try {
         result = await this.doForward(modifiedRequest, account, provider, actualModel, context)
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'Unknown error'
+        const message = describeTransportError(error)
         lastError = message
         if (!isProbe) {
           accountRuntime.recordAttemptOutcome(account.id, actualModel, {
@@ -877,6 +900,36 @@ export class RequestForwarder {
         break
       }
 
+      // 静默通道快速失败（与具名路径 chat.ts 同源判据）：连续首块超时且近期无成功
+      // 的 (账号, 模型) 已被运行时判为「现在不会开口」。auto/钉泳道原先不读这个
+      // 窗口，钉在死通道上时每笔请求都再陪它等满首块切片（现网 2026-11-15：
+      // loomy 10 笔 504 循环 25 分钟）。不派发、不记账号故障（窗口本身就是惩罚），
+      // 换下一家；只剩这一家时收口成 503 + Retry-After，钉保留。
+      const silent = accountRuntime.silentChannel(candidate.account.id, candidate.actualModel)
+      if (silent !== undefined) {
+        const retryAfterSeconds = Math.max(1, Math.ceil(silent.retryAfterMs / 1000))
+        const message = `渠道连续 ${silent.timeouts} 次在首块前超时、近期没有任何成功，本轮不再空等（${retryAfterSeconds}s 后再试）`
+        const silentResult: ForwardResult = {
+          success: false,
+          status: 503,
+          error: message,
+          errorDetails: { message, code: SILENT_CHANNEL_SKIP_CODE },
+          retryAfter: String(retryAfterSeconds),
+          latency: 0,
+          attempts: [],
+        }
+        attempts += 1
+        last = { result: silentResult, candidate, attempts }
+        failures.push(describeAttemptFailure({
+          candidate: candidate.displayName,
+          error: message,
+          status: 503,
+          providerType: candidate.provider.type,
+          budgetElapsedMs,
+        }))
+        continue
+      }
+
       const attemptDeadlineMs = planAttemptDeadline({
         completeMs: requestDeadlines().completeMs,
         elapsedMs: budgetElapsedMs,
@@ -897,13 +950,23 @@ export class RequestForwarder {
         actualModel: candidate.actualModel,
       }
 
+      // 链上只有一家时（硬钉、或具名模型只有一个账号），`maxRetries: 0` 的理由
+      // ——「失败就换下一个」——不成立：没有下一个。而连接层失败（上游一个字节都没
+      // 收到，这次 DNS 挑中的 IP 连不上）换一次解析就可能自愈，原地重打一次是纯赚。
+      // 2026-11-15 现网：火山 16 笔里 7 笔 500，真因是 `connect ETIMEDOUT
+      // 180.184.47.154:443`，而同一域名另外两个 IP 38ms 就通 —— 一次重试就能绕过。
+      // 多家链保持 0：换家比原地重打便宜，墙钟预算也是按候选数算的。
+      // 放宽只到「一次」，且 429/400/408/504 仍由 `isSameTargetRetryableStatus`
+      // 在重试循环里就地拦掉，不会因为这条被原地重打。
+      const soloRetry =
+        candidates.length === 1 && remainingBudgetMs >= MIN_REMAINING_FOR_NEXT_ATTEMPT_MS ? 1 : 0
       const result = await this.forwardChatCompletion(
         attemptRequest,
         candidate.account,
         candidate.provider,
         candidate.actualModel,
         attemptContext,
-        { maxRetries: 0 }
+        { maxRetries: soloRetry }
       )
 
       attemptTrace.push(...(result.attempts ?? []))
@@ -1050,6 +1113,9 @@ export class RequestForwarder {
     // AIMD 并发槽。欠费/未订阅不在范围内 —— 那些不会在十几秒内自己变好。
     if (last !== null
       && recovery.roundsLeft > 0
+      // 静默收口不进恢复轮：窗口是 60s–5min，等 5s 再派只会再撞同一个窗口，
+      // 白付一次等待还把「毫秒级拒答」拖成秒级。
+      && last.result.errorDetails?.code !== SILENT_CHANNEL_SKIP_CODE
       && isRecoverableChainExhaustion({
         status: last.result.status,
         error: last.result.error,
@@ -1541,14 +1607,14 @@ export class RequestForwarder {
         return {
           success: false,
           status: error.response?.status,
-          error: error.message,
+          error: describeTransportError(error),
           latency,
         }
       }
 
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: describeTransportError(error),
         latency,
       }
     }
@@ -1641,13 +1707,13 @@ export class RequestForwarder {
         return {
           success: false,
           status: error.response?.status,
-          error: error.message,
+          error: describeTransportError(error),
           latency,
         }
       }
       return {
         success: false,
-        error: error instanceof Error ? error.message : 'Unknown error',
+        error: describeTransportError(error),
         latency,
       }
     }

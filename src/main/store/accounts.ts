@@ -7,6 +7,7 @@ import { storeManager } from './store'
 import { Account, AccountStatus, ValidationResult } from './types'
 import { validateCredentials } from './validator'
 import { dailyUsageOf, nextDailyUsage } from '../../shared/dailyUsage.ts'
+import { normalizeDeclaredQuota, type DeclaredQuotaLimit } from '../../shared/declaredQuota.ts'
 
 /**
  * Account Manager class
@@ -58,6 +59,11 @@ export class AccountManager {
     email?: string
     credentials: Record<string, string>
     dailyLimit?: number
+    /**
+     * 用户声明的额度窗口（第五层证据）。走 `normalizeDeclaredQuota` 归一：
+     * 非法条目丢掉、同 `(窗口, 单位)` 取更小的、最多 4 条；空结果不落键。
+     */
+    declaredQuota?: DeclaredQuotaLimit[]
   }): Account {
     // Ensure provider exists before creating account
     storeManager.ensureProviderExists(data.providerId)
@@ -68,6 +74,7 @@ export class AccountManager {
       throw new Error(`Provider not found: ${data.providerId}`)
     }
     
+    const declaredQuota = normalizeDeclaredQuota(data.declaredQuota)
     const now = Date.now()
     const account: Account = {
       id: storeManager.generateId(),
@@ -81,6 +88,7 @@ export class AccountManager {
       requestCount: 0,
       todayUsed: 0,
       dailyLimit: data.dailyLimit,
+      ...(declaredQuota.length === 0 ? {} : { declaredQuota }),
       lastStatusCheck: now,
       lastUsed: now,
     }
@@ -111,7 +119,18 @@ export class AccountManager {
       throw new Error(`Account not found: ${id}`)
     }
     
-    const updated = storeManager.updateAccount(id, updates)
+    // 声明额度是结构化数据：渲染层/旧备份给什么都可能，边界上归一一次。
+    // 空数组 = 用户清空了全部声明 → 落成 `undefined`（不留下一个空键让下游多判一次）。
+    const normalized: Partial<Omit<Account, 'id' | 'createdAt'>> =
+      updates.declaredQuota === undefined
+        ? updates
+        : (() => {
+            const declaredQuota = normalizeDeclaredQuota(updates.declaredQuota)
+            return declaredQuota.length === 0
+              ? { ...updates, declaredQuota: undefined }
+              : { ...updates, declaredQuota }
+          })()
+    const updated = storeManager.updateAccount(id, normalized)
     
     if (updated) {
       storeManager.addLog('info', `Updated account: ${existing.name}`, {

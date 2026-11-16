@@ -37,6 +37,7 @@ import type {
   AggregateQuotaExhaustions,
 } from '../../shared/aggregateQuotaExhaustion.ts'
 import type { RepetitionGuardSettings } from '../../shared/streamRepetition.ts'
+import type { DeclaredQuotaLimit } from '../../shared/declaredQuota.ts'
 
 /**
  * 实时额度快照的落盘键。类型只在 `shared/aggregateCredit.ts` 声明一次，这里同步
@@ -194,6 +195,14 @@ export interface Account {
   todayUsed?: number
   /** `todayUsed` 属于哪个本地日期（`YYYY-MM-DD`）；与今天不同即读作 0 */
   todayUsedDay?: string
+  /**
+   * 用户自己声明的额度窗口（`shared/declaredQuota.ts`，第五层额度证据）。
+   *
+   * 与 `shared/types.ts::Account` 的同名字段是同一件事：官方不公布、而用户知道的
+   * 5 小时 / 每周 / 自然月窗口写在这里，选路阶段按它挡发车（`declared-exhausted`）。
+   * 缺省 = 没有任何声明；数组为空归一时不落键。
+   */
+  declaredQuota?: DeclaredQuotaLimit[]
 }
 
 /**
@@ -433,6 +442,8 @@ export interface SlidingWindowConfig {
   enabled: boolean
   /** Maximum number of messages to keep */
   maxMessages: number
+  /** Per-provider window, wins over `maxMessages`; absent = `maxMessages`. Runs before `tokenLimit`. */
+  maxMessagesByProvider?: Record<string, number>
 }
 
 /**
@@ -444,6 +455,49 @@ export interface TokenLimitConfig {
   enabled: boolean
   /** Maximum number of tokens to keep */
   maxTokens: number
+  /** Per-provider cap; absent = `maxTokens`. */
+  maxTokensByProvider?: Record<string, number>
+  /**
+   * Fallback context-window tier (`200k` / `400k` / `1m`), used **only** when the
+   * serving model declares no window of its own.
+   *
+   * The serving model's annotation outranks everything here: a route can point at
+   * any model, and one provider routinely serves 128K and 1M models at once, so
+   * no per-provider or global number is right for all of them (2026-11-16: a
+   * per-provider 65,536 against a model declaring 1,000,000 made the cap
+   * unreachable and discarded the whole conversation every turn). This key is the
+   * answer for the unannotated remainder, and `maxTokensByProvider` stays as the
+   * pre-tier shape so old configs keep behaving identically.
+   */
+  contextWindowTier?: '200k' | '400k' | '1m'
+  /**
+   * Per-provider cap for the **system block**; absent = system messages are never
+   * touched.
+   *
+   * Cutting the client's own prompt is a stronger act than dropping old turns, so
+   * it is opt-in per provider rather than implied by `maxTokens`. Measured
+   * 2026-11-16 on a live agent request: the system block is large (~36%) but not
+   * the bulk, and it is re-bought at full price on a plan endpoint whose prefix
+   * cache carries no discount.
+   */
+  maxSystemTokensByProvider?: Record<string, number>
+  /**
+   * Per-provider **prompt-cost target** in tokens — our own spending limit, not a
+   * window.
+   *
+   * Two different questions, two different numbers. The window (from the model's
+   * own annotation, else the tier) is an upstream fact: going over it is a
+   * `context` 400. A cost target is a choice: `trae` bills by prompt volume and
+   * gets no prefix cache, so a smaller prompt is genuinely cheaper even when the
+   * model's window is 1M.
+   *
+   * Because it is a choice it may never make a request unserviceable: a target too
+   * small to keep the system block, the reserved task statements and a usable tail
+   * is declined in favour of the window (with a warning), never honoured by
+   * discarding the conversation — that shape is the 2026-11-16 defect. Absent = no
+   * cost gate.
+   */
+  costBudgetByProvider?: Record<string, number>
 }
 
 /**

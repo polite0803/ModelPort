@@ -27,6 +27,17 @@ import {
   Copy,
   Check
 } from 'lucide-react'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Plus, Trash2 } from 'lucide-react'
+import {
+  DECLARED_QUOTA_MAX_LIMIT,
+  DECLARED_QUOTA_MAX_WINDOWS,
+  DECLARED_QUOTA_WINDOWS,
+  normalizeDeclaredQuota,
+  type DeclaredQuotaLimit,
+  type DeclaredQuotaUnit,
+  type DeclaredQuotaWindow,
+} from '@shared/declaredQuota'
 import type { Provider, CredentialField, Account, BuiltinProviderConfig } from '@/types/electron'
 
 interface AddAccountDialogProps {
@@ -38,6 +49,7 @@ interface AddAccountDialogProps {
     email?: string
     credentials: Record<string, string>
     dailyLimit?: number
+    declaredQuota?: DeclaredQuotaLimit[]
   }) => Promise<void>
   onValidateToken: (providerId: string, credentials: Record<string, string>) => Promise<{
     valid: boolean
@@ -65,6 +77,7 @@ export function AddAccountDialog({
   const { t } = useTranslation()
   const [name, setName] = useState('')
   const [dailyLimit, setDailyLimit] = useState<string>('')
+  const [declaredQuota, setDeclaredQuota] = useState<DeclaredQuotaLimit[]>([])
   const [credentials, setCredentials] = useState<Record<string, string>>({})
   const [isValidating, setIsValidating] = useState(false)
   const [validationResult, setValidationResult] = useState<{
@@ -91,6 +104,7 @@ export function AddAccountDialog({
       if (editingAccount) {
         setName(editingAccount.name)
         setDailyLimit(editingAccount.dailyLimit?.toString() || '')
+        setDeclaredQuota(normalizeDeclaredQuota(editingAccount.declaredQuota))
         // 不预填已存凭据：那份值在渲染层是密文，回填再保存等于把密文重新加密一遍。
         setCredentials({})
       } else {
@@ -102,6 +116,7 @@ export function AddAccountDialog({
   const resetForm = () => {
     setName('')
     setDailyLimit('')
+    setDeclaredQuota([])
     setCredentials({})
     setValidationResult({})
   }
@@ -177,6 +192,8 @@ export function AddAccountDialog({
         name: name.trim(),
         credentials,
         dailyLimit: dailyLimit ? parseInt(dailyLimit, 10) : undefined,
+        // 归一后再提交：空数组与「一条都没填」是同一件事，主进程据此不落键。
+        declaredQuota: normalizeDeclaredQuota(declaredQuota),
       }
 
       if (isEditing && editingAccount && onUpdateAccount) {
@@ -234,6 +251,8 @@ export function AddAccountDialog({
                 onChange={(e) => setDailyLimit(e.target.value)}
               />
             </div>
+
+            <DeclaredQuotaEditor value={declaredQuota} onChange={setDeclaredQuota} t={t} />
 
             <CredentialFieldsForm
               fields={credentialFields}
@@ -310,6 +329,96 @@ export function AddAccountDialog({
         </DialogContent>
       </Dialog>
     </>
+  )
+}
+
+/**
+ * 声明额度编辑器（第五层：用户自己写下的上限）。
+ *
+ * 只收「哪个窗口、什么单位、多少」，不收任何换算率 —— 钱与 token 互不可比是本仓的
+ * 硬约束，所以这里没有「折合多少额度」这种字段。写下的数会**真的挡发车**
+ * （`declared-exhausted`），不是备注。
+ *
+ * 行内只保留已有的声明；「新增」按还没用过的窗口给一条默认（同窗口同单位只保留一条，
+ * 归一器取更小的那个）。
+ */
+function DeclaredQuotaEditor({ value, onChange, t }: {
+  value: DeclaredQuotaLimit[]
+  onChange: (next: DeclaredQuotaLimit[]) => void
+  t: (key: string, options?: Record<string, unknown>) => string
+}) {
+  const used = new Set(value.map(entry => entry.window))
+  const nextWindow = DECLARED_QUOTA_WINDOWS.find(window => !used.has(window))
+  const update = (index: number, patch: Partial<DeclaredQuotaLimit>): void => {
+    onChange(normalizeDeclaredQuota(value.map((entry, at) => (at === index ? { ...entry, ...patch } : entry))))
+  }
+  return (
+    <div className="space-y-2">
+      <Label>{t('providers.declaredQuota')}</Label>
+      <p className="text-xs text-muted-foreground">{t('providers.declaredQuotaHint')}</p>
+      {value.map((entry, index) => (
+        <div key={`${entry.window}-${entry.unit}`} className="flex items-center gap-2">
+          <Select
+            value={entry.window}
+            onValueChange={window => update(index, { window: window as DeclaredQuotaWindow })}
+          >
+            <SelectTrigger className="w-[120px]" aria-label={t('providers.declaredQuotaWindow')}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {DECLARED_QUOTA_WINDOWS.map(window => (
+                <SelectItem key={window} value={window}>{t(`providers.declaredWindow_${window}`)}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Select
+            value={entry.unit}
+            onValueChange={unit => update(index, { unit: unit as DeclaredQuotaUnit })}
+          >
+            <SelectTrigger className="w-[110px]" aria-label={t('providers.declaredQuotaUnit')}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="requests">{t('providers.declaredUnit_requests')}</SelectItem>
+              <SelectItem value="tokens">{t('providers.declaredUnit_tokens')}</SelectItem>
+            </SelectContent>
+          </Select>
+          <Input
+            type="number"
+            min={1}
+            max={DECLARED_QUOTA_MAX_LIMIT}
+            className="flex-1"
+            aria-label={t('providers.declaredQuotaLimit')}
+            value={String(entry.limit)}
+            onChange={event => {
+              const parsed = Number.parseInt(event.target.value, 10)
+              // 空输入暂时按 1 存：这一行是用户刚加的，删掉它要用右边的按钮，不是清空数字。
+              update(index, { limit: Number.isFinite(parsed) && parsed > 0 ? parsed : 1 })
+            }}
+          />
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            aria-label={t('providers.declaredQuotaRemove')}
+            onClick={() => onChange(value.filter((_, at) => at !== index))}
+          >
+            <Trash2 className="h-4 w-4" />
+          </Button>
+        </div>
+      ))}
+      {nextWindow !== undefined && value.length < DECLARED_QUOTA_MAX_WINDOWS && (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => onChange([...value, { window: nextWindow, unit: 'requests', limit: 100 }])}
+        >
+          <Plus className="mr-1.5 h-4 w-4" />
+          {t('providers.declaredQuotaAdd')}
+        </Button>
+      )}
+    </div>
   )
 }
 
