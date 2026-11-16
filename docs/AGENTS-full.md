@@ -392,10 +392,11 @@ Three rules, all encoded in `tests/shared/quota-pacing.test.ts`:
 1. **Reset time is derived, never stored.** The ledger keeps usage only; `quotaPacing` recomputes the
    boundary from the window definition (rolling minute / rolling 24h aligned to whole windows, UTC
    calendar month). `quota-ledger.json` keeps its current format.
-2. **No derivable reset means no opinion.** A candidate whose provider has no enforceable cap, or
-   whose ledger read failed, does not participate; `selectByQuotaPacing()` returns `null` and
-   `selectAccount()` falls back to `fill-first` order. Never a forced pick, never a dropped
-   candidate - "cannot compute" is not "cannot serve".
+2. **No derivable reset means no opinion.** A candidate with no enforceable cap **and** no
+   user-declared window (`AccountQuotaFacts.declared`, see §The Fifth Quota Layer), or whose ledger
+   read failed, does not participate; `selectByQuotaPacing()` returns `null` and `selectAccount()`
+   falls back to `fill-first` order. Never a forced pick, never a dropped candidate - "cannot
+   compute" is not "cannot serve".
 3. **An exhausted candidate is a last resort.** `pickBestPace` skips candidates with zero remaining
    when any usable one exists; `pickSoonestReset` ranks full candidates after every candidate that
    still has allowance, even when the full one resets sooner.
@@ -531,6 +532,93 @@ balance into a token ratio is not just discouraged, it does not typecheck. A res
 recognised is reported as `unexpected-shape` in the UI rather than guessed into a number: both endpoint shapes
 came from a transcribed record, not from a captured payload, so the first real click is what confirms them.
 
+### The Fifth Quota Layer and the Recommendation Queue (2026-11-16)
+
+Ruling: the `/routes` page must answer two questions that no existing surface answered - **which
+allowance is about to expire**, and **in what order should the pool be tried**. Both are display
+concerns with one deliberate consequence for routing; the rest of this section is why each part is
+shaped the way it is.
+
+**A user-declared window is the fifth quota layer** (`src/shared/declaredQuota.ts`). The catalogue
+publishes nothing for the 20 plan entries (`AGGREGATE_PLAN_ENTRIES` are *all* `undocumented`), so the
+existing four layers - documented caps, our ledger, live money balance, witnessed upstream refusal -
+leave `smart` / `pace` with no number to sort on exactly where the user cares most. The declaration
+is an account-level `declaredQuota` of at most `DECLARED_QUOTA_MAX_WINDOWS` entries:
+
+- windows `fiveHour` / `day` (rolling) and `week` / `month` (UTC natural boundaries); units
+  `tokens` / `requests`, **never interchangeable**, and no field converts a currency amount into
+  either ("$5 = ? tokens" is not offered, because a conversion rate would be invented).
+- normalized at the write boundary (`normalizeDeclaredQuota`): invalid entries dropped, the same
+  `(window, unit)` pair folds to the **smaller** ceiling (fill-or-lower, same rule as learned caps),
+  an empty list stores no key at all.
+- **enforced, not annotated.** `quotaBlockDetail` evaluates the declaration after the four
+  aggregate layers and for **every** provider type - a cap written on a `builtin` or `custom`
+  account is still the user's cap, and the four aggregate layers deliberately do not fire there
+  because those providers have no quota sidecar. The resulting reason is `declared-exhausted`,
+  and its `until` comes from `declaredResetAt`: rolling windows report the instant the oldest
+  counted request slides out (`resetSource: 'estimated'` - an estimate, the UI writes 「约」),
+  natural week/month report our own bookkeeping edge (`'local'`), and a window with no usage yet
+  reports **no instant at all** rather than a guessed boundary.
+- it feeds `smart` / `pace` through `AccountQuotaFacts.declared` (`shared/quotaPacing.ts`), so
+  "use the allowance before it rolls over" now has a real opinion on a declared-only account
+  instead of falling back to `fill-first`. The fallback remains, but only for a turn where **no**
+  candidate carries any evidence (no enforceable cap *and* no declaration).
+
+**`preview.models[]` carries the queue, `status` and `blocked` are orthogonal.** The bug this
+replaced: `preview` derived its config keys from `rankInputs`, so when an account was fully out of
+quota every model of that provider disappeared from the list entirely - the page could not say
+"configured fine, quota is the reason nothing was dispatched". Now the config layer is computed over
+`[...rankInputs, ...blockedCandidates]`, and each row reports two independent facts:
+
+- `status` (`kept` / `included` / `excluded` / `filtered` / `below-tier` / `not-pinned` /
+  `unavailable`) - a **configuration** conclusion.
+- `blocked: { reason, until?, untilSource? }` - this turn's **temporary** state. A row can be
+  `kept` *and* `blocked`; that is the queue's whole point.
+
+Three rules follow, all pinned by `tests/routes/route-queue-blocked-pin.test.ts`:
+
+1. **A configuration conclusion is never restated as a temporary one.** A model dropped by a pool
+   strategy or manually excluded keeps its own status and carries **no** `blocked`, even when its
+   quota is also gone - otherwise the page tells the user to wait for a window that will not bring
+   the model back.
+2. **Blocked candidates never enter `rankInputs`.** Display and dispatch are two different name
+   sets; folding them once dispatches a model whose window is empty.
+3. **`counts.candidates` counts dispatchable models**, `new Set(rankInputs…)`, never "rows without
+   `blocked`" - strategy-filtered and excluded rows are equally `blocked`-free.
+
+**The queue's routing decision is the user's pin, and nothing else.** There is no priority field,
+no soft ordering, no score that the queue writes. `sortByRating` on `/routes` is a **display** sort:
+dispatchable rows first, then blocked ones, each segment by star count, stable within a segment. The
+star itself absorbs the transient state (`recommendModelStars`: non-money `blocked` −2,
+`quotaBand: 'tight'` −1, both counting once) so the two signals agree, but the segment boundary is
+hard rather than numeric - a strong model can still out-score a fast one, and the queue must say
+what happens *if you click now*. Since 2026-11-16 the star is also a monotone image of the routing
+score itself (see §Star ratings on the pool), so within a segment the star order and the dispatch
+order point the same way; the pin remains the only thing that *changes* routing. A blocked model stays pinnable: `switchModel` accepts it (ruling
+2026-11-16, manual pin is the highest response), and the pinned turn then refuses **in place** with
+`pinTransient` (429 + `Retry-After`, cause `quota`) rather than silently switching models - which is
+the exact behaviour the queue exists to prevent.
+
+`shared/routeQuotaView.ts` holds the projection as pure functions (no electron, no store):
+`summarizeQuotaRows` folds per-account row groups into a summary where **`band` is the best account**
+(can we dispatch at all?) while **`rows` are the tightest per `(window, unit, source, limit)`**
+(which allowance is about to expire?) - averaging either one lies in the opposite direction from
+the other. `ROUTE_QUOTA_TIGHT_RATIO = 0.8` is a display threshold only; a model with no enforceable
+number at all is `undocumented`, never `ample`, and money (`isMoneyBlock`) never enters a ratio, a
+band, or a star. `soonestExpiryAt` ignores full windows (that is "gone", not "about to expire"),
+`describeDelay` rounds up so "1 minute" never means zero, and the renderer recomputes countdown
+labels from absolute instants on a 15 s local clock - `routes:menu` is a full-pool scan (p50 4.7 s)
+and must never be polled as a timer.
+
+Tests: `tests/routes/route-quota-view.test.ts` (the projection contract, including bidirectional
+enum parity with `QuotaBlockReason`), `tests/proxy/declared-quota-gate.test.ts` (enforcement:
+per-provider-type, all four windows, duplicates folding down, ledger bucket families, persistence),
+`tests/proxy/quota-pacing-declared.test.ts` (declared facts actually change `smart` / `pace`
+selection, and no-evidence accounts fall back), `tests/shared/quota-pacing.test.ts` (the pure
+ordering rules including declared windows with and without a derivable reset),
+`tests/routes/route-queue-blocked-pin.test.ts` (the three rules above end to end through preview,
+select and pin), `tests/routes/recommend-model-stars.test.ts` (the star absorption, money exempt).
+
 ### Aggregate Per-Model Cost Classification
 
 Quota answers "how much may I send"; cost answers "does this model cost extra". Separate sidecars,
@@ -606,10 +694,24 @@ cannot route to advertises something that never answers.
 - **Affinity is capped by the documented TTL** (`effectiveAffinityMinutes`): `cacheAffinityMinutes`
   (60) may not outlive the cache - Anthropic 5m tier → 5m, 1h tier → 60m; an undocumented TTL keeps
   the configured value. Rationale: a pin past the cache only blocks a better candidate.
+- **Cache-first skips live-zone compression for documented, cheap caches**
+  (`CompressionConfig.cacheFirst`, default **on** as shipped in `DEFAULT_COMPRESSION_CONFIG`). The
+  rule: when a provider documents a prefix cache (`promptCache` known) and the saving from compressing
+  beats `1 - c/(1+w)`, compressing is a net loss - every rewritten byte invalidates a cache that was
+  already going to be cheap. A per-provider `providerOverrides[providerId]` wins over the global
+  switch, and only `cacheFirst` truthiness enables the skip (an absent key takes the shipped default
+  rather than silently flipping the policy). Volc/AFP is the case that made this visible: its plan
+  lane documents no cache discount, so `cacheFirst` never touches it and its compressed saving is
+  real; on a lane that *does* discount, the skip is what keeps the cached prefix intact.
 - **Held, deliberately**: the fourth Anthropic breakpoint (a mid-history marker moves every turn and
   rewrites a large prefix each time) and adaptive 5m/1h TTL (the 1h tier doubles the write price and
   the next turn's gap is unknown). Both wait for `/economics` to show a warm cache and a saving
   above break-even; see `docs/plan/PLAN-prompt-cache.md` P3 (2026-11-14 ruling).
+- **`LoadBalanceStrategy` is declared twice on purpose**: `shared/types.ts` (the renderer's copy) and
+  `main/store/types.ts` (the store schema's copy), plus UI label maps and both locales. Adding a
+  strategy means five edits; missing the store copy type-checks and then fails at load, missing a
+  locale renders the raw id. Same pattern, same reason as `ModelMapping.disabled` being declared in
+  both `types.ts` files.
 
 ### Account Channels
 
@@ -717,9 +819,10 @@ the opposite of the "unknown is a real answer" rule the router is built on.
 `free: false` — a model the channel prices by weight cannot simultaneously be a free model, so this
 is read off the channel's own quote, not "unknown folded into false". No rate label at all (trae /
 minimax) writes neither value, and the attribute stays `unclassified`. Routing is unaffected either
-way: `costSignalFor` short-circuits on `free === true` and `costBucketOf` keys off `weight`, so
-`false` behaves exactly like absent there; what changes is annotation coverage, where `free` used to
-be unfillable for every metered channel model.
+way: `costBucketOf` keys off `weight`, so `false` behaves exactly like absent there, and the
+`free === true` short-circuit in `costSignalFor` only applies when no discount window came with it
+(§Time-varying discounts); what changes is annotation coverage, where `free` used to be unfillable
+for every metered channel model.
 
 The IPC surface is `channels:models` (one channel's catalogue, 30s cache),
 `channels:refreshModels` (re-read online, then rewrite the provider record and the global model
@@ -739,6 +842,32 @@ self-heal is a 30-day TTL, so the clear button is the sole manual recovery). Acc
 renewed through `channels:rpc('account.refresh', {accountId})` and the pool order through
 `channels:rpc('account.reorder', {provider, orderedIds})` - the load balancer hands requests out in
 pool order, so reordering is how a user picks the preferred account.
+
+**Auto-refresh reads the credential, never the pool's `refreshable` boolean (2026-11-16).** The
+30-minute sweep (`index.ts`'s `refreshTargets` + `refreshAllCredentials`) exists precisely to correct
+mis-marked accounts, so any provider whose `refreshAll` started with `if (!entry.refreshable) continue`
+turned that boolean into a **one-way door**: one transient server rejection (or a concurrent refresh
+that burned the `refresh_token` and got misjudged as terminal) writes `false`, and from then on the
+timer skips the account forever - the refresh loop never even reads the credential again, so nothing
+can self-heal and only a manual re-login recovers it. `codearts` (`service.ts::refreshAll`) is the
+reference shape, and by 2026-11-16 `lobsterai`, `qoder`, `trae`, `cline`, `buddy`, `raccoon`,
+`gemini` and `minimax` all follow it: resolve the credential first, treat "has refresh material" as
+the only criterion for attempting a refresh, and **write `refreshable: false` only when the material
+is genuinely absent** (and only when the pool value actually changed, since the account list is
+written as a whole). A `false` that disagrees with a healthy credential is corrected by the same
+round - `syncAccountExpiry` writes `refreshableOf(credential)` back after the reconcile, and where the
+provider skips the network request entirely (`raccoon`'s still-valid branch) the reconcile is done
+inline so the correction does not have to wait for expiry. Two further rules ride along: `enabled` is
+never part of the criterion (a disabled account's refresh token rots just the same, and it used to),
+and a *read* failure is not material absence - never write `false` because `credentials.resolve`
+threw. The `!IKIRTT` lead-time gate is orthogonal to all of this: within an hour of expiry the sweep
+really refreshes, outside it it only reconciles the pool values.
+
+The same criterion applies outside the sweep: `channel-pack-rpc.ts`'s lobsterai balance path used to
+skip `entry.refreshable === false` accounts before querying credits, which made the greyed-out
+「余额查询失败」 permanent for exactly the accounts that needed the reconcile. Fenced by
+`tests/channels/refresh-selfheal-all-channels.test.ts` (all six providers, both directions, plus
+raccoon's still-valid branch) and `tests/channels/minimax-refresh-selfheal.test.ts`.
 
 `manager.ts` mirrors that state into provider records. It only writes one when the channel has at
 least one account, so the provider list never grows fifteen unusable rows; records are
@@ -1020,12 +1149,72 @@ penalty, and `details.missing` may say `reasoning` only when **every** candidate
 `X-ModelPort-Auto-Degraded: response_format` - returning free text beats refusing the request, but it
 must never be silent.
 
-**Cost and preference.** `costBucketOf()` (shared with the channels UI) turns the channel
-multiplier into a bucket; unknown is neutral, never "cheap". `prefer` is
+**Cost and preference.** `costSignalFor` reads the multiplier **in force at `now`**
+(`discountWindow.ts::effectiveCostOf`, §Time-varying discounts) and scores it on the `2^-w` curve;
+`costBucketOf()` still labels the bucket for the UI. Unknown is neutral, never "cheap". `prefer` is
 `balanced | fast | strong | cheap`, stored in `autoRouting.prefer`, overridable per request with
 `X-Auto-Prefer`. It changes both the target tier and the weight the cost factor carries: balanced
 0.2, fast 0.2, strong 0.1, cheap 0.6 (cost enters as `weight * (costScore - 0.5)`, so an unknown
 cost contributes exactly zero). Builtin and custom providers have no cost data at all.
+
+### Time-varying discounts (2026-11-16)
+
+Several channels sell the same model at two prices depending on the clock, and until 2026-11-16 the
+host could not see it. Every vendor adapter already parsed the schedule and then collapsed it into
+one string in the display name (`Qwen3.8-Max · x0.5→x0.2`), emitted **only while the window was
+open** — so a catalogue read at noon recorded `x0.5` and nothing remembered that `x0.2` exists at
+night. Two defects followed: the fetched price was cached for the whole catalogue TTL, so a request
+crossing a boundary was priced with the previous side; and a model that is `0` at night and `0.29`
+by day was read as 24-hour free, which made `cheap` dispatch to a metered model all day.
+
+The window is now a first-class catalogue fact and the effective price is computed **at evaluation
+time from the local clock**, so there is no schedule table to keep in sync:
+
+- **One ruler.** `shared/discountWindow.ts` owns it all: `DiscountWindow` (`daily` slots in an IANA
+  `timezone`, plus an optional `validFrom`/`validUntil` span), `isDiscountWindowActive`,
+  `effectiveWeightOf`, `effectiveCostOf`, `nextDiscountBoundary`, `discountWindowLabel`, and the
+  cost curve. The channels page, the model list, the route preview and `autoRouter` all call it, so
+  no two surfaces can disagree at the same instant.
+- **The vendor carries the schedule.** `RpcDiscountWindow` / `RpcModelDiscount` in
+  `vendor/channel-pack/src/types.ts`; buddy (`parsePromotionWindows` over `modelPromotions[].schedule`,
+  `factor: 0` = genuinely free but windowed), qoder (`qoderDiscountOf`, 22:00–08:00
+  `Asia/Singapore` — was hardcoded `+8`), trae (`traeDiscountOf`, `originalCreditsRate` +
+  `discountEndsAtSec`). Raccoon reports effective vs base multiplier but **no schedule**, so it
+  emits no `discount` at all; `readModelList` keeps its `x0.5→x0.2` reading as
+  `weight`/`baseWeight`, which is correct when there is no window to switch on. A promo span with no
+  end emits no time field, so the host never extends one.
+- **Normalisation is defensive.** `modelCatalog.ts::readDiscount` narrows every field and drops what
+  it cannot read — an unparseable slot is dropped, not widened to "all day". `readSchedule` in the
+  pack returns `undefined` (not `{}`) when nothing is readable, because an empty `DiscountWindow`
+  reads as 24/7.
+- **The static `free` flag yields to a window.** `free: true` is a fetch-time conclusion
+  (`weight === 0`); with a window it stops being a fact and `effectiveCostOf` decides. Without a
+  window the flag is unchanged, so windowless entries behave exactly as before.
+- **Failure direction is the cheaper price.** A zone `Intl` cannot resolve, or a slot nobody can
+  parse, reads as **active**. Both sides are about money the user was already quoted: showing the
+  discount the vendor's own client shows is recoverable, quietly charging double is not. Same rule
+  `buddy.ts::promotionActiveNow` already applied.
+- **The cost factor is a curve, not five buckets.** `costScoreOfWeight` is `2^-w`, clamped to
+  [0, 16]. The old `COST_SCORE` table is exactly this curve sampled at its anchors (free 1, base
+  0.5, above-base 0.25; the below-base 0.75 is the curve at w≈0.42), so base-price behaviour is
+  unchanged — but five buckets could not see depth: x0.02 and x0.9 both scored `below-base`, so a
+  50× price difference could not change a dispatch decision. On the curve they are 0.99 and 0.54.
+  `costScoreOf` prefers the curve whenever a `weight` exists and keeps `COST_SCORE.free` for
+  `costBucket === 'free'` (a reported free model is free; a missing weight only means "unreported").
+- **Rendering at the boundary, not on a ticker.** `useDiscountClock` re-renders at the earliest
+  `nextDiscountBoundary`, capped at 30 minutes so a DST-shifted boundary is late, never wrong. It
+  keys on the windows' JSON content so an array rebuilt by `.map()` does not re-arm the timer on
+  every keystroke.
+
+Tests: `tests/shared/discount-window.test.ts` (slot parsing incl. unpadded `7:50`, three zones,
+cross-midnight, validity spans, fail-open direction, the curve's anchors/clamping, boundary math
+incl. "never 0"), `tests/channels/model-catalog.test.ts` (a reported window survives normalisation,
+no window is not read as all-day, unreadable slots dropped, the capability hint keeps
+`baseWeight`/`promoWeight`/`discountWindow`), `tests/proxy/autoRouting.test.ts` (the curve separates
+depths five buckets collapsed; free short-circuits; no weight falls back to the bucket table), and
+`tests/routes/discount-window-cost.test.ts` (through the real `autoRouter.preview()`: open window →
+`promoWeight` and `free`, closed window → base price and `below-base` while the static `free` flag
+no longer applies, windowless free model unchanged).
 
 **Stickiness is a bonus, not a pin.** The previous candidate for the same conversation scores +0.12
 (same account) or +0.06 (same model, another account). A cooled-down or exhausted candidate simply
@@ -1206,7 +1395,9 @@ voided an earlier strategy **of a different category** (`capability` / `channel`
 `tier`, from `AUTO_POOL_STRATEGIES[].category` via `STRATEGY_CATEGORY`), with how many models it added
 back and which steps it broke. Same-category unions are *not* reported - `(free ∪ low-weight ∪ in-plan)`
 is exactly how the money-saving presets are written, and warning about it would train the user to
-ignore the warning. `RoutePoolEditor` renders `preview.conflicts` as a notice, and the 503
+ignore the warning. `low-weight` reads `RankCandidate.weight` (the price in force, §Time-varying
+discounts), not the fetched hint — otherwise a night-discount model would be judged the same at noon
+and at 2 a.m. `RoutePoolEditor` renders `preview.conflicts` as a notice, and the 503
 `details.missing` value `pool_strategy` is the same emptied-by-configuration state seen from the
 request side.
 
@@ -1352,8 +1543,10 @@ remain, but they now describe `modelScope: 'pool'` rather than the default.
 absent (a route record written before this change keeps working and lands on the new default). `single`
 trims the ordered list to the head model's accounts, `family` keeps everything sharing
 `modelFamilyKey(head)`, `pool` keeps the previous behaviour. Trimming happens in `autoRouter::select`
-*after* the soft pin and *after* the circuit reorder, so a user pick or a degraded model decides which
-model the turn serves; nothing downstream re-expands it. A single-scope turn gets
+*after* the pin and *after* the circuit reorder, so a user pick or a degraded model decides which
+model the turn serves; nothing downstream re-expands it. **A pin overrides the scope entirely**
+(ruling 2026-11-15): when a pin exists the trim keeps only the pinned model's accounts even under
+`pool` - cross-model failover is off, the routing algorithm runs only when no pin exists. A single-scope turn gets
 `AUTO_SINGLE_SCOPE_BUDGET_MS` = 40 s through `AutoRouteDecision.wallClockBudgetMs` instead of the 90 s
 pool clock: with only accounts left in the chain, waiting longer cannot promote a new model (that can only
 happen between turns) and only holds the client's socket.
@@ -1369,24 +1562,28 @@ result reports `missing: ['min_tier']` (not `pool_strategy`), the preview marks 
 the advertised context floor (`keptOfPool`) applies the same filter, and the write path rejects an
 unknown value instead of silently storing "no floor".
 
-**Fast switching, and its precedence.** `ModelPin` is the soft pin: memory only, keyed by route plus
-scope (route-wide, or a session key), 30 minutes (`DEFAULT_PIN_MINUTES`), `source: 'console' | 'tray' |
-'header'`. Precedence in `select` is **soft pin > `ModelRoute.preferredModel` > sticky**: the pin
-reorders the list before the latency gate and the circuit, so a pin is *not* vetoed by an automated
-ticket (user intent outranks it; the menu still shows the model as circuited). Tray-issued pins default
-to `TRAY_PIN_MINUTES` = 10 (a route pin affects every client behind that route, so the menu also says
-so); console pins keep 30 and an explicit `minutes` always wins.
+**Fast switching, and its precedence.** There is exactly one pin concept, 「固定」 (ruling 2026-11-15).
+A route holds at most one pinned model, and both the console and the tray write it through
+`routes:switch` into config `ModelRoute.preferredModel` - one persistent hard pin, never two stores.
+`ModelPin` in memory now carries only session/header pins (`until: 0`, no countdown); route-level
+switches do not write it. Precedence in `select` is **pin > sticky**: the pin reorders the list before
+the latency gate and the circuit, so a pin is *not* vetoed by an automated ticket (user intent outranks
+it; the menu still shows the model as circuited). While a pin exists the route serves **only** that
+model - the scope trim filters to it even under `pool`; the routing algorithm runs only when no pin
+exists. Retired surfaces: the soft-pin countdown (`DEFAULT_PIN_MINUTES` = 30 / `TRAY_PIN_MINUTES` = 10),
+the `preferredModel` `'ignored'` fallback to the ordinary order, and the separate console/tray stores.
 
 A pinned model that is not in the pool at all (disabled, no accounts) is **decision-time `pinStale`**,
-and what happens next depends on where the pin came from. A soft pin is retired on the spot and the turn
-fails fast: `candidates: []` → 503 `pin_stale` with `details {pin, scope, source, action: 'retired'}`
-and `X-ModelPort-Pin: stale=<name>;action=retired`. Serving the ordinary order instead was measured as
-3x 504 - the client believed it was still talking to the pinned model while every turn quietly changed
-implementation, and each turn first paid a failure. `preferredModel` is **not** deleted by the selector
-(only `routes:unpin` revokes config): it serves the ordinary order, keeps the config, and reports
-`action: 'ignored'`. Both also write `pinMiss`, and the menu carries `pin.stale` so it never reads
-"pinned" while another model actually runs - a silently ignored choice is how "the tray says X, the
-traffic says Y" goes unnoticed.
+and the turn **refuses and keeps the pin**: `candidates: []` → 503 `pin_stale` with
+`details {pin, scope, source, action: 'held'}` and `X-ModelPort-Pin: stale=<name>;action=held`. No
+algorithm may switch a pinned model away - only manual replacement (`routes:switch`) or clear
+(`routes:unpin`) changes it. Serving the ordinary order instead was measured as 3x 504 - the client
+believed it was still talking to the pinned model while every turn quietly changed implementation, and
+each turn first paid a failure; that `'ignored'` fallback is exactly the "pinned but still switches"
+bug this ruling retires. The selector never deletes the pin (only `routes:unpin` revokes config). The
+decision also writes `pinMiss`, and the menu carries `pin.stale` so it never reads "pinned" while
+another model actually runs - a silently ignored choice is how "the tray says X, the traffic says Y"
+goes unnoticed.
 
 **Cooling is not staleness (`pinCooling`).** `rankCandidates` removes cooling accounts from `ranked`
 as soon as any warm candidate exists (`warm.length > 0 ? warm : soonestCooling(...)`), so
@@ -1396,32 +1593,81 @@ selector used to treat both as `pinStale` and retire the pin, and the live log s
 pin on a model that had been serving, one 504 first-token timeout, and 25 s later `pin_stale` +
 `action: 'retired'` (`codex-deepseek`, 2026-11-13 03:14). The criterion is now **presence in
 `rankInputs`** (the pre-rank pool from `collectCandidates`, which still carries `coolingUntil`), not
-"did this turn rank it". A **soft pin** whose model is present but unusable this turn keeps the pin and
+"did this turn rank it". A pin whose model is present but unusable this turn keeps the pin and
 returns zero candidates - switching models mid-conversation is the failure this mechanism exists to
 avoid:
 
 - all matching accounts cooling → `pinCooling {displayName, scope, source, retryAfterSeconds}` (at
   least 1 s), projected as 429 `model_temporarily_unavailable` + `Retry-After` and
   `X-ModelPort-Pin: cooling=<name>;retry=<s>`;
+- every matching account transiently skipped (worker rate-limit window, daily limit, witnessed quota
+  mark) → `pinTransient {displayName, scope, source, cause, retryAfterSeconds}`, projected as the same
+  429 + `Retry-After` and `X-ModelPort-Pin: transient=<name>;retry=<s>`. These three prunes
+  `continue` **before** `rankInputs.push`, so the pin name necessarily misses `promotePinned` - the
+  old code read that as "the name left the pool" and answered 503 `pin_stale`, inviting the user to
+  revoke a pin that returns by itself at the window reset. The disposition attributes the skip records
+  **by the pin's own display name** (`TransientSkip.displayName`), never the whole pool's, and derives
+  its own earliest unlock;
 - a request-level miss (vision/tools/reasoning/context, or the contract filter) → `pinBlocked
   {displayName, scope, source, missing}` with the capability names `hardFilterFailure` reported,
   projected as the ordinary 503 `no_available_model` whose `details` become `{pin, missing}` and
   `X-ModelPort-Pin: blocked=<name>`. One image request must not revoke a pin.
 
-`preferredModel` is a default, not a turn: neither case stalls the route or marks it stale - it serves
-the ordinary order and reports `pinMiss` only (availability wins; the existing `ignored` disposition is
-reserved for a model that is truly absent). The menu needs no special case: `preview` never deducts
-cooldown, so `pin.stale` stays false and the countdown keeps running. Both readings land in the request
-log next to `auto.pinStale` as `auto.pinCooling` / `auto.pinBlocked`.
+`preferredModel` is the same hard pin, not a soft default (ruling 2026-11-15): cooling, a transient
+block and a request-level miss all refuse the turn and keep the pin exactly like a header pin - there
+is no "availability wins, serve the ordinary order" path left. The menu needs no special case:
+`selectableModels` reads the pre-rank pool with `ignoreTransientAvailability` (and cooling accounts
+stay in `rankInputs`), so neither a cooldown nor a transient skip marks `pin.stale`. All readings land
+in the request log next to `auto.pinStale` as `auto.pinCooling` / `auto.pinTransient` /
+`auto.pinBlocked`.
+
+**Manual pin/unpin is the highest response (ruling 2026-11-16).** The user's explicit act outranks
+every backoff ticket the gateway wrote for itself: `routes:switch`, after the config write and
+`clearPin`, runs `autoRouter.releaseForManualPin(route, providerId, displayName)` - it tears the
+target model's circuit ticket (a user naming the model is an endorsement), calls
+`accountRuntime.clearManualOverride` for every account of that provider (failure cooldown +
+`consecutiveFailures`, the `(account, model)` 429 tier - keyed by the **upstream actual name**,
+resolved through `getEffectiveModels`, not the display name - and the silent-channel window), and
+clears the route's sticky/cache-affinity inertia. The next request dispatches by the new pin
+immediately instead of sitting in a "retry in N s" queue. `routes:unpin` runs `clearRouteInertia`
+only: the circuit tickets are the algorithm's own quality signal and survive an unpin (the next turn
+ranks by score, not by the last conversation's anchor).
+
+The boundary is **ticket vs fact**. Never cleared: daily usage, witnessed quota marks
+(`aggregateQuotaExhaustion`), worker rate limits (`accountChannelManager.modelRateLimitResetAt`),
+catalog-miss cooldowns - those are what the upstream itself said, and clearing them only fabricates
+capacity; a pin on a daily-capped account still refuses with `pinTransient` and keeps the pin.
+Equally load-bearing: `clearManualOverride` is **not** `recordSuccess`/`clearAccountCooldown` - it
+never writes `lastSuccessAt` and never touches AIMD or latency stats. No success happened; a
+fabricated one would poison the silent-window "no success in 10 min" predicate and a dead channel
+could never arm its fast-fail window again. Both switching surfaces toggle: the console row button
+runs `runSwitch(model.pinned ? 'reset' : 'pin')` and stays enabled for a pinned row even with 0
+accounts (unpin needs no account); the tray checkbox item sends a `reset` intent when checked, which
+the page's `runCommand` already maps to `routes:unpin`. Tests:
+`tests/routes/manual-pin-priority.test.ts` (cooldown/429-tier/silent/circuit yield, facts survive,
+silent window re-arms after release, inertia cleared per-route, handler/UI/locale wiring).
+
+**A pin refusal never borrows the pool's `transientUnavailable`.** That projection is gated on
+`pinMiss === undefined` in `select()`: when a pin refused, the empty candidate list is the *pin's*
+doing, and summing unrelated models' quota windows would answer for it with a wrong cause and a wrong
+retry instant. Live shape (2026-11-15 18:59-19:03 UTC, 8 rows): route `stable` pinned
+`agnes/agnes-3.0-flash`, a 764-turn conversation hit `pinBlocked.missing: ['context']`, yet the client
+read 429 "quota or credit exhausted; retry in 1976408s" - bailian's faithful 12-08 monthly reset,
+22.9 days away, unrelated to this turn. The four pin dispositions carry their own shapes; the pool
+projection must not speak for them (branch order in the route handlers is no longer load-bearing).
+Tests: `tests/routes/route-pin-transient-http.test.ts` (both HTTP entries: daily cap and quota mark →
+429 + pin held, day-key rollover re-forwards, a vision block is not masked by an unrelated daily cap,
+a ghost pin still answers `pin_stale`), `tests/routes/route-pin-stale-min-tier.test.ts` §7
+(decision-level attribution, and mixed capped/healthy accounts still dispatch the healthy one).
 
 **`auto.reason` is computed before the scope trim.** `pin` when a pin hit, `only` when the pre-trim pool
 held exactly one display name, otherwise `cache-affinity` / `sticky` / `score`. Computing it after
 `single` trimmed the list collapsed 29/29 observed rows to `only`, which says nothing about why this
 model won. `auto.previousHint` records the anchor actually read this turn (whether or not the turn
 switched) and `auto.pinStale` mirrors the decision above. `preferredModel` is the persistent form of the same choice (one `RouteModelRef`), surfaced with
-`until: 0` so the UI can draw "一直" instead of a countdown; it is written by `routes:switch` with
-`persist: true` (`updateRoute` + `CONFIG_CHANGED` broadcast, then `clearPin` - the soft pin outranks it,
-so leaving one behind would hide "一直" behind a 30-minute countdown). A client that asks for a model with
+`until: 0` - pinning is persistent, there is no countdown to draw. It is written by `routes:switch`
+(`updateRoute` + `CONFIG_CHANGED` broadcast, then `clearPin` to sweep any in-memory header residue so
+it cannot hide the config pin). A client that asks for a model with
 `X-ModelPort-Model: <displayName>` (`autoModelFromHeader`) pins it for the conversation
 (`source: 'header'`, session scope when a session key exists) - the same mechanism, so the next turn does
 not "think for" the client and switch away.
@@ -1447,7 +1693,7 @@ in by all three handlers): the local table only ever holds one placeholder accou
 counting it printed `1` for a pool of two. When the Worker is unreachable the placeholder count is kept,
 never `0`.
 `routes:menu` / `routes:switch` / `routes:unpin` are the channels; `switchModel` validates
-(unknown route, disabled route, empty pool, session scope from the tray) and returns the refreshed menu
+(unknown route, disabled route, empty pool, session scope - header pins only) and returns the refreshed menu
 entry even on a refusal, so a refused click still repaints the truth. The shell's tray cannot call them: it
 does not hold the management secret, so it publishes `shell:route-menu-request`, the page runs
 `routes:menu` on its own transport and answers with `shell:route-menu`, and a click comes back as a
@@ -1457,10 +1703,10 @@ distinct - no snapshot yet (console not opened), read failed (`snapshot.error`),
 the tooltip names the route and the model that would serve, because an icon with a menu nobody opens
 answers nothing.
 
-Tests: `tests/routes/model-scope-pin-circuit.test.ts` (19 cases: trimming per scope, wall clock, pin vs
-sticky, pin vs circuit, `pinMiss`, persistent preference, header pin, circuit trip/expiry/clear on the
-*next* turn, all-circuited disabled, menu order and limit, channel account counts per pool state,
-switch reasons, tray session-scope refusal),
+Tests: `tests/routes/model-scope-pin-circuit.test.ts` (22 cases: trimming per scope, pin exclusivity
+under `pool`, wall clock, pin vs sticky, pin vs circuit, `pinMiss`, persistent pin, header pin, circuit
+trip/expiry/clear on the *next* turn, all-circuited disabled, menu order and limit, channel account
+counts per pool state, switch reasons, session-scope refusal),
 `tests/shell/tray-model-menu.test.ts` (artifact-level: menu shape, the three channels on both sides, sender
 gate, the four label markers, three absences), `tests/ipc/routes-menu-wire.test.ts` (channel strings, the
 `error` shape, unpin clearing both the pin and `preferredModel`). The older pool tests declare
@@ -1478,7 +1724,7 @@ The pool could only be sampled by luck.
 `/routes?route=<name>` is that landing spot (`src/renderer/src/pages/Routes.tsx`, sidebar entry
 `nav.routes`). It reads the **same** `routes:menu` snapshot - one call for the left column, one
 `{ route, limit }` call for the detail, both through `autoRouter.routeMenu` - so the pool, the
-serving model, the soft pin and the circuit read exactly what the tray draws; nothing is recomputed
+serving model, the pin and the circuit read exactly what the tray draws; nothing is recomputed
 from route config. `preview()` is short-cached (15 s, 64 entries, key = `route.name` + the
 **dereferenced** pool so a `basedOnRoute` change invalidates it; `structuredClone` on the way in and
 out) because one menu open measured p50 4.7 s / p90 10.2 s / max 11.0 s of full-pool scans. The range
@@ -1486,10 +1732,10 @@ arguments only **narrow** the query: `route` filters the route list,
 `limit` is clamped in the handler to `1..ROUTE_MENU_MODELS_MAX` (2000) with
 `ROUTE_MENU_MODELS_DEFAULT` (8) as the absent case, precisely so the tray keeps its short menu while
 the console asks for all of them. Search filters the full result on `displayName` / `providerName` /
-`providerId`. Pinning calls `routes:switch` with `source: 'console'` (in-memory soft pin, 30 min);
-"长期" sends the same request with `persist: true`, which writes the route's `preferredModel` in the
-main process (the page still never touches route config itself - one routing decision, one writer) and
-clears the soft pin so the badge reads "长期固定" instead of a countdown. "back to automatic order"
+`providerId`. Pinning calls `routes:switch` with `source: 'console'`, which writes the route's
+`preferredModel` in the main process (the page still never touches route config itself - one routing
+decision, one writer) and clears any in-memory residue so the badge reads 「已固定」 (persistent).
+There is no separate 「长期」 tier: pinning is always persistent (ruling 2026-11-15). "back to automatic order"
 calls `routes:unpin` (which also clears the persistent `preferredModel`). Four absences stay distinct
 in the page: API unavailable (no bridge), read failed (with `snapshot.error`), no enabled routes,
 no switchable model right now, plus "no search match". The tray's overflow line and
@@ -1502,14 +1748,42 @@ absences, locale slots in both languages), `tests/shell/tray-model-menu.test.ts`
 is clickable and carries the route), `tests/ipc/routes-menu-wire.test.ts` (the range arguments only
 narrow the query).
 
-### Star ratings on the pool (2026-11-15)
+### Star ratings on the pool (2026-11-15, rescoped 2026-11-16)
 
 Each pool row on `/routes` carries a 1–5 star recommendation (`StarRating` in `Routes.tsx`). By
-default the star is a **system recommendation** (`recommendedStars`, computed by
-`shared/modelRecommendation.ts` from capability tier + observed first-token latency + current
-health: strong=4 / balanced=3 / fast=2 base, ≤1s +1 / ≥4s −1 when a reading exists, −2 while
-circuited, −2 at zero dispatchable accounts, clamped 1..5; context is capability not quality and is
-deliberately excluded). It is display-only and never enters ranking. Clicking the Nth star overrides
+default the star is a **system recommendation** (`recommendedStars`), and since 2026-11-16 that
+value is **a projection of the routing score**, not a second derivation.
+
+The old module computed stars from tier base + latency ±1 + health −2 while `scoreCandidate` ranked
+the same models with a completely different formula. Two rules, same pool, no shared terms: a model
+could top the stars and rank fifth in dispatch, and "stars first" sorted by the former. That is now
+one ruler:
+
+- `autoRouting.ts::scoreFactors(profile, candidate, capability, now, seed, strategy, maxRpmInPool,
+  prefer, sticky) → ScoreFactor[]` is the factor table (`quota`, `usageRatio`, `tierFit`, `headroom`,
+  `concurrency`, `idleness`, `dispersion`, `penalty`, `quotaPenalty`, `operational`, `cost`, `sticky`,
+  `live`); `scoreCandidate` is `sumScoreFactors(...)` over it, and the four strategy formulas live in
+  one `STRATEGY_FACTORS` table plus a shared `TAIL_FACTORS` tail. The split is **bit-identical** to
+  the four return expressions it replaced (order of summation and weights unchanged).
+- `recommendModelStars` evaluates that same table at `STAR_REFERENCE_PROFILE` (a `complex` request —
+  at `standard` the tier fit is symmetric and strong/fast tie), `STAR_REFERENCE_PREFER` (`balanced`,
+  never a user preference) and `STAR_REFERENCE_STRATEGY` (`round-robin`), drops `dispersion` and
+  `sticky` (they are account/session state, not model properties), then maps through
+  `shared/modelRecommendation.ts::starsFromScore`: linear on `STAR_SCORE_FLOOR`=0.5 ..
+  `STAR_SCORE_CEILING`=1 onto 1..5. Sanity check that the endpoints were not arbitrary: base factor
+  weights sum to 1 in every strategy, so the reference score lands inside 0..1, and the mapping reads
+  exactly strong=4 / balanced=3 / fast=2.
+- Eligibility facts that never reach ranking (circuit, zero accounts, blocked this turn, `tight`
+  quota band) still cost stars, but they cost **score** through `STAR_SCORE_STEP` — one star is the
+  same quantity in both lenses. `no-credit` stays exempt (`isMoneyBlock`): a balance in USD/CNY has
+  no exchange rate into stars.
+- `routeMenu` feeds the projection the model-level readings it needs (`costBucket`, Bandit `live`
+  from `aggregateBanditStats`, lazily over just the rows being emitted). Without `live` the stars and
+  the ranking would diverge again: same tier, same latency, one model on a 24h losing streak.
+- Consequences to keep: `starsFromScore` must stay monotonic (the page's "stars first" sort must be
+  the same direction as dispatch), and the projection must keep excluding `dispersion`.
+
+Clicking the Nth star overrides
 it with a **manual** rating (gold fill vs the recommendation's muted fill); clicking the same manual
 star again clears back to the system recommendation, hover/focus previews the pending value. The
 manual write is a fourth wire, `routes:rate` (`RouteRateRequest { route, providerId, model, stars }`,
@@ -1523,10 +1797,13 @@ error instead of silently filtering. `routeMenu` projects the manual rating onto
 (omitted when unrated) plus `recommendedStars` on every row; the tray ignores both. The page updates
 optimistically and re-reads on failure; a "星级优先 / Stars first" toggle sorts the **display** only
 (stable, by displayed value = manual ?? system recommendation) and says so in its tooltip - routing
-order stays the snapshot order.
+order stays the snapshot order. Since stars are a monotone image of the routing score, that display
+order now agrees in direction with dispatch instead of contradicting it.
 
-Tests: `tests/routes/recommend-model-stars.test.ts` (the derivation: tier base, latency bump/drop,
-health penalties, clamp, no-reading neutrality), `tests/routes/route-model-ratings.test.ts`
+Tests: `tests/routes/recommend-model-stars.test.ts` (stars are the `starsFromScore` image of the
+reference score — asserted against `scoreFactors` directly, plus monotonicity, the 4/3/2 endpoint
+check, cost bucket, latency, eligibility penalties measured in `STAR_SCORE_STEP`, Bandit record and
+clamp), `tests/routes/route-model-ratings.test.ts`
 (normalize/check/whole-table write validation),
 `tests/routes/model-scope-pin-circuit.test.ts` (menu projection, rating never reorders selection,
 clear drops the key, recommendedStars present on unrated rows), `tests/ipc/routes-menu-wire.test.ts`
@@ -1564,7 +1841,10 @@ Three prunes could empty it, and none of them is a configuration fact:
    (`selectionRefusalEntry`) like the route path. `retryAfterSeconds`
    is derived where a fact exists - an exhaustion mark's `until` (30 min TTL when absent) or the next
    local midnight for a daily limit - and falls back to 60 s for window reasons, whose reset instant the
-   local ledger does not track.
+   local ledger does not track. When a pin refused the turn (`pinMiss` set) this projection stays
+   `undefined`: the empty candidate list is the pin's doing, and its four dispositions carry their own
+   cause and retry instant (see the pin section above) - unrelated models' windows must not answer for
+   the pin.
 3. **The daily limit never reset.** `Account.todayUsed` only ever went up: `resetDailyUsage()`'s comment
    said "should be called at midnight" and nothing in the tree called it, so `dailyLimit` behaved as a
    lifetime cap and an account that crossed it was pruned forever. The counter is now day-keyed
@@ -1628,6 +1908,67 @@ a daily limit reports `daily_limit` and the account re-enters the pool once its 
 `model_temporarily_unavailable`, and forward again after the rollover), `tests/shared/daily-usage.test.ts`
 (day-key arithmetic), `tests/proxy/autoRouting.test.ts` (the all-cooling fallback keeps the soonest group
 and still drops cooling accounts when a warm one exists).
+
+### AIMD admission, the exhausted chain, and the cooldown tiers (2026-11-16)
+
+Numbers live here rather than in `AGENTS.md`; every one of them was read off the code
+(`accountRuntime.ts`, `failover.ts`) rather than recalled.
+
+- **AIMD is per `(account, model)`**, `DEFAULT_MODEL_CONCURRENCY` = 4, clamped to
+  `MIN_MODEL_CONCURRENCY` = 2 .. `MAX_MODEL_CONCURRENCY` = 16. The floor is 2, not 1, on purpose: a
+  multiplicative drop to 1 lets one slow first-token stream own the only slot and 429 every other
+  request for that model locally (measured 2026-11-11, the codearts 429 storm - four 502s in 23 s
+  drove 4→2→1 and then 57-102 s fake-hang streams took turns). Shrinking is multiplicative on
+  429/timeout/5xx with `DECREASE_COOLDOWN_MS` = 30 s between drops, so one outage wave drops once.
+  Growth is additive: `INCREASE_STREAK` = 5 clean successes after `INCREASE_COOLDOWN_MS` = 30 s
+  quiet. A local rejection is 429 `local_concurrency_limit` - failover, and never an account
+  penalty (the account did nothing wrong; our own slot was full).
+- **Exhausted chain = exactly one internal wait.** `planRecoveryWaitMs` =
+  `min(remaining clock, upstream unlock, 15 s)`, default 5 s, taken after `endAttempt` so the wait
+  holds no AIMD slot. Arrears / not-subscribed are out of the chain entirely, and so is anything
+  `permanentRefusalCooldownMs` classifies: re-walking a permanent refusal only pays it twice.
+- **Cooldown tiers.** Account 15 s → 2 min; per `(account, model)` 429 60 s → 10 min; credential
+  5 → 30 min. Two terminal tiers are maxed with the exponential *and* with the upstream
+  `Retry-After`: `PERMANENT_REFUSAL_COOLDOWN_MS` = 6 h for payment/subscription refusals (402, or
+  the payment/subscription wording in `failover.ts`) and `QUOTA_WINDOW_COOLDOWN_MS` = 1 h for
+  quota-window exhaustion (`free_usage_limit`, daily limit, all channels throttled). The classifier
+  is narrow on purpose and never matches a bare 429, a bare "rate limit", or "for your
+  subscription tier" - those are throughput facts, not verdicts about the account.
+
+### Silent single-candidate channel: fast-fail before dispatch (2026-11-16)
+
+Two consecutive first-block timeouts (504 carrying `FIRST_BLOCK_TIMEOUT_CODE`) with no success in
+10 min arm a 60 s → 5 min window per `(account, model)` (`accountRuntime.recordFirstBlockTimeout` /
+`silentChannel`). A success - or a channel pool/credential change - clears it. Slow-but-alive channels
+(a success between the 504s) never trip: "slow" is not the predicate, "never succeeds" is.
+
+The window was originally read only by the chat named-model lane. The auto/pin lane kept dispatching
+into it: live 2026-11-15 18:49-19:07 UTC, routes `stable`/`daily` pinned `loomy/GLM-5.3-Flash`, ten
+requests each burned 20-23 s on a first-block timeout against the same silent channel, ~19 min of
+guaranteed-failure round trips while the window was already armed. `forwardFirstReachable` now
+consults `silentChannel` for every candidate **before** `planAttemptDeadline`: a hit synthesizes 503
+`first_block_silent_skip` + `Retry-After` (the window's remaining time) without dispatching, without
+an account penalty (the window is the punishment), and fails over to the next candidate; a sole
+candidate answers the client in milliseconds with the pin held. The recovery wait
+(`planRecoveryWaitMs`) is skipped when the last failure is a silent skip - waiting 5 s only re-hits
+the same 60 s-5 min window. The completions named lane carried the same gap (chat had the check,
+completions did not) and now mirrors it; the messages/responses lanes relay through loopback chat and
+inherit the coverage.
+
+Tests: `tests/proxy/forward-retry-status.test.ts` pins the machine code, the real-traffic-only
+accounting and every dispatch-lane call site (both named entries, auto/pin via
+`forwardFirstReachable`, recovery-round exclusion).
+
+### In-place retries stop when the pack says the request cannot be served (2026-11-16)
+
+A channel pack can wrap a machine code in a 502 and still be telling the truth about the *request*:
+`INVALID_REQUEST`, `UNSUPPORTED_CONTENT`, `MISSING_CREDENTIAL` and `AUTH` are not transport noise, they
+mean this body will never be accepted by that entry. `isDeterministicChannelRejection` classifies them,
+and the retry loop treats a hit as terminal **for that target**: no second attempt against the same
+entry, no AIMD drop, no cooldown - the account did nothing wrong. Switching to a *different* candidate
+stays allowed, because another provider may well accept the same body. The distinction matters because
+the outer status is 502: reading status alone would burn the whole retry budget on a request no attempt
+can fix.
 
 ### Fallback-served prose-only stop (2026-11-13, the seventh degraded class)
 
@@ -1831,12 +2172,93 @@ would flush the log list.
   model directly.
 - `usage` is `null` unless the upstream reported real token counts; it is never fabricated.
 - History trimming never empties the history: `TokenLimitStrategy` always keeps the newest
-  non-system message, even when that message alone exceeds `maxTokens` (and even when the system
-  prompt by itself does). Shipping `messages: []` is not "compression" - the account-channel gateway
+  non-system message. Shipping `messages: []` is not "compression" - the account-channel gateway
   rejects it with `messages must be a non-empty array`, which reads to the client as "you sent no
   messages" rather than "your message was too long" (reproduced live 2026-11-01 at `maxTokens: 8000`:
-  24 000 chars 200, 26 000 chars 400). `estimateTokens` here is `ceil(length / 3)`, deliberately not
-  the CJK-aware estimator the router uses.
+  24 000 chars 200, 26 000 chars 400). **Keeping it is not the same as keeping it whole** (2026-11-16
+  ruling): a newest message that alone exceeds `maxTokens` is *truncated to its budget* with a
+  retrievable pointer to the dropped tail (`truncateToBudget`), never forwarded verbatim. Verbatim was
+  the old shape and it made the cap advisory - one tool result (a file read, a search) carried a live
+  agent request to 125,024 tokens against a 65,536 cap, 1.9x, while the log claimed a successful trim.
+  Three further repairs keep the cap a hard constraint rather than a target: the tool-group widening
+  and task rescue run against a **copy** of the non-system array (re-slicing the original silently
+  reverted a truncation), rescued task statements are fitted to `taskReserve` (a 30,000-token
+  `AGENTS.md` first turn otherwise sailed past an 8,000 cap), and `enforceHardCap` halves the largest
+  message until the measured total fits when the accounting disagrees with measurement. Truncation is
+  re-entrant (`parseTruncationMarker`) so that last repair can still bind, and it reuses the original
+  hash so the pointer keeps describing the real original. `estimateTokens` prices CJK at 1.5
+  chars/token and everything else at 3 (`countCjkChars`, the same calibrated table the compression
+  estimator uses): a flat `/3` under-counted Chinese by ~2x, which is the arithmetic behind the
+  125,024-vs-65,536 gap.
+- **A cap the system block alone exceeds is unreachable, and the degenerate branch must say so
+  instead of spending the conversation.** When `availableTokens <= 0` the newest message used to be
+  budgeted at that *negative* balance, so it was cut to `MIN_KEPT_TOKENS` (64) - a stub. With an
+  untouchable system block (`maxSystemTokensByProvider` unset) no cut can reach `maxTokens` anyway,
+  so that branch bought nothing and cost everything: live 2026-11-16, a Claude Code session whose own
+  system prompt measured ~65,880 tokens against a 65,536 cap forwarded `"客\n… [626 of 627 chars
+  dropped to fit the context budget. …]"` with **no conversation history at all**, every turn, and
+  the client reported it as "the model keeps flipping between Chinese and English". Two rules now:
+  the newest message is budgeted at `maxTokens` (a normal instruction passes through whole; a turn
+  that is itself huge is still bounded), and both `taskReserve` and `enforceHardCap`/`keepToolGroupAndTask`
+  run only when the cap is reachable (`systemBudget !== undefined || systemTokens < maxTokens`).
+  `trimmed` stays `false` in the unreachable case, so the forwarder does not adopt a no-op. The cap
+  being unreachable is a **configuration** fact, not a trimming bug: `glm-5.3-flash` advertises a
+  1,000,000-token window while `maxTokensByProvider.volcengine_ark_agent_plan` was 65,536 and the
+  client's own prompt alone was 65,880. The real repair is the budget source below, not another
+  number in that table; do not re-introduce the stub.
+- **The trim budget belongs to the model, not to the provider (2026-11-16).**
+  `resolveTrimBudget(config, providerId, declaredContextWindow)` reads, in order: the serving
+  model's own declared window → `contextWindowTier` (`200k` / `400k` / `1m`, the Qoder-style
+  three-tier selector in 上下文管理) → `maxTokensByProvider[providerId]` → `maxTokens`. It is
+  deliberately **not** a `min()`: a per-provider number is structurally wrong for a gateway whose
+  routes may point at any model, because one provider serves a 128K and a 1M model at the same
+  time — stacking the channel value on top of the model window would reproduce the very defect
+  above. The tier exists because `volcengine_ark_agent_plan` and `bailian` carry empty
+  `modelCapabilities` (the aggregate catalogue is generated and does not annotate windows), so for
+  those there is no model annotation to prefer.
+- **Only four layers count as "this model's declaration".** `modelTrimWindow.ts::declaredContextWindowOf`
+  resolves the display name (catalogue first, `modelMappings` reverse lookup second) and then reads
+  manual marks > provider-synced record > aggregate official table > probe. The result goes through
+  `advertisedContextTokens`, the same gate the client-facing `context_window` uses, so static table
+  rows and family rules (`glm-5.3` → 128000) are excluded — they are transcriptions of similar
+  models, and pricing a 1M model at 128K is the same defect from another source. No evidence means
+  `undefined`, which hands the decision to the tier; the function never guesses a number.
+  `/v1/models` follows the same rule, and a **pinned** route advertises its pinned model's own
+  window (`floorOfPool` in `autoRouter.ts`), not the pool minimum: once pinned the route only ever
+  dispatches that model, so the pool floor would make the client summarize a 1M session at a 128K
+  sibling's threshold. If the pin is not in the pool (`pin_stale`) the route dispatches nothing, so
+  the pool floor stays the honest number there.
+- **A cost target is a different number from the window, and it may never make a request
+  unserviceable (2026-11-16).** Once the budget came from the model, the per-provider cap stopped
+  binding — `trae` has 30 of 32 models declaring ≥65,536, the largest 1M — so its prompt volume
+  could grow 15x. That 65,536 was never a window claim: trae bills credits by prompt volume and gets
+  no prefix cache, so it was a **spending** decision. `TokenLimitConfig.costBudgetByProvider` now
+  carries spending, resolved per provider into the internal `costBudget`, and it is consulted only
+  through `TokenLimitStrategy::budgetFor`, which can only *tighten* the window. The invariant that
+  keeps it honest: a target below `system + taskReserve + MIN_SERVICEABLE_TAIL_TOKENS` (256, i.e.
+  four `MIN_KEPT_TOKENS`) cannot be met by any legal trim, so it is **declined** — the window wins,
+  every byte is kept, and a warning names the target. Honouring it literally is exactly the
+  unreachable-cap branch that threw the conversation away every turn, so the cost gate cannot reach
+  that branch at all: `availableTokens <= 0` there always means the *window* is too small. There is
+  no global cost fallback on purpose — `maxTokens` ships as 4000, and reading that as a spending
+  target would truncate every annotated model to 4000 tokens. Configured in 上下文管理 as one
+  `channel: tokens` line per channel; the renderer keeps it in a separate state field from the tier
+  so an edit can never rewrite `maxTokens`.
+- **`trimmed` means "the bytes changed", not "fewer messages".** `ContextProcessResult.changed`
+  is what the forwarder adopts (`if (processResult.changed)`); deriving it from `finalCount !==
+  originalCount` threw away every truncation, because a truncation keeps the count and rewrites one
+  message. `StrategyResult.rewrote` says which kind it was (surfaced in the log as
+  `content truncated`), so a reader can tell a dropped turn from a shortened one.
+- **The system block is trimmed only when a provider names a cap for it**
+  (`TokenLimitConfig.maxSystemTokensByProvider`, resolved per `providerId` into the internal
+  `systemMaxTokens`). Cutting the client's own prompt is a stronger act than dropping old turns, so
+  absent = one byte untouched, and `enforceHardCap` will not touch a system message either. Measured
+  on that same 125,024-token request: the system block was ~45,239 tokens (36.2%) and one tool result
+  ~66,005, so the system block is large but not the bulk - it is opt-in rather than the default fix,
+  and on a plan endpoint whose prefix cache carries no discount it is re-bought at full price every
+  turn, which is the reason the switch exists at all. A stored `systemMaxTokens` is stripped by
+  `normalizeContextManagementConfig` (it is a resolved value, not configuration state), which is why
+  `createContextManagementService` resolves the per-provider override itself.
 - **The first user turn is not necessarily the task.** `keepToolGroupAndTask` used to rescue the
   first non-system `user` message when the window stopped covering it, which is the question in a
   chat client but is `AGENTS.md` in Codex: the app injects the rulebook as the first user turn, so a
@@ -1990,6 +2412,39 @@ missing from its SAN (`proxy/tls.ts::loadTlsMaterial`).
 * Never report a client as working on the strength of the trust flag; the honest evidence is a handshake
   that turned into a request row.
 
+### Host boundary: three hosts, one bootstrap (2026-11-16)
+
+- **Three hosts share `bootstrapGateway()`**: windowless Electron (local desktop), the headless Node
+  daemon (`daemon/entry.ts`, WSL / Docker), and the retired `--desktop` dev host. Anything that differs
+  between them goes through `runtime/host.ts`; **nothing under `proxy/`, `providers/`, `store/`,
+  `scheduler/` or `channelPack/` may import `electron`** (`tests/build/daemon-bundle.test.ts` - the
+  daemon tarball has no Electron to import).
+- **`store.key` on a keystore-less host is `sealed-unreadable`** (`keyMigration.ts::planKeySetup`). The
+  key file proves the data was written under a keystore this host does not have, so `initialize()`
+  throws and leaves the file alone - critically, it is **not** routed through the corrupted-data backup
+  path, because the file is not corrupt. Treating "I cannot decrypt this" as "this data is broken"
+  would overwrite a perfectly good store on first start.
+- **Two management surfaces, one registry.** `/v1/management/rpc` (+ `/events`) is the handler registry
+  minus `app:installUpdate` / `app:downloadUpdate` (those two are desktop-only) - never a second list
+  maintained by hand. `/ui/` serves the built renderer where `getWebRoot()` exists (trailing slash, no
+  auth: those are public build artifacts).
+- **Backup has three entries, one engine.** Import arrives via the desktop dialog, the
+  `--import-backup` argv flag, or `POST .../backup/stage`; all three funnel into `stageBackupFile()`
+  (`backup/service.ts`), which owns the format checks and the sealed-file path. Export writes through
+  the save dialog on desktop and returns the payload for a browser download on headless hosts
+  (`delivery: 'payload'`) - a headless host has no dialog to write to. Management secrets: browser
+  `sessionStorage`, or `secrets.json` per origin written `0600` and sealed by the console - which
+  refuses to write with no keystore, so `gateways.json` stays credential-free.
+- **Release shape.** One installer per platform, plus `dist/modelport-daemon-<ver>-<arch>.tar.gz` and a
+  Docker image tarball (`modelport-daemon-<ver>-docker-<arch>.tar.gz`, `docker load`-ready). No
+  `latest.yml` is published: updates are discovered from the repository's public `releases.atom` feed
+  (`shell/updatePlan.ts::RELEASES_ATOM`) and asset URLs are **derived from the tag** by
+  `releaseFromTag` - never the anonymous REST API, whose 60-per-hour-per-IP budget turns one spent
+  quota into a bare 403 on every subsequent check, which reads as "up to date or broken?" with no way
+  to tell. The console is a thin argv orchestrator (dynamic imports only,
+  `tests/build/shell-entries.test.ts`), and headless persistence needs a **system-scope** systemd unit:
+  a `systemctl --user` unit dies with the login session that started it (`docs/features/wsl-daemon.md`).
+
 ### Client Repointing (2026-11-14)
 
 The console can point the clients installed on its own machine at the active gateway, so switching
@@ -2121,7 +2576,7 @@ fails if a tagged site is missing from this table or a table row has no tag. Pro
 
 | id | what it writes | provenance | why it exists |
 | --- | --- | --- | --- |
-| `ccr-sentinel` | appends `… N more items <<ccr:hash …_items_offloaded>>` / `[N lines compressed to M. Retrieve more: hash=…]` inside tool results | `9d07417` 2026-10-30, 刘小平 | compression that stays honest about itself: the marker is the retrieval pointer, and re-compressing a payload that already carries one is never correct. |
+| `ccr-sentinel` | appends `… N more items <<ccr:hash …_items_offloaded>>` / `[N lines compressed to M. Retrieve more: hash=…]` inside tool results; history trimming reuses the id for `… [N of M chars dropped to fit the context budget. Retrieve more: hash=…]` | `9d07417` 2026-10-30, 刘小平 | compression that stays honest about itself: the marker is the retrieval pointer, and re-compressing a payload that already carries one is never correct. `TokenLimitStrategy.truncateToBudget` shares the id because it is the same act and the same promise - a cut body says how much it lost and how to get it back, and `isAlreadyCompressed` keeps a second pass from cutting the tail of a tail. |
 | `liveness-ping` | `messages:[{role:'user',content:'ping'}]` with `max_tokens:1` | `ddc566a` 2026-10-30, 刘小平 | catalogue liveness probe; never part of a user conversation. Two call sites share the id: `aggregateProviderManager.testModel` (aggregate detail page) and `providers/modelTest.ts` (the Models page "test" button). The latter carries `probe: true`, so it never enters the dispatch ledger, AIMD admission, Bandit or cooldowns. |
 | `probe-context` | `buildContextProbePrompt()`: repeats `probe ` to push the input to a target token tier | `2026-11-04` 探测阶梯 | context-window ladder probe; carries `probe: true`, so it never enters a client conversation, never counts toward AIMD/Bandit, and is excluded from success statistics. |
 | `probe-output` | `Write the word "ok" repeated on a single line until you are stopped. Do not stop on your own.` | `2026-11-04` 探测阶梯 | output-cap ladder probe: asks the model to keep going so `max_tokens` is the only stop reason; same `probe: true` isolation. |
@@ -2203,6 +2658,32 @@ live `GATEWAY-TEXT:` tags — so the provenance survives without pretending the 
   behaviour (including the invariant that trimming never empties history). `normalizeContextManagementConfig`
   drops a stored `strategies.summary` and filters `summary` out of `executionOrder`, so an upgraded
   `data.json` cannot resurrect it; the gate is `tests/proxy/context-summary-retired.test.ts`.
+
+## Logging
+
+Request rows carry `requestId`, `attempts[]`, `streamTrace` (first token, total elapsed, bytes, end
+reason, whether `[DONE]` was seen, ping count, upstream id), `errorType` / `errorCode` / `errorParam`
+and `upstreamStatus` / upstream id.
+
+**Retention is a floor bounded by time.** At least 100 error request rows and 500 error app logs are
+kept, but both floors are capped by `logRetentionDays`: an unbounded floor turns "keep the errors"
+into "keep everything", and the reading becomes the whole corpus. Log-panel counters are therefore
+read from `statistics.dailyStats`, never by counting the rows that happen to survive.
+
+**Bodies have exactly three knobs**, and none of them is a per-request default:
+`includeBodies` (a config flag), a per-request `X-ModelPort-Trace: 1` header, and `bodySampleRate`
+- sampled by **hashing the `requestId`**, never by a coin flip, so the same request is either
+sampled for every observer or for none, and a rerun from the log reproduces the sample.
+`bodyRetentionDays` (7) strips the stored body and the `captureBodies` flag but **keeps the row**, so
+counters and error classifications survive body expiry. Sampling defaults to 0.
+
+**Writes.** Timed log writes are async and atomic; `flushSync()` is the quit path (a normal shutdown
+flushes, a crash loses at most the tail). `console.*` is mirrored by `consoleBridge.ts`; a sink must
+never report its own failure through `console.*` - that recurses - so it writes to `process.stderr`.
+
+**Settings forms must not render editable controls before `appConfig` loads** (`ProxyConfigForm`):
+rendering against the empty default and then overwriting it with the loaded value races the user's
+first keystroke into a lost edit.
 
 ## Data Storage
 
