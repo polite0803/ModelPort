@@ -83,6 +83,9 @@ assert.equal(sm.updateRoute('auto', { modelScope: 'single', prefer: 'cheap', poo
 
 const { accountChannelManager } = await loadModule('main/providers/accountChannels/manager.ts')
 const { autoRouter } = await loadModule('main/proxy/autoRouter.ts')
+const { channelRuntimeState, markChannelRuntimeRunning, markChannelRuntimeStopped } = await loadModule(
+  'main/providers/accountChannels/runtimeState.ts',
+)
 
 /** worker 报「限流中」的模型 id；`resetAtMs` 由 every test 现算。 */
 let limitedModels = new Set<string>()
@@ -93,7 +96,10 @@ let rateLimitQueries: string[][] = []
 const seenModels: string[] = []
 
 accountChannelManager.bridgeOrThrow = async () => ({
-  models: async () => [],
+  models: async () => [
+    { id: 'opencode/opencode/pickle' },
+    { id: 'opencode/opencode/live' },
+  ],
   rpc: async (method: string, payload: { models?: string[] }) => {
     if (method === 'model.rateLimits') {
       const requested = payload.models ?? []
@@ -148,6 +154,7 @@ after(async () => {
   await proxy.stop()
   autoRouter.reset()
   accountChannelManager.clearRateLimitCache()
+  markChannelRuntimeStopped()
   harness.dispose()
 })
 
@@ -252,4 +259,26 @@ test('整池都零产出地被额度拒绝：尝试有上限，收口成可重�
   assert.ok(Number(response.headers['retry-after']) >= 1, '要给出可退避的间隔')
   assert.deepEqual(seenModels, ['opencode/pickle', 'opencode/live'],
     '池里只有两个模型：各试一次就收口，排除了整池之后不再空转')
+})
+
+test('预热：不发请求也能把 worker 限流读数灌进镜像（展示面在第一笔撞墙前就有数）', async () => {
+  // 2026-11-16 WorkBuddy 缺口：镜像只在请求路径预检时才有数，路由页/菜单读空表，
+  // 用户撞了 429 才知道整池限流。prewarmRateLimits 必须在零请求的前提下补上这一格。
+  limitedModels = new Set(['opencode/pickle'])
+  // 先把服务清单缓存填上（预热按它定每家问哪些模型；生产里这由一次目录读取回填），
+  // 并把运行时标记成在跑——与真 bridgeOrThrow 同形：没在跑时预热保持空表（fail-open）。
+  markChannelRuntimeRunning()
+  // 后台刷新是单飞任务，起完即可；给它一拍让 seed 落地再继续。
+  await accountChannelManager.refreshPackServedInBackground()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(accountChannelManager.isModelRateLimitedNow('opencode', 'opencode/pickle'), false,
+    '前置：没有任何请求时镜像是空的')
+
+  await accountChannelManager.prewarmRateLimits()
+
+  assert.equal(accountChannelManager.isModelRateLimitedNow('opencode', 'opencode/pickle'), true,
+    '预热必须把 worker 的限流读数落进镜像')
+  assert.equal(accountChannelManager.isModelRateLimitedNow('opencode', 'opencode/live'), false,
+    '没被限流的模型不产生读数')
+  assert.deepEqual(seenModels, [], '预热只读 worker 内存副本，绝不发出上游调用')
 })

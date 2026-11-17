@@ -60,6 +60,7 @@ import type {
   RouteMutationResult,
   RouteRemovalResult,
   RoutePoolSizesResult,
+  AvailabilityBlocksResult,
 } from './modelRouteName'
 import type {
   AnthropicDiscoveryResult,
@@ -857,6 +858,10 @@ const routesAPI = {
   poolSizes: (): Promise<RoutePoolSizesResult> =>
     wire.invoke(IpcChannels.ROUTES_POOL_SIZES),
 
+  // 模型可用性快照（模型页徽章）：渠道限流镜像 + 聚合额度活标记，只读内存表。
+  availabilityBlocks: (): Promise<AvailabilityBlocksResult> =>
+    wire.invoke(IpcChannels.AVAILABILITY_BLOCKS),
+
   // 快捷切换模型（架构 A）：菜单快照 / 切换 / 恢复自动排序。托盘通过 shell 桥
   // 把这三件事转给这个页面，凭据仍然只在这里 —— 主进程不持有管理密钥。
   // `request` 只是范围：托盘不带参数（默认上限），控制台路由页要一条路由的全部模型。
@@ -1112,6 +1117,10 @@ const electronAPI = {
   config: configAPI,
   anthropicDiscovery: anthropicDiscoveryAPI,
   routes: routesAPI,
+  availability: {
+    blocks: (): Promise<AvailabilityBlocksResult> =>
+      wire.invoke(IpcChannels.AVAILABILITY_BLOCKS),
+  },
   managementApi: managementApiAPI,
   contextManagement: contextManagementAPI,
   tray: trayAPI,

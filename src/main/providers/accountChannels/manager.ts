@@ -63,6 +63,8 @@ interface PackAccount {
   proxyLabel?: string
   /** Set by the pack when upstream said it will not serve this account. */
   serviceStopped?: { at: number; text: string }
+  /** `account.list` 原样带出的模型级限流（`account-pool.ts` 的 `ProviderAccountEntry`）。 */
+  modelRateLimits?: Record<string, number>
 }
 
 const MODELS_CACHE_MS = 30_000
@@ -256,6 +258,19 @@ class AccountChannelManager {
                   text: account.serviceStopped.text,
                 }
               : undefined,
+            // 仍在期的模型级限流（上游声明的解禁时刻）：账号行徽章与「重置/重测」
+            // 两条人工解禁路径读的就是这一份。过期条目不投影（worker 池的 sweep
+            // 有时差，投影层自己再滤一次，免得面板画出已解禁的徽章）。
+            ...(() => {
+              const limits = account.modelRateLimits
+              if (limits === null || typeof limits !== 'object') return {}
+              const now = Date.now()
+              const live: Record<string, number> = {}
+              for (const [modelId, at] of Object.entries(limits)) {
+                if (typeof at === 'number' && at > now) live[modelId] = at
+              }
+              return Object.keys(live).length === 0 ? {} : { rateLimits: live }
+            })(),
           })),
         },
         models: {
@@ -490,6 +505,78 @@ class AccountChannelManager {
 
   isModelRateLimitedNow(id: string, modelId: string, now: number = Date.now()): boolean {
     return this.modelRateLimitResetAt(id, modelId, now) !== undefined
+  }
+
+  /**
+   * 预热渠道限流镜像：对全部账号渠道各发一次 `model.rateLimits`（worker 内存副本，
+   * 无上游请求），把读数灌进 `rateLimitMarks`。
+   *
+   * 为什么需要它：镜像只在**请求路径**预检（`chat.ts` 折池）时才有数。展示面
+   * （路由页/托盘菜单）读同一张表，但不发请求就永远是空的——用户在第一笔撞墙
+   * 之前看不到「Hy4 flash 全部账号限流到明天 17:44」（2026-11-16 WorkBuddy 实测）。
+   * 每家渠道 60s TTL（`modelRateLimits`），热路径不会因预热而变密。
+   *
+   * 单家失败只跳过那一家（fail-open）：预热是展示辅助，它的失败不许把调用方
+   * （preview/menu 处理器）搞挂。
+   */
+  async prewarmRateLimits(): Promise<void> {
+    try {
+      const bridge = await this.bridgeOrThrow()
+      void bridge
+      const now = Date.now()
+      const batches: { id: string; modelIds: string[] }[] = []
+      for (const channel of ACCOUNT_CHANNELS) {
+        const entry = this.packServedCache.get(channel.id)
+        if (entry === undefined || entry.ids === null || now >= entry.expiresAt + PACK_SERVED_STALE_GRACE_MS) {
+          continue
+        }
+        const modelIds = [...entry.ids]
+          .filter(qualified => qualified.startsWith(`${channel.id}/`))
+          .map(qualified => qualified.slice(channel.id.length + 1))
+        if (modelIds.length === 0) continue
+        batches.push({ id: channel.id, modelIds })
+      }
+      await Promise.all(
+        batches.map(async ({ id, modelIds }) => {
+          try {
+            await this.modelRateLimits(id, modelIds)
+          } catch {
+            // 单家失败只影响那一家镜像；fail-open。
+          }
+        }),
+      )
+    } catch {
+      // worker 未起：镜像维持空表，行为与预热前一致。
+    }
+  }
+
+  /** 预热后镜像里**有读数**的 `(渠道, 模型)` 对数；给调用方判断预热是否带来新事实。 */
+  rateLimitMarkCount(): number {
+    return this.rateLimitMarks.size
+  }
+
+  /**
+   * 限流镜像全表快照：`(渠道) -> (模型 id -> 解禁时刻)`，只含仍在期的条目。
+   *
+   * 模型页可用性徽章读这一份（与选路同源，绝不另算）。只读内存表，无 IO、
+   * 无 worker RPC——高频调用安全。过期条目顺带清掉（与 `modelRateLimitResetAt`
+   * 同判据）。
+   */
+  rateLimitMarksSnapshot(now: number = Date.now()): Record<string, Record<string, number>> {
+    const table: Record<string, Record<string, number>> = {}
+    for (const [key, until] of this.rateLimitMarks) {
+      if (until <= now) {
+        this.rateLimitMarks.delete(key)
+        continue
+      }
+      const sep = key.indexOf('::')
+      if (sep <= 0) continue
+      const channelId = key.slice(0, sep)
+      const modelId = key.slice(sep + 2)
+      const bucket = table[channelId] ?? (table[channelId] = {})
+      bucket[modelId] = until
+    }
+    return table
   }
 
   /** 账号启停/重置/换号后立即失效该渠道的限流预检缓存与镜像。 */

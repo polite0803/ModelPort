@@ -30,6 +30,10 @@ export const IpcChannels = {
   ROUTES_PREVIEW: 'routes:preview',
   // 逐路由的候选模型数（一次采集折全表，比逐条 preview 便宜一个量级）。只读。
   ROUTES_POOL_SIZES: 'routes:pool-sizes',
+  // 模型可用性快照：渠道限流镜像（与选路同源）+ 聚合额度活标记，折叠成
+  // `<providerId>/<modelId> -> { reason, until }`。模型页徽章读这一份——
+  // 「使用前」就知道哪个模型此刻派不出去、什么时候回来。只读内存表，无上游请求。
+  AVAILABILITY_BLOCKS: 'availability:blocks',
   // 快捷切换模型（架构 A）：菜单快照、切换/点名、恢复自动排序。
   //
   // 分三条而不是一条 `routes:pin(...args)`：菜单是只读轮询面，切换是写操作，

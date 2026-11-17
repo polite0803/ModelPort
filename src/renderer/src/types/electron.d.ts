@@ -100,6 +100,7 @@ import type {
   RouteMutationResult,
   RouteRemovalResult,
   RoutePoolSizesResult,
+  AvailabilityBlocksResult,
 } from '../../../shared/modelRouteName'
 import type {
   AnthropicDiscoveryResult,
@@ -813,6 +814,10 @@ interface ElectronAPI {
   config: ConfigAPI
   anthropicDiscovery: AnthropicDiscoveryAPI
   routes: RoutesAPI
+  /** 模型可用性快照（模型页徽章）：渠道限流镜像 + 聚合额度活标记，只读内存表。 */
+  availability: {
+    blocks: () => Promise<AvailabilityBlocksResult>
+  }
   managementApi: ManagementApiAPI
   contextManagement: ContextManagementAPI
   tray: TrayAPI

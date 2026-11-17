@@ -89,6 +89,16 @@ export interface ChannelDefinition {
     tools?: boolean
   }
   /**
+   * 该渠道的前缀缓存行为（适配器级事实，不是每模型一份 —— 渠道包不逐模型上报缓存）。
+   *
+   * 只写**适配器代码能证明**的事：请求体带 `prompt_cache_key` / `cache_control`
+   * 或上游实测返回 `cached_tokens`，才声明 `implicit-prefix` / `explicit-breakpoints`；
+   * 实测显式 0（trae，PLAN §9.12）保持缺席（unknown）。`readDiscount` 只在有
+   * 官方价目出处时写。这里与聚合目录的 `promptCache` 同构，消费方是
+   * `autoRouter.promptCacheCapabilityOf` 与压缩闸。
+   */
+  promptCache?: import('./promptCache').PromptCacheCapability
+  /**
    * The client identity this channel presents upstream, and how likely that is
    * to be read as "non-official usage".
    *
@@ -130,6 +140,14 @@ export interface ChannelAccountView {
    * verbatim so the row can say which of the three kinds of grey it is.
    */
   serviceStopped?: { at: number; text: string }
+  /**
+   * 该账号名下仍在期（未过期）的模型级限流：模型 id → 上游声明的解禁时刻（epoch ms）。
+   *
+   * 只带未来的条目（过期的在 worker 池里已被 sweep，即便残留也不投影）。这是
+   * **上游声明的事实**（账号 × 模型的真实重置时刻，如免费额度打满），不是估算，
+   * 界面不需要「约」。没有限流的账号缺省（不写空表）。
+   */
+  rateLimits?: Record<string, number>
 }
 
 /** Per-channel state rendered on one card. */

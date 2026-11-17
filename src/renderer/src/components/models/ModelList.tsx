@@ -38,6 +38,7 @@ import {
 } from '@shared/discountWindow'
 import { useDiscountClock } from '@/hooks/useDiscountClock'
 import type { AggregateCostClass } from '@shared/aggregateCost'
+import type { AvailabilityBlock } from '@shared/modelRouteName'
 import { aggregateCostOf, costBucketOfAggregateClass } from '@shared/aggregateCost'
 import modelMappingIcon from '@/assets/providers/model-mapping.svg'
 
@@ -109,6 +110,11 @@ interface ModelInfo {
   weightApplicable: boolean
   /** 聚合条目的成本分类（只有聚合行有），行上按它显示免费/套餐内/按量/未标注 */
   costClass?: AggregateCostClass
+  /**
+   * 上游真实模型名（`<provider>/<内部 id>` 形状的键由调用方拼）。可用性快照
+   * （限流镜像 / 额度标记）按它查行 —— 与 freeFlags 等目录事实同一把钥匙。
+   */
+  actualModelId?: string
   /** 与路由同口径的消耗档位：免费/低倍率/基准/高倍率/未知 */
   costBucket: CostBucket
   /**
@@ -132,6 +138,8 @@ interface ModelRowProps {
   testBusy: boolean
   /** 最近一次测试结果；缺省 = 还没测过 */
   testResult?: ProviderModelTestResult
+  /** 此刻被什么挡住（渠道限流镜像 / 聚合额度活标记）；缺省 = 没有读数，正常可派 */
+  blocked?: AvailabilityBlock
   onTestModel: (model: ModelInfo) => void
 }
 
@@ -192,6 +200,7 @@ const ModelRow = memo(({
   testing,
   testBusy,
   testResult,
+  blocked,
   onTestModel,
 }: ModelRowProps) => {
   const providerIcon = providerIcons[model.providerId]
@@ -295,6 +304,29 @@ const ModelRow = memo(({
           )}
           {model.modality === 'multimodal' && (
             <Badge variant="secondary">{t('models.multimodal')}</Badge>
+          )}
+          {/* 此刻被挡（渠道限流 / 聚合额度标记）：与选路同一份读数。事实带时刻、
+              推算带「约」，没有时刻的原因只写原因 —— 与路由页 `blockLabel` 同一口径。 */}
+          {blocked !== undefined && (
+            <Badge
+              variant="outline"
+              className="text-amber-600 dark:text-amber-400"
+              title={t('models.blockedHint', {
+                reason: t(blocked.reason === 'rate_limited' ? 'models.blockedRateLimited' : 'models.blockedQuota'),
+              })}
+            >
+              {blocked.reason === 'rate_limited'
+                ? t('models.blockedRateLimitedShort')
+                : t('models.blockedQuotaShort')}
+              {blocked.until !== undefined
+                ? ` · ${new Date(blocked.until).toLocaleString([], {
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}${blocked.untilSource === 'estimated' ? t('models.blockedApproxSuffix') : ''}`
+                : ''}
+            </Badge>
           )}
         </div>
       </TableCell>
@@ -444,6 +476,13 @@ export function ModelList() {
   const [modalityFlags, setModalityFlags] = useState<Record<string, boolean>>({})
   /** provider id -> 该供应商当前余额/积分（渠道包 credits.balances） */
   const [credits, setCredits] = useState<Record<string, ChannelCredits | 'loading'>>({})
+  /**
+   * `<provider>/<model>` -> 此刻被什么挡住（渠道限流镜像 / 聚合额度活标记）。
+   *
+   * 与选路同一份读数（`availability:blocks`），「使用前」就知道哪个模型派不出去、
+   * 什么时候回来。每 60s 重取一次：镜像与标记都是分钟级粒度，无需更快。
+   */
+  const [availabilityBlocks, setAvailabilityBlocks] = useState<Record<string, AvailabilityBlock>>({})
 
   /**
    * 折扣窗口的边界时刻：本页印的是**此刻生效**的倍率，所以窗口一开一关必须重绘。
@@ -567,6 +606,29 @@ export function ModelList() {
   useEffect(() => {
     loadCatalogueFacts()
   }, [loadCatalogueFacts, modelsLastUpdated])
+
+  // 可用性快照：只读内存表，60s 一拍。预热由 `routes:preview`/`routes:menu`
+  // 处理器做，这里只读现成的镜像 —— 模型页不发任何上游请求。
+  useEffect(() => {
+    const api = window.electronAPI?.availability
+    if (!api?.blocks) return
+    let cancelled = false
+    const load = () => {
+      api.blocks()
+        .then(result => {
+          if (!cancelled && result.ok) setAvailabilityBlocks(result.blocks)
+        })
+        .catch(() => {
+          // 快照是辅助读数，失败保持上一份（fail-open），不打扰页面。
+        })
+    }
+    load()
+    const timer = window.setInterval(load, 60_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [])
 
   /**
    * 手工标注读一次：行上的倍率/免费必须显示路由实际使用的那一层
@@ -716,6 +778,9 @@ export function ModelList() {
           modality: toModality(supportsImage),
           free: effective.free || undefined,
           weight: effective.weight,
+          // 可用性快照的键（`<providerId>/<内部模型 id>`）：与 freeFlags 等同一把钥匙，
+          // 徽章据此找到自己的行。聚合条目是 `<entryId>/<model.id>`，同一形状。
+          actualModelId: model.actualModelId,
           ...price,
           ...price.window === undefined
             ? {}
@@ -1314,6 +1379,9 @@ export function ModelList() {
                       testing={testingModelId === model.id}
                       testBusy={testingModelId !== null}
                       {...(testResults[model.id] === undefined ? {} : { testResult: testResults[model.id] })}
+                      {...(model.actualModelId === undefined
+                        ? {}
+                        : { blocked: availabilityBlocks[model.actualModelId] ?? availabilityBlocks[model.name] })}
                       onTestModel={handleTestModel}
                     />
                   ))}

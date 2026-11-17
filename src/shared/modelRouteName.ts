@@ -92,6 +92,29 @@ export type RoutePoolSizesResult =
   | { ok: false; error: RouteIpcError }
 
 /**
+ * 模型可用性快照（模型页徽章，P4 2026-11-16）。键是 `<providerId>/<modelId>`
+ * （渠道的 modelId 是裸模型名，聚合的 modelId 也是裸名——两域与各自账本同键）。
+ *
+ * 两个判据域**不折成一个口径**：
+ * - `rate_limited`（渠道 worker 限流镜像）：`until` 是上游声明的解禁时刻，
+ *   `untilSource: 'upstream'`；
+ * - `quota-exhausted`（聚合额度活标记）：`until` 来自标记自身的事实时刻或 TTL 推算，
+ *   `untilSource: 'estimated'`；没有可推算时刻的行不写 `until`（原因-only）。
+ */
+export interface AvailabilityBlock {
+  reason: 'rate_limited' | 'quota-exhausted'
+  /** 解禁时刻（epoch ms）；缺席 = 原因-only（钱不够这类）。 */
+  until?: number
+  untilSource?: 'upstream' | 'estimated'
+}
+
+export type AvailabilityBlocksResult = {
+  ok: true
+  blocks: Record<string, AvailabilityBlock>
+  generatedAt: number
+}
+
+/**
  * 规范化：非字符串一律得到 `''`（调用方据此判非法），字符串按 trim + 小写。
  * 这里**不**做字符集校验，只做形态收敛：读取侧要能拿它比较键与字段。
  */

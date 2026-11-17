@@ -1958,6 +1958,36 @@ export function Channels() {
                             {t('channels.serviceStopped')}
                           </span>
                         )}
+                        {(() => {
+                          // 模型级限流徽章（上游声明的解禁时刻）：最早恢复的那个印在行上，
+                          // 完整清单进 tooltip。多模型共用一行不折算 —— 每个模型的窗口
+                          // 是独立事实（AGENTS.md：两套计数域不得并排显示成可比）。
+                          const limits = account.rateLimits
+                          if (limits === undefined) return null
+                          const entries = Object.entries(limits).sort((a, b) => a[1] - b[1])
+                          if (entries.length === 0) return null
+                          const [firstModel, firstAt] = entries[0]!
+                          const title = entries
+                            .map(([model, at]) => `${model}: ${new Date(at).toLocaleString()}`)
+                            .join('\n')
+                          return (
+                            <span
+                              className="shrink-0 max-w-[14rem] truncate text-xs text-amber-600 dark:text-amber-400"
+                              title={title}
+                            >
+                              {t('channels.accountRateLimited', {
+                                model: firstModel,
+                                count: entries.length,
+                                time: new Date(firstAt).toLocaleString([], {
+                                  month: '2-digit',
+                                  day: '2-digit',
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                }),
+                              })}
+                            </span>
+                          )
+                        })()}
                         {account.expiresAt !== undefined && (
                           <span className="shrink-0 text-xs text-muted-foreground">
                             {new Date(account.expiresAt).toLocaleDateString()}

@@ -63,7 +63,8 @@ import { ConfigManager } from '../store/config'
 import { generateManagementSecret } from '../proxy/middleware/managementAuth'
 import { buildRequestDiagnosticBundle } from '../logging/diagnosticBundle'
 import type { Provider, Account, ProxyStatus, ProviderCheckResult, OAuthResult, AuthType, CredentialField, LogLevel, LogEntry, ProviderVendor, ModelRoute, ModelCapabilityHint, ProviderModelSyncResult } from '../../shared/types'
-import type { RouteListResult, RouteMutationResult, RouteRemovalResult, RoutePoolSizesResult } from '../../shared/modelRouteName'
+import type { RouteListResult, RouteMutationResult, RouteRemovalResult, RoutePoolSizesResult, AvailabilityBlocksResult } from '../../shared/modelRouteName'
+import { exhaustionExpiresAt, liveExhaustions } from '../../shared/aggregateQuotaExhaustion.ts'
 import type { ManagementApiConfig, AppConfig } from '../store/types'
 import { DEFAULT_CONTEXT_MANAGEMENT_CONFIG } from '../store/types'
 import type { TlsStatus, TlsTrustResult } from '../../shared/types'
@@ -441,6 +442,11 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
   /**
    * 路由池预览。入参是**草稿**路由（还没保存的那份），所以不能从 store 读配置 ——
    * 用户要看到的是「按下保存后会怎样」。只读：不扣冷却、不请求上游、不写状态。
+   *
+   * 折池前预热渠道限流镜像：预览的 `blocked`（`rate_limited · 恢复时刻`）读
+   * `accountChannelManager` 的内存镜像，而那张表只在请求路径预检时才有数——
+   * 不预热的话，第一笔撞墙之前路由页对「全部账号限流到明天」毫不知情
+   * （2026-11-16 WorkBuddy 实测）。预热只发 worker 内存 RPC，无上游请求。
    */
   registerMainHandler(
     IpcChannels.ROUTES_PREVIEW,
@@ -450,6 +456,7 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
       sample?: RoutePreviewSample,
       options?: { fresh?: boolean },
     ): Promise<RoutePreviewResult> => {
+      await accountChannelManager.prewarmRateLimits()
       return autoRouter.preview(route, sample ?? {}, options ?? {})
     },
   )
@@ -467,6 +474,46 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
       } catch (error) {
         return { ok: false, error: routeStorageError(error) }
       }
+    },
+  )
+
+  /**
+   * 模型可用性快照（P4，2026-11-16）：两个判据域各出各的事实，折成一张键表给
+   * 模型页徽章——「使用前」就知道哪个模型此刻派不出去、什么时候回来。
+   *
+   * - `rate_limited`：渠道 worker 的模型级限流镜像（与选路 `blocked` 同源同一张表，
+   *   `untilSource: 'upstream'`——时刻是上游亲口说的）。
+   * - `quota-exhausted`：聚合线的额度活标记（`exhaustionSummaries` 折叠 + 逐行
+   *   `exhaustionExpiresAt`；没有事实时刻的行不写 until）。
+   *
+   * 只读内存表，无 IO、无上游请求。两域不折成一个口径：徽章按 reason 分色。
+   */
+  registerMainHandler(
+    IpcChannels.AVAILABILITY_BLOCKS,
+    async (): Promise<AvailabilityBlocksResult> => {
+      const blocks: Record<string, { reason: 'rate_limited' | 'quota-exhausted'; until?: number; untilSource?: 'upstream' | 'estimated' }> = {}
+      const channelMarks = accountChannelManager.rateLimitMarksSnapshot()
+      for (const [channelId, models] of Object.entries(channelMarks)) {
+        for (const [modelId, until] of Object.entries(models)) {
+          blocks[`${channelId}/${modelId}`] = { reason: 'rate_limited', until, untilSource: 'upstream' }
+        }
+      }
+      try {
+        const exhaustions = storeManager.getAggregateQuotaExhaustions()
+        for (const [entryId, records] of Object.entries(exhaustions)) {
+          for (const record of liveExhaustions(records)) {
+            const until = exhaustionExpiresAt(record)
+            blocks[`${entryId}/${record.modelId}`] = {
+              reason: 'quota-exhausted',
+              ...(until > Date.now() ? { until, untilSource: 'estimated' as const } : {}),
+            }
+          }
+        }
+      } catch (error) {
+        // 标记读不出来只影响聚合那一半；渠道镜像照常返回。
+        console.error('[AvailabilityBlocks] failed to read exhaustion marks:', error)
+      }
+      return { ok: true, blocks, generatedAt: Date.now() }
     },
   )
 
@@ -509,6 +556,8 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
         ? Math.min(ROUTE_MENU_MODELS_MAX, Math.max(1, Math.trunc(request.limit)))
         : undefined
       try {
+        // 菜单行也带 `blocked`（与预览同一份镜像）：打开菜单前预热，理由同 routes:preview。
+        await accountChannelManager.prewarmRateLimits()
         const channelAccounts = await channelAccountCounts()
         const routes = storeManager.listModelRoutes()
           .filter(route => only === undefined || route.name === only)
