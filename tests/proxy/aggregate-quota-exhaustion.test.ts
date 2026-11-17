@@ -239,6 +239,43 @@ test('a rate-limit row and a local admission rejection never create a mark', () 
   assert.equal(rows.length, before, 'nothing new was recorded')
 })
 
+test('upstream-written reset time in the message wins over the final Retry-After (Volcengine token-plan case)', () => {
+  // 11-14 现网：报文明写 12-08 复位（月窗），Retry-After 没带 ⇒ 旧修法的 until 是空的，
+  // 路由页只能写原因、写不出恢复时刻。报文解析成功时它必须压过 Retry-After。
+  marks.applyQuotaExhaustions(
+    [
+      trace({
+        status: 429,
+        errorCode: 'insufficient_quota',
+        errorMessage:
+          'Your token-plan 1-month quota has been exhausted. The quota will reset at 12-08 16:00:00 UTC.',
+      }),
+    ],
+    60_000,
+    NOW,
+  )
+  const [marked] = harness.storeManager.getAggregateQuotaExhaustionsOf('open_router')
+  assert.equal(marked.until, iso(Date.parse('2026-12-08T16:00:00Z')), '报文里的复位时刻直接成为解禁时刻')
+
+  // 报文解析不出（无时区）⇒ 退回 Retry-After（旧行为保持）。
+  marks.applyQuotaExhaustions(
+    [
+      trace({
+        model: 'm-nofact',
+        status: 429,
+        errorCode: 'insufficient_quota',
+        errorMessage: 'You exceeded your current quota',
+      }),
+    ],
+    120_000,
+    NOW,
+  )
+  const fallback = harness.storeManager
+    .getAggregateQuotaExhaustionsOf('open_router')
+    .find(row => row.modelId === 'm-nofact')
+  assert.equal(fallback?.until, iso(NOW + 120_000), '解析不出报文时刻才用 Retry-After')
+})
+
 test('a success on the same (account, model) clears the mark, and the final Retry-After sets the unlock time', () => {
   marks.applyQuotaExhaustions(
     [trace({ status: 429, errorMessage: 'insufficient quota', errorCode: 'insufficient_quota' })],
@@ -278,6 +315,9 @@ test('non-aggregate providers are never marked', () => {
 })
 
 test('list folds live rows into count + latest, detail carries the rows, and the manual clear empties one entry only', () => {
+  // 先清场：前序用例（报文复位时刻 / Retry-After 兜底）留下的行也算活标记，
+  // 本用例数的是这一批落库之后的总账，不依赖执行顺序。
+  manager.aggregateProviderManager.clearQuotaExhaustions('open_router')
   marks.applyQuotaExhaustions(
     [
       trace({ model: 'm-a', status: 403, errorMessage: '账户欠费' }),

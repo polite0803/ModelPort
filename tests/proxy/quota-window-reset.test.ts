@@ -88,6 +88,37 @@ test('复位时刻解析：带偏移才认，过期与超远都丢弃', () => {
   )
 })
 
+test('复位时刻解析：无年份写法按当年补齐（火山/百炼 Token Plan 月窗现网原文）', () => {
+  // 现网原文（app-logs 2026-11-14T13:38:50.500Z，逐字）：上游只写月-日 + UTC 字面量。
+  const now = Date.parse('2026-11-14T13:38:50Z')
+  const target = Date.parse('2026-12-08T16:00:00Z')
+  assert.equal(
+    quotaWindowResetMs(
+      'Your token-plan 1-month quota has been exhausted. The quota will reset at 12-08 16:00:00 UTC.',
+      now,
+    ),
+    target - now,
+    '「12-08 16:00:00 UTC」补当年、UTC→+00:00',
+  )
+  assert.equal(
+    quotaWindowResetMs('The quota will reset at 11-20 09:00:00 GMT.', now),
+    Date.parse('2026-11-20T09:00:00Z') - now,
+    'GMT 字面量同样认',
+  )
+  assert.equal(
+    quotaWindowResetMs('The quota will reset at 11-20 09:00:00.', now),
+    undefined,
+    '无任何时区的无年份写法不猜',
+  )
+  // 跨年错位自检：12 月读「12-08」无年份 ⇒ 补出当年 12-08（已是过去）⇒ 丢弃，退估计。
+  const dec = Date.parse('2026-12-20T00:00:00Z')
+  assert.equal(
+    quotaWindowResetMs('The quota will reset at 12-08 16:00:00 UTC.', dec),
+    undefined,
+    '补年补出过去时刻 ⇒ 丢弃（31 天上限挡住跨年错位）',
+  )
+})
+
 const harness = await bootstrapStore({ initialData: { providers: [], accounts: [] } })
 const sm = harness.storeManager
 const { autoRouter } = await loadModule('main/proxy/autoRouter.ts')

@@ -430,8 +430,14 @@ const QUOTA_WINDOW_EXHAUSTED_PATTERN =
  * 再把冷却翻倍（2026-11-15 现网：20 分钟 45 笔 `model_temporarily_unavailable`，
  * 而真实解禁在约 2 小时后）。
  *
- * 必须带显式时区偏移：`CST` 这类缩写在中国/美国中部之间歧义，无偏移时不猜，
- * 退回档位估计。月窗最长 31 天，更远的「复位时刻」按坏数据丢弃。
+ * 必须带显式时区：数字偏移（`+08:00`）或 `UTC`/`GMT` 字面量。`CST` 这类歧义缩写
+ * 与无时区的写法都不认，不猜，退回档位估计。年份数字上游没写时按 `now` 所在年
+ * 补齐——跨年错位（12 月报 12-08 而补出当年）会被 31 天上限判成超界丢弃，
+ * 宁可退估计也不报假时刻。月窗最长 31 天，更远的「复位时刻」按坏数据丢弃。
+ *
+ * 已核实的两种上游写法（现网）：
+ * - `reset at 2026-11-17T09:59:23+08:00`（WorkBuddy 免费额度）
+ * - `reset at 12-08 16:00:00 UTC`（火山/百炼 Token Plan 月窗，无年份）
  */
 export function quotaWindowResetMs(
   message: string | undefined,
@@ -440,8 +446,19 @@ export function quotaWindowResetMs(
   if (!message) return undefined
   const matched = QUOTA_RESET_AT_PATTERN.exec(message)
   if (!matched) return undefined
-  const digits = matched[3].replace(':', '')
-  const at = Date.parse(`${matched[1]}T${matched[2]}${digits.slice(0, 3)}:${digits.slice(3)}`)
+  // 时区必须显式：数字偏移或 UTC/GMT 字面量，其余（缺失、CST 类缩写）不猜。
+  const tz = matched[5] ?? ''
+  // 数字偏移统一成 ±HH:MM；UTC/GMT 字面量已是标准形状，直接用。
+  const offset = /^(?:UTC|GMT)$/i.test(tz)
+    ? '+00:00'
+    : /^[+-]/.test(tz)
+      ? tz.replace(':', '')
+      : undefined
+  if (offset === undefined) return undefined
+  const norm = offset.length === 5 ? `${offset.slice(0, 3)}:${offset.slice(3)}` : offset
+  // 无年份的写法按现在所在年补齐；跨年错位由 31 天上限丢弃（见函数注释）。
+  const year = matched[1] ?? String(new Date(now).getUTCFullYear())
+  const at = Date.parse(`${year}-${matched[2]}-${matched[3]}T${matched[4]}${norm}`)
   if (!Number.isFinite(at)) return undefined
   const delta = at - now
   if (delta <= 0 || delta > QUOTA_RESET_MAX_MS) return undefined
@@ -451,7 +468,7 @@ export function quotaWindowResetMs(
 const QUOTA_RESET_MAX_MS = 31 * 24 * 60 * 60 * 1000
 
 const QUOTA_RESET_AT_PATTERN =
-  /reset at (\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s*([+-]\d{2}:?\d{2})/i
+  /reset at (?:(\d{4})-)?(\d{2})-(\d{2})[ T](\d{2}:\d{2}:\d{2})\s*([+-]\d{2}:?\d{2}|UTC|GMT)\b/i
 
 /**
  * 哪些状态码值得**换下一家**。

@@ -18,6 +18,7 @@ import {
   type AggregateQuotaExhaustionRecord,
   type AggregateQuotaExhaustionReason,
 } from '../../../shared/aggregateQuotaExhaustion.ts'
+import { quotaWindowResetMs } from '../failover.ts'
 import { getAggregateEntry } from '../../providers/aggregate/registry.ts'
 import { storeManager } from '../../store/store'
 
@@ -98,10 +99,17 @@ export function applyQuotaExhaustions(
         continue
       }
       const asOf = new Date(nowMs).toISOString()
+      // 解禁时刻两路来源，**报文里上游亲口写的优先**：`reset at …` 比网关自己折算的
+      // `Retry-After` 权威（11-14 火山 Token Plan：报文明写 12-08 复位，Retry-After
+      // 却没带，标记的 until 因此空过一整轮月窗）。报文解析不出再退 Retry-After，
+      // 都没有就维持旧形态（TTL 兜底，见 `exhaustionExpiresAt`）。
+      const resetMs = quotaWindowResetMs(action.record.message, nowMs)
       const until =
-        key === lastKey && retryAfterMs !== undefined && retryAfterMs > 0
-          ? new Date(nowMs + retryAfterMs).toISOString()
-          : undefined
+        resetMs !== undefined
+          ? new Date(nowMs + resetMs).toISOString()
+          : key === lastKey && retryAfterMs !== undefined && retryAfterMs > 0
+            ? new Date(nowMs + retryAfterMs).toISOString()
+            : undefined
       const record: AggregateQuotaExhaustionRecord = {
         accountId: action.accountId,
         ...(action.accountName === undefined ? {} : { accountName: action.accountName }),
