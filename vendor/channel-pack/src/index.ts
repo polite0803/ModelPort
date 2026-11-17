@@ -1319,8 +1319,9 @@ export function apply(ctx: Context, config: {
 
   // ===== WorkBuddy（腾讯国际版）/ CodeBuddy（腾讯中国版）服务 =====
   // 两者同后端同协议，差异全部由 product 配置承载。**两个都要注册**：
-  // 国际版没有签到接口（product.ts 的 WORKBUDDY 注释），每日积分只能在
-  // 中国版（CodeBuddy）领取 —— 只注册国际版等于拿不到每日免费积分。
+  // 签到只有中国版有（手动每日领取）；国际版的积分是「限时每日活跃奖励」，
+  // 由服务端按官方客户端活动自动发放，没有手动领取动作 —— 想要可手动领的
+  // 每日免费积分，必须把中国版（CodeBuddy）也接上。
   // 服务名由 BuddyAuth 依 product.id 派生：buddyAuth / workbuddyAuth。
   const buddy = new BuddyAuth(ctx, { product: CODEBUDDY, fetcher: fetchFor(CODEBUDDY.id) })
   const workbuddy = new BuddyAuth(ctx, { product: WORKBUDDY, fetcher: fetchFor(WORKBUDDY.id) })

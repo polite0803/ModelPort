@@ -3103,7 +3103,9 @@ function registerChannelPackEndpoints(
           return { ok: true, value: { accounts: value } satisfies RpcCreditsStatusResponse }
         }
         if (req.provider === WORKBUDDY.id) {
-          // WorkBuddy 国际版后端**没有签到接口**：如实返回 null，
+          // WorkBuddy 国际版**没有手动签到**：它的积分是「限时每日活跃奖励」
+          // （Free 30/天、Pro 50/天，当天在官方客户端有效对话/任务后次日自动发放，
+          // 每账号每天最多一次）。没有可点击的领取动作，如实返回 null，
           // 不臆造一份状态对象（客户端也不会渲染领取按钮）。
           const accounts = await pool.listAccounts(req.provider)
           return {
@@ -3302,13 +3304,15 @@ function registerChannelPackEndpoints(
           return { ok: true, value }
         }
         if (req.provider === WORKBUDDY.id) {
-          // 国际版没有签到接口：显式拒绝，别落到 `productById` 的通用
-          // `unsupported provider` 文案（那会让排查者以为 provider 没注册）。
+          // 国际版没有**手动签到**：积分是「限时每日活跃奖励」，由服务端按官方
+          // 客户端活动自动发放（Free 30/天、Pro 50/天，次日到账）。显式拒绝，
+          // 别落到 `productById` 的通用 `unsupported provider` 文案（那会让
+          // 排查者以为 provider 没注册），也别让用户以为点一下就能领。
           return {
             ok: false,
             error: {
               code: 'bad-request',
-              message: 'WorkBuddy 国际版不支持每日签到（其后端没有签到接口）',
+              message: 'WorkBuddy 国际版不支持每日签到（没有手动领取动作）：其积分为「限时每日活跃奖励」（Free 30/天、Pro 50/天），当天在官方 WorkBuddy / CodeBuddy 客户端发起过有效对话或任务后次日自动到账，每账号每天最多一次',
             },
           }
         }
@@ -3562,9 +3566,10 @@ function registerChannelPackEndpoints(
         const req = payload as RpcCreditsBalancesRequest
         const accounts = await pool.listAccounts(req.provider)
         if (req.provider === CODEBUDDY.id || req.provider === WORKBUDDY.id) {
-          // 两个产品共用同一套积分口径：`get-user-resource` 两边都实现，
-          // 只有签到（`daily-checkin`）是中国版独占。余额查询失败按 null 上报，
-          // 卡片显示原因而不是 0。
+          // 两个产品共用同一套积分口径：`get-user-resource` 两边都实现。
+          // 签到只有中国版有（手动每日领取）；国际版是「限时每日活跃奖励」——
+          // 由服务端按客户端活动自动发放（Free 30/天、Pro 50/天），没有手动领取动作。
+          // 余额查询失败按 null 上报，卡片显示原因而不是 0。
           const product: BuddyProduct = req.provider === CODEBUDDY.id ? CODEBUDDY : WORKBUDDY
           const values = await collectCreditBalances<BuddyCredential, BuddyProduct>(
             accounts, product, {

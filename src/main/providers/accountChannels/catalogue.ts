@@ -117,23 +117,27 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
   },
   {
     id: 'buddy',
-    upstreamIdentity: { declared: 'User-Agent: WorkBuddy/<version> WorkBuddy/<version> CLI/<version>（国内客户端形态）· X-IDE-Version: <version> · 版本与国际版同源', risk: 'high' },
+    upstreamIdentity: { declared: 'User-Agent: WorkBuddy/<version> WorkBuddy/<version> CLI/<version>（国内客户端形态）· X-IDE-Version: <version> · 版本线与国际版分开取（copilot.tencent.com 源）', risk: 'high' },
     name: 'WorkBuddy (国内版)',
     vendor: '腾讯',
     loginKind: 'browser',
     dailyCheckin: true,
     growthTasks: true,
-    description: 'WorkBuddy 国内版（原 CodeBuddy）：浏览器授权，支持每日签到领取免费积分（国际版没有签到接口）。',
+    description: 'WorkBuddy 国内版（原 CodeBuddy）：浏览器授权，支持每日签到领取免费积分（国际版是同族产品的另一区域发行，计奖方式不同）。',
   },
   {
     id: 'workbuddy',
-    upstreamIdentity: { declared: 'User-Agent: WorkBuddy/<version> · X-IDE-Version: <version> · 按模型族分档（国际线 / 国内线）', risk: 'high' },
+    upstreamIdentity: { declared: 'User-Agent: WorkBuddy/<version> WorkBuddy AI/<version> CLI/<version> · X-IDE-Version: <version> · 版本线取 www.workbuddy.ai（与国际版安装目录一致）', risk: 'high' },
     name: 'WorkBuddy (国际版)',
     vendor: '腾讯',
     loginKind: 'browser',
+    // 国际版没有「手动签到」：其积分是「限时每日活跃奖励」——Free 30/天、Pro 50/天，
+    // 系统自动发放（当天在官方 WorkBuddy / CodeBuddy 客户端发起过至少一次有效对话或
+    // 任务，网页端不计入；次日到账，每账号每天最多一次）。没有可点击的领取动作，
+    // 因此不渲染领取按钮；机制写在下方描述里。
     dailyCheckin: false,
     growthTasks: false,
-    description: '浏览器授权 WorkBuddy 国际版账号，共享一份每日额度；后端没有签到接口。',
+    description: '浏览器授权 WorkBuddy 国际版账号，共享一份每日额度。积分是「限时每日活跃奖励」：Free 30/天、Pro 50/天，系统自动发放——当天在官方 WorkBuddy / CodeBuddy 客户端发起至少一次有效对话或任务（网页端不计入），次日自动到账，每账号每天最多一次；没有手动签到动作。',
   },
   {
     id: 'opencode',

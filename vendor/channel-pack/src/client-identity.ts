@@ -48,6 +48,8 @@ const STAT_TTL_MS = 60_000
 
 /** 本机没有安装 WorkBuddy、官网也取不到时的兜底值。 */
 export const WORKBUDDY_FALLBACK_VERSION = '5.9.3'
+/** 国内版（原 CodeBuddy）兜底版本：与本机 WorkBuddy 安装的 5.11.x 版本线一致。 */
+export const CODEBUDDY_FALLBACK_VERSION = '5.11.3'
 
 /** 本机没有安装 Qoder、官网也取不到时的兜底值。 */
 export const QODER_FALLBACK_VERSION = '0.5.3'
@@ -181,7 +183,14 @@ function winPrograms(...rest: string[]): string[] {
   return [...roots].map(root => join(root, ...rest))
 }
 
-function workbuddyProductFiles(): string[] {
+function workbuddyIntlProductFiles(): string[] {
+  return [
+    ...winPrograms('WorkBuddyAI', 'resources', 'app.asar.unpacked', 'cli', 'product.json'),
+    '/Applications/WorkBuddy AI.app/Contents/Resources/app.asar.unpacked/cli/product.json',
+  ]
+}
+
+function workbuddyCnProductFiles(): string[] {
   return [
     ...winPrograms('WorkBuddy', 'resources', 'app.asar.unpacked', 'cli', 'product.json'),
     '/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/product.json',
@@ -193,13 +202,18 @@ function workbuddyProductFiles(): string[] {
  *
  * `product.json` 的 `genieVersion` 就是安装器写入的桌面版本，比
  * `cli/package.json` 的 `@genie/agent-cli` 版本更贴近 UA 里的客户端形态。
+ *
+ * ⚠️ 区域版本线**不共用**（2026-11-16 实测）：同一个 `platform` 参数，
+ * `www.workbuddy.ai` 回 5.9.x（国际版），`copilot.tencent.com` 回 5.11.x
+ * （国内版）。国际版安装目录是 `WorkBuddyAI`（applicationName `workbuddy-ai`），
+ * 国内版是 `WorkBuddy`。把两边的值混用，会把国内版版本号当国际版身份发出去。
  */
 export function workbuddyClientVersion(now = Date.now()): ClientVersionInfo {
   const fromEnv = envVersion('MODELPORT_WORKBUDDY_VERSION')
   if (fromEnv !== undefined) return { version: fromEnv, source: 'env', checkedAt: now }
   const fromOfficial = readOfficial('workbuddy', now)
   if (fromOfficial !== undefined) return fromOfficial
-  for (const file of workbuddyProductFiles()) {
+  for (const file of workbuddyIntlProductFiles()) {
     const found = readFileVersion('workbuddy', file, ['genieVersion'], now)
     if (found !== undefined) return found
   }
@@ -210,16 +224,20 @@ export function workbuddyClientVersion(now = Date.now()): ClientVersionInfo {
  * WorkBuddy 国内版（原 CodeBuddy）客户端版本。
  *
  * 2026-11-05 起腾讯把「CodeBuddy（腾讯）」更名为 **WorkBuddy（国内版）**——
- * 与 `workbuddy` 渠道（WorkBuddy 国际版）是同一产品的两个区域发行，共用同一
- * 套客户端与更新源。因此版本号直接复用国际版那条取值链
- * （env → 官方 /v2/update → 本机 product.json → fallback），**不再**单独抓
- * CodeBuddy IDE release notes：那是另一条产品线（4.12.x），与国内版客户端的
- * 5.9.x 版本体系不同，混用会把身份头改回错误形态。
+ * 与 `workbuddy` 渠道（WorkBuddy 国际版）是同一产品的两个区域发行，共用同一套
+ * 客户端形态，但**版本线彼此独立**：这里只认国内版的官方源
+ * （`copilot.tencent.com`）与本机安装（`WorkBuddy`），不回落国际版的值。
  */
 export function codebuddyClientVersion(now = Date.now()): ClientVersionInfo {
   const fromEnv = envVersion('MODELPORT_CODEBUDDY_VERSION')
   if (fromEnv !== undefined) return { version: fromEnv, source: 'env', checkedAt: now }
-  return workbuddyClientVersion(now)
+  const fromOfficial = readOfficial('buddy', now)
+  if (fromOfficial !== undefined) return fromOfficial
+  for (const file of workbuddyCnProductFiles()) {
+    const found = readFileVersion('buddy', file, ['genieVersion'], now)
+    if (found !== undefined) return found
+  }
+  return { version: CODEBUDDY_FALLBACK_VERSION, source: 'fallback', checkedAt: now }
 }
 
 /** Qoder（国际版 / 中国版）客户端版本：官方 latest.yml → `.qoder-versions` 最大目录。 */
@@ -483,6 +501,7 @@ export function startClientIdentityRefresh(): void {
 export async function refreshOfficialVersions(now = Date.now()): Promise<void> {
   await Promise.allSettled([
     refreshWorkbuddyOfficial(now),
+    refreshBuddyOfficial(now),
     refreshQoderOfficial('qodercn', now),
     refreshQoderOfficial('qoder', now),
   ])
@@ -502,27 +521,47 @@ export async function forceIdentityRefresh(): Promise<ClientIdentitySnapshotEntr
 }
 
 async function refreshWorkbuddyOfficial(now: number): Promise<void> {
-  // ⚠️ `platform` 描述的是**要呈现的客户端**，不是跑网关的宿主（2026-11-08 实测）：
-  // `workbuddy-linux-x64-user` 被端点判为非法（HTTP 400），而
-  // `workbuddy-win32-x64-user` 从 WSL 里请求同样返回 204。网关跑在 WSL 时发的
-  // 仍是 WorkBuddy 桌面身份，官方源必须按 win32 查，平台守卫只会让 WSL 恒 fallback。
+  await refreshBuddyVersionLine('workbuddy', 'https://www.workbuddy.ai', now)
+}
+
+async function refreshBuddyOfficial(now: number): Promise<void> {
+  await refreshBuddyVersionLine('buddy', 'https://copilot.tencent.com', now)
+}
+
+/**
+ * 按区域刷新 WorkBuddy 版本线。
+ *
+ * ⚠️ `platform` 描述的是**要呈现的客户端**，不是跑网关的宿主（2026-11-08 实测）：
+ * `workbuddy-linux-x64-user` 被端点判为非法（HTTP 400），而
+ * `workbuddy-win32-x64-user` 从 WSL 里请求同样返回 204。网关跑在 WSL 时发的
+ * 仍是 WorkBuddy 桌面身份，官方源必须按 win32 查，平台守卫只会让 WSL 恒 fallback。
+ *
+ * ⚠️ 两个区域**必须分开发**（2026-11-16 实测）：同一 `platform` 参数，
+ * `www.workbuddy.ai` 回国际版版本线（5.9.x），`copilot.tencent.com` 回国内版
+ * （5.11.x）。只查一边会把另一边的版本号当成自己的身份发出去。
+ */
+async function refreshBuddyVersionLine(
+  channel: 'workbuddy' | 'buddy',
+  host: string,
+  now: number,
+): Promise<void> {
   const asset = process.arch === 'arm64' ? 'arm64' : 'x64'
-  const current = official.get('workbuddy')?.version
-    ?? workbuddyClientVersion(now).version
-  const url = 'https://copilot.tencent.com/v2/update'
+  // ⚠️ 查询版本固定用 `0.0.0`，**不能**回填当前值（2026-11-16 实测缺陷）：
+  // 两区域的版本线互不可比，旧缓存里若有另一区域的更大版本号（如国际版缓存
+  // 里残留国内版的 5.11.3），带上去会被服务端判成「已是最新」回 204，
+  // 于是把错误值当成官方确认值锁死 24h。0.0.0 必然低于任何在线版本，
+  // 服务端会直接回最新版本对象。
+  const url = `${host}/v2/update`
     + `?platform=workbuddy-win32-${asset}-user`
-    + `&version=${encodeURIComponent(current)}`
+    + '&version=0.0.0'
   try {
     const response = await fetch(url, { signal: AbortSignal.timeout(8_000) })
-    // 204 = 已是最新，把 current 记为官方确认值，刷新 TTL。
-    if (response.status === 204) {
-      setOfficial('workbuddy', current, now)
-      return
-    }
+    // 204 在这里只可能是服务端异常行为：没有拿到版本对象就不写缓存，
+    // 绝不把「问不到的当前值」记成官方确认值。
     if (!response.ok) return
     const data = await response.json() as Record<string, unknown>
     const version = data.productVersion ?? data.version
-    if (typeof version === 'string') setOfficial('workbuddy', version, now)
+    if (typeof version === 'string') setOfficial(channel, version, now)
   } catch {
     // 断网/超时：保留已有值（官方缓存或本机安装或兜底）。
   }

@@ -29,9 +29,12 @@ async function loadFingerprints() {
   return await import(pathToFileURL(join(VENDOR_SRC, 'openai-gateway', 'tencent-fingerprint.ts')).href)
 }
 
-/** 表里那条唯一有实发证据的指纹（被拦 + 改写后放行，双端点实测）。 */
+/** 表里两条有实发证据的指纹（被拦 + 改写后放行）。 */
 const FIND = 'Main branch (you will usually use this for PRs)'
 const REPLACE = 'Main branch (PRs usually go here)'
+const CLAUDE_SENTENCE = "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK."
+const CLAUDE_REPLACE = 'You are an AI assistant working with the user toward their goals.'
+const BILLING_LINE = 'x-anthropic-billing-header: cc_version=2.1.325.5be; cc_entrypoint=claude-desktop-3p;'
 
 test('改写所有 system（含非首位），大小写不敏感，user/tool 原样', async () => {
   const { rewriteTencentSystemMessages } = await loadFingerprints()
@@ -67,6 +70,26 @@ test('无命中时返回同一个数组引用（前缀缓存不得被无谓重�
   assert.equal(rewriteTencentSystemMessages(near, 'workbuddy'), near)
   const spaced = [{ role: 'system', content: 'Main branch  (you will usually use this for PRs): main' }]
   assert.equal(rewriteTencentSystemMessages(spaced, 'workbuddy'), spaced)
+})
+
+test('Claude Desktop 3p：billing 标记行整行剥除，首句等义替换', async () => {
+  const { rewriteTencentSystemMessages } = await loadFingerprints()
+  // 真实形状：标记行与首句在同一行，剥行后该行整条消失。
+  const messages = [{ role: 'system', content: `${BILLING_LINE}${CLAUDE_SENTENCE}\nYou are an agent working.` }]
+  const out = rewriteTencentSystemMessages(messages, 'workbuddy')
+  assert.equal(out[0].content, 'You are an agent working.')
+
+  // 首句独立成行时（别的入口形态）走字面量等义替换。
+  const onlySentence = [{ role: 'system', content: `${CLAUDE_SENTENCE}\nrest` }]
+  const out2 = rewriteTencentSystemMessages(onlySentence, 'workbuddy')
+  assert.equal(out2[0].content, `${CLAUDE_REPLACE}\nrest`)
+
+  // 大小写不敏感的剥行（标记前缀大小写变了同样剥）。
+  const upper = [{ role: 'system', content: `${BILLING_LINE.toUpperCase()}tail` }]
+  assert.equal(rewriteTencentSystemMessages(upper, 'workbuddy')[0].content, '')
+
+  // 非腾讯系不改。
+  assert.equal(rewriteTencentSystemMessages(messages, 'qoder'), messages)
 })
 
 test('非腾讯系 provider 原样返回', async () => {

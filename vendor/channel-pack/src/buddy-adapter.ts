@@ -436,12 +436,12 @@ function errorMessage(error: unknown): string {
  *
  * ## ⚠️ 必须排除 11128（2026-11-15）
  *
- * `11128` 是**渠道校验 / 内容级**拦截（`displayTips`：「可能不是官方客户端发出的」），
- * 同一账号换掉 system 里那句模板就通 —— 而它的 `msg` **也是 `request illegal`**，
- * 于是下面第二条信号一直在把它误认成账号级策略拦截：换号 + 30 分钟冷却白锁整池，
- * 再叠上 `account-stop.ts` 当时把「official client」当停服标记，一个健康登录被永久
- * 停用（实测 `workbuddy-aad65f7f`）。已知指纹的改写见
- * `openai-gateway/tencent-fingerprint.ts`，本函数只负责**不再把它当账号级**。
+ * `11128` 是**渠道校验**拦截（`displayTips`：「可能不是官方客户端发出的」），
+ * 与内容无关：2026-11-16 实测会话四头或首条 system 缺失即触发。它的 `msg`
+ * **也是 `request illegal`**，于是下面第二条信号一直在把它误认成账号级策略拦截：
+ * 换号 + 30 分钟冷却白锁整池，再叠上 `account-stop.ts` 当时把「official client」
+ * 当停服标记，一个健康登录被永久停用（实测 `workbuddy-aad65f7f`）。已知指纹的
+ * 改写见 `openai-gateway/tencent-fingerprint.ts`，本函数只负责**不把它当账号级**。
  */
 function isContentRejection(body: string): boolean {
   if (body.length === 0) return false
@@ -569,18 +569,18 @@ function contentRejectionError(
 }
 
 /**
- * 渠道校验拦截（11128）的错误：**内容级**，不冷却、不换号、不停用账号。
+ * 渠道校验拦截（11128）的错误：**请求形态级**，不冷却、不换号、不停用账号。
  *
- * 码取 `INVALID_REQUEST`：请求体里确实有上游不收的东西（system 模板句），宿主的
- * `isDeterministicChannelRejection` 据此停止原地重试，而换家仍允许 —— 换到非腾讯系
- * 模型能成，换腾讯系的另一个账号不能成（同一句照样被拦）。取 `AUTH` /
- * `PERMISSION_DENIED` 都会把用户引向「重新登录 / 停用账号」，而那个账号是健康的。
+ * 码取 `INVALID_REQUEST`：宿主据此停止原地重试，换家仍允许。取 `AUTH` /
+ * `PERMISSION_DENIED` 会把用户引向「重新登录 / 停用账号」，而账号通常是健康的。
+ * 2026-11-16 实测：会话四头缺失、首条不是 system、客户端形态不符都会回 11128，
+ * 与内容无关 —— 文案不得再断言「内容级」。
  */
 function channelVerificationError(productId: string, status: number, body: string): LlmError {
   return new LlmError(
-    `${productId}: 上游渠道校验拦截（HTTP ${status}，code 11128）。这是内容级拦截，账号未被处置：`
-    + `system 里含上游不收的客户端模板句（已知指纹已自动改写，见 openai-gateway/tencent-fingerprint.ts）；`
-    + `请调整该句或补充指纹表：${errorDetail(body)}`,
+    `${productId}: 上游渠道校验拦截（HTTP ${status}，code 11128）。`
+    + `上游按「请求形态」而非内容拒收（会话头缺失 / 首条不是 system / 客户端形态不符都报这个码），`
+    + `账号本身未必有问题；原文：${errorDetail(body)}`,
     'INVALID_REQUEST',
     { status },
   )
@@ -1464,7 +1464,14 @@ export class BuddyAdapter extends LlmAdapter {
     }
     // 腾讯内容级风控（11128）：客户端注入 system 的模板句会让上游整笔拒收。
     // 只改 system；无命中时返回同一个数组引用，前缀缓存逐字节不变。
-    const messages = rewriteTencentSystemMessages(serialized, this.product.id)
+    const rewritten = rewriteTencentSystemMessages(serialized, this.product.id)
+    // 上游要求第一条消息必须是 system（2026-11-16 实测：缺它直接回 11128
+    // `first message is not system prompt`）。客户端没给 system 时补一条**空串**
+    // system —— 这是出入站形状适配，不是网关自造提示词；空内容不改变模型行为。
+    if (rewritten[0]?.role !== 'system') {
+      rewritten.unshift({ role: 'system', content: '' })
+    }
+    const messages = rewritten
     const tools = options.tools?.map((tool) => ({
       type: 'function' as const,
       function: {
@@ -1924,7 +1931,9 @@ export class BuddyAdapter extends LlmAdapter {
     const headers = new Headers(attributionHeaders())
     headers.set('Authorization', `Bearer ${credential.access_token}`)
     headers.set('Accept', 'text/event-stream')
-    headers.set('Content-Type', 'application/json')
+    // 与官方客户端逐字一致（2026-11-16 抓包）：带 charset，省掉它本身不致命，
+    // 但上游个别后端节点按「完整客户端形态」判定渠道授权，能对齐就对齐。
+    headers.set('Content-Type', 'application/json;charset=UTF-8')
     // ⚠️ 顺序与空值语义都不能改（真实缺陷，两个子问题都出在这一行）：
     // ① **以产品配置为准**，而不是优先用凭据里的 `credential.domain`。凭据的
     //    domain 是「登录时站点」的快照；产品改造后（早期 workbuddy 指向
@@ -1960,6 +1969,29 @@ export class BuddyAdapter extends LlmAdapter {
     // 必须用 set 覆盖（attributionHeaders() 注入的框架 UA 键为小写，
     // 但 Headers 键大小写不敏感，set 能正常覆盖）。
     headers.set('User-Agent', resolveUserAgent(this.product, options.model))
+    // 上游 WAF 要求聊天请求携带会话关联头：缺任一个即回 11128 `request illegal`
+    // （2026-11-16 实测：官方内核逐请求下发这四个头；去掉它们后其余头全对也照样被拦）。
+    // 值只要形状合法即可参与关联，这里按请求现生成，会话号沿用本实例的 sessionId。
+    const requestId = crypto.randomUUID().replace(/-/g, '')
+    headers.set('x-conversation-id', this.sessionId)
+    headers.set('x-conversation-request-id', requestId)
+    headers.set('x-conversation-message-id', requestId)
+    headers.set('x-request-id', requestId)
+    // 渠道授权判据（2026-11-16 晚实测）：官方内核把每个 API 请求标成 XHR
+    // （`x-requested-with: XMLHttpRequest`）。缺它时上游回 11128
+    // `Illegal API invocation from an unapproved channel`；仅补这一个头即放行。
+    headers.set('x-requested-with', 'XMLHttpRequest')
+    // 其余官方出站标记（同日抓包逐字取）：工单/调用方/链路标识。单看每个都
+    // 不是硬判据，但上游按「完整客户端形态」判渠道，宽松节点与严格节点并存
+    // （同一分钟里一笔 200 一笔 400），全部对齐才能让严格节点也放行。
+    headers.set('x-agent-intent', 'craft')
+    headers.set('x-agent-runtime', 'local-agent')
+    headers.set('caller_method', '/')
+    headers.set('traceparent', `00-${crypto.randomUUID().replace(/-/g, '')}-${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}-01`)
+    if (credential.user_id !== undefined && credential.user_id.length > 0) {
+      headers.set('x-user-id', credential.user_id)
+    }
+    headers.set('x-department-info', '')
     try {
       return await this.fetchImpl(`${this.product.endpoint}/v2/chat/completions`, {
         method: 'POST',

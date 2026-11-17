@@ -29,6 +29,16 @@
  * | 内层多一个空格 | `Main branch  (you will…)` | ✅ 200 |
  * | 全小写 / 全大写 | — | ❌ 400/11128 |
  *
+ * 2026-11-16 续（Claude Desktop 3p，claude-cli 2.1.325，真实 system 8202 字符）：
+ *
+ * | 探针 | system 处理 | 结果 |
+ * |---|---|---|
+ * | 原样 | 首行 `x-anthropic-billing-header: cc_version=…; cc_entrypoint=claude-desktop-3p;You are Claude Code, …` | ❌ 400/11128 `Illegal API invocation from an unapproved channel` |
+ * | 只删 billing 参数 / 只换 `claude-desktop-3p` | — | ❌ 400/11128 |
+ * | 保留 billing 行、只换 `You are Claude Code…` 句 | — | ❌ 400/11128 |
+ * | **整行剥除** billing 行 | — | ✅ 200 |
+ * | **等义替换** `You are Claude Code, Anthropic's official CLI…` 句 | — | ✅ 200（两句同时处理；只处理其一仍 400） |
+ *
  * 由此得到三条**不能违反**的实现约束：
  *
  * 1. **只改 `system`**：`user` / `tool` 里同一句**不拦**（上表第 6、7 行）。
@@ -97,7 +107,32 @@ const CONTENT_FINGERPRINTS: readonly ContentFingerprint[] = [
     replace: 'Main branch (PRs usually go here)',
     note: 'Gitee IKJNA1；本机 2026-10-05 对 workbuddy / CodeBuddy 双端点实测复现',
   },
+  {
+    // Claude Desktop（3p，claude-cli 2.1.325）system 首句。
+    find: "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.",
+    replace: 'You are an AI assistant working with the user toward their goals.',
+    note: '2026-11-16 真实 system（8202 字符）直连 www.workbuddy.ai 实测：原样 400/11128 `Illegal API invocation from an unapproved channel`；等义替换后 200',
+  },
 ]
+
+/**
+ * 客户端自带的计费/入口标记行前缀。
+ *
+ * 这行**不能**做字面量匹配：`cc_version=2.1.325.5be`、`cc_entrypoint=…` 随客户端
+ * 版本与入口变化，且整行还拼着别的句子。实测（2026-11-16）该行**只要有前缀就拦**：
+ * 只删参数、只换 `claude-desktop-3p` 都仍 400，整行剥掉才 200 —— 所以这里按
+ * **行前缀**剥除（大小写不敏感），不是对正文做模式泛化。
+ */
+const CLIENT_HEADER_LINE_PREFIX = 'x-anthropic-billing-header:'
+
+/** 剥掉以 {@link CLIENT_HEADER_LINE_PREFIX} 开头的整行；无命中返回同一个字符串内容。 */
+function stripClientHeaderLines(text: string): string {
+  if (!text.toLowerCase().includes(CLIENT_HEADER_LINE_PREFIX)) return text
+  return text
+    .split('\n')
+    .filter((line) => !line.toLowerCase().startsWith(CLIENT_HEADER_LINE_PREFIX))
+    .join('\n')
+}
 
 /** 正则元字符转义：把字面量安全地变成**精确**匹配，而不是模式。 */
 function escapeRegExp(literal: string): string {
@@ -139,7 +174,8 @@ export function isTencentContentFingerprintProvider(provider: string): boolean {
  */
 export function rewriteTencentContentFingerprints(text: string, provider: string): string {
   if (!isTencentContentFingerprintProvider(provider)) return text
-  let out = text
+  // 先剥客户端标记行：那一行里通常还拼着下面的句子，先剥行再走字面量表。
+  let out = stripClientHeaderLines(text)
   for (const rule of COMPILED) {
     // 预检：不含（小写化后的）字面量就整条跳过，`out` 保持同一份字符串内容。
     if (!out.toLowerCase().includes(rule.findLower)) continue

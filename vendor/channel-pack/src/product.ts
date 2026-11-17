@@ -403,8 +403,12 @@ const WORKBUDDY_FALLBACK_MODELS: readonly BuddyFallbackModel[] = [
  * - `authentication.attributes.platform` = "workbuddy-ai"
  * - `prefixPath` = "/plugin"（与中国版相同）
  *
- * 该产品**没有**每日签到积分接口（内核中只有 `/v2/billing/meter/get-dosage-notify`），
- * 因此 Channel Pack 不为其渲染「一键领取积分」按钮；积分领取在 CodeBuddy 侧完成。
+ * 该产品**没有手动签到**：它的积分是「限时每日活跃奖励」——Free 30/天、
+ * Pro 50/天，系统自动发放（当天在官方客户端发起过至少一次有效对话或任务，
+ * 网页端不计入；次日到账，每账号每天最多一次）。桌面包里虽然存在
+ * `checkin-activity-status` / `daily-checkin` 两个字面量，但实测活动期内手动
+ * 领取会被拒（`签到活动未开启或已过期`）——该走的是自动发放，不是签到按钮。
+ * 因此 Channel Pack 不为它渲染「一键领取积分」按钮。
  */
 export const WORKBUDDY: BuddyProduct = {
   id: 'workbuddy',
