@@ -44,11 +44,13 @@ test('路由页是页内一等入口：侧边栏有、路由表注册、懒加�
 
 test('页面读的是托盘同一份快照，并且显式要满额', () => {
   assert.match(page, /window\.electronAPI\?\.routes/)
-  assert.match(page, /await api\.menu\(\{ route, limit: FULL_LIST_LIMIT \}\)/,
-    '不带 limit 只会拿到托盘默认的 8 个 —— 那正是「选不到」的原样')
+  assert.match(page, /await api\.menu\(\{ route, limit: FULL_LIST_LIMIT, includeDropped: true \}\)/,
+    '不带 limit 只会拿到托盘默认的 8 个；不带 includeDropped 则看不到被池策略筛掉的模型，'
+    + '而这一页要能就地做排除/加回')
   assert.match(page, /const FULL_LIST_LIMIT = 2000/,
     '页面的上限由主进程钳，这里只声明「要全部」，不写第二个默认值')
-  // 快照字段是唯一事实：不许页面自己按 include/exclude 重算池子。
+  // 快照字段是唯一事实：不许页面自己按手动名单重算池子（读写都走主进程）。
+  // 「列哪些模型、每行 status 是三态里的哪一个」全部来自同一次 preview 结论。
   assert.doesNotMatch(page, /includeModels|excludeModels/,
     '模型列表必须来自选路器快照，页面重算会与真实选路长期不一致')
 })
@@ -73,6 +75,9 @@ test('切换与撤钉走管理面：固定走 routes:switch，页面从不自己
   assert.doesNotMatch(page, /persist/, 'persist 档已退役：切换即固定，页面不带第二种语义')
   assert.doesNotMatch(page, /routes\.update\(|storeManager|saveAppConfig/,
     '页面不碰路由配置：写盘只有主进程那一处')
+  // 手动例外也只表达意图：页面调用 routes:exclude，由主进程改两个手动名单。
+  assert.match(page, /await api\.excludeModel\(\{/,
+    '排除/加回/恢复自动必须是 routes:exclude，不是页面自己拼配置')
   assert.match(page, /await api\.unpin\(detail\.route\)/,
     '「恢复自动排序」是另一条通道：它还要清持久 preferredModel')
   assert.match(page, /result\.reason \?\? t\('routes\.actionFailedHint'\)/,
@@ -105,8 +110,12 @@ test('星级推荐走 routes:rate：纯标注控件，星数共用常量，排�
   // 并且**先分「能不能派」两段**再比星（推荐队列，2026-11-16）。
   assert.match(page, /const rank = \(model: RouteMenuModel\): number => model\.rating \?\? model\.recommendedStars \?\? 0/,
     '同星保持快照原序（稳定排序）')
-  assert.match(page, /const aBlocked = a\.blocked === undefined \? 0 : 1[\s\S]{0,240}?if \(aBlocked !== bBlocked\) return aBlocked - bBlocked[\s\S]{0,80}?return rank\(b\) - rank\(a\)/,
-    '队列先分「这一轮能派 / 派不出去」两段，段内按星级降序')
+  // 三段：能派 → 被挡 → 不在池里（手动排除/被策略筛掉）。配置事实排在临时状态之后，
+  // 否则一个被策略筛掉的模型会混在「等额度回来」的行里，读起来像它马上就能用。
+  assert.match(page, /const seg = \(model: RouteMenuModel\): number =>[\s\S]{0,200}?model\.excluded === true \? 2/,
+    '队列先按「能不能派」分段，不在池里的排最后')
+  assert.match(page, /if \(delta !== 0\) return delta[\s\S]{0,80}?return rank\(b\) - rank\(a\)/,
+    '段内按星级降序')
   assert.match(page, /sortByRating \? t\('routes\.sortByRating'\) : t\('routes\.sortByRouting'\)/)
   assert.match(page, /t\('routes\.sortHint'\)/, '排序按钮要说明「只改显示、不改选路」')
   // 写失败要回读真相，不能让乐观更新的星星停在屏幕上骗人。

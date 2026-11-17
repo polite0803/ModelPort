@@ -19,7 +19,7 @@ import { resolveRouteRequest, routePoolBreakMessage } from '../../store/modelRou
 import { rejectionEntryFromContext, selectionRefusalEntry } from '../rejectionLog'
 import { createTextCompletionChunkTransform, toTextCompletion } from '../utils/textCompletion'
 import { routeHeaderValue, toHeaderValue } from '../utils/headerValue'
-import { clientHeaderValue, identifyClientByUserAgent } from '../../../shared/clientProfile'
+import { CLIENT_HEADER, clientHeaderValue, clientStatsKey, identifyClient } from '../../../shared/clientProfile'
 import { nextDailyUsage } from '../../../shared/dailyUsage.ts'
 import { mapForwardFailure, retryAfterHeader, withRequestId } from '../errorMapping'
 import { autoExhaustedResponse, parseRetryAfterSeconds, SILENT_CHANNEL_SKIP_CODE } from '../failover'
@@ -75,9 +75,14 @@ router.post('/completions', async (ctx: Context) => {
   const traceHeader = ctx.headers['x-modelport-trace']
   const traceRequested = String(Array.isArray(traceHeader) ? traceHeader[0] : traceHeader ?? '').trim() === '1'
   if (traceRequested) ctx.set('X-ModelPort-Trace', 'captured')
-  // 与 chat 路由同口径：UA 归类只进日志与响应头，不参与选路
-  const client = identifyClientByUserAgent(ctx.headers['user-agent'])
+  // 与 chat 路由同口径：客户端定名只进日志与响应头，不参与选路
+  const client = identifyClient({
+    declared: ctx.headers[CLIENT_HEADER],
+    userAgent: ctx.headers['user-agent'],
+    apiKeyName: typeof ctx.state.clientKeyName === 'string' ? ctx.state.clientKeyName : undefined,
+  })
   ctx.set('X-ModelPort-Client', clientHeaderValue(client))
+  const clientKey = clientStatsKey(client)
 
   let request: CompletionRequest
   try {
@@ -165,7 +170,7 @@ router.post('/completions', async (ctx: Context) => {
     const rejected = rejectionEntryFromContext(ctx, 404, 'route_disabled', disabledMessage, requestId)
     rejected.client = client
     storeManager.addRequestLog(rejected)
-    storeManager.recordRequestInStats(false, rejected.latency, rejected.model || undefined)
+    storeManager.recordRequestInStats(false, rejected.latency, rejected.model || undefined, undefined, undefined, clientKey)
     return
   }
 
@@ -184,7 +189,7 @@ router.post('/completions', async (ctx: Context) => {
     const rejected = rejectionEntryFromContext(ctx, 404, 'route_reference_broken', breakMessage, requestId)
     rejected.client = client
     storeManager.addRequestLog(rejected)
-    storeManager.recordRequestInStats(false, rejected.latency, rejected.model || undefined)
+    storeManager.recordRequestInStats(false, rejected.latency, rejected.model || undefined, undefined, undefined, clientKey)
     return
   }
 
@@ -256,7 +261,7 @@ router.post('/completions', async (ctx: Context) => {
           client,
         })
         storeManager.addRequestLog(refused)
-        storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+        storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined, undefined, undefined, clientKey)
         return
       }
       ctx.status = 503
@@ -344,7 +349,7 @@ router.post('/completions', async (ctx: Context) => {
         auto: refusalAuto,
       }
       storeManager.addRequestLog(refused)
-      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined, undefined, undefined, clientKey)
       return
     }
     const coolingPin = autoDecision.pinCooling
@@ -382,7 +387,7 @@ router.post('/completions', async (ctx: Context) => {
         auto: refusalAuto,
       }
       storeManager.addRequestLog(refused)
-      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined, undefined, undefined, clientKey)
       return
     }
     const transientPin = autoDecision.pinTransient
@@ -421,7 +426,7 @@ router.post('/completions', async (ctx: Context) => {
         auto: refusalAuto,
       }
       storeManager.addRequestLog(refused)
-      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined, undefined, undefined, clientKey)
       return
     }
     const transient = autoDecision.transientUnavailable
@@ -455,7 +460,7 @@ router.post('/completions', async (ctx: Context) => {
         auto: refusalAuto,
       }
       storeManager.addRequestLog(refused)
-      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined, undefined, undefined, clientKey)
       return
     }
     const message = `No available model for route '${autoDecision.routeName}'`
@@ -493,7 +498,7 @@ router.post('/completions', async (ctx: Context) => {
       auto: refusalAuto,
     }
     storeManager.addRequestLog(refused)
-    storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+    storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined, undefined, undefined, clientKey)
     return
   }
 

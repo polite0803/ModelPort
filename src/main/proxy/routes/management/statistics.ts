@@ -48,6 +48,14 @@ router.get('/statistics', async (ctx: Context) => {
           failedRequests: todayStats.failedRequests,
         },
       },
+      // Per-client attribution for today. Absent on days recorded before clients
+      // were attributed - "not recorded", never 0.
+      ...(todayStats.clientUsage === undefined
+        ? {}
+        : { clientUsage: todayStats.clientUsage }),
+      ...(todayStats.clientSuccess === undefined
+        ? {}
+        : { clientSuccess: todayStats.clientSuccess }),
     }
 
     ctx.body = {

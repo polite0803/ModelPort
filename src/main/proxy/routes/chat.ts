@@ -59,7 +59,7 @@ import { getAggregateEntry } from '../../providers/aggregate/registry.ts'
 import { learnFromErrorBody, learnFromHeaders } from '../quota/observations'
 import { applyQuotaExhaustions } from '../quota/exhaustionMarks.ts'
 import { rejectionEntryFromContext, selectionRefusalEntry } from '../rejectionLog'
-import { clientHeaderValue, identifyClientByUserAgent } from '../../../shared/clientProfile'
+import { CLIENT_HEADER, clientHeaderValue, clientStatsKey, identifyClient } from '../../../shared/clientProfile'
 import { takeCompressionReport, type CompressionReport } from '../compression'
 import { takeContextManagementReport, type ContextManagementReport } from '../compression'
 import { takeDuplication } from '../compression/duplication.ts'
@@ -543,10 +543,18 @@ router.post('/completions', async (ctx: Context) => {
   const traceHeader = ctx.headers['x-modelport-trace']
   const traceRequested = String(Array.isArray(traceHeader) ? traceHeader[0] : traceHeader ?? '').trim() === '1'
   if (traceRequested) ctx.set('X-ModelPort-Trace', 'captured')
-  // 按 UA 归类调用方：只用于日志与响应头（Trae / WorkBuddy / Qoder / dsh …），
+  // 给调用方定名：只用于日志与响应头（Trae / WorkBuddy / Qoder / dsh …），
   // 不参与选路。识别失败不报错，落到 other + 原始产品名。
-  const client = identifyClientByUserAgent(ctx.headers['user-agent'])
+  // 优先级：客户端声明头 > 命中的网关 key 名 > UA 归类。Node 系客户端不发 UA
+  // （缺省 `undici`），只按 UA 认会把 Qoder 与 Claude Desktop 混成一类。
+  const client = identifyClient({
+    declared: ctx.headers[CLIENT_HEADER],
+    userAgent: ctx.headers['user-agent'],
+    apiKeyName: typeof ctx.state.clientKeyName === 'string' ? ctx.state.clientKeyName : undefined,
+  })
   ctx.set('X-ModelPort-Client', clientHeaderValue(client))
+  // 按天统计的客户端桶键：一次算好，12 个统计写入口共用。
+  const clientKey = clientStatsKey(client)
   const clientIP = getClientIP(ctx)
 
   let request: ChatCompletionRequest
@@ -707,7 +715,7 @@ router.post('/completions', async (ctx: Context) => {
     const rejected = rejectionEntryFromContext(ctx, 404, 'route_disabled', disabledMessage, requestId)
     rejected.client = client
     storeManager.addRequestLog(rejected)
-    storeManager.recordRequestInStats(false, rejected.latency, rejected.model || undefined)
+    storeManager.recordRequestInStats(false, rejected.latency, rejected.model || undefined, undefined, undefined, clientKey)
     return
   }
 
@@ -728,7 +736,7 @@ router.post('/completions', async (ctx: Context) => {
     const rejected = rejectionEntryFromContext(ctx, 404, 'route_reference_broken', breakMessage, requestId)
     rejected.client = client
     storeManager.addRequestLog(rejected)
-    storeManager.recordRequestInStats(false, rejected.latency, rejected.model || undefined)
+    storeManager.recordRequestInStats(false, rejected.latency, rejected.model || undefined, undefined, undefined, clientKey)
     return
   }
 
@@ -875,7 +883,7 @@ router.post('/completions', async (ctx: Context) => {
           client,
         })
         storeManager.addRequestLog(refused)
-        storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+        storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined, undefined, undefined, clientKey)
         return
       }
       ctx.status = 503
@@ -972,7 +980,7 @@ router.post('/completions', async (ctx: Context) => {
       rejected.errorMessage = message
       rejected.responseBody = JSON.stringify(errorBody)
       storeManager.addRequestLog(rejected)
-      storeManager.recordRequestInStats(false, latency, request.model, dead.provider.id, dead.account.id)
+      storeManager.recordRequestInStats(false, latency, request.model, dead.provider.id, dead.account.id, clientKey)
     }
 
     if (chainCandidates.length > 1) {
@@ -1084,7 +1092,7 @@ router.post('/completions', async (ctx: Context) => {
         ...(refusalAuto === undefined ? {} : { auto: refusalAuto }),
       }
       storeManager.addRequestLog(refused)
-      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined, undefined, undefined, clientKey)
       return
     }
     const coolingPin = autoDecision.pinCooling
@@ -1124,7 +1132,7 @@ router.post('/completions', async (ctx: Context) => {
         ...(refusalAuto === undefined ? {} : { auto: refusalAuto }),
       }
       storeManager.addRequestLog(refused)
-      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined, undefined, undefined, clientKey)
       return
     }
     const transientPin = autoDecision.pinTransient
@@ -1165,7 +1173,7 @@ router.post('/completions', async (ctx: Context) => {
         ...(refusalAuto === undefined ? {} : { auto: refusalAuto }),
       }
       storeManager.addRequestLog(refused)
-      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined, undefined, undefined, clientKey)
       return
     }
     const transient = autoDecision.transientUnavailable ?? preflightTransient
@@ -1201,7 +1209,7 @@ router.post('/completions', async (ctx: Context) => {
         ...(refusalAttribution === undefined ? {} : refusalAttribution),
       }
       storeManager.addRequestLog(refused)
-      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+      storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined, undefined, undefined, clientKey)
       return
     }
     // 空池而没有 `missing` 时，跳过清单是唯一线索（整池都在冷却/目录未命中里时
@@ -1244,7 +1252,7 @@ router.post('/completions', async (ctx: Context) => {
       ...(refusalAttribution === undefined ? {} : refusalAttribution),
     }
     storeManager.addRequestLog(refused)
-    storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined)
+    storeManager.recordRequestInStats(false, refused.latency, refused.model || undefined, undefined, undefined, clientKey)
     return
   }
 
@@ -1671,7 +1679,7 @@ router.post('/completions', async (ctx: Context) => {
         errorParam: mapped.param,
       })
 
-      storeManager.recordRequestInStats(false, latency, request.model, provider.id, account.id)
+      storeManager.recordRequestInStats(false, latency, request.model, provider.id, account.id, clientKey)
 
       return
     }
@@ -1801,7 +1809,7 @@ router.post('/completions', async (ctx: Context) => {
       logEntryId = logEntry.id
     }
 
-    storeManager.recordRequestInStats(true, latency, request.model, provider.id, account.id)
+    storeManager.recordRequestInStats(true, latency, request.model, provider.id, account.id, clientKey)
 
     // 上游返回了本次请求没声明的工具名时记一行（纯观测，不改响应字节）。
     // 没声明任何工具的请求不跑：那种请求里任何调用都算「越界」，只会变成噪声。
@@ -2388,7 +2396,7 @@ router.post('/completions', async (ctx: Context) => {
       errorParam: null,
     })
 
-    storeManager.recordRequestInStats(false, latency, request.model, provider.id, account.id)
+    storeManager.recordRequestInStats(false, latency, request.model, provider.id, account.id, clientKey)
   }
 })
 

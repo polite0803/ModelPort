@@ -83,8 +83,9 @@ function addBucket(target: Record<string, QuotaBucket>, key: string, requests: n
 }
 
 /** 分别求请求数与 token 数：一个窗口两件事，不能只回一个数。 */
-function readWindow(
+function sumWindow(
   minutes: MinuteBuckets,
+  parseStamp: (stamp: string) => number,
   key: string,
   windowMs: number,
   nowMs: number
@@ -93,10 +94,12 @@ function readWindow(
   let requests = 0
   let tokens = 0
 
-  for (const [stamp, buckets] of Object.entries(minutes)) {
-    const at = Date.parse(`${stamp}:00Z`)
+  // for...in 而不是 Object.entries：热路径每个候选调两次，entries 每次都要
+  // 分配上千条 [键, 值] 数组，实测占修复后剩余 CPU 的三成。
+  for (const stamp in minutes) {
+    const at = parseStamp(stamp)
     if (Number.isNaN(at) || at < from || at > nowMs) continue
-    const bucket = buckets[key]
+    const bucket = minutes[stamp][key]
     if (!bucket) continue
     requests += bucket.requests
     tokens += bucket.tokens
@@ -106,9 +109,34 @@ function readWindow(
 }
 
 /**
+ * 分钟窗专用：窗口至多横跨两个分钟桶，直接按键取，不扫全表。
+ * 全池选路每个候选都要读 rpm/tpm，扫 1000+ 个桶是旧实现在现网卡死的主因之一。
+ * 桶键由 `minuteKey` 生成（UTC `YYYY-MM-DDTHH:MM`）。边界逐字沿用扫描口径
+ * `at >= now-60s && at <= now`：首桶 `ceil(from/格)`（from 恰在格上时该桶计数），
+ * 末桶 `floor(now/格)`。
+ */
+function sumMinuteWindow(
+  minutes: MinuteBuckets,
+  key: string,
+  nowMs: number
+): { requests: number; tokens: number } {
+  let requests = 0
+  let tokens = 0
+  const first = Math.ceil((nowMs - MINUTE_MS) / MINUTE_MS) * MINUTE_MS
+  const last = Math.floor(nowMs / MINUTE_MS) * MINUTE_MS
+  for (let at = first; at <= last; at += MINUTE_MS) {
+    const bucket = minutes[minuteKey(at)]?.[key]
+    if (!bucket) continue
+    requests += bucket.requests
+    tokens += bucket.tokens
+  }
+  return { requests, tokens }
+}
+
+/**
  * 跨天数的用量合计（声明窗口的周 / 月要走这里）。
  *
- * 与 `readWindow` 的分工：那个按「现在往前推一个窗口长度」扫分钟桶；这个从**给定起点**
+ * 与 `sumWindow` 的分工：那个按「现在往前推一个窗口长度」扫分钟桶；这个从**给定起点**
  * 扫日桶（自然周 / 自然月）。`oldestAt` 只对滚动窗口有意义，跨天窗口的复位时刻由
  * 自然边界给出，不从这里推。
  */
@@ -123,10 +151,10 @@ function readSpan(
   let tokens = 0
   let oldestAt: number | undefined
 
-  for (const [stamp, rows] of Object.entries(buckets)) {
+  for (const stamp in buckets) {
     const at = parseStamp(stamp)
     if (Number.isNaN(at) || at < fromMs || at > nowMs) continue
-    const bucket = rows[key]
+    const bucket = buckets[stamp][key]
     if (!bucket) continue
     requests += bucket.requests
     tokens += bucket.tokens
@@ -176,6 +204,13 @@ export class QuotaLedger {
   private dirty = false
   private persistTimer: NodeJS.Timeout | null = null
   private readonly persistDelayMs = 2000
+  /**
+   * 桶键 → 毫秒的解析缓存。选路热路径每个候选读分钟/日两个窗口，每个窗口扫全部
+   * 分钟桶（现网 1000+ 个）；不缓存时一次全池选路是几百万次 Date.parse，实测独占
+   * 事件循环 1.7–3.4s，整个网关表现为卡死。桶键是不可变字符串、解析结果恒定，
+   * 缓存只跟着 prune 删键，没有失效问题。
+   */
+  private readonly stampCache = new Map<string, number>()
 
   /** 时钟可注入：窗口与保留策略全靠时刻，不注入就只能按真实墙钟测。 */
   constructor(storageDir: string, now: () => number = () => Date.now()) {
@@ -186,6 +221,18 @@ export class QuotaLedger {
   static key(providerId: string, accountId: string, modelId: string): string {
     return `${providerId}|${accountId}|${modelId}`
   }
+
+  private parseStamp(stamp: string, parse: (stamp: string) => number): number {
+    let at = this.stampCache.get(stamp)
+    if (at === undefined) {
+      at = parse(stamp)
+      this.stampCache.set(stamp, at)
+    }
+    return at
+  }
+
+  private readonly minuteStamp = (stamp: string): number => this.parseStamp(stamp, parseMinuteStamp)
+  private readonly dayStamp = (stamp: string): number => this.parseStamp(stamp, parseDayStamp)
 
   initialize(): void {
     if (this.initialized) return
@@ -271,8 +318,8 @@ export class QuotaLedger {
     this.ensureInitialized()
 
     const modelKey = QuotaLedger.key(providerId, accountId, modelId)
-    const minute = readWindow(this.minutes, modelKey, MINUTE_MS, nowMs)
-    const day = readWindow(this.minutes, modelKey, DAY_MS, nowMs)
+    const minute = sumMinuteWindow(this.minutes, modelKey, nowMs)
+    const day = sumWindow(this.minutes, this.minuteStamp, modelKey, DAY_MS, nowMs)
     const month = this.months[monthKey(nowMs)]?.[modelKey]
 
     return {
@@ -292,8 +339,8 @@ export class QuotaLedger {
     this.ensureInitialized()
 
     const key = QuotaLedger.key(providerId, accountId, ALL_MODELS)
-    const minute = readWindow(this.minutes, key, MINUTE_MS, nowMs)
-    const day = readWindow(this.minutes, key, DAY_MS, nowMs)
+    const minute = sumMinuteWindow(this.minutes, key, nowMs)
+    const day = sumWindow(this.minutes, this.minuteStamp, key, DAY_MS, nowMs)
     const month = this.months[monthKey(nowMs)]?.[key]
 
     return {
@@ -330,7 +377,7 @@ export class QuotaLedger {
 
     if (window === 'week') {
       const { startMs } = anchoredWindow('week', nowMs)
-      const span = readSpan(this.days, parseDayStamp, key, startMs, nowMs)
+      const span = readSpan(this.days, this.dayStamp, key, startMs, nowMs)
       return { requests: span.requests, tokens: span.tokens }
     }
 
@@ -341,7 +388,7 @@ export class QuotaLedger {
 
     const span = DECLARED_ROLLING_MS[window]
     if (span === undefined) return { requests: 0, tokens: 0 }
-    const read = readSpan(this.minutes, parseMinuteStamp, key, nowMs - span, nowMs)
+    const read = readSpan(this.minutes, this.minuteStamp, key, nowMs - span, nowMs)
     return {
       requests: read.requests,
       tokens: read.tokens,
@@ -371,15 +418,21 @@ export class QuotaLedger {
   prune(nowMs: number): void {
     const from = nowMs - MINUTE_RETENTION_MS
     for (const stamp of Object.keys(this.minutes)) {
-      const at = Date.parse(`${stamp}:00Z`)
-      if (Number.isNaN(at) || at < from) delete this.minutes[stamp]
+      const at = this.minuteStamp(stamp)
+      if (Number.isNaN(at) || at < from) {
+        delete this.minutes[stamp]
+        this.stampCache.delete(stamp)
+      }
     }
 
     // 日桶只服务声明窗口（周 / 自然月）：留到 40 天即可覆盖一个自然月加一天。
     const dayFrom = nowMs - DAY_RETENTION_MS
     for (const stamp of Object.keys(this.days)) {
-      const at = parseDayStamp(stamp)
-      if (Number.isNaN(at) || at < dayFrom) delete this.days[stamp]
+      const at = this.dayStamp(stamp)
+      if (Number.isNaN(at) || at < dayFrom) {
+        delete this.days[stamp]
+        this.stampCache.delete(stamp)
+      }
     }
 
     const currentMonth = monthKey(nowMs)

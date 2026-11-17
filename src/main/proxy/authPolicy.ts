@@ -3,6 +3,15 @@ import { createHash, timingSafeEqual } from 'crypto'
 export interface ApiKeyRecord {
   key: string
   enabled: boolean
+  /**
+   * 这把 key 的归属名（控制台里给用户起的名字，如 `Qoder` / `Claude`）。
+   *
+   * 它是**客户端归属的权威锚点**：Node 系客户端（Qoder、Claude Desktop）不发
+   * `User-Agent`，纯 UA 口径下两者都落进 `undici`，永远分不开。给每个客户端
+   * 配一把命名 key 之后，日志与按天统计就能说出「这 7039 笔里哪些是 Qoder 发的」。
+   * 缺省（老配置）时归属回落到 UA 归类。
+   */
+  name?: string
 }
 
 export const LOOPBACK_HOSTS = ['127.0.0.1', '::1', 'localhost'] as const
@@ -69,14 +78,29 @@ function stripWrappingQuotes(value: string): string {
 
 export type ApiKeyAuthOutcome = 'allow' | 'missing_key' | 'invalid_key'
 
+export interface ApiKeyAuthResult {
+  outcome: ApiKeyAuthOutcome
+  /**
+   * 命中的那把 key 的归属名（`ApiKeyRecord.name`）。
+   *
+   * 只在 `outcome === 'allow'` 且这把 key 起了名时才有值；没有 key 配置、或 key
+   * 没起名、或者根本没发 key —— 都是 `undefined`，调用方据此回落到 UA 归类。
+   * 这里给的是**归属标签**，不是凭据：值本身永远不进日志。
+   */
+  matchedKeyName?: string
+}
+
 export function evaluateApiKeyAuth(input: {
   apiKeys?: ApiKeyRecord[]
   providedKey?: string | null
-}): ApiKeyAuthOutcome {
+}): ApiKeyAuthResult {
   const keys = activeApiKeys(input.apiKeys)
-  if (keys.length === 0) return 'allow'
-  if (!input.providedKey) return 'missing_key'
-  return keys.some((entry) => safeKeyEquals(entry.key, input.providedKey as string)) ? 'allow' : 'invalid_key'
+  if (keys.length === 0) return { outcome: 'allow' }
+  if (!input.providedKey) return { outcome: 'missing_key' }
+  const matched = keys.find((entry) => safeKeyEquals(entry.key, input.providedKey as string))
+  if (!matched) return { outcome: 'invalid_key' }
+  const name = typeof matched.name === 'string' ? matched.name.trim() : ''
+  return { outcome: 'allow', ...(name === '' ? {} : { matchedKeyName: name }) }
 }
 
 export function checkStartupSecurity(input: { apiKeys?: ApiKeyRecord[]; host: string }): { ok: boolean; reason?: string } {

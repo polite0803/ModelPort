@@ -166,6 +166,10 @@ scheduler/）、`src/preload/`、`src/renderer/`（React）、`src/shared/`。�
 - **客户端改写是控制台能力，不是新监听端口**（`shell/clientSync*.ts`，页面 `/clients`）：就地改客户端自己的存
   储，并通过 `config:update` 分发唯一一把规范 key。页面只说客户端 id、不说路径，也只看掩码后的 key；fork 运行
   期间 SQLite 写入会被拒绝。
+- **「谁发来的」按三层判**（`shared/clientProfile.ts`）：声明头 > 命中的网关 key 名 > UA。Node 系客户端
+  （Qoder、Claude Desktop）不发 UA，纯 UA 口径下都是 `undici`、分不开——所以给客户端各配一把**命名 key**，
+  归属靠 key 名落。按天计数在 `dailyStats[day].clientUsage`（日志保留窗只有 200 行，跨天分析只能读这本账）。
+  三层都只是标签，不作安全判据。§Client attribution。
 
 ## 日志
 

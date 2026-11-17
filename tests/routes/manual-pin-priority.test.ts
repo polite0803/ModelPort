@@ -307,7 +307,11 @@ test('控制台按钮：已固定再点 = 解除；0 账号的已固定模型也
   const source = readFileSync(new URL('../../src/renderer/src/pages/Routes.tsx', import.meta.url), 'utf8')
   assert.ok(/onClick=\{\(\) => void runSwitch\(model\.pinned \? 'reset' : 'pin', model\)\}/.test(source),
     '同一颗按钮 toggle：钉住 → reset，未钉 → pin')
-  assert.ok(source.includes("disabled={busy || (!model.pinned && (model.accountCount === 0 || !detail?.enabled))}"),
+  // 被排除的行不能固定（排除与固定互相矛盾），但解钉仍然不需要账号：
+  // 已固定的行不因 0 账号/停用被禁点。
+  assert.ok(source.includes('disabled={busy || model.excluded === true'),
+    '被排除的行禁用固定')
+  assert.ok(source.includes('(!model.pinned && (model.accountCount === 0 || !detail?.enabled))'),
     '解钉不需要账号：已固定的行不因 0 账号/停用被禁点')
   assert.ok(source.includes("? t('routes.unpinHint')"), '钉住态的悬停提示是解除语义')
 })

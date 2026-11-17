@@ -339,3 +339,18 @@ export function qualifyChannelModel(channelId: string, model: string): string {
   if (trimmed.slice(0, slash) === channelId) return trimmed
   return trimmed
 }
+
+/**
+ * 去掉**本渠道**前缀后的裸模型名；不是本渠道前缀就原样返回。
+ *
+ * 限流镜像的键必须统一成裸名：同一份读数有两个调用方 —— 预热用目录里的裸 id
+ * （`hy4flash-free`），选路用映射后的 `actualModelId`（`buddy/hy4flash-free`）。
+ * 两条路各写各的，镜像里就是两把键，而查询只命中其中一把：2026-11-17 实测
+ * 路由页 `blocked` 对渠道限流恒为 0、账号页却在报「限流中」—— 用户读到的是
+ * 一个自相矛盾的两处读数。
+ */
+export function bareChannelModelId(channelId: string, model: string): string {
+  const trimmed = model.trim()
+  const prefix = `${channelId}/`
+  return trimmed.startsWith(prefix) ? trimmed.slice(prefix.length) : trimmed
+}

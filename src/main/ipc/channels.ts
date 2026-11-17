@@ -45,6 +45,9 @@ export const IpcChannels = {
   // 星级推荐（1–5，0 清除）：写路由配置的 `modelRatings`，纯标注不改选路。
   // 独立一条而不并入 switch：评分不是切换，限流桶与日志要分得开。
   ROUTES_RATE: 'routes:rate',
+  // 手动排除/加回一个模型：写路由配置的 `excludeModels`。与 switch（固定）和
+  // rate（星级）分开——三者是三种不同的写入，混用会让「点了之后到底改了什么」说不清。
+  ROUTES_EXCLUDE: 'routes:exclude',
   // 主进程 → 界面：候选池的**结构**变了（供应商/账号/模型启停增删、能力标注、路由
   // 结构编辑）。路由页与托盘据此重取菜单。刻意不复用 config:changed —— 星级推荐也写
   // config，但它不改池成员，混在一起会让每次评分都触发整池重读（实测全池扫描 p50 4.7s）。
@@ -200,6 +203,8 @@ export const IpcChannels = {
   STATISTICS_GET_TOKEN_USAGE: 'statistics:getTokenUsage',
   STATISTICS_GET_TOKEN_USAGE_HISTORY: 'statistics:getTokenUsageHistory',
   STATISTICS_GET_TOKEN_USAGE_DAYS: 'statistics:getTokenUsageDays',
+  /** Requests per client (attributed name) per day; survives the request-log window. */
+  STATISTICS_GET_CLIENT_USAGE: 'statistics:getClientUsage',
 
   APP_GET_VERSION: 'app:getVersion',
   APP_CHECK_UPDATE: 'app:checkUpdate',

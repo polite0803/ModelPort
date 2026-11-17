@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { clientHeaderValue, identifyClientByUserAgent } from '../../src/shared/clientProfile.ts'
+import { clientHeaderValue, clientStatsKey, identifyClient, identifyClientByUserAgent } from '../../src/shared/clientProfile.ts'
 
 test('Trae 客户端按 UA 识别', () => {
   const identity = identifyClientByUserAgent('Trae/1.5.0 (Windows NT 10.0; Win64; x64)')
@@ -79,4 +79,42 @@ test('缺少 UA 不报错', () => {
 
 test('UA 头是数组时取第一个', () => {
   assert.equal(identifyClientByUserAgent(['Trae/1.0', 'Trae/1.1']).id, 'trae')
+})
+
+test('客户端定名：声明头 > 命中的 key 名 > UA', () => {
+  // 声明头最优先 —— 客户端自己说的最准。
+  const declared = identifyClient({
+    declared: 'qoder/0.9.1',
+    userAgent: 'undici',
+    apiKeyName: 'Qoder',
+  })
+  assert.equal(declared.id, 'qoder')
+  assert.equal(declared.source, 'header')
+  assert.equal(declared.version, '0.9.1')
+
+  // 声明头缺席时用命中的 key 名：Node 系客户端不发 UA，纯 UA 口径下
+  // Qoder 与 Claude Desktop 都是 `undici`，分不开（2026-11-17 实测 267/300 行如此）。
+  const byKey = identifyClient({ userAgent: 'undici', apiKeyName: 'Claude' })
+  assert.equal(byKey.source, 'key')
+  assert.equal(byKey.label, 'Claude')
+
+  // 两者都没有才回落 UA。
+  const byUa = identifyClient({ userAgent: 'Trae/1.5.0' })
+  assert.equal(byUa.source, 'ua')
+  assert.equal(byUa.id, 'trae')
+})
+
+test('key 名不参与规则匹配时保留原名', () => {
+  const identity = identifyClient({ apiKeyName: 'Visual Studio Code' })
+  assert.equal(identity.id, 'other')
+  assert.equal(identity.label, 'Visual Studio Code')
+  assert.equal(identity.source, 'key')
+})
+
+test('按天统计的桶键清掉控制字符并夹到 40 字', () => {
+  assert.equal(clientStatsKey({ id: 'other', label: 'Qoder' }), 'Qoder')
+  assert.equal(clientStatsKey({ id: 'other', label: '  ' }), 'unknown')
+  // 控制字符先被换成空格，再把连续空白折成一个空格。
+  assert.equal(clientStatsKey({ id: 'other', label: 'a\r\nb' }), 'a b')
+  assert.equal(clientStatsKey({ id: 'other', label: 'x'.repeat(80) }).length, 40)
 })

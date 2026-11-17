@@ -40,6 +40,8 @@ import type {
   RouteMenuRequest,
   RouteRateRequest,
   RouteRateResult,
+  RouteExcludeRequest,
+  RouteExcludeResult,
   RouteSwitchRequest,
   RouteSwitchResult,
   TlsStatus,
@@ -656,6 +658,12 @@ interface DailyStatistics {
   /** Absent on buckets written before outcomes were recorded; never read as 0. */
   providerSuccess?: Record<string, number>
   providerLatency?: Record<string, number>
+  /** Requests per client (attributed name). Absent on days recorded before attribution. */
+  clientUsage?: Record<string, number>
+  clientSuccess?: Record<string, number>
+  clientLatency?: Record<string, number>
+  /** When the day's client attribution started (epoch ms). */
+  clientUsageSince?: number
 }
 
 const statisticsAPI = {
@@ -879,6 +887,11 @@ const routesAPI = {
   // 也不要求模型此刻在可派池里（冷却/配额是瞬时状态，不该拒写用户的推荐）。
   rate: (request: RouteRateRequest): Promise<RouteRateResult> =>
     wire.invoke(IpcChannels.ROUTES_RATE, request),
+
+  // 手动排除 / 加回一个模型：写路由的 `excludeModels`。改了池成员（与星级那种纯标注
+  // 不同），所以 `routes:pool-changed` 会随 config 写入一起推送，页面据此重取菜单。
+  excludeModel: (request: RouteExcludeRequest): Promise<RouteExcludeResult> =>
+    wire.invoke(IpcChannels.ROUTES_EXCLUDE, request),
 
   // 池结构变更（供应商/账号/模型启停增删、能力标注、路由结构编辑）：主进程单向推送，
   // 路由页与托盘据此重取菜单。与 config:changed 分开 —— 评分写 config 但不改池，

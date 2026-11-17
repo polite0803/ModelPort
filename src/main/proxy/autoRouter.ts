@@ -2121,19 +2121,30 @@ class AutoRouter {
    * 把它们从可切换集合里去掉，用户就只能在「能派的模型」里选，那正是
    * 「池子里还有 51 个模型一次都没被派过，而界面看不出原因」的原样。
    */
-  private selectableModels(route: ModelRoute, now: number): {
+  private selectableModels(route: ModelRoute, now: number, includeDropped = false): {
     models: RoutePreviewModel[]
     current?: RouteMenuCurrent
     pin?: ModelPin
     preferred?: RouteModelRef
   } {
     const preview = this.preview(route)
-    const inPool = preview.models.filter(model => model.status === 'kept' || model.status === 'included')
-    // 两段拼：能派的在前，被挡下的在后。段内顺序不动 —— 快照原序就是真实选路次序，
-    // 菜单不重新排序（另算一份，展示与行为迟早不一致）。
+    const isExcluded = (model: RoutePreviewModel): boolean => model.status === 'excluded'
+    // `includeDropped`（控制台路由页）：连被池策略/手动例外筛掉的行也带上 ——
+    // 那一页要能就地排除/加回，而不是跳到路由编辑器去改配置。托盘不开这一档：
+    // 它不是「选一个来固定」的界面，把几十行筛掉的东西塞进原生菜单只会滚不动。
+    const inPool = includeDropped
+      ? preview.models
+      : preview.models.filter(model =>
+          model.status === 'kept' || model.status === 'included' || model.status === 'excluded')
+    const dispatchable = (model: RoutePreviewModel): boolean =>
+      model.status === 'kept' || model.status === 'included'
+    // 分段：能派的 → 被挡下的 → 被排除的 → 其它（仅 includeDropped 时出现）。
+    // 段内顺序不动 —— 快照原序就是真实选路次序，菜单不另排一份。
     const selectable = [
-      ...inPool.filter(model => model.blocked === undefined),
-      ...inPool.filter(model => model.blocked !== undefined),
+      ...inPool.filter(model => dispatchable(model) && model.blocked === undefined),
+      ...inPool.filter(model => dispatchable(model) && model.blocked !== undefined),
+      ...inPool.filter(model => isExcluded(model)),
+      ...inPool.filter(model => !dispatchable(model) && !isExcluded(model)),
     ]
     const current = this.lastServed.get(route.name)
     const pin = this.pinFor(route.name, undefined, now)
@@ -2175,9 +2186,14 @@ class AutoRouter {
     limit = ROUTE_MENU_MODELS_DEFAULT,
     now = Date.now(),
     channelAccounts?: ChannelAccountCounts,
+    /**
+     * 连**被池策略/手动例外筛掉**的模型也带出来（控制台路由页用）。
+     * 托盘不传：它只列「能点来固定的」，筛掉的几十行塞进原生菜单滚不动。
+     */
+    includeDropped = false,
   ): RouteMenuEntry {
     this.sweepCircuits(now)
-    const { models, current, pin, preferred } = this.selectableModels(route, now)
+    const { models, current, pin, preferred } = this.selectableModels(route, now, includeDropped)
     const routeName = route.name
     const pinnedName = pin?.displayName ?? preferred?.displayName
     // 钉子指向的模型不在可派池里：菜单照常显示这颗钉子（配置事实），但标成失效。
@@ -2231,6 +2247,12 @@ class AutoRouter {
           : model.accountCount
         const rating = ratings.get(`${model.providerId}\u0000${model.displayName}`)
         const quota = quotaSummaryOf(model.providerId, model.actualModelId, quotaContext, now)
+        // 账号级限流明细：`blocked.rate_limited` 只在**全部账号**限流时出现，
+        // 而用户要看的是「3 个账号里 1 个限流、最早什么时候回来」——那张表
+        // 只读内存（`noteRateLimits` 的逐账号扩展），零额外 RPC。
+        const accountLimits = storeManager.getProviderById(model.providerId)?.type === 'account'
+          ? accountChannelManager.modelAccountLimitSummary(model.providerId, model.actualModelId, now)
+          : undefined
         return {
           providerId: model.providerId,
           providerName: model.providerName,
@@ -2241,6 +2263,7 @@ class AutoRouter {
           ...(circuitUntil === undefined ? {} : { circuitUntil }),
           ...(rating === undefined ? {} : { rating }),
           ...(model.blocked === undefined ? {} : { blocked: model.blocked }),
+          ...(accountLimits === undefined ? {} : { accountLimits }),
           ...(quota.windows === 0 ? {} : { quota }),
           recommendedStars: recommendModelStars({
             tier: model.capability.tier,
@@ -2261,6 +2284,12 @@ class AutoRouter {
           }),
           current: current !== undefined && current.displayName === model.displayName,
           pinned: pinnedName !== undefined && pinnedName === model.displayName,
+          // 三态投影：路由页据此显示「策略保留 / 手动加回 / 手动排除 / 被策略筛掉」，
+          // 与路由编辑器读同一份 preview 结论（同一个 `status` 字段，不另算）。
+          status: model.status,
+          ...(model.filteredBy === undefined ? {} : { filteredBy: model.filteredBy }),
+          ...(model.unavailableReason === undefined ? {} : { unavailableReason: model.unavailableReason }),
+          ...(model.status === 'excluded' ? { excluded: true as const } : {}),
         } satisfies RouteMenuModel
       }),
       // 池内总数（含这一轮被挡下的那些）：它回答「这条路由有多大」，而不是「现在

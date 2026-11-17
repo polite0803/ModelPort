@@ -28,10 +28,75 @@ export type ClientId =
 
 export interface ClientIdentity {
   id: ClientId
-  /** 供日志/界面展示的可读名；`other` 时是 UA 里的原始产品名 */
+  /** 供日志/界面展示的可读名；`other` 时是 UA（或声明值）里的原始产品名 */
   label: string
-  /** UA 里能解析到的第一个版本号，没有就省略 */
+  /** 能解析到的第一个版本号，没有就省略 */
   version?: string
+  /**
+   * 身份从哪里来：客户端声明头 / 命中的网关 API key 名 / UA 归类。
+   * 只写进日志与统计，不作安全判据（三者都是调用方可控的文本）。
+   */
+  source?: 'header' | 'key' | 'ua'
+}
+
+/**
+ * 客户端可主动声明的身份头，值形如 `qoder` 或 `qoder/0.9.1`。
+ *
+ * 存在的理由：Qoder 这类 Node 客户端不发 UA（缺省 `undici`），纯 UA 口径下
+ * 永远认不出是它；Claude Desktop 的 `claude-cli/...` 也只能认到产品层。
+ * 声明头优先，`undefined` 时回落到命中的 API key 名。
+ */
+export const CLIENT_HEADER = 'x-modelport-client'
+
+export interface ClientIdentityInput {
+  /** `X-ModelPort-Client` 头（可带版本，如 `qoder/0.9.1`）。 */
+  declared?: string | string[] | null
+  /** 原始 User-Agent。 */
+  userAgent?: string | string[] | null
+  /**
+   * 命中的网关 API key 名。每个客户端配一把命名 key 时，这条不依赖客户端
+   * 配合，是声明头缺席时唯一可靠的归属。
+   */
+  apiKeyName?: string | null
+}
+
+/**
+ * 身份来源优先级：声明头 > API key 名 > UA 归类。
+ *
+ * 三者都只用于日志与按天统计；伪造声明头只能污染自己的标签，换不来任何权限。
+ */
+export function identifyClient(input: ClientIdentityInput): ClientIdentity {
+  const declared = firstHeaderValue(input.declared)
+  if (declared !== '') return { ...classifyDeclared(declared), source: 'header' }
+  const keyName = firstHeaderValue(input.apiKeyName)
+  if (keyName !== '') return { ...classifyDeclared(keyName), source: 'key' }
+  return { ...identifyClientByUserAgent(input.userAgent), source: 'ua' }
+}
+
+/** 按天统计的桶键：声明名/key 名原样、归类名用 label；清掉控制字符并夹到 40 字。 */
+export function clientStatsKey(identity: ClientIdentity): string {
+  const label = identity.label.replace(CONTROL_CHARS, '').replace(/\s+/g, ' ').trim().slice(0, 40)
+  return label === '' ? 'unknown' : label
+}
+
+function classifyDeclared(value: string): ClientIdentity {
+  const versionMatch = VERSION_PATTERN.exec(value)
+  const version = versionMatch?.[0]
+  for (const rule of CLIENT_RULES) {
+    if (!rule.pattern.test(value)) continue
+    return { id: rule.id, label: rule.label, ...(version === undefined ? {} : { version }) }
+  }
+  const cleaned = value.replace(CONTROL_CHARS, '').replace(/\s+/g, ' ').trim().slice(0, 40)
+  return {
+    id: 'other',
+    label: cleaned === '' ? 'unknown' : cleaned,
+    ...(version === undefined ? {} : { version }),
+  }
+}
+
+function firstHeaderValue(value: string | string[] | null | undefined): string {
+  const raw = Array.isArray(value) ? value[0] : value
+  return typeof raw === 'string' ? raw.trim() : ''
 }
 
 interface ClientRule {

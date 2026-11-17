@@ -54,7 +54,7 @@ test('菜单读失败带回原因：托盘才能把「读不到」与「没有�
   assert.match(block, /routes: \[\], generatedAt, error: routeStorageError\(error\)\.message/,
     '空表 + error 才是「读取失败」；空表不带 error 会被读成「配置被清了」')
   assert.match(block, /storeManager\.listModelRoutes\(\)/, '菜单内容来自存储里的路由')
-  assert.match(block, /\.map\(route => autoRouter\.routeMenu\(route, /,
+  assert.match(block, /\.map\(route => autoRouter\.routeMenu\(/,
     '每条路由的模型都来自选路器同一份快照，不是处理器自己算一遍')
 })
 
@@ -72,7 +72,7 @@ test('账号渠道行改读 Worker 池计数：读不到退回占位账号数，
   assert.match(menuBlock, /const channelAccounts = await channelAccountCounts\(\)/)
   assert.match(
     menuBlock,
-    /autoRouter\.routeMenu\(route, limit \?\? ROUTE_MENU_MODELS_DEFAULT, generatedAt, channelAccounts\)/,
+    /autoRouter\.routeMenu\([\s\S]{0,200}?channelAccounts,/,
     '菜单每一行都要拿到池计数，否则渠道行又退回占位 1',
   )
   assert.match(handlerBlock('ROUTES_SWITCH'), /channelAccounts,/, '切换回灌的菜单同样要带池计数')

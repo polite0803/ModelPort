@@ -619,6 +619,25 @@ export interface RouteMenuModel {
   current: boolean
   /** 被 `preferredModel` 或一次显式切换钉住的模型。 */
   pinned: boolean
+  /**
+   * 池层结论（与路由编辑器的 `preview.models[].status` **同一个字段、同一份计算**）。
+   *
+   * 只在控制台请求了 `includeDropped` 时才有意义：那时列表里还有被策略筛掉的行。
+   * 托盘不传这一档，它只列能点来固定的模型。
+   */
+  status?: RoutePreviewStatus
+  /** `status === 'filtered'`：第一条把它筛掉的池策略。 */
+  filteredBy?: AutoPoolStrategyId
+  /** `status === 'unavailable'`：请求画像会把它硬过滤掉的原因。 */
+  unavailableReason?: 'vision' | 'tools' | 'reasoning' | 'context'
+  /**
+   * 被这条路由**手动排除**（`excludeModels`）。
+   *
+   * 排除的行仍然出现在菜单里（否则页面上没有任何地方能把它加回来），但
+   * **绝不参与派发**：`selectableModels` 把它排在能派的之后，`routes:switch`
+   * 也不会选它（那是「固定」，与「排除」互相矛盾，写入会被拒绝）。
+   */
+  excluded?: boolean
   /** 用户给的星级推荐（1–5）；没评过不写。 */
   rating?: number
   /**
@@ -641,6 +660,23 @@ export interface RouteMenuModel {
   blocked?: RouteModelBlock
   /** 这个模型此刻的额度概况（多账号、多窗口折成一份）。只读展示。 */
   quota?: RouteQuotaSummary
+  /**
+   * 账号级限流明细：这个模型在渠道里有几个账号、其中几个限流、最早什么时候回来。
+   *
+   * 与 `blocked` 的关系：`blocked.rate_limited` 只在**全部账号**都限流时出现
+   * （那是「能不能派」的判据）；本字段是它的**逐账号版本**，部分账号限流时
+   * `blocked` 不写而这里照写 —— 「3 个账号里 1 个限流」正是展示面要说的那句话。
+   * 数据来自 worker 的 `account.list`（每个账号自带 `modelRateLimits`），
+   * 与选路读的是同一份账号池状态，零额外上游请求。
+   */
+  accountLimits?: {
+    /** 该渠道启用的账号总数（分母）。 */
+    total: number
+    /** 其中在该模型上处于限流期的账号数。 */
+    limited: number
+    /** 这些限流账号里最早解禁的时刻；`limited === 0` 时缺席。 */
+    earliestResetAt?: number
+  }
 }
 
 /** 一条路由的托盘/界面菜单快照。 */
@@ -688,6 +724,11 @@ export interface RouteMenuRequest {
   route?: string
   /** 每条路由最多带几个模型；缺省 = 托盘上限，主进程会夹到安全范围。 */
   limit?: number
+  /**
+   * 连被池策略/手动例外筛掉的模型也带出来（控制台路由页要在这页做排除/加回）。
+   * 托盘不传：原生菜单塞不下几十行被筛掉的模型。
+   */
+  includeDropped?: boolean
 }
 
 /** 一次切换请求。`model` 缺省 = 「换下一个」：取当前模型在菜单顺序里的下一项。 */
@@ -730,6 +771,35 @@ export interface RouteRateResult {
   model?: string
   /** 写入后的星级（清除时为 0）。 */
   stars?: number
+  /** 失败原因，可直接展示。 */
+  reason?: string
+}
+
+/**
+ * 一条路由上「手动例外 / 排除 / 恢复自动」一个模型（写 `includeModels` / `excludeModels`）。
+ *
+ * 三种动作对应路由编辑器里的三个按钮，语义必须一致：
+ * - `exclude`：写进 `excludeModels`（并从未 `includeModels` 里删掉）。选路完全不再考虑；
+ * - `include`：写进 `includeModels`（并从 `excludeModels` 里删掉）—— 用于把已被池策略
+ *   筛掉的模型手动加回；
+ * - `restore`：从两个手动名单里都删掉 —— 交回池策略判定（「恢复自动」）。
+ *
+ * 与「固定」（`preferredModel`）和「星级」（`modelRatings`）是三种不同的写入：
+ * 固定 = 下一轮只服务它；星级 = 只影响展示排序；本动作 = 改池成员。
+ */
+export interface RouteExcludeRequest {
+  route: string
+  providerId: string
+  model: string
+  action: 'exclude' | 'include' | 'restore'
+}
+
+export interface RouteExcludeResult {
+  ok: boolean
+  route: string
+  model?: string
+  /** 写入后这个模型在这条路由上的手动态。 */
+  action?: RouteExcludeRequest['action']
   /** 失败原因，可直接展示。 */
   reason?: string
 }
@@ -2067,6 +2137,13 @@ export interface StatisticsResponse {
     successRequests: number
     failedRequests: number
   }>
+  /**
+   * Requests per client today, keyed by the attributed client name.
+   * Absent when the day was recorded before clients were attributed.
+   */
+  clientUsage?: Record<string, number>
+  /** Successful requests per client today. Same absence rule. */
+  clientSuccess?: Record<string, number>
 }
 
 export interface ConfigUpdateRequest {

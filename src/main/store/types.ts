@@ -667,6 +667,31 @@ export interface DailyStatistics {
   providerSuccess?: Record<string, number>
   /** Summed latency of this day's successful requests per provider. Same absence rule. */
   providerLatency?: Record<string, number>
+  /**
+   * Requests per client, keyed by the client's attribution name
+   * (`clientStatsKey`): the declared client header, the matched API key's name,
+   * or the UA-derived label.
+   *
+   * Absent on days recorded before clients were attributed - "not recorded",
+   * never 0, so a per-client share must skip the day rather than charge the
+   * unrecorded requests to a client that never sent them.
+   */
+  clientUsage?: Record<string, number>
+  /**
+   * Successful requests per client, written alongside `clientUsage`. Same
+   * absence rule.
+   */
+  clientSuccess?: Record<string, number>
+  /** Summed latency of this day's successful requests per client. Same absence rule. */
+  clientLatency?: Record<string, number>
+  /**
+   * When the client attribution for this day started being recorded (epoch ms).
+   *
+   * A day that began under a build without client attribution has requests
+   * nobody claimed; the client buckets cover only what came after this instant.
+   * Absence means the whole day was attributed from its start.
+   */
+  clientUsageSince?: number
 }
 
 /**

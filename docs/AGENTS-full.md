@@ -333,10 +333,10 @@ The protocol-neutral half of the loopback (target host, credential forwarding, t
 `User-Agent`, SSE headers, upstream error text, inner `X-Request-Id` adoption, `X-ModelPort-*`
 passthrough) lives in `proxy/utils/inboundLoopback.ts` - shared by both entries precisely because a
 second copy drifts. Forwarding `User-Agent` is not cosmetic: the request log's `client` and the
-`X-ModelPort-Client` response header are classified from the UA alone
+`X-ModelPort-Client` response header are classified from the caller's identity
 (`shared/clientProfile.ts`), so an entry that drops it reports every caller as the proxy's own
-fetch client (`node`), which is exactly the lead an operator needs when a harness misbehaves. The UA
-goes through `toHeaderValue` like every other dynamic header value.
+fetch client (`node` / `undici`), which is exactly the lead an operator needs when a harness
+misbehaves. The UA goes through `toHeaderValue` like every other dynamic header value.
 
 **Freeform (`custom`) tools are a separate contract from functions, and both halves are
 load-bearing.** Codex declares `apply_patch` as `{type: 'custom', format: …}` - its argument is raw
@@ -2658,6 +2658,33 @@ live `GATEWAY-TEXT:` tags — so the provenance survives without pretending the 
   behaviour (including the invariant that trimming never empties history). `normalizeContextManagementConfig`
   drops a stored `strategies.summary` and filters `summary` out of `executionOrder`, so an upgraded
   `data.json` cannot resurrect it; the gate is `tests/proxy/context-summary-retired.test.ts`.
+
+## Client attribution
+
+**Client attribution has three tiers, and the UA is the weakest.** `identifyClient`
+(`shared/clientProfile.ts`) resolves the caller as *declared header > matched API key name > UA
+classification*, and records which tier answered (`client.source`). The key tier exists because Node
+clients (Qoder, Claude Desktop) send no `User-Agent` at all - measured 2026-11-17 on the WSL
+gateway: 267 of 300 retained rows said `undici`, which cannot tell Qoder from Claude. The key tier
+does not depend on the client cooperating: name each key in the console (`Qoder`, `Claude`, ...) and
+the attribution follows the key the request authenticated with. A declared `X-ModelPort-Client`
+header outranks the key, but it is caller-controlled text, so it only ever relabels the caller's own
+traffic - it buys no access. None of the three tiers may be used as a security judgement.
+
+**Per-client counters live in the day ledger, not in the rows.** `dailyStats[day].clientUsage` /
+`clientSuccess` / `clientLatency` are keyed by the attributed client name (`clientStatsKey`), and
+`clientUsageSince` says when that day's attribution started. The request log keeps a bounded window
+(200 rows by default - measured 2026-11-17: 7,039 requests left 300 rows, ~2.5 hours), so "which
+client sent what today" is only answerable from a ledger of its own; `statistics:getClientUsage`
+reads it back per day.
+
+The three maps are created on the **first attributed request of the day**, and the success rate
+denominator is `clientSuccess[client] / clientUsage[client]` - the client's own requests, not the
+day's total. That is what makes a mid-day start legitimate: the requests nobody attributed stay
+out of every client's bucket. It is the opposite of the `providerSuccess` / `providerLatency` pair,
+whose denominator (`providerUsage`) spans the attribution start, so that one must wait for the
+build that owns the day to create it - otherwise the reported rate is simply wrong. The
+`clientUsageSince` stamp is what tells a reader that the day's client figures cover a partial day.
 
 ## Logging
 

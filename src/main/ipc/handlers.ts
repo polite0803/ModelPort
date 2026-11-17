@@ -68,7 +68,7 @@ import { exhaustionExpiresAt, liveExhaustions } from '../../shared/aggregateQuot
 import type { ManagementApiConfig, AppConfig } from '../store/types'
 import { DEFAULT_CONTEXT_MANAGEMENT_CONFIG } from '../store/types'
 import type { TlsStatus, TlsTrustResult } from '../../shared/types'
-import type { RouteMenuRequest, RouteMenuResult, RouteRateRequest, RouteRateResult, RouteSwitchRequest, RouteSwitchResult } from '../../shared/types'
+import type { RouteExcludeRequest, RouteExcludeResult, RouteMenuRequest, RouteMenuResult, RouteRateRequest, RouteRateResult, RouteSwitchRequest, RouteSwitchResult } from '../../shared/types'
 import { ROUTE_RATING_MAX_STARS } from '../../shared/types'
 import type { ProviderType } from '../oauth/types'
 import type { DeclaredQuotaLimit } from '../../shared/declaredQuota.ts'
@@ -555,13 +555,22 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
       const limit = typeof request?.limit === 'number' && Number.isFinite(request.limit)
         ? Math.min(ROUTE_MENU_MODELS_MAX, Math.max(1, Math.trunc(request.limit)))
         : undefined
+      // 控制台路由页要列「策略产出的全部模型」（含被筛掉的）以便就地做排除/加回；
+      // 托盘不传这一档，它只列能点来固定的。
+      const includeDropped = request?.includeDropped === true
       try {
         // 菜单行也带 `blocked`（与预览同一份镜像）：打开菜单前预热，理由同 routes:preview。
         await accountChannelManager.prewarmRateLimits()
         const channelAccounts = await channelAccountCounts()
         const routes = storeManager.listModelRoutes()
           .filter(route => only === undefined || route.name === only)
-          .map(route => autoRouter.routeMenu(route, limit ?? ROUTE_MENU_MODELS_DEFAULT, generatedAt, channelAccounts))
+          .map(route => autoRouter.routeMenu(
+            route,
+            limit ?? ROUTE_MENU_MODELS_DEFAULT,
+            generatedAt,
+            channelAccounts,
+            includeDropped,
+          ))
         return { routes, generatedAt }
       } catch (error) {
         // 存储没起来时菜单必须是「读不到」而不是「没有路由」：后者会让用户以为自己的
@@ -711,6 +720,68 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
         }
         broadcastConfigChanged(storeManager.getConfig())
         return { ok: true, route: routeName, model: displayName, stars }
+      } catch (error) {
+        return { ok: false, route: request.route, reason: routeStorageError(error).message }
+      }
+    },
+  )
+
+  /**
+   * 手动排除 / 加回一个模型（写路由的 `excludeModels`）。
+   *
+   * 为什么不复用 `routes:update`：那条是**整条路由的配置写**，列表页一次只动一个
+   * 模型，走它得先把整条路由读出来再原样写回 —— 并发编辑时会把别人刚改的池策略
+   * 覆盖掉。这里只做「一个 ref 的增删」，与 `routes:rate` 同一形状。
+   */
+  registerMainHandler(
+    IpcChannels.ROUTES_EXCLUDE,
+    async (_, request: RouteExcludeRequest): Promise<RouteExcludeResult> => {
+      if (request === null || typeof request !== 'object'
+        || typeof request.route !== 'string' || request.route.trim().length === 0
+        || typeof request.providerId !== 'string' || request.providerId.trim().length === 0
+        || typeof request.model !== 'string' || request.model.trim().length === 0
+        || (request.action !== 'exclude' && request.action !== 'include' && request.action !== 'restore')) {
+        return {
+          ok: false,
+          route: typeof request?.route === 'string' ? request.route : '',
+          reason: '排除请求缺少路由名、供应商、模型名或动作（exclude / include / restore）',
+        }
+      }
+      try {
+        const routeName = request.route.trim()
+        const route = storeManager.listModelRoutes().find(candidate => candidate.name === routeName)
+        if (route === undefined) {
+          return { ok: false, route: routeName, reason: `路由 '${routeName}' 不存在` }
+        }
+        const providerId = request.providerId.trim()
+        const displayName = request.model.trim()
+        const key = `${providerId.toLowerCase()}\u0000${displayName.toLowerCase()}`
+        const keyOf = (ref: { providerId: string; displayName: string }): string =>
+          `${ref.providerId.toLowerCase()}\u0000${ref.displayName.toLowerCase()}`
+        const ref = { providerId, displayName }
+        const without = (list: readonly { providerId: string; displayName: string }[]) =>
+          list.filter(entry => keyOf(entry) !== key)
+        const excludes = route.excludeModels ?? []
+        const includes = route.includeModels ?? []
+        // 三种动作与路由编辑器同一套规则（`RoutePoolEditor` 的 include/exclude/resetManual）：
+        // 两个手动名单互斥 —— 一个模型不能既是「手动加回」又是「手动排除」。
+        const nextExclude = request.action === 'exclude'
+          ? (excludes.some(entry => keyOf(entry) === key) ? excludes : [...excludes, ref])
+          : without(excludes)
+        const nextInclude = request.action === 'include'
+          ? (includes.some(entry => keyOf(entry) === key) ? includes : [...includes, ref])
+          : without(includes)
+        const written = storeManager.updateRoute(routeName, {
+          excludeModels: nextExclude,
+          includeModels: nextInclude,
+        })
+        if (!written.ok) {
+          return { ok: false, route: routeName, model: displayName, reason: written.error.message }
+        }
+        // 池成员变了：`updateRoute` 写 config 时 store 自己会推 `routes:pool-changed`，
+        // 这里只补一遍配置广播（界面读的启用/停用态随之刷新）。
+        broadcastConfigChanged(storeManager.getConfig())
+        return { ok: true, route: routeName, model: displayName, action: request.action }
       } catch (error) {
         return { ok: false, route: request.route, reason: routeStorageError(error).message }
       }
@@ -1992,6 +2063,17 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
 
   registerMainHandler(IpcChannels.STATISTICS_GET_TOKEN_USAGE, async () => {
     return storeManager.getTodayTokenUsage()
+  })
+
+  /**
+   * Requests per client, per day.
+   *
+   * The request log keeps a bounded window, so a client-attribution ledger is
+   * the only way to answer "which client sent what, on which day" once the
+   * rows are gone. Read-only; it changes nothing.
+   */
+  registerMainHandler(IpcChannels.STATISTICS_GET_CLIENT_USAGE, async () => {
+    return storeManager.getClientUsageByDay()
   })
 
   registerMainHandler(IpcChannels.STATISTICS_GET_TOKEN_USAGE_HISTORY, async (_event, days?: number) => {

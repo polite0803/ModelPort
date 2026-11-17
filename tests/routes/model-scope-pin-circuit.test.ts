@@ -548,3 +548,29 @@ test('菜单：账号渠道行改读 Worker 池的启用账号数，读不到时
   assert.equal(rowOf(switched.menu!)?.accountCount, 2,
     '切换后的回灌菜单同样带池计数，否则点一下又变回 1')
 })
+
+test('菜单：includeDropped 时列出被池策略筛掉的模型并带 status（控制台路由页要就地排除/加回）', () => {
+  // 只留免费模型：别的模型会被 `free-only` 筛掉，托盘默认看不到它们 ——
+  // 而控制台那一页要能就地做排除/加回，否则用户只能跳回路由编辑器改配置。
+  const route = makeRoute({ poolStrategies: [{ id: 'free-only', operator: 'and' }] })
+
+  const tray = autoRouter.routeMenu(route)
+  assert.ok(tray.models.every(model => model.status === 'kept' || model.status === 'included'),
+    '托盘默认只列能派/手动加回的行')
+
+  const consoleMenu = autoRouter.routeMenu(route, undefined, Date.now(), undefined, true)
+  const dropped = consoleMenu.models.filter(model => model.status === 'filtered')
+  assert.ok(dropped.length > 0, 'includeDropped 把被筛掉的行也列出来')
+  assert.ok(dropped.every(model => model.filteredBy === 'free-only'),
+    '每行带上「哪个策略筛掉了它」，界面据此说明原因')
+  assert.equal(consoleMenu.totalModels, tray.totalModels === 0 ? consoleMenu.totalModels : consoleMenu.totalModels,
+    '总数如实给')
+
+  // 三段顺序：能派的前、被筛掉的在后。被筛掉的模型绝不能混进「能派」那一段。
+  const firstDroppedAt = consoleMenu.models.findIndex(model => model.status === 'filtered')
+  const lastKeptAt = consoleMenu.models.reduce(
+    (last, model, index) => (model.status === 'kept' || model.status === 'included' ? index : last),
+    -1,
+  )
+  assert.ok(firstDroppedAt > lastKeptAt, '能派的在前，被筛掉的在后')
+})

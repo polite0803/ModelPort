@@ -2298,13 +2298,17 @@ class StoreManager {
 
   /**
    * Record Request in Statistics
+   *
+   * `clientKey` 是这次请求的客户端归属名（`clientStatsKey` 的产物）。缺省就
+   * 不写客户端维度 —— 那一格是「没记」，不是 0。
    */
   recordRequestInStats(
     success: boolean,
     latency: number,
     model?: string,
     providerId?: string,
-    accountId?: string
+    accountId?: string,
+    clientKey?: string
   ): PersistentStatistics {
     this.ensureInitialized()
     const stats = this.store!.get('statistics') || DEFAULT_STATISTICS
@@ -2346,6 +2350,9 @@ class StoreManager {
         providerUsage: {},
         providerSuccess: {},
         providerLatency: {},
+        clientUsage: {},
+        clientSuccess: {},
+        clientLatency: {},
       }
     }
     
@@ -2376,6 +2383,36 @@ class StoreManager {
         dayLatency[providerId] = (dayLatency[providerId] || 0) + (success ? latency : 0)
       }
     }
+
+    if (clientKey) {
+      const day = newStats.dailyStats[today]
+      // 三张客户端表**成对同起同落**：一个客户端的成功率是
+      // `clientSuccess[client] / clientUsage[client]`，分母是它自己的笔数，
+      // 不是当天的总笔数 —— 所以在第一笔带归属的请求上建桶是安全的，
+      // 不会把「归属之前那些没人认领的请求」算进任何一个客户端。
+      //
+      // 与 `providerSuccess` / `providerLatency` 的差别正在这里：那一对与
+      // `providerUsage`（全天计数）并列，分母跨了归属的起点，所以必须等本
+      // 构建亲自创建那一天才写，否则报出来的成功率是错的。
+      //
+      // `clientUsageSince` 说明这份覆盖从什么时候开始 —— 那天早些时候的流量
+      // 没有归属，读数时得知道这一点，而不是把它当全天数。
+      let dayClientUsage = day.clientUsage
+      let dayClientSuccess = day.clientSuccess
+      let dayClientLatency = day.clientLatency
+      if (!dayClientUsage || !dayClientSuccess || !dayClientLatency) {
+        dayClientUsage = {}
+        dayClientSuccess = {}
+        dayClientLatency = {}
+        day.clientUsage = dayClientUsage
+        day.clientSuccess = dayClientSuccess
+        day.clientLatency = dayClientLatency
+        day.clientUsageSince = Date.now()
+      }
+      dayClientUsage[clientKey] = (dayClientUsage[clientKey] || 0) + 1
+      dayClientSuccess[clientKey] = (dayClientSuccess[clientKey] || 0) + (success ? 1 : 0)
+      dayClientLatency[clientKey] = (dayClientLatency[clientKey] || 0) + (success ? latency : 0)
+    }
     
     this.store!.set('statistics', newStats)
     return newStats
@@ -2397,6 +2434,28 @@ class StoreManager {
       modelUsage: {},
       providerUsage: {},
     }
+  }
+
+  /**
+   * Requests per client, per day.
+   *
+   * The request log keeps only a bounded window (200 rows by default), so "which
+   * client sent what today" has to live in a ledger of its own - this is that
+   * ledger. A day with no client attribution is skipped rather than shipped as
+   * an empty bucket: "not recorded" and "zero requests" are different, and the
+   * second one would silently make a client look idle.
+   */
+  getClientUsageByDay(): Record<string, Record<string, number>> {
+    this.ensureInitialized()
+    const stats = this.store!.get('statistics') || DEFAULT_STATISTICS
+    const days: Record<string, Record<string, number>> = {}
+    const dailyStats = (stats.dailyStats ?? {}) as Record<string, DailyStatistics>
+    for (const [day, dayStats] of Object.entries(dailyStats)) {
+      const usage = dayStats.clientUsage
+      if (!usage || Object.keys(usage).length === 0) continue
+      days[day] = { ...usage }
+    }
+    return days
   }
 
   /**

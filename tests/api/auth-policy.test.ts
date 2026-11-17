@@ -15,21 +15,35 @@ import {
 const keys = [{ key: 'sk-live-1', enabled: true }]
 
 test('auth is fail-open only when no key is configured', () => {
-  assert.equal(evaluateApiKeyAuth({ apiKeys: [], providedKey: null }), 'allow')
-  assert.equal(evaluateApiKeyAuth({ apiKeys: undefined, providedKey: null }), 'allow')
+  assert.equal(evaluateApiKeyAuth({ apiKeys: [], providedKey: null }).outcome, 'allow')
+  assert.equal(evaluateApiKeyAuth({ apiKeys: undefined, providedKey: null }).outcome, 'allow')
 })
 
 test('configured keys always require authentication', () => {
-  assert.equal(evaluateApiKeyAuth({ apiKeys: keys, providedKey: null }), 'missing_key')
-  assert.equal(evaluateApiKeyAuth({ apiKeys: keys, providedKey: '' }), 'missing_key')
-  assert.equal(evaluateApiKeyAuth({ apiKeys: keys, providedKey: 'wrong' }), 'invalid_key')
-  assert.equal(evaluateApiKeyAuth({ apiKeys: keys, providedKey: 'sk-live-1' }), 'allow')
+  assert.equal(evaluateApiKeyAuth({ apiKeys: keys, providedKey: null }).outcome, 'missing_key')
+  assert.equal(evaluateApiKeyAuth({ apiKeys: keys, providedKey: '' }).outcome, 'missing_key')
+  assert.equal(evaluateApiKeyAuth({ apiKeys: keys, providedKey: 'wrong' }).outcome, 'invalid_key')
+  assert.equal(evaluateApiKeyAuth({ apiKeys: keys, providedKey: 'sk-live-1' }).outcome, 'allow')
 })
 
 test('disabled or empty keys do not count as configured', () => {
   assert.equal(requiresApiKey([{ key: 'sk-off', enabled: false }]), false)
-  assert.equal(evaluateApiKeyAuth({ apiKeys: [{ key: 'sk-off', enabled: false }], providedKey: null }), 'allow')
-  assert.equal(evaluateApiKeyAuth({ apiKeys: [{ key: '', enabled: true }], providedKey: null }), 'allow')
+  assert.equal(evaluateApiKeyAuth({ apiKeys: [{ key: 'sk-off', enabled: false }], providedKey: null }).outcome, 'allow')
+  assert.equal(evaluateApiKeyAuth({ apiKeys: [{ key: '', enabled: true }], providedKey: null }).outcome, 'allow')
+})
+
+test('the matched key name is the client attribution anchor', () => {
+  // Node 系客户端不发 UA，纯 UA 口径下 Qoder 与 Claude Desktop 都是 `undici`。
+  // 命名 key 是唯一不依赖客户端配合的归属依据。
+  const named = [{ key: 'sk-qoder', enabled: true, name: 'Qoder' }]
+  assert.equal(evaluateApiKeyAuth({ apiKeys: named, providedKey: 'sk-qoder' }).matchedKeyName, 'Qoder')
+  // 未命中的 key 不带名字：那是「没配名」，不是「叫 unknown」。
+  assert.equal(evaluateApiKeyAuth({ apiKeys: named, providedKey: 'sk-other' }).matchedKeyName, undefined)
+  // 没起名的 key 同样没有归属名，回落到 UA 口径。
+  assert.equal(evaluateApiKeyAuth({ apiKeys: keys, providedKey: 'sk-live-1' }).matchedKeyName, undefined)
+  // 起名但只有空白，等同于没起名。
+  const blank = [{ key: 'sk-x', enabled: true, name: '   ' }]
+  assert.equal(evaluateApiKeyAuth({ apiKeys: blank, providedKey: 'sk-x' }).matchedKeyName, undefined)
 })
 
 test('key comparison is constant-time and length independent', () => {
@@ -78,10 +92,12 @@ test('server middleware evaluates auth before body parsing and drops query keys'
   )
   assert.doesNotMatch(source, /ctx\.query\.api_key/)
   assert.doesNotMatch(source, /enableApiKey &&/)
-  const authIndex = source.indexOf('const outcome = evaluateApiKeyAuth')
+  const authIndex = source.indexOf('evaluateApiKeyAuth(')
   const bodyParserIndex = source.indexOf('this.app.use(bodyParser(')
   assert.ok(authIndex > -1, 'auth middleware must call evaluateApiKeyAuth')
   assert.ok(bodyParserIndex > authIndex, 'body parser must be registered after the auth middleware')
+  // 命中的 key 名要挂到 ctx.state —— 路由据此给客户端定名。
+  assert.match(source, /ctx\.state\.clientKeyName\s*=/)
 })
 
 test('proxy control API rejects non-loopback hosts', () => {

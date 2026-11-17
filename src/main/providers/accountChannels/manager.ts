@@ -41,7 +41,7 @@ import { channelModelDisplayName, summarizeChannelCredits } from '../../../share
 import type { ModelCapabilityHint } from '../../../shared/types'
 import { ACCOUNT_CHANNELS, getChannelDefinition } from './catalogue'
 import { accountRuntime } from '../../proxy/accountRuntime'
-import { attachContextWindows, capabilityHintOf, qualifyChannelModel, readModelList, readModelListSource } from './modelCatalog'
+import { attachContextWindows, bareChannelModelId, capabilityHintOf, qualifyChannelModel, readModelList, readModelListSource } from './modelCatalog'
 import { channelRuntimeState } from './runtimeState'
 import { resyncsAfterChannelRpc } from './rpcSync'
 import { SingleFlight } from './singleFlight'
@@ -122,6 +122,16 @@ class AccountChannelManager {
    * 只在成功读数时写入；表里没有的模型视为已解禁；账号启停/重置随缓存一起清。
    */
   private rateLimitMarks = new Map<string, number>()
+  /**
+   * 账号级限流明细：`(渠道, 裸模型 id) -> { 账号总数, 限流账号数, 最早解禁时刻 }`。
+   *
+   * 为什么与 `rateLimitMarks` 并存：那张表是**能否派发**的判据（只有全部账号都
+   * 限流才有条目），而展示面要回答的是「N 个账号里几个限流、最早什么时候回来」——
+   * 3 个账号里 1 个限流时，`rateLimitMarks` 什么都不写，用户就看不见那 1 个。
+   * 数据源是 worker 的 `account.list`（每个账号自带 `modelRateLimits`），
+   * 由 `prewarmRateLimits` 在同一个往返里灌进来，零额外上游请求。
+   */
+  private accountLimitIndex = new Map<string, { total: number; limited: number; earliestResetAt?: number }>()
 
   private get dataDir(): string {
     return join(homedir(), '.modelport')
@@ -472,8 +482,12 @@ class AccountChannelManager {
       if (until <= now) this.rateLimitMarks.delete(key)
     }
     for (const modelId of modelIds) {
-      const key = `${id}::${modelId}`
-      const entry = table[modelId]
+      // 键与查询同形：都用**裸名**。两个调用方各传各的形状 —— 预热传目录里的裸 id，
+      // 选路传映射后的 `actualModelId`（带 `<channelId>/`）—— 不归一就是一把键写、
+      // 另一把键读，路由页永远查不到（2026-11-17 实测 `blocked` 恒为 0）。
+      const bare = bareChannelModelId(id, modelId)
+      const key = `${id}::${bare}`
+      const entry = table[modelId] ?? table[bare]
       if (entry === undefined) {
         this.rateLimitMarks.delete(key)
         continue
@@ -493,7 +507,9 @@ class AccountChannelManager {
    * fail-open：没有读数、读数过期、表里没这个模型，一律 `undefined`（当作可用）。
    */
   modelRateLimitResetAt(id: string, modelId: string, now: number = Date.now()): number | undefined {
-    const key = `${id}::${modelId}`
+    // 查询与写入同形：一律按裸名查（见 `noteRateLimits`）。选路传的是映射后的
+    // `actualModelId`（`buddy/hy4flash-free`），不归一就查不到预热的读数。
+    const key = `${id}::${bareChannelModelId(id, modelId)}`
     const until = this.rateLimitMarks.get(key)
     if (until === undefined) return undefined
     if (until <= now) {
@@ -522,7 +538,6 @@ class AccountChannelManager {
   async prewarmRateLimits(): Promise<void> {
     try {
       const bridge = await this.bridgeOrThrow()
-      void bridge
       const now = Date.now()
       const batches: { id: string; modelIds: string[] }[] = []
       for (const channel of ACCOUNT_CHANNELS) {
@@ -543,11 +558,84 @@ class AccountChannelManager {
           } catch {
             // 单家失败只影响那一家镜像；fail-open。
           }
+          // 账号级明细另取一次 `account.list`：每个账号自带 `modelRateLimits`，
+          // 逐账号读数只有这一份（`model.rateLimits` 只在**全部账号都限流**时才报）。
+          try {
+            await this.refreshAccountLimitIndex(bridge, id, now)
+          } catch {
+            // 同上：展示辅助，失败不动已有索引。
+          }
         }),
       )
     } catch {
       // worker 未起：镜像维持空表，行为与预热前一致。
     }
+  }
+
+  /**
+   * 从 `account.list` 的逐账号读数重建一家渠道的账号级限流明细。
+   *
+   * 只统计**启用**账号（停用账号本来就不参与派发，把它算进分母会让
+   * 「3 个账号里 1 个限流」看起来比实际更宽松）。没有任何账号限流时删掉该
+   * 模型的条目 —— 留着 0 会在界面上制造一行「0 个账号限流」的噪声。
+   */
+  private async refreshAccountLimitIndex(
+    bridge: { rpc: (method: string, payload?: unknown) => Promise<{ ok: boolean; value?: unknown }> },
+    channelId: string,
+    now: number,
+  ): Promise<void> {
+    const result = await bridge.rpc('account.list', { provider: channelId })
+    if (result?.ok !== true) return
+    const accounts = (result.value as { accounts?: Array<{ enabled?: boolean; modelRateLimits?: Record<string, number> }> } | undefined)?.accounts
+    if (!Array.isArray(accounts)) return
+
+    const enabled = accounts.filter(account => account.enabled !== false)
+    const perModel = new Map<string, { limited: number; earliestResetAt?: number }>()
+    for (const account of enabled) {
+      for (const [modelId, untilRaw] of Object.entries(account.modelRateLimits ?? {})) {
+        const until = Number(untilRaw)
+        if (!Number.isFinite(until) || until <= now) continue
+        const bare = bareChannelModelId(channelId, modelId)
+        const row = perModel.get(bare) ?? { limited: 0 }
+        row.limited += 1
+        row.earliestResetAt = row.earliestResetAt === undefined ? until : Math.min(row.earliestResetAt, until)
+        perModel.set(bare, row)
+      }
+    }
+
+    // 该渠道先整片清掉再重建：`account.list` 是整家快照，逐个删会留下已解禁的旧行。
+    const prefix = `${channelId}::`
+    for (const key of [...this.accountLimitIndex.keys()]) {
+      if (key.startsWith(prefix)) this.accountLimitIndex.delete(key)
+    }
+    for (const [bare, row] of perModel) {
+      this.accountLimitIndex.set(`${channelId}::${bare}`, {
+        total: enabled.length,
+        limited: row.limited,
+        ...(row.earliestResetAt === undefined ? {} : { earliestResetAt: row.earliestResetAt }),
+      })
+    }
+  }
+
+  /**
+   * 某个模型的账号级限流明细（只读内存表，同步）。
+   *
+   * 返回 `undefined` = 没有账号在这个模型上受限（不是「未知」）。调用方若要区分
+   * 「读数还没预热过」与「真的都没限流」，用 {@link rateLimitMarkCount}。
+   */
+  modelAccountLimitSummary(
+    id: string,
+    modelId: string,
+    now: number = Date.now(),
+  ): { total: number; limited: number; earliestResetAt?: number } | undefined {
+    const key = `${id}::${bareChannelModelId(id, modelId)}`
+    const row = this.accountLimitIndex.get(key)
+    if (row === undefined) return undefined
+    if (row.earliestResetAt !== undefined && row.earliestResetAt <= now) {
+      this.accountLimitIndex.delete(key)
+      return undefined
+    }
+    return { ...row }
   }
 
   /** 预热后镜像里**有读数**的 `(渠道, 模型)` 对数；给调用方判断预热是否带来新事实。 */
@@ -584,6 +672,7 @@ class AccountChannelManager {
     if (id === undefined) {
       this.rateLimitCache.clear()
       this.rateLimitMarks.clear()
+      this.accountLimitIndex.clear()
       return
     }
     const prefix = `${id}::`
@@ -595,6 +684,11 @@ class AccountChannelManager {
     for (const key of this.rateLimitMarks.keys()) {
       if (key.startsWith(prefix)) {
         this.rateLimitMarks.delete(key)
+      }
+    }
+    for (const key of this.accountLimitIndex.keys()) {
+      if (key.startsWith(prefix)) {
+        this.accountLimitIndex.delete(key)
       }
     }
   }

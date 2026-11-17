@@ -36,6 +36,7 @@ import { managementRateLimiter } from './middleware/rateLimiter'
 import { buildRouteError, isModelApiPath, isUnmountedRouteNotFound } from './routeErrorPolicy'
 import { buildRejectionLogEntry, createUnmountedRouteTracer, requestedModelOf } from './rejectionLog'
 import { anthropicErrorBody } from '../../shared/anthropicWire'
+import { CLIENT_HEADER, clientStatsKey, identifyClient } from '../../shared/clientProfile'
 
 const SLOW_REQUEST_THRESHOLD_MS = 1500
 
@@ -128,7 +129,19 @@ function recordRejectedRequest(ctx: Context, statusCode: number, code: string, m
   })
 
   storeManager.addRequestLog(entry)
-  storeManager.recordRequestInStats(false, entry.latency, entry.model || undefined)
+  const client = identifyClient({
+    declared: ctx.headers[CLIENT_HEADER],
+    userAgent: ctx.headers['user-agent'],
+    apiKeyName: typeof ctx.state.clientKeyName === 'string' ? ctx.state.clientKeyName : undefined,
+  })
+  storeManager.recordRequestInStats(
+    false,
+    entry.latency,
+    entry.model || undefined,
+    undefined,
+    undefined,
+    clientStatsKey(client),
+  )
 }
 
 /**
@@ -223,7 +236,14 @@ export class ProxyServer {
 
       const config = storeManager.getConfig()
       const providedKey = extractProvidedKey(ctx)
-      const outcome = evaluateApiKeyAuth({ apiKeys: config.apiKeys, providedKey })
+      const { outcome, matchedKeyName } = evaluateApiKeyAuth({ apiKeys: config.apiKeys, providedKey })
+
+      // 命中的 key 名挂到 ctx.state：路由据此给「是谁发来的」定名。Node 系客户端
+      // （Qoder、Claude Desktop）不发 UA，纯 UA 口径下两者都是 `undici`，分不开；
+      // 命名 key 是唯一不依赖客户端配合的锚点。
+      if (matchedKeyName !== undefined) {
+        ctx.state.clientKeyName = matchedKeyName
+      }
 
       // Anthropic 客户端只认 Anthropic 的错误信封。回 OpenAI 信封会让它把 401
       // 当成"响应解析失败"，用户看到的是莫名其妙的 JSON 报错而不是"密钥不对"。

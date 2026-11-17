@@ -141,6 +141,19 @@ export async function startProxy(port) {
   const { proxyServer } = await loadModule('main/proxy/server.ts')
   const started = await proxyServer.start(port, '127.0.0.1')
   if (started !== true) {
+    // 起不来之后不要留任何半启动状态：`stop()` 会把 `this.server`/`this.httpsServer`
+    // 与状态位一起收干净（对空实例幂等）。不收的两个后果：
+    // - 失败瞬间若还有 listener / HTTPS 子监听残存，固定端口会被本进程一直占住；
+    // - 本进程内下一次 `start()` 撞上 `if (this.server) return false`，永远起不来。
+    // 2026-11-17 门禁连续红的一条形态就是它：一次环境占用被放大成整个文件、整条腿的红。
+    // 只收非 running 的实例：正在服务的 server 不会因为第二次调用被误停。
+    if (!proxyServer.isRunning()) {
+      try {
+        await proxyServer.stop()
+      } catch {
+        // 收尾失败不改变「起不来」这个结论
+      }
+    }
     throw new Error(`[harness] proxy server refused to start on 127.0.0.1:${port}`)
   }
 

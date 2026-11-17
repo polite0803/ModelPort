@@ -36,6 +36,7 @@ import {
   setSseHeaders,
 } from '../utils/inboundLoopback'
 import { clientSessionKey } from '../../../shared/clientSessionKey.ts'
+import { CLIENT_HEADER, clientStatsKey, identifyClient } from '../../../shared/clientProfile'
 import { describeTransportError, mapForwardFailure, withRequestId } from '../errorMapping'
 import { startSseHeartbeat } from '../utils/sseHeartbeat'
 import {
@@ -80,7 +81,19 @@ function failWith(ctx: Context, status: number, message: string, code: string, p
 function recordRejection(ctx: Context, status: number, code: string, message: string): void {
   const entry = rejectionEntryFromContext(ctx, status, code, message, ctx.response.get('X-Request-Id'))
   storeManager.addRequestLog(entry)
-  storeManager.recordRequestInStats(false, entry.latency, entry.model || undefined)
+  const client = identifyClient({
+    declared: ctx.headers[CLIENT_HEADER],
+    userAgent: ctx.headers['user-agent'],
+    apiKeyName: typeof ctx.state.clientKeyName === 'string' ? ctx.state.clientKeyName : undefined,
+  })
+  storeManager.recordRequestInStats(
+    false,
+    entry.latency,
+    entry.model || undefined,
+    undefined,
+    undefined,
+    clientStatsKey(client),
+  )
 }
 
 router.post('/responses', async (ctx: Context) => {

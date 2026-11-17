@@ -552,6 +552,11 @@ interface RoutesAPI {
    */
   rate: (request: RouteRateRequest) => Promise<RouteRateResult>
   /**
+   * 手动排除 / 加回一个模型：写路由的 。改了池成员，与「固定」
+   * 互斥（被排除的模型不能被钉）。
+   */
+  excludeModel: (request: RouteExcludeRequest) => Promise<RouteExcludeResult>
+  /**
    * 候选池**结构**变更订阅（供应商/账号/模型启停增删、能力标注、路由结构编辑）。
    * 主进程落盘时推 `routes:pool-changed`，路由页与托盘桥据此重取菜单。纯星级评分
    * 不触发（标注不改池成员）。返回取消订阅函数，重挂载不留两个监听器。

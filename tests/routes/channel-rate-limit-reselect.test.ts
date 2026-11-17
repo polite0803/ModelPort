@@ -282,3 +282,33 @@ test('预热：不发请求也能把 worker 限流读数灌进镜像（展示面
     '没被限流的模型不产生读数')
   assert.deepEqual(seenModels, [], '预热只读 worker 内存副本，绝不发出上游调用')
 })
+test('预热后的渠道限流出现在路由页预览与菜单的 blocked 上（不是只活在账号页）', () => {
+  // 2026-11-17 现网：账号渠道页报「限流 · Hy4 flash → 明天 17:44」，而路由页
+  // routes:menu 里同一个模型 blocked=null。两边读的是同一张 rateLimitMarks，
+  // 差在键上：预热写目录里的裸 id（hy4flash-free），路由侧查映射后的
+  // actualModelId（opencode/pickle）。不归一就是「写一把键、读另一把」，
+  // 路由页对渠道限流恒为 0 —— 而用户要看的正是路由页。
+  //
+  // 这里直接按预热路径的形状写镜像（裸名），再走路由页真正读的那份投影。
+  // 运行时标回 stopped：packServesModelNow 此时 fail-open 返回 null，不参与剔除 ——
+  // 本用例只问「限流读数能不能从路由页看见」，与 pack 服务清单无关。
+  markChannelRuntimeStopped()
+  const until = Date.now() + 30 * 60_000
+  ;(accountChannelManager as unknown as {
+    noteRateLimits: (id: string, table: Record<string, { limited: true; resetAtMs: number }>, models: string[]) => void
+  }).noteRateLimits('opencode', { pickle: { limited: true, resetAtMs: until } }, ['pickle'])
+
+  const route = autoRoute()
+  assert.ok(route !== undefined, '前置：auto 路由存在')
+
+  // 路由页右栏读的是 autoRouter.preview()（routes:menu 与 routes:preview 同一份）。
+  const preview = autoRouter.preview(route, {}, { fresh: true })
+  const row = preview.models.find(model => model.displayName === 'OpenCode / Pickle')
+  assert.ok(row !== undefined, '被限流的模型仍在列表里（推荐队列的地基）')
+  assert.equal(row?.blocked?.reason, 'rate_limited', '路由页必须说出「渠道限流」')
+  assert.equal(row?.blocked?.until, until, '并给出上游声明的恢复时刻')
+  assert.equal(row?.blocked?.untilSource, 'upstream', '时刻是上游亲口说的，界面不写「约」')
+  // 另一颗同家模型不受牵连：限流是逐 (渠道, 模型) 的读数。
+  const open = preview.models.find(model => model.displayName === 'OpenCode / Live')
+  assert.equal(open?.blocked, undefined)
+})

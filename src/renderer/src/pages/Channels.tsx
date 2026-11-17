@@ -1939,9 +1939,29 @@ export function Channels() {
 
                 {channel.accounts.list.length > 0 && (
                   <ul className="space-y-1">
-                    {channel.accounts.list.map((account, index) => (
+                    {channel.accounts.list.map((account, index) => {
+                      // 该账号的余额读数（`channels:credits` 的逐账号明细）。
+                      // 只有「确认为 0」才标：查询失败 / 未报 / 未知一律不标 ——
+                      // 把「查不到」画成「耗尽」比不显示更糟。
+                      const accountCredit = creditState !== undefined && creditState !== 'loading'
+                        ? creditState.accounts.find(row => row.accountId === account.id)
+                        : undefined
+                      const creditsExhausted = accountCredit !== undefined
+                        && accountCredit.error === undefined
+                        && accountCredit.status === undefined
+                        && accountCredit.remaining !== undefined
+                        && accountCredit.remaining <= 0
+                      return (
                       <li key={account.id} className="flex items-center gap-2 rounded border px-2 py-1 text-sm">
                         <span className="min-w-0 flex-1 truncate">{account.nickname}</span>
+                        {creditsExhausted && (
+                          <span
+                            className="shrink-0 text-xs text-destructive"
+                            title={t('channels.creditsExhaustedHint')}
+                          >
+                            {t('routes.accountCreditsExhausted')}
+                          </span>
+                        )}
                         {account.proxyLabel !== undefined && (
                           <span
                             className="max-w-[10rem] shrink-0 truncate text-xs text-muted-foreground"
@@ -2062,7 +2082,8 @@ export function Channels() {
                           <UserMinus className="h-3.5 w-3.5" />
                         </Button>
                       </li>
-                    ))}
+                      )
+                    })}
                   </ul>
                 )}
 

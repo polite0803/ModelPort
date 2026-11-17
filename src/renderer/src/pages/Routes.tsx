@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSearchParams } from 'react-router-dom'
-import { Pin, RefreshCw, RotateCcw, Search, SkipForward, Star } from 'lucide-react'
+import { Ban, Pin, RefreshCw, RotateCcw, Search, SkipForward, Star } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -74,6 +74,59 @@ function blockLabel(
   if (block.until === undefined) return reason
   const when = delayLabel(block.until, now, t)
   return `${reason} · ${t(isApproximate(block.untilSource) ? 'routes.blockedUntilApprox' : 'routes.blockedUntil', { when })}`
+}
+
+/**
+ * 这一行现在**不在**这条路由的派发池里。
+ *
+ * 与 `blocked` 正交：`blocked` 是「在池里，但此刻派不出去」（额度/限流，会自己恢复）；
+ * 这里是「配置层就不在池里」—— 手动排除、被池策略筛掉、低于能力下限、或请求画像
+ * 不支持。两类原因在界面上必须分开写，否则用户会对着一个配置问题白等额度。
+ */
+function isOutOfPool(model: RouteMenuModel): boolean {
+  if (model.excluded === true) return true
+  return model.status !== undefined && model.status !== 'kept' && model.status !== 'included'
+}
+
+/** 池层结论的人话（`undefined` = 在池里，不需要说）。与路由编辑器同一个 `status`。 */
+function statusNote(
+  model: RouteMenuModel,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string | undefined {
+  if (model.excluded === true || model.status === 'excluded') return t('routes.excludedLabel')
+  switch (model.status) {
+    case undefined:
+    case 'kept':
+    case 'included':
+      return undefined
+    case 'filtered':
+      return model.filteredBy === undefined
+        ? t('routes.poolStatus_filtered')
+        : t('routes.poolStatus_filteredBy', { strategy: t(`routes.poolStrategy_${model.filteredBy}`) })
+    case 'below-tier':
+      return t('routes.poolStatus_below-tier')
+    case 'not-pinned':
+      return t('routes.poolStatus_not-pinned')
+    case 'unavailable':
+      return model.unavailableReason === undefined
+        ? t('routes.poolStatus_unavailable')
+        : t(`routes.poolUnavailable_${model.unavailableReason}`)
+    default:
+      return t('routes.poolStatus_filtered')
+  }
+}
+
+/**
+ * 这一行的手动例外按钮该做什么（与路由编辑器的三个按钮同语义）。
+ *
+ * - 在池里 → `exclude`（把它排除出去）；
+ * - 被手动排除 → `restore`（恢复自动，交回池策略）；
+ * - 其它不在池里的原因（被策略筛掉 / 低于下限 / 画像不支持）→ `include`（手动加回）。
+ */
+function manualActionOf(model: RouteMenuModel): 'exclude' | 'include' | 'restore' {
+  if (model.excluded === true || model.status === 'excluded') return 'restore'
+  if (model.status === undefined || model.status === 'kept' || model.status === 'included') return 'exclude'
+  return 'include'
 }
 
 /**
@@ -212,7 +265,7 @@ export function Routes() {
     if (!api?.menu) return
     setDetailLoading(true)
     try {
-      const snapshot = await api.menu({ route, limit: FULL_LIST_LIMIT })
+      const snapshot = await api.menu({ route, limit: FULL_LIST_LIMIT, includeDropped: true })
       if (snapshot.error !== undefined) {
         setError(snapshot.error)
         setDetail(null)
@@ -326,9 +379,11 @@ export function Routes() {
     // 段内稳定排序：同星（含未评分）保持快照原序，即真实选路的先后。
     const rank = (model: RouteMenuModel): number => model.rating ?? model.recommendedStars ?? 0
     return [...filtered].sort((a, b) => {
-      const aBlocked = a.blocked === undefined ? 0 : 1
-      const bBlocked = b.blocked === undefined ? 0 : 1
-      if (aBlocked !== bBlocked) return aBlocked - bBlocked
+      // 三段：能派 → 被挡 → 被排除。排除是配置事实（不是临时状态），排在最后。
+      const seg = (model: RouteMenuModel): number =>
+        model.excluded === true ? 2 : (model.blocked === undefined ? 0 : 1)
+      const delta = seg(a) - seg(b)
+      if (delta !== 0) return delta
       return rank(b) - rank(a)
     })
   }, [detail, search, sortByRating])
@@ -382,9 +437,58 @@ export function Routes() {
     }
   }
 
+  /**
+   * 排除 / 加回 / 恢复自动一个模型（写路由的两个手动名单，经 routes:exclude）。
+   *
+   * 与「固定」的区别必须让用户看得见：固定 = 下一轮只服务它；排除 = 把它从这条
+   * 路由的池里拿掉。所以排除之后要重读菜单（池成员变了，快照里的候选集也变了），
+   * 不像星级那样只改一个字段。
+   */
+  const runExclude = async (
+    model: RouteMenuModel,
+    action: 'exclude' | 'include' | 'restore',
+  ): Promise<void> => {
+    if (api?.excludeModel === undefined || detail === null) return
+    setBusy(true)
+    try {
+      const result = await api.excludeModel({
+        route: detail.route,
+        providerId: model.providerId,
+        model: model.displayName,
+        action,
+      })
+      if (!result.ok) {
+        toast({
+          title: t('routes.actionFailed'),
+          description: result.reason ?? t('routes.actionFailedHint'),
+          variant: 'destructive',
+        })
+      } else {
+        toast({
+          title: action === 'exclude'
+            ? t('routes.excludeDone', { model: model.displayName })
+            : action === 'restore'
+              ? t('routes.restoreDone', { model: model.displayName })
+              : t('routes.includeDone', { model: model.displayName }),
+        })
+      }
+    } catch (caught) {
+      toast({
+        title: t('routes.actionFailed'),
+        description: caught instanceof Error ? caught.message : String(caught),
+        variant: 'destructive',
+      })
+    } finally {
+      setBusy(false)
+      // 不论成败都重读：池成员/排除态是服务端事实，页面上那份快照不能自己猜。
+      await refresh()
+      publishTrayRouteMenu()
+    }
+  }
+
   /** 这一页里本轮派不出去的模型数（不算搜索过滤：它说的是路由的形状）。 */
   const blockedCount = useMemo(
-    () => detail?.models.filter(model => model.blocked !== undefined).length ?? 0,
+    () => detail?.models.filter(model => model.blocked !== undefined && model.excluded !== true).length ?? 0,
     [detail],
   )
 
@@ -630,12 +734,26 @@ export function Routes() {
                   key={`${model.providerId}\u0000${model.displayName}`}
                   className={cn(
                     'flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md px-3 py-2',
-                    model.current && 'bg-accent/60'
+                    model.current && 'bg-accent/60',
+                    // 不进池的行（被手动排除 / 被池策略筛掉 / 低于下限 / 画像不支持）整体压暗：
+                    // 它们仍在表里（这是就地加回的唯一入口），但必须一眼看出不参与选路。
+                    isOutOfPool(model) && 'opacity-55'
                   )}
                 >
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-medium">{model.displayName}</span>
                     <span className="block truncate text-xs text-muted-foreground">{model.providerName}</span>
+                    {/* 池层结论（与路由编辑器读 `preview.models[].status` 同一份）：说清
+                        这一行为什么不在池里。排除是配置事实，不用警告色 —— 它与限流/额度
+                        那种「等一会儿就回来」不是一回事。 */}
+                    {statusNote(model, t) !== undefined && (
+                      <span
+                        className="mt-0.5 block truncate text-xs text-muted-foreground"
+                        title={model.excluded === true ? t('routes.excludedHint') : t('routes.statusHint')}
+                      >
+                        {statusNote(model, t)}
+                      </span>
+                    )}
                     {/* 为什么这一轮派不出去 + 什么时候回来。估算带「约」（`isApproximate`），
                         钱不够这类没有时刻的原因只写原因 —— 不给一个假的倒计时。 */}
                     {model.blocked !== undefined && (
@@ -644,6 +762,27 @@ export function Routes() {
                         title={t('routes.blockedHint')}
                       >
                         {blockLabel(model.blocked, now, t)}
+                      </span>
+                    )}
+                    {/* 账号级限流：`blocked` 只在**全部账号**都限流时出现，部分账号
+                        限流时整行看起来完全正常 —— 而用户真正要判断的是「这条路由
+                        还有几个号能用」。分母是该渠道的启用账号数，分子是此刻在
+                        这个模型上限流的账号数；恢复时刻取最早解禁的那个。 */}
+                    {model.accountLimits !== undefined && model.accountLimits.limited > 0 && (
+                      <span
+                        className="mt-0.5 block truncate text-xs text-[var(--warning)]"
+                        title={t('routes.accountLimitsHint')}
+                      >
+                        {model.accountLimits.earliestResetAt === undefined
+                          ? t('routes.accountLimitsNoReset', {
+                              limited: model.accountLimits.limited,
+                              total: model.accountLimits.total,
+                            })
+                          : t('routes.accountLimits', {
+                              limited: model.accountLimits.limited,
+                              total: model.accountLimits.total,
+                              when: delayLabel(model.accountLimits.earliestResetAt, now, t),
+                            })}
                       </span>
                     )}
                     {/* 额度读数：哪个窗口、还剩多少、什么时候复位、这个数哪来的。
@@ -714,11 +853,14 @@ export function Routes() {
                   </span>
                   {/* 被挡下的模型也能固定（裁定 2026-11-16：手动固定是最高响应）。
                       点下去不会换别的模型，而是让这一轮明确等额度回来 —— 按钮文案要说清
-                      这一点，否则用户以为点了也没用。 */}
+                      这一点，否则用户以为点了也没用。
+                      被排除的模型不能固定：排除与固定互相矛盾（一个说「不要它」，一个说
+                      「只要它」），先加回再固定。 */}
                   <Button
                     size="sm"
                     variant={model.pinned ? 'secondary' : 'outline'}
-                    disabled={busy || (!model.pinned && (model.accountCount === 0 || !detail?.enabled))}
+                    disabled={busy || model.excluded === true
+                      || (!model.pinned && (model.accountCount === 0 || !detail?.enabled))}
                     title={model.pinned
                       ? t('routes.unpinHint')
                       : model.accountCount === 0
@@ -728,6 +870,29 @@ export function Routes() {
                   >
                     <Pin className="mr-1.5 h-4 w-4" />
                     {model.pinned ? t('routes.pinnedBadge') : t('routes.pin')}
+                  </Button>
+                  {/* 手动例外：三态，与路由编辑器的「排除 / 加回 / 恢复自动」同一套写入
+                      （两者是路由配置里同一份手动名单，与编辑器共用）。
+                      - 在池里 → 「排除」；
+                      - 被手动排除 → 「恢复自动」（交回池策略）；
+                      - 被策略筛掉 / 低于下限 / 画像不支持 → 「加回」（手动 include）。 */}
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={busy || detail === null}
+                    title={manualActionOf(model) === 'exclude'
+                      ? t('routes.excludeHint')
+                      : manualActionOf(model) === 'restore'
+                        ? t('routes.restoreHint')
+                        : t('routes.includeHint')}
+                    onClick={() => void runExclude(model, manualActionOf(model))}
+                  >
+                    <Ban className="mr-1.5 h-4 w-4" />
+                    {manualActionOf(model) === 'exclude'
+                      ? t('routes.exclude')
+                      : manualActionOf(model) === 'restore'
+                        ? t('routes.restore')
+                        : t('routes.include')}
                   </Button>
                 </div>
               ))}

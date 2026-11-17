@@ -82,7 +82,7 @@ test('every refusal path records the request, and only the model API does', () =
   assert.match(server, /recordRejectedRequest\(ctx, 401, 'invalid_api_key'/)
   assert.match(server, /recordRejectedRequest\(ctx, routeError\.status, routeError\.body\.error\.code/)
   assert.match(server, /if \(!isModelApiPath\(ctx\.path\)\)/, 'management refusals must not join the model traffic counts')
-  assert.match(server, /storeManager\.recordRequestInStats\(false, entry\.latency/, 'the cards must count the same set as the chart')
+  assert.match(server, /storeManager\.recordRequestInStats\(\s*false,\s*entry\.latency/, 'the cards must count the same set as the chart')
 })
 
 test('the route reply carries its own status so koa cannot rewrite it', () => {

@@ -116,3 +116,65 @@ test('a month beyond the previous one no longer counts toward monthlyTokens', ()
   ledger.prune(now)
   assert.equal(ledger.snapshot('groq', 'a1', 'llama').monthlyTokens, 0)
 })
+
+test('repeated window reads reuse parsed bucket stamps instead of re-parsing them', () => {
+  const now = T0 + 399 * MINUTE + 30_000
+  const { ledger } = fixedLedger(now)
+  for (let i = 0; i < 400; i++) {
+    ledger.record('groq', 'a1', 'llama', usage(10), T0 + i * MINUTE)
+  }
+  // 先读一遍把缓存焐热，再数 Date.parse：热路径上每个候选都要读这些窗口，
+  // 现网 1000+ 个分钟桶时重复解析曾把一次全池选路拖成几秒的事件循环独占。
+  ledger.snapshot('groq', 'a1', 'llama')
+  ledger.providerSnapshot('groq', 'a1')
+  ledger.declaredWindow('groq', 'a1', 'fiveHour')
+  ledger.declaredWindow('groq', 'a1', 'week')
+
+  const originalParse = Date.parse
+  let parses = 0
+  Date.parse = ((value: string) => {
+    parses += 1
+    return originalParse(value)
+  }) as typeof Date.parse
+  try {
+    for (let i = 0; i < 20; i++) {
+      ledger.snapshot('groq', 'a1', 'llama')
+      ledger.providerSnapshot('groq', 'a1')
+      ledger.declaredWindow('groq', 'a1', 'fiveHour')
+      ledger.declaredWindow('groq', 'a1', 'week')
+    }
+    assert.equal(parses, 0, 'warm window reads must not re-parse bucket stamps')
+  } finally {
+    Date.parse = originalParse
+  }
+
+  const snap = ledger.snapshot('groq', 'a1', 'llama')
+  assert.equal(snap.rpm, 1, 'only the newest record is inside the last minute')
+  assert.equal(snap.tpm, 10)
+  assert.equal(snap.rpd, 400, 'every record is inside the rolling day')
+  assert.equal(snap.tpd, 4000)
+  assert.equal(ledger.declaredWindow('groq', 'a1', 'fiveHour').requests, 300,
+    'the five-hour window keeps the newest 300 of the 400 records')
+})
+
+test('the minute window boundary follows at >= now-60s && at <= now exactly', () => {
+  // 原口径逐字是 `at < from || at > nowMs` 跳过：起点恰好压在分钟格上时那个桶
+  // **计数**。直接按键取桶的实现必须在格点两侧一毫秒都不差。
+  const now = T0 + 2 * MINUTE
+  const { ledger } = fixedLedger(now)
+  ledger.record('groq', 'a1', 'llama', usage(10), T0)
+  ledger.record('groq', 'a1', 'llama', usage(20), T0 + MINUTE)
+  ledger.record('groq', 'a1', 'llama', usage(40), T0 + 2 * MINUTE)
+
+  const snap = ledger.snapshot('groq', 'a1', 'llama')
+  assert.equal(snap.rpm, 2, 'buckets at now-60s and now both count; now-120s does not')
+  assert.equal(snap.tpm, 60)
+
+  const offGrid = ledger.snapshot('groq', 'a1', 'llama', now + 1)
+  assert.equal(offGrid.rpm, 1, 'one ms past the mark: now-60s+1ms excludes the middle bucket')
+  assert.equal(offGrid.tpm, 40)
+
+  const earlier = ledger.snapshot('groq', 'a1', 'llama', now - 1)
+  assert.equal(earlier.rpm, 1, 'one ms before the mark: the bucket at now is already in the future')
+  assert.equal(earlier.tpm, 20)
+})
