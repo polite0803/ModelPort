@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
+import { collectIndexIssues } from '../../scripts/check-doc-index.mjs'
 
 /**
  * The release wiring for a single product.
@@ -121,11 +122,16 @@ test('the Docker image is built from the staged tree and verified like every oth
   )
 })
 
-test('the new feature doc and plan are registered in the index', () => {
+test('the doc index covers every markdown file and is declared in AGENTS.md', () => {
   assert.ok(existsSync('docs/features/wsl-daemon.md'), 'the WSL/headless behaviour must be documented')
   const index = readFileSync('docs/README.md', 'utf8')
   assert.match(index, /\[`features\/wsl-daemon\.md`\]\(features\/wsl-daemon\.md\)/,
     'a doc the index does not list is an orphan, and the index claims there are none')
   assert.match(index, /PLAN-wsl-headless-daemon-and-shell\.md/)
   assert.match(index, /PLAN-shell-three-modes\.md/, 'the three-mode decision record must be indexed')
+  assert.deepEqual(
+    collectIndexIssues(process.cwd()),
+    [],
+    'docs/README.md claims no orphan files; let check-doc-index verify that for the whole tree',
+  )
 })

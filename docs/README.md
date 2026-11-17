@@ -1,10 +1,11 @@
 # ModelPort 文档索引
 
-> 适用版本：v1.7.3 ｜ 最后核对：2026-11-04 ｜ 状态：现行
+> 适用版本：v1.8.25 ｜ 最后核对：2026-11-17 ｜ 状态：现行
 
-这是 `docs/` 下唯一的索引入口。所有文档按性质归入 `design/`（方案）、`plan/`（计划）、
+这是 `docs/` 下唯一的索引入口，也是智能体查找项目文档的全局参考。所有文档按性质归入 `design/`（方案）、`plan/`（计划）、
 `audit/`（审计）与 `features/`（功能手册）四类；供应商笔记、上游快照与数据票据保留在原有旁支目录。索引覆盖
-`docs/` 下的每一份文档，没有孤立文件。
+`docs/` 下的每一份文档，没有孤立文件。新增或移动文档必须同步更新本索引，并运行
+`node scripts/check-doc-index.mjs` 核对覆盖率；该检查已接入 `npm run gate`。
 
 当文档与代码冲突时，以代码和 [`AGENTS-full.md`](AGENTS-full.md) 为准。行为改变时，请在同一个
 改动里更新文档。
@@ -121,6 +122,7 @@
 | [`providers/opencode.md`](providers/opencode.md) | `opencode` 账号渠道，以及已退役本机运行时的区分 | v1.7.3 | 现行 |
 | [`providers/deepseek.md`](providers/deepseek.md) | DeepSeek 上下文缓存的取证、能力表取值与缓存优先策略约束 | v1.7.9 | 现行 |
 | [`providers/anthropic.md`](providers/anthropic.md) | Anthropic 显式 prompt caching 的断点位置、能力表与待复核项 | v1.7.9 | 现行 |
+| [`providers/minimax-cn.md`](providers/minimax-cn.md) | MiniMax（CN）隐式前缀缓存的实测取证、能力表取值与缓存优先策略约束 | v1.7.9 | 现行 |
 | [`upstream/workbuddy-v2.5.1/README.md`](upstream/workbuddy-v2.5.1/README.md) | WorkBuddy v2.5.1 逐字快照的来源、校验和与用途 | v1.6.1 | 历史记录 |
 | [`repo-description.md`](repo-description.md) | GitHub “About” 文案：短描述与长介绍 | v1.7.3 | 现行 |
 | [`data/`](data/) | 生成型 sidecar 的源票据（`models-dev-cost.json`、`models-dev-capabilities.json`、`free-quota-research/*.json`）；只改票据再跑 builder | v1.7.3 | 现行 |
