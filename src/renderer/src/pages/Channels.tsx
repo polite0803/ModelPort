@@ -1616,6 +1616,7 @@ export function Channels() {
                     {creditState.mixedUnits === true && (
                       <p className="mb-1 text-xs text-muted-foreground">{t('channels.creditsMixedNote')}</p>
                     )}
+                    <p className="mb-1 text-xs text-muted-foreground">{t('channels.creditsReadAtNote')}</p>
                     {creditState.error !== undefined && (
                       <p className="mb-1 text-xs text-destructive">{creditState.error}</p>
                     )}

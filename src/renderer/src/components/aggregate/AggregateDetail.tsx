@@ -36,6 +36,7 @@ import type {
   AggregateCreditSnapshot,
 } from '../../../../shared/aggregateCredit'
 import { CREDIT_SNAPSHOT_TTL_MS, creditSnapshotLive } from '../../../../shared/aggregateCredit'
+import { describeDelay } from '../../../../shared/routeQuotaView'
 import type {
   AggregateQuotaExhaustionReason,
   AggregateQuotaExhaustionRecord,
@@ -73,6 +74,22 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { useToast } from '@/hooks/use-toast'
+
+/**
+ * TTL 倒计时的刷新节奏：与路由页一致，每 15 秒只重画标签。
+ * 只更新本地 now，不重取快照、更不触发任何额度查询。
+ */
+const CREDIT_CLOCK_TICK_MS = 15_000
+
+/** 相对时长标签（`3 分钟`）：只给时长，「还有」由调用方拼。 */
+function creditDelayLabel(
+  until: number,
+  now: number,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string {
+  const { unit, n } = describeDelay(Math.max(0, until - now))
+  return t(`routes.delay_${unit}`, { n })
+}
 
 /** 每模型参数编辑草稿：三个常用数值字段 + 其余参数的 JSON 文本。 */
 interface ParamDraft {
@@ -944,6 +961,14 @@ function QuotaCard(props: {
   const [probing, setProbing] = useState(false)
   const [clearing, setClearing] = useState(false)
   const [probe, setProbe] = useState<AggregateCreditQueryResult | null>(null)
+  const [now, setNow] = useState(() => Date.now())
+
+  // 只有存在读数时才挂本地时钟：没查过就没有任何倒计时可画，不必每 15 秒白重渲染。
+  useEffect(() => {
+    if (credit === undefined && probe === null) return
+    const timer = window.setInterval(() => setNow(Date.now()), CREDIT_CLOCK_TICK_MS)
+    return () => window.clearInterval(timer)
+  }, [credit, probe])
 
   const view = quotaViewOf(entry, { hasApiKey, usage })
   const rows = quotaRows(entry.id, usage)
@@ -1102,7 +1127,7 @@ function QuotaCard(props: {
                   <p className="text-xs text-muted-foreground">{t('aggregate.manage.credit.never')}</p>
                 )
               }
-              const fresh = creditSnapshotLive(shown)
+              const fresh = creditSnapshotLive(shown, now)
               if (!shown.ok) {
                 // 旧行只剩"上次也没问出来"这一种信息，别让它看起来像一个 0 余额。
                 return (
@@ -1135,6 +1160,19 @@ function QuotaCard(props: {
                       ? t('aggregate.manage.credit.orderingOn', { minutes: Math.round(CREDIT_SNAPSHOT_TTL_MS / 60_000) })
                       : t('aggregate.manage.credit.orderingOff', { minutes: Math.round(CREDIT_SNAPSHOT_TTL_MS / 60_000) })}
                   </p>
+                  {fresh && (() => {
+                    const asOf = Date.parse(shown.asOf)
+                    if (Number.isNaN(asOf)) return null
+                    const expiresAt = asOf + CREDIT_SNAPSHOT_TTL_MS
+                    if (expiresAt <= now) return null
+                    return (
+                      <p className="text-[11px] text-muted-foreground">
+                        {t('aggregate.manage.credit.orderingCountdown', {
+                          when: creditDelayLabel(expiresAt, now, t),
+                        })}
+                      </p>
+                    )
+                  })()}
                 </div>
               )
             })()}

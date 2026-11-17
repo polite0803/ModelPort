@@ -6,6 +6,7 @@
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { dailyUsageOf } from '@shared/dailyUsage'
+import { DeclaredQuotaRows } from './DeclaredQuotaRows'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -192,7 +193,9 @@ export function AccountList({
                           <span>{t('dashboard.totalRequests')}: {account.requestCount || 0}</span>
                           <span>{t('providers.usedToday')}: {formatUsage(account)}</span>
                         </div>
-                        
+
+                        <DeclaredQuotaRows quota={account.declaredQuota} now={Date.now()} />
+
                         {account.status === 'error' && account.errorMessage && (
                           <p className="text-meta text-error mt-1 truncate">
                             {account.errorMessage}
