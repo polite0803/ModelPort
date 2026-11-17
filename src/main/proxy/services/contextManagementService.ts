@@ -381,6 +381,14 @@ const CHARS_PER_TOKEN_ASCII = 3
 const CHARS_PER_TOKEN_CJK = 1.5
 
 /**
+ * Characters per token for JSON tool arguments. Same table as
+ * `compression/estimator.ts` (3.2) so both budgets price the same payload the
+ * same way; denser than the flat 3 because JSON is punctuation-heavy, and
+ * tokenizers bill punctuation at roughly one token per 3 characters.
+ */
+const CHARS_PER_TOKEN_JSON = 3.2
+
+/**
  * Floor for a truncated message, in tokens.
  *
  * A message cut below this is not a summary of anything — it is a marker with
@@ -403,23 +411,33 @@ const MIN_KEPT_TOKENS = 64
 const MIN_SERVICEABLE_TAIL_TOKENS = MIN_KEPT_TOKENS * 4
 
 /**
- * Estimate the token count of a message.
+ * Estimate the token count of a message, **including its tool payload**.
  *
  * ASCII keeps the historical 3 chars/token; CJK codepoints are priced
  * separately at 1.5. Getting this wrong in the cheap direction is not a
  * rounding error, it is a cap that silently does not bind.
+ *
+ * `tool_calls` arguments are JSON strings and priced at the JSON ratio (3.2
+ * chars/token, same table as `compression/estimator.ts`) — an agent turn whose
+ * tool result blocks carry file contents can hold tens of thousands of tokens
+ * that a content-only estimate never sees, which is exactly how a request
+ * measured "fits" and then got rejected upstream for length.
  */
-function estimateTokens(content: string | ChatMessage['content']): number {
-  if (content === null || content === undefined) {
+function estimateTokens(messageOrContent: ChatMessage | string | ChatMessage['content']): number {
+  if (messageOrContent === null || messageOrContent === undefined) {
     return 0
   }
 
-  if (typeof content === 'string') {
-    return estimateTextTokens(content)
+  let tokens = 0
+  let toolCalls: ChatMessage['tool_calls'] = undefined
+
+  if (typeof messageOrContent === 'string') {
+    return estimateTextTokens(messageOrContent)
   }
 
-  if (Array.isArray(content)) {
-    return content.reduce((total, part) => {
+  if (Array.isArray(messageOrContent)) {
+    // Content-part array: price the text parts.
+    return messageOrContent.reduce((total, part) => {
       if (part.type === 'text' && part.text) {
         return total + estimateTextTokens(part.text)
       }
@@ -427,7 +445,18 @@ function estimateTokens(content: string | ChatMessage['content']): number {
     }, 0)
   }
 
-  return 0
+  // Full message: content + tool_calls arguments.
+  const message = messageOrContent as ChatMessage
+  tokens = estimateTokens(message.content)
+  toolCalls = message.tool_calls
+  if (Array.isArray(toolCalls)) {
+    for (const call of toolCalls) {
+      // The function name and id are small but real; arguments dominate.
+      tokens += Math.ceil((call.function?.name?.length ?? 0) / CHARS_PER_TOKEN_ASCII)
+      tokens += Math.ceil((call.function?.arguments?.length ?? 0) / CHARS_PER_TOKEN_JSON)
+    }
+  }
+  return tokens
 }
 
 /** Price one piece of text: dense scripts by their own ratio, the bulk at 3. */
@@ -627,9 +656,9 @@ export class TokenLimitStrategy {
     const first = nonSystemMessages.find(message => message.role === 'user')
     const current = lastUserBefore(nonSystemMessages, nonSystemMessages.length)
     let reserve = 0
-    if (first !== undefined && first !== newest) reserve += estimateTokens(first.content)
+    if (first !== undefined && first !== newest) reserve += estimateTokens(first)
     if (current !== undefined && current !== first && current !== newest) {
-      reserve += estimateTokens(current.content)
+      reserve += estimateTokens(current)
     }
     return reserve
   }
@@ -741,7 +770,7 @@ export class TokenLimitStrategy {
       }
     }
 
-    const originalTokens = messages.reduce((sum, message) => sum + estimateTokens(message.content), 0)
+    const originalTokens = messages.reduce((sum, message) => sum + estimateTokens(message), 0)
 
     // The system block is truncated only when this provider named a cap for it
     // (`maxSystemTokensByProvider` -> `systemMaxTokens`). Default: untouched, so
@@ -758,7 +787,7 @@ export class TokenLimitStrategy {
     // size while the log claimed it had been cut.
     const work = messages.filter(message => message.role !== 'system')
 
-    const systemTokens = systemMessages.reduce((sum, message) => sum + estimateTokens(message.content), 0)
+    const systemTokens = systemMessages.reduce((sum, message) => sum + estimateTokens(message), 0)
     const reserve = this.taskReserve(work)
     const { budget, declined } = this.budgetFor(systemTokens, reserve)
     if (declined !== undefined) {
@@ -812,7 +841,7 @@ export class TokenLimitStrategy {
       const result = capReachable
         ? this.enforceHardCap([...systemMessages, ...repaired], this.config.maxTokens, systemBudget !== undefined)
         : [...systemMessages, ...repaired]
-      const totalTokens = result.reduce((sum, message) => sum + estimateTokens(message.content), 0)
+      const totalTokens = result.reduce((sum, message) => sum + estimateTokens(message), 0)
       console.warn(
         `[TokenLimitStrategy] 系统块 + 任务预留已吃满上限 ` +
           `(system=${systemTokens} + reserve=${reserve} > maxTokens=${this.config.maxTokens})` +
@@ -832,7 +861,7 @@ export class TokenLimitStrategy {
     let spend = 0
     let windowStart = work.length
     for (let index = work.length - 1; index >= 0; index -= 1) {
-      const tokens = estimateTokens(work[index].content)
+      const tokens = estimateTokens(work[index])
       if (spend + tokens <= availableTokens) {
         spend += tokens
         windowStart = index
@@ -864,7 +893,7 @@ export class TokenLimitStrategy {
     // user turn): "rescue the task" must not be able to unmake the cap.
     const prefix = this.fitPrefixToBudget(taskPrefix(work, groupStart, withGroup), reserve)
     let result = [...systemMessages, ...prefix, ...withGroup]
-    let totalTokens = result.reduce((sum, message) => sum + estimateTokens(message.content), 0)
+    let totalTokens = result.reduce((sum, message) => sum + estimateTokens(message), 0)
 
     if (totalTokens > budget) {
       // Whichever bound is in force is a constraint, not a target. Reaching here
@@ -875,7 +904,7 @@ export class TokenLimitStrategy {
       // fits. `budget` is the cost target when one is in force, so the same
       // repair keeps the spending promise rather than merely the window.
       result = this.enforceHardCap(result, budget, systemBudget !== undefined)
-      totalTokens = result.reduce((sum, message) => sum + estimateTokens(message.content), 0)
+      totalTokens = result.reduce((sum, message) => sum + estimateTokens(message), 0)
     }
 
     const rewrote = totalTokens < originalTokens
@@ -901,7 +930,7 @@ export class TokenLimitStrategy {
     originalCount: number,
     originalTokens: number
   ): StrategyResult {
-    const totalTokens = messages.reduce((sum, message) => sum + estimateTokens(message.content), 0)
+    const totalTokens = messages.reduce((sum, message) => sum + estimateTokens(message), 0)
     const shrunk = totalTokens < originalTokens
     return {
       messages,
@@ -923,7 +952,7 @@ export class TokenLimitStrategy {
    */
   private fitPrefixToBudget(prefix: ChatMessage[], budgetTokens: number): ChatMessage[] {
     if (prefix.length === 0) return prefix
-    const total = prefix.reduce((sum, message) => sum + estimateTokens(message.content), 0)
+    const total = prefix.reduce((sum, message) => sum + estimateTokens(message), 0)
     if (total <= budgetTokens) return prefix
 
     const next = [...prefix]
@@ -931,7 +960,7 @@ export class TokenLimitStrategy {
     // Largest first, and never below the floor: a marker with nothing in front of
     // it is not a task statement any more.
     const order = next
-      .map((message, index) => ({ index, tokens: estimateTokens(message.content) }))
+      .map((message, index) => ({ index, tokens: estimateTokens(message) }))
       .sort((a, b) => b.tokens - a.tokens)
     for (const { index, tokens } of order) {
       if (excess <= 0) break
@@ -939,7 +968,7 @@ export class TokenLimitStrategy {
       const truncated = this.truncateToBudget(next[index], target)
       if (truncated === undefined) continue
       next[index] = truncated
-      excess -= tokens - estimateTokens(truncated.content)
+      excess -= tokens - estimateTokens(truncated)
     }
     return next
   }
@@ -957,13 +986,13 @@ export class TokenLimitStrategy {
     if (groupStart >= work.length) return
     const groupTokens = work
       .slice(groupStart)
-      .reduce((sum, message) => sum + estimateTokens(message.content), 0)
+      .reduce((sum, message) => sum + estimateTokens(message), 0)
     if (groupTokens <= availableTokens) return
 
     let largestIndex = groupStart
     let largestTokens = -1
     for (let index = groupStart; index < work.length; index += 1) {
-      const tokens = estimateTokens(work[index].content)
+      const tokens = estimateTokens(work[index])
       if (tokens > largestTokens) {
         largestTokens = tokens
         largestIndex = index
@@ -989,12 +1018,12 @@ export class TokenLimitStrategy {
   ): ChatMessage[] {
     const next = [...messages]
     let guard = next.length * 2
-    while (next.reduce((sum, message) => sum + estimateTokens(message.content), 0) > maxTokens && guard-- > 0) {
+    while (next.reduce((sum, message) => sum + estimateTokens(message), 0) > maxTokens && guard-- > 0) {
       let worst = -1
       let worstTokens = 0
       next.forEach((message, index) => {
         if (message.role === 'system' && !systemMayShrink) return
-        const tokens = estimateTokens(message.content)
+        const tokens = estimateTokens(message)
         if (tokens > worstTokens) {
           worstTokens = tokens
           worst = index
@@ -1183,7 +1212,7 @@ export class ContextManagementService {
    * Estimate total tokens for messages
    */
   static estimateTotalTokens(messages: ChatMessage[]): number {
-    return messages.reduce((total, msg) => total + estimateTokens(msg.content), 0)
+    return messages.reduce((total, msg) => total + estimateTokens(msg), 0)
   }
 }
 

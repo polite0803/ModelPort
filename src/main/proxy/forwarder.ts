@@ -133,7 +133,7 @@ import {
   responsesEventToChatChunks,
   type ResponsesEvent,
 } from '../../shared/responsesWire'
-import { applyCompression, recordCompressionReport } from './compression'
+import { applyCompression, recordCompressionReport, recordContextManagementReport } from './compression'
 import { resolveCompressionConfig } from '../store/compressionConfig.ts'
 import { cacheEconomicsOf, promptCacheOf } from '../../shared/promptCache.ts'
 import { measureCrossTurnDuplication, recordDuplication } from './compression/duplication.ts'
@@ -559,6 +559,21 @@ export class RequestForwarder {
           }))
 
           const processResult = await contextService.process(contextMessages)
+
+          // 记录裁剪结果到请求日志（即使没变也记，统计口径完整——否则「该渠道
+          // 开了裁剪但这一轮没裁」与「根本没跑裁剪」在日志里无法区分）。
+          if (request.requestId) {
+            recordContextManagementReport(request.requestId, {
+              applied: processResult.changed,
+              strategyResults: processResult.strategyResults.map(sr => ({
+                strategyName: sr.strategyName,
+                originalCount: sr.originalCount,
+                processedCount: sr.processedCount,
+                trimmed: sr.trimmed,
+                rewrote: sr.rewrote === true,
+              })),
+            })
+          }
 
           // 采纳判据是「字节变了」，不是「条数变了」。截断保持条数不变而改写内容
           // —— 用条数判断会把截断结果整份丢掉，超预算的原文照发（2026-11-16：

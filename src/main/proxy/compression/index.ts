@@ -49,6 +49,7 @@ import {
   type CompressionConfig,
   type CompressionReport,
   type CompressionSkipReason,
+  type ContextManagementReport,
   type ContentType,
 } from './types.ts'
 
@@ -333,6 +334,7 @@ export function applyCompression(input: ApplyCompressionInput): ApplyCompression
 
 export { getCcrStore } from './ccr/store.ts'
 export type { CompressionConfig, CompressionReport } from './types.ts'
+export type { ContextManagementReport } from './types.ts'
 export { DEFAULT_COMPRESSION_CONFIG } from './types.ts'
 
 /**
@@ -363,5 +365,24 @@ export function recordCompressionReport(requestId: string, report: CompressionRe
 export function takeCompressionReport(requestId: string): CompressionReport | undefined {
   const report = reports.get(requestId)
   if (report) reports.delete(requestId)
+  return report
+}
+
+/** Context management reports, keyed by requestId. */
+const ctxReports = new Map<string, ContextManagementReport>()
+
+export function recordContextManagementReport(requestId: string, report: ContextManagementReport): void {
+  if (!requestId) return
+  if (ctxReports.size >= MAX_PENDING_REPORTS) {
+    const oldest = ctxReports.keys().next()
+    if (!oldest.done) ctxReports.delete(oldest.value)
+  }
+  ctxReports.set(requestId, report)
+}
+
+/** Read and clear context management report for `requestId`. */
+export function takeContextManagementReport(requestId: string): ContextManagementReport | undefined {
+  const report = ctxReports.get(requestId)
+  if (report) ctxReports.delete(requestId)
   return report
 }

@@ -365,6 +365,22 @@ export function RequestLogDetail({ log, onClose }: RequestLogDetailProps) {
                       : t(`logs.contextFit${log.contextFit === 'fits' ? 'Fits' : log.contextFit === 'overflow' ? 'Overflow' : 'Unknown'}`)}
                   />
                 )}
+                {log.contextManagement !== undefined && (
+                  <InfoItem
+                    label={t('logs.contextManagement')}
+                    value={log.contextManagement.applied
+                      ? log.contextManagement.strategyResults
+                          .filter((result) => result.trimmed || result.rewrote)
+                          .map((result) => t('logs.contextManagementStrategy', {
+                            name: result.strategyName,
+                            before: result.originalCount,
+                            after: result.processedCount,
+                            action: result.rewrote ? t('logs.contextManagementRewrote') : t('logs.contextManagementTrimmed'),
+                          }))
+                          .join('；')
+                      : t('logs.contextManagementNoop')}
+                  />
+                )}
               </div>
 
               {log.attempts && log.attempts.length > 0 && (

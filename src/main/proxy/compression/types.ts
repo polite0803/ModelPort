@@ -168,3 +168,10 @@ export interface FieldCompressionResult {
   /** Compressor name for the report, e.g. 'json'. */
   strategy: string
 }
+
+/**
+ * Context management observability record. Defined in `shared/types.ts` (the
+ * request log row lives there); re-exported here so the compression facade can
+ * hand it around without reaching into shared directly.
+ */
+export type { ContextManagementReport } from '../../../shared/types.ts'

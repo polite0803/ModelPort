@@ -22,6 +22,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  ContextManagementService,
   TokenLimitStrategy,
   normalizeContextManagementConfig,
 } from '../../src/main/proxy/services/contextManagementService.ts'
@@ -144,3 +145,33 @@ test('归一化：成本目标是解析值不在盘上（防止一格错配到�
   } as never)
   assert.equal('costBudget' in config.strategies.tokenLimit, false)
 })
+
+test('tool_calls 参数计入 token 预算：costBudget 可见真实体量（2026-11-16 遗留）', () => {
+  // 一条 assistant 的 content 很短，但 arguments 有 ~9000 token。
+  // 只数 content 会把 9K 工具参数当成 0，于是 costBudget 永远看不出它超支；
+  // 计入之后，9K 参数 + 1K 任务预留装不进 10K 目标，必须拒绝目标而不是假裁。
+  const bigArgs = 'a'.repeat(9000 * 3)
+  const messages = [
+    message('system', 100),
+    {
+      role: 'assistant',
+      content: 'x',
+      tool_calls: [{
+        id: 'call-1',
+        type: 'function',
+        function: { name: 'apply_patch', arguments: bigArgs },
+      }],
+    },
+    message('user', 1000),
+  ]
+  const result = strategy(200_000, 10_000).execute(messages as never)
+
+  assert.equal(result.trimmed, false, '10K 目标装不下 9K 工具参数 + 1K 预留，应退回窗口不假裁')
+  assert.equal(
+    ContextManagementService.estimateTotalTokens(messages as never) > 9_000,
+    true,
+    '总账必须计入 tool_calls；否则上一条断言会变成错误的不裁'
+  )
+  assert.equal(result.messages.length, messages.length, '退回窗口时不删消息')
+})
+

@@ -61,6 +61,7 @@ import { applyQuotaExhaustions } from '../quota/exhaustionMarks.ts'
 import { rejectionEntryFromContext, selectionRefusalEntry } from '../rejectionLog'
 import { clientHeaderValue, identifyClientByUserAgent } from '../../../shared/clientProfile'
 import { takeCompressionReport, type CompressionReport } from '../compression'
+import { takeContextManagementReport, type ContextManagementReport } from '../compression'
 import { takeDuplication } from '../compression/duplication.ts'
 import { takeConversationTurn } from '../compression/survivorship.ts'
 import { createReasoningEchoObserver, reasoningEchoApplies } from '../reasoningEcho.ts'
@@ -1537,6 +1538,10 @@ router.post('/completions', async (ctx: Context) => {
       ctx.set('X-ModelPort-Compression-Ratio', compressionReport.ratio.toFixed(3))
     }
 
+    // 上下文裁剪记录：滑动窗口 + tokenLimit 的裁剪结果。即使 applied=false 也要记
+    // （用于统计"本该裁但没裁"的基线）。
+    const contextManagementReport = takeContextManagementReport(requestId)
+
     // 跨轮重复度：纯观测，请求字节未被改动。只在日志里留一行，供日后判断
     // "要不要做跨轮去重"；不写响应头，因为它不改变任何客户端可见行为。
     const duplication = takeDuplication(requestId)
@@ -1649,6 +1654,7 @@ router.post('/completions', async (ctx: Context) => {
         upstreamRequestId: result.upstreamRequestId,
         captureBodies: traceRequested,
         compression: compressionReport,
+        ...(contextManagementReport === undefined ? {} : { contextManagement: contextManagementReport }),
         duplication,
         conversationTurn,
         webSearch: request.web_search,
@@ -1744,6 +1750,7 @@ router.post('/completions', async (ctx: Context) => {
         upstreamRequestId: result.upstreamRequestId,
         captureBodies: traceRequested,
         compression: compressionReport,
+        ...(contextManagementReport === undefined ? {} : { contextManagement: contextManagementReport }),
         duplication,
         conversationTurn,
         webSearch: request.web_search,
@@ -1781,6 +1788,7 @@ router.post('/completions', async (ctx: Context) => {
         upstreamRequestId: result.upstreamRequestId,
         captureBodies: traceRequested,
         compression: compressionReport,
+        ...(contextManagementReport === undefined ? {} : { contextManagement: contextManagementReport }),
         duplication,
         conversationTurn,
         webSearch: request.web_search,

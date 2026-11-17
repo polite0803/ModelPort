@@ -18,6 +18,26 @@ export { DEFAULT_REPETITION_GUARD }
 
 export type AccountStatus = 'active' | 'inactive' | 'expired' | 'error'
 
+/**
+ * Context management observability record (trim = sliding window + token limit).
+ * Mirrors `StrategyResult` from the context management service; `strategyName`
+ * stays a plain `string` for the same reason that type keeps it one.
+ */
+export interface ContextManagementReport {
+  /** True when at least one strategy changed the history (bytes, not count). */
+  applied: boolean
+  /** Results per strategy that ran, in `executionOrder`. */
+  strategyResults: {
+    strategyName: string
+    originalCount: number
+    processedCount: number
+    /** Messages were dropped (count decreased). */
+    trimmed: boolean
+    /** A message's content was rewritten in place (budget truncation). */
+    rewrote: boolean
+  }[]
+}
+
 export type ProviderStatus = 'online' | 'offline' | 'unknown'
 
 
@@ -1845,6 +1865,13 @@ export interface RequestLogEntry {
     /** True when a cap stopped the scan before the whole prompt. */
     truncated: boolean
   }
+  /**
+   * Context management record. Trim operations (sliding window + token limit) are
+   * deletion-only transforms; they never rewrite a message's bytes except to append
+   * a CCR marker when truncating. This field is present whenever `channelIds` named
+   * this provider, whether or not anything was actually trimmed.
+   */
+  contextManagement?: ContextManagementReport
   /**
    * Which turn of its conversation this request was, as attributed by the
    * survivorship tracker (1 = the first turn we observed).

@@ -606,6 +606,17 @@ interface RequestLogEntry {
   modelContextWindow?: number
   contextFit?: 'fits' | 'overflow' | 'unknown'
   contextFitSource?: 'measured'
+  /** 上下文裁剪读数（与 `shared/types.ts::ContextManagementReport` 同名接口镜像）。缺省 = 该请求未被裁剪。 */
+  contextManagement?: {
+    applied: boolean
+    strategyResults: {
+      strategyName: string
+      originalCount: number
+      processedCount: number
+      trimmed: boolean
+      rewrote: boolean
+    }[]
+  }
   streamTrace?: RequestStreamTrace
   /** Caller identified from User-Agent by the proxy; `other` keeps the raw product name */
   client?: { id: string; label: string; version?: string }
