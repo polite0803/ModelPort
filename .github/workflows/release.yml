@@ -27,8 +27,23 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'npm'
 
+      # electron 的二进制在 postinstall 时从 GitHub Releases 拉（ELECTRON_MIRROR），
+      # 这一跳不走 npm 缓存、每次构建都重新下载，偶发 504（瞬时网关超时）就会红掉
+      # 整条腿；与上传步骤的三连重试同款。npm ci 自身先删 node_modules 再装，重试干净。
       - name: Install dependencies
-        run: npm ci
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if npm ci; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::npm ci failed after 3 attempts"
+              exit 1
+            fi
+            echo "::warning::npm ci attempt $attempt failed; retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
         env:
           ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
 
@@ -107,8 +122,23 @@ jobs:
           node-version-file: '.nvmrc'
           cache: 'npm'
 
+      # electron 的二进制在 postinstall 时从 GitHub Releases 拉（ELECTRON_MIRROR），
+      # 这一跳不走 npm 缓存、每次构建都重新下载，偶发 504（瞬时网关超时）就会红掉
+      # 整条腿；与上传步骤的三连重试同款。npm ci 自身先删 node_modules 再装，重试干净。
       - name: Install dependencies
-        run: npm ci
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if npm ci; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::npm ci failed after 3 attempts"
+              exit 1
+            fi
+            echo "::warning::npm ci attempt $attempt failed; retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
         env:
           ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
 
