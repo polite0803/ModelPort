@@ -117,6 +117,7 @@ import { opencodeAffinityHeaders } from './utils/opencodeAffinity.ts'
 import { createContextManagementService, trimAppliesToProvider } from './services/contextManagementService'
 import { declaredContextWindowOf } from './modelTrimWindow'
 import { accountChannelManager } from '../providers/accountChannels/manager'
+import { getChannelDefinition } from '../providers/accountChannels/catalogue'
 import {
   formatToolCallPairing,
   repairToolCallAdjacency,
@@ -423,11 +424,11 @@ export class RequestForwarder {
     // 受管标记，绝不能再过一遍内容压缩器。重复调用是幂等的：已带 CCR 标记的
     // 文本会被识别并跳过，所以链式重试不会二次压缩。
     const compressionConfig = resolveCompressionConfig(config.compression, provider)
-    const promptCacheCapability = promptCacheOf(
-      provider.type === 'aggregate' && provider.aggregateId
-        ? getAggregateEntry(provider.aggregateId)
+    const promptCacheCapability = provider.type === 'aggregate' && provider.aggregateId
+      ? promptCacheOf(getAggregateEntry(provider.aggregateId))
+      : provider.type === 'account'
+        ? getChannelDefinition(provider.id)?.promptCache
         : undefined
-    )
     const cachePolicy = cacheEconomicsOf(promptCacheCapability, config.promptCaching?.anthropicTtl)
 
     // 跨轮重复折叠：配置只是开关的一半。另一半是测量门（重复占比 + 会话还能活多久），

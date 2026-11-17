@@ -9,6 +9,7 @@
 import type { CompressionConfig } from '../../shared/types.ts'
 import { isCacheSensitive, promptCacheOf } from '../../shared/promptCache.ts'
 import { getAggregateEntry } from '../providers/aggregate/registry.ts'
+import { getChannelDefinition } from '../providers/accountChannels/catalogue.ts'
 import {
   COMPRESSION_AGGRESSIVENESS,
   DEFAULT_COMPRESSION_CONFIG,
@@ -64,7 +65,9 @@ export function normalizeCompressionConfig(
  * with a documented prefix cache whose cached input is much cheaper than fresh
  * input skips compression. The second rule is the P2-D2 "cache-first" policy —
  * a compressed live block is discarded by the next turn's original bytes, and
- * at a 0.02–0.1 read discount that trade loses more than it saves.
+ * at a 0.02–0.1 read discount that trade loses more than it saves. Account
+ * channels declare the same shape on the channel definition (adapter-level
+ * facts), so e.g. loomy's measured 98%+ hits get the same protection.
  */
 export function resolveCompressionConfig(
   config: CompressionConfig,
@@ -77,7 +80,12 @@ export function resolveCompressionConfig(
     const entry = provider.type === 'aggregate' && provider.aggregateId
       ? getAggregateEntry(provider.aggregateId)
       : undefined
-    if (isCacheSensitive(promptCacheOf(entry))) return { ...config, enabled: false }
+    const capability = entry !== undefined
+      ? promptCacheOf(entry)
+      : provider.type === 'account'
+        ? getChannelDefinition(provider.id)?.promptCache
+        : undefined
+    if (isCacheSensitive(capability)) return { ...config, enabled: false }
   }
 
   return config

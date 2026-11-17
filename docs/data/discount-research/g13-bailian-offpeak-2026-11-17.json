@@ -1,0 +1,26 @@
+[
+  {
+    "entryId": "bailian",
+    "providerName": "阿里云百炼（按量付费）",
+    "source": "operator-reported",
+    "docUrl": "https://help.aliyun.com/zh/model-studio/models",
+    "asOf": "2026-11-17",
+    "scope": "keyed-account",
+    "discount": {
+      "kind": "time-varying",
+      "window": { "daily": [{ "start": "22:00", "end": "06:00" }], "timezone": "Asia/Shanghai" },
+      "weight": 0.5,
+      "baseWeight": 1,
+      "modelIds": [
+        "qwen3.8-max",
+        "qwen3.8-flash",
+        "qwen3.7-max",
+        "qwen3.7-plus",
+        "qwen3.6-flash",
+        "qwen3-coder-plus"
+      ]
+    },
+    "evidence": "使用者 2026-11-17 报告：聚合渠道中的百炼在夜间部分模型半价（原话：「比如聚合渠道中的阿里云百炼在夜间部分模型是半价」）。窗口 22:00–06:00（Asia/Shanghai）与折后倍率 0.5 按该报告登记；第三方模型（DeepSeek/GLM/Kimi/MiniMax）未登记 —— 它们在上游按各自牌价计费，没有百炼侧的错峰口径。",
+    "notes": "⚠️ 未核验：官方计费页（help.aliyun.com/zh/model-studio/models）无头抓取只返回 SPA 壳，正文需要浏览器渲染，窗口与覆盖模型清单待官方页核验后修正。修正动作 = 同步改本回执与 registry.ts 里 bailian 条目的 discount 字段（两处必须一致，路由与两个页面读的都是目录）。"
+  }
+]

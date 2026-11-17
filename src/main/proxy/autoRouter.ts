@@ -99,6 +99,7 @@ import { costBucketOf, type CostBucket } from '../../shared/channels.ts'
 import { costScoreOfWeight, effectiveCostOf } from '../../shared/discountWindow.ts'
 import type { ClientSessionKey } from '../../shared/clientSessionKey.ts'
 import { aggregateCostOf, costBucketOfAggregateClass, type AggregateCostClass } from '../../shared/aggregateCost.ts'
+import { aggregateDiscountWindowOf, type AggregateModelDiscount } from '../../shared/aggregate.ts'
 import { recommendModelStars } from './autoRouting'
 
 /**
@@ -147,12 +148,19 @@ export type ChannelAccountCounts = Readonly<Record<string, { total: number; enab
 /**
  * Whether this candidate's upstream has a documented cache behaviour.
  *
- * Only aggregate entries carry the capability table; builtin/custom endpoints
- * stay out, because "unknown" must not silently become "cache-friendly".
+ * Aggregate entries carry the capability table; account channels carry theirs
+ * on the channel definition (`shared/channels.ts::promptCache`, adapter-level
+ * facts only). builtin/custom endpoints stay out, because "unknown" must not
+ * silently become "cache-friendly".
  */
 function promptCacheCapabilityOf(provider: Provider): PromptCacheCapability | undefined {
-  if (provider.type !== 'aggregate') return undefined
-  return promptCacheOf(getAggregateEntry(provider.aggregateId ?? provider.id))
+  if (provider.type === 'aggregate') {
+    return promptCacheOf(getAggregateEntry(provider.aggregateId ?? provider.id))
+  }
+  if (provider.type === 'account') {
+    return getChannelDefinition(provider.id)?.promptCache
+  }
+  return undefined
 }
 
 export interface AutoCandidate {
@@ -555,6 +563,25 @@ function stickyLatencyExceeded<
 const LEGACY_ROUTE_NAME = AUTO_MODEL_ID
 
 /**
+ * 注册表行的时段折扣 → `record` 层标注。
+ *
+ * 字段对位（与账号渠道 `modelCatalog.ts::capabilityHintOf` 同一张表）：
+ * `promoWeight` = 窗口内的价，`baseWeight` = 窗口外的原价，`weight` 也取原价 ——
+ * `effectiveWeightOf` 在两侧都齐时不会读它，缺 `promoWeight` 的残缺折扣（只报
+ * 原价）靠它兜底，行为与「窗口外按原价」一致。`discountWindow` 经
+ * `aggregateDiscountWindowOf` 收窄，读不懂的字段不进标注。
+ */
+function registryDiscountToHint(discount: AggregateModelDiscount): ModelCapabilityHint {
+  const window = aggregateDiscountWindowOf(discount)
+  return {
+    ...(discount.baseWeight === undefined ? {} : { weight: discount.baseWeight }),
+    ...(discount.weight === undefined ? {} : { promoWeight: discount.weight }),
+    ...(discount.baseWeight === undefined ? {} : { baseWeight: discount.baseWeight }),
+    ...(window === undefined ? {} : { discountWindow: window }),
+  }
+}
+
+/**
  * 一个模型的四层标注。分层只为**取值的优先级**与**来源展示**：手工 > 供应商记录
  * > 聚合官方 > 第三方，缺席的层不参与。
  *
@@ -588,8 +615,20 @@ function capabilityHintsFor(
   probeIndex: ReadonlyMap<string, ModelProbeRow>,
   nowMs: number
 ): CandidateHints {
-  const record = provider.modelCapabilities?.[displayName]
   const aggregateId = provider.type === 'aggregate' ? (provider.aggregateId ?? provider.id) : undefined
+  // 聚合条目的「供应商记录」= 注册表行本身：账号渠道的折扣由同步写进
+  // `modelCapabilities`，聚合没有同步那一步，目录行里的 `discount` 就是供应商
+  // 自己声明的时段折扣（与 `aggregateContextWindow` 同一条「目录事实」链）。
+  // 写进 `record` 层而不是新开一层：`mergedHintOf` 已合并 record，`costSignalFor`
+  // 已对合并结果跑 `effectiveCostOf` —— 路由、渠道页与模型管理页因此同一时刻
+  // 给出同一个价，不再需要任何一处的第二份推算。
+  const registryDiscount = aggregateId === undefined
+    ? undefined
+    : (getAggregateEntry(aggregateId)?.models ?? [])
+      .find(model => model.id === actualModelId || `${aggregateId}/${model.id}` === actualModelId)
+      ?.discount
+  const record = provider.modelCapabilities?.[displayName]
+    ?? (registryDiscount === undefined ? undefined : registryDiscountToHint(registryDiscount))
   const contextWindow = aggregateId === undefined
     ? undefined
     : aggregateContextWindow(aggregateId, actualModelId)

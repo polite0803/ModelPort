@@ -40,6 +40,7 @@ import { useDiscountClock } from '@/hooks/useDiscountClock'
 import type { AggregateCostClass } from '@shared/aggregateCost'
 import type { AvailabilityBlock } from '@shared/modelRouteName'
 import { aggregateCostOf, costBucketOfAggregateClass } from '@shared/aggregateCost'
+import { aggregateDiscountWindowOf } from '@shared/aggregate'
 import modelMappingIcon from '@/assets/providers/model-mapping.svg'
 
 const providerIcons: Record<string, string> = {
@@ -591,6 +592,24 @@ export function ModelList() {
           const key = `${entry.id}/${model.id}`
           classes[key] = signal.class
           if (signal.class === 'free') free[key] = true
+          // 聚合条目的时段折扣（注册表行 `discount`）：与账号渠道同一个投影 ——
+          // 行查找按 `actualModelId`（即 `<entryId>/<model.id>`），与 costClasses
+          // 同一把钥匙，所以同一行的倍率/免费/时变价三处同源。没有折扣的行
+          // 什么都不登记：没有窗口时 `weight` 就是唯一答案。
+          const discount = model.discount
+          if (discount !== undefined) {
+            const window = aggregateDiscountWindowOf(discount)
+            if (window !== undefined) {
+              if (discount.weight !== undefined || discount.baseWeight !== undefined) {
+                prices[key] = {
+                  window,
+                  ...(discount.weight === undefined ? {} : { promoWeight: discount.weight }),
+                  ...(discount.baseWeight === undefined ? {} : { baseWeight: discount.baseWeight }),
+                }
+              }
+              if (discount.weight !== undefined) weights[key] = discount.weight
+            }
+          }
         }
       }
     } catch (error) {

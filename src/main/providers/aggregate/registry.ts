@@ -3377,12 +3377,21 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "wire": "openai-chat",
     "models": [
-      { "id": "qwen3.8-max", "name": "Qwen3.8 Max" },
-      { "id": "qwen3.8-flash", "name": "Qwen3.8 Flash" },
-      { "id": "qwen3.7-max", "name": "Qwen3.7 Max" },
-      { "id": "qwen3.7-plus", "name": "Qwen3.7 Plus" },
-      { "id": "qwen3.6-flash", "name": "Qwen3.6 Flash" },
-      { "id": "qwen3-coder-plus", "name": "Qwen3 Coder Plus" },
+      // 错峰折扣（2026-11-17 回执 g13）：窗口与覆盖模型按**使用者报告**登记
+      // （官方计费页无头读不到，SPA 壳），数据待官方页核验后修正 —— 改这里
+      // 就等于改路由与两个页面的口径，回执与目录必须同步。
+      { "id": "qwen3.8-max", "name": "Qwen3.8 Max",
+        "discount": { "weight": 0.5, "baseWeight": 1, "daily": [{ "start": "22:00", "end": "06:00" }], "timezone": "Asia/Shanghai" } },
+      { "id": "qwen3.8-flash", "name": "Qwen3.8 Flash",
+        "discount": { "weight": 0.5, "baseWeight": 1, "daily": [{ "start": "22:00", "end": "06:00" }], "timezone": "Asia/Shanghai" } },
+      { "id": "qwen3.7-max", "name": "Qwen3.7 Max",
+        "discount": { "weight": 0.5, "baseWeight": 1, "daily": [{ "start": "22:00", "end": "06:00" }], "timezone": "Asia/Shanghai" } },
+      { "id": "qwen3.7-plus", "name": "Qwen3.7 Plus",
+        "discount": { "weight": 0.5, "baseWeight": 1, "daily": [{ "start": "22:00", "end": "06:00" }], "timezone": "Asia/Shanghai" } },
+      { "id": "qwen3.6-flash", "name": "Qwen3.6 Flash",
+        "discount": { "weight": 0.5, "baseWeight": 1, "daily": [{ "start": "22:00", "end": "06:00" }], "timezone": "Asia/Shanghai" } },
+      { "id": "qwen3-coder-plus", "name": "Qwen3 Coder Plus",
+        "discount": { "weight": 0.5, "baseWeight": 1, "daily": [{ "start": "22:00", "end": "06:00" }], "timezone": "Asia/Shanghai" } },
       { "id": "qwen3-coder-next", "name": "Qwen3 Coder Next" },
       { "id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro" },
       { "id": "glm-5.3", "name": "GLM 5.3" },
@@ -3416,7 +3425,15 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     ],
     "authUrl": "https://bailian.console.aliyun.com/cn-beijing/subscription/token-plan/personal",
     "envVar": "DASHSCOPE_TOKEN_PLAN_API_KEY",
-    "notes": "阿里云百炼 Token Plan 专属端点：Key 以 sk-sp- 开头，只在该 Base URL 上抵扣订阅 Credits。官方另给 Anthropic 兼容地址 .../apps/anthropic；目录只登记 OpenAI 兼容线。与按量、Coding Plan 的 Key 互不相通。",
+    "promptCache": {
+      "mode": "implicit-prefix",
+      "readDiscount": 0.02,
+      "evidence": {
+        "docUrl": "https://help.aliyun.com/zh/model-studio/context-cache",
+        "asOf": "2026-11-16"
+      }
+    },
+    "notes": "阿里云百炼 Token Plan 专属端点：Key 以 sk-sp- 开头，只在该 Base URL 上抵扣订阅 Credits。官方另给 Anthropic 兼容地址 .../apps/anthropic；目录只登记 OpenAI 兼容线。与按量、Coding Plan 的 Key 互不相通。readDiscount 取 deepseek-v4.1-flash(-1017) 的 cached_token 口径（input 单价的 2%，官方 context-cache 页逐字给出；主力模型，其余模型 10%~25% 不等，声明取最常用者）。",
     "website": "https://help.aliyun.com/zh/model-studio/token-plan-overview"
   },
   {
@@ -3546,7 +3563,15 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     "planCatalog": { "edition": "personal" },
     "authUrl": "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey",
     "envVar": "ARK_AGENT_PLAN_API_KEY",
-    "notes": "Agent Plan 订阅端点：官方接入文档给出 OpenAI 协议 /api/plan/v3、Anthropic 协议 /api/plan，并要求使用 Agent Plan 专属 Key。ark-code-latest 由控制台切换实际模型。基线按 2026-11-11 官方概览/控制台清单手抄（含 DeepSeek-V4.1-Flash、GLM-5.3、Kimi-K3.1-Pro；Kimi-K3 标注即将下线）。/api/plan/v3 无 GET /models，在线同步改走开放接口 ListArkAgentPlanModel（Access Key 鉴权；控制台「在线目录凭据」填入 IAM AK/SK 密封保存，或读环境变量 VOLCENGINE_ACCESS_KEY_ID/SECRET_ACCESS_KEY）。",
+    "promptCache": {
+      "mode": "implicit-prefix",
+      "readDiscount": 0.287,
+      "evidence": {
+        "docUrl": "https://ark.volcengine.com/region:cn-beijing/docs/model-pricing",
+        "asOf": "2026-11-16"
+      }
+    },
+    "notes": "Agent Plan 订阅端点：官方接入文档给出 OpenAI 协议 /api/plan/v3、Anthropic 协议 /api/plan，并要求使用 Agent Plan 专属 Key。ark-code-latest 由控制台切换实际模型。基线按 2026-11-11 官方概览/控制台清单手抄（含 DeepSeek-V4.1-Flash、GLM-5.3、Kimi-K3.1-Pro；Kimi-K3 标注即将下线）。/api/plan/v3 无 GET /models，在线同步改走开放接口 ListArkAgentPlanModel（Access Key 鉴权；控制台「在线目录凭据」填入 IAM AK/SK 密封保存，或读环境变量 VOLCENGINE_ACCESS_KEY_ID/SECRET_ACCESS_KEY）。readDiscount 取 glm-5.3-flash 缓存命中价 ÷ 输入价（0.23/0.80 = 28.7%，官方 model-pricing 表；主力钉住模型。deepseek-v4.1-flash 为 2%，doubao 系 20%）。",
     "website": "https://www.volcengine.com/docs/82379/2374459"
   },
   {

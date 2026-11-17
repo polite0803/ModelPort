@@ -66,6 +66,10 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
   {
     id: 'loomy',
     upstreamIdentity: { declared: '仅 Authorization + token（不发 User-Agent，也没有官方签名）', risk: 'medium' },
+
+    // 前缀缓存：适配器不发 prompt_cache_key，但上游隐式缓存实测有效
+    // （GLM-5.3-Flash 2026-11-15/16 两天 98.9% / 98.4% 命中，来自 usage 上报）。
+    promptCache: { mode: 'implicit-prefix' },
     name: 'Loomy (讯飞)',
     vendor: '科大讯飞',
     loginKind: 'browser',
@@ -97,6 +101,10 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
 {
     id: 'zcode',
     upstreamIdentity: { declared: 'User-Agent: ZCode（动态版本）· X-ZCode-App-Version · 内置官方身份块', risk: 'high' },
+
+    // 显式断点缓存：适配器在最后一个 tool 与 system 块上打 cache_control
+    // （vendor/channel-pack zcode-adapter withToolCacheBreakpoint）。
+    promptCache: { mode: 'explicit-breakpoints' },
     name: 'ZCode (智谱)',
     vendor: '智谱',
     loginKind: 'browser',
@@ -118,6 +126,9 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
   {
     id: 'buddy',
     upstreamIdentity: { declared: 'User-Agent: WorkBuddy/<version> WorkBuddy/<version> CLI/<version>（国内客户端形态）· X-IDE-Version: <version> · 版本线与国际版分开取（copilot.tencent.com 源）', risk: 'high' },
+
+    // 前缀缓存：适配器每个请求体带 prompt_cache_key（vendor/channel-pack buddy-adapter）。
+    promptCache: { mode: 'implicit-prefix' },
     name: 'WorkBuddy (国内版)',
     vendor: '腾讯',
     loginKind: 'browser',
@@ -128,6 +139,9 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
   {
     id: 'workbuddy',
     upstreamIdentity: { declared: 'User-Agent: WorkBuddy/<version> WorkBuddy AI/<version> CLI/<version> · X-IDE-Version: <version> · 版本线取 www.workbuddy.ai（与国际版安装目录一致）', risk: 'high' },
+
+    // 前缀缓存：与 buddy 共用同一适配器，每个请求体带 prompt_cache_key。
+    promptCache: { mode: 'implicit-prefix' },
     name: 'WorkBuddy (国际版)',
     vendor: '腾讯',
     loginKind: 'browser',
@@ -162,6 +176,10 @@ export const ACCOUNT_CHANNELS: readonly ChannelDefinition[] = [
       declared: '华为 IAM OAuth（DPoP ES256）· SDK-HMAC-SHA256 签名 · 码道 IDE 的 AK/SK 临时凭据 · 不发送自定义 UA · 排队重投 10s→30s 退避 · Chat-Id 每请求唯一/Session-Id 按账号派生',
       risk: 'high',
     },
+
+    // 前缀缓存：适配器请求体带 prompt_cache_key（按账号派生的 Session-Id，
+    // vendor/channel-pack llm-adapter CodeArtsAdapter）。
+    promptCache: { mode: 'implicit-prefix' },
     name: 'CodeArts 码道 (华为云)',
     vendor: '华为云',
     loginKind: 'oauth',

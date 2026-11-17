@@ -8,6 +8,7 @@
  */
 
 import type { AggregateCostSignal } from './aggregateCost.ts'
+import type { DiscountWindow } from './discountWindow.ts'
 import type { AggregateCreditSnapshot } from './aggregateCredit.ts'
 import type {
   AggregateQuotaExhaustionRecord,
@@ -45,6 +46,46 @@ export type AggregateAuthKind = 'apiKey' | 'none' | 'unsupported'
 export interface AggregateModelEntry {
   id: string
   name: string
+  /**
+   * 供应商自己声明的时段折扣（错峰/夜间半价这类）。
+   *
+   * 形状与账号渠道的 `RpcModelDiscount` 同一个（`shared/discountWindow.ts` 的
+   * `DiscountWindow` + 窗口内外两个价），所以宿主侧（`effectiveCostOf`）对
+   * 账号渠道与聚合条目走同一条推算 —— 渠道页、模型管理页与 auto 路由读的
+   * 是同一个函数，同一时刻不会给出两个价。
+   *
+   * `weight` 是窗口内的价（折后），`baseWeight` 是窗口外的原价；两者都在时
+   * 界面上印 `x原价→x折`。免费模型不报窗口（常态免费没有「窗口外更贵」的一侧）。
+   */
+  discount?: AggregateModelDiscount
+}
+
+export interface AggregateModelDiscount {
+  /** 窗口内的价（折后）；缺失表示窗口只改原价不改价 */
+  weight?: number
+  /** 窗口外的原价 */
+  baseWeight?: number
+  /** 每日生效时段，钟点字符串（`"22:00"`） */
+  daily: { start: string; end: string }[]
+  /** IANA 时区；缺失 = 宿主本地时区 */
+  timezone?: string
+  validFrom?: number
+  validUntil?: number
+}
+
+/** 聚合目录行的时段折扣（`AggregateModelDiscount`）→ 宿主的 `DiscountWindow`。 */
+export function aggregateDiscountWindowOf(
+  discount: AggregateModelDiscount | undefined,
+): (DiscountWindow & { weight?: number; baseWeight?: number }) | undefined {
+  if (discount === undefined) return undefined
+  return {
+    daily: discount.daily,
+    ...(discount.timezone === undefined ? {} : { timezone: discount.timezone }),
+    ...(discount.validFrom === undefined ? {} : { validFrom: discount.validFrom }),
+    ...(discount.validUntil === undefined ? {} : { validUntil: discount.validUntil }),
+    ...(discount.weight === undefined ? {} : { weight: discount.weight }),
+    ...(discount.baseWeight === undefined ? {} : { baseWeight: discount.baseWeight }),
+  }
 }
 
 /**
