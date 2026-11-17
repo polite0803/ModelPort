@@ -17,7 +17,9 @@
  * - probe the entry's client https endpoint with Chromium's TLS stack (`net.fetch`), which
  *   consults the OS store exactly like Claude Desktop and the browser do. Any HTTP answer,
  *   even 401, means the handshake succeeded: the certificate is public or already
- *   installed, and there is nothing to install;
+ *   installed, and there is nothing to install. The probe asks `/health` (the gateway's
+ *   public liveness endpoint) instead of `/v1/models`: a keyless probe of the model list
+ *   produced a `401 missing_api_key` request-log error every time this panel was opened;
  * - a refused handshake means the machine does not trust what this path presents. Read the
  *   leaf the endpoint presents right now (a plain TLS connect that does not judge - the
  *   probe already judged) and offer it for install;
@@ -154,7 +156,9 @@ export function defaultHandshakeProbe(): HandshakeProbe {
     async handshake(clientOrigin) {
       const { net } = await import('electron')
       try {
-        await net.fetch(`${clientOrigin}/v1/models`, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })
+        await net.fetch(new URL('/health', clientOrigin).toString(), {
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        })
         return 'trusted'
       } catch (cause) {
         const message = cause instanceof Error

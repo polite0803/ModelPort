@@ -50,6 +50,23 @@ test('a refused request is logged as an error row that says why', () => {
     'a refused caller must be identifiable by UA',
   )
 
+  const keylessProbe = buildRejectionLogEntry({
+    method: 'GET',
+    path: '/v1/models',
+    statusCode: 401,
+    code: 'missing_api_key',
+    message: 'API key is required',
+    startedAt: today.start + 1000,
+    now: today.start + 1005,
+    model: '',
+    userAgent: 'some-client/1.2.3',
+    kind: 'probe',
+  })
+  assert.equal(keylessProbe.kind, 'probe')
+  assert.equal(keylessProbe.status, 'error')
+  assert.equal(keylessProbe.statusCode, 401)
+  assert.match(keylessProbe.errorMessage ?? '', /^missing_api_key: API key is required/)
+
   assert.equal(
     buildRejectionLogEntry({
       method: 'GET',
@@ -77,11 +94,16 @@ test('the model stays empty when the body was never parsed', () => {
 test('every refusal path records the request, and only the model API does', () => {
   const server = sourceOf('../../src/main/proxy/server.ts')
 
-  assert.match(server, /recordRejectedRequest\(ctx, 401, 'missing_api_key'/)
+  assert.match(server, /recordRejectedRequest\(ctx, 401, 'missing_api_key', 'API key is required', 'probe'\)/)
   assert.match(server, /userAgent: ctx\.get\('user-agent'\)/, 'refused rows must carry the caller UA')
   assert.match(server, /recordRejectedRequest\(ctx, 401, 'invalid_api_key'/)
   assert.match(server, /recordRejectedRequest\(ctx, routeError\.status, routeError\.body\.error\.code/)
   assert.match(server, /if \(!isModelApiPath\(ctx\.path\)\)/, 'management refusals must not join the model traffic counts')
+  assert.match(
+    server,
+    /if \(kind === 'probe'\) return/,
+    'a keyless probe must stay out of the success-rate ledger',
+  )
   assert.match(server, /storeManager\.recordRequestInStats\(\s*false,\s*entry\.latency/, 'the cards must count the same set as the chart')
 })
 

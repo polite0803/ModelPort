@@ -1,5 +1,8 @@
 import type { RequestLogEntry } from '../store/types.ts'
 
+/** Why a refused request entered the log; only `probe` stays out of traffic stats. */
+export type RequestLogKind = NonNullable<RequestLogEntry['kind']>
+
 /**
  * A request the proxy refused never reaches a provider, so no route records it.
  * Without these rows a client hammering a wrong path or a stale key reads as
@@ -17,11 +20,14 @@ export function buildRejectionLogEntry(input: {
   model: string
   /** Client UA; the only way to name a caller that was refused before any route. */
   userAgent?: string
+  /** Rejection kind. Only keyless capability probes are marked as non-traffic. */
+  kind?: 'client' | 'probe'
 }): Omit<RequestLogEntry, 'id'> {
   const latency = Math.max(0, input.now - input.startedAt)
 
   return {
     timestamp: input.startedAt,
+    ...(input.kind === undefined ? {} : { kind: input.kind }),
     status: 'error',
     statusCode: input.statusCode,
     method: input.method,
@@ -71,6 +77,7 @@ export function rejectionEntryFromContext(
   message: string,
   /** The id this response already carries (`X-Request-Id`); a row without it cannot be joined. */
   requestId?: string,
+  kind?: 'client' | 'probe',
 ): Omit<RequestLogEntry, 'id'> {
   const startedAt = typeof ctx.state?.startedAt === 'number' ? ctx.state.startedAt : Date.now()
 
@@ -85,6 +92,7 @@ export function rejectionEntryFromContext(
       now: Date.now(),
       model: requestedModelOf(ctx.request?.body),
       ...(typeof ctx.get === 'function' ? { userAgent: ctx.get('user-agent') } : {}),
+      kind,
     }),
     ...(requestId === undefined ? {} : { requestId }),
   }

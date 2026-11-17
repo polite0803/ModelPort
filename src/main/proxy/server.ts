@@ -34,7 +34,12 @@ import {
 import { autoRouter } from './autoRouter'
 import { managementRateLimiter } from './middleware/rateLimiter'
 import { buildRouteError, isModelApiPath, isUnmountedRouteNotFound } from './routeErrorPolicy'
-import { buildRejectionLogEntry, createUnmountedRouteTracer, requestedModelOf } from './rejectionLog'
+import {
+  buildRejectionLogEntry,
+  createUnmountedRouteTracer,
+  requestedModelOf,
+  type RequestLogKind,
+} from './rejectionLog'
 import { anthropicErrorBody } from '../../shared/anthropicWire'
 import { CLIENT_HEADER, clientStatsKey, identifyClient } from '../../shared/clientProfile'
 
@@ -108,7 +113,13 @@ export function flushKeyUsage(): void {
  * Without these rows a client hammering a wrong path or a stale key reads as
  * "no traffic" on the same dashboard that reports the refusals as errors.
  */
-function recordRejectedRequest(ctx: Context, statusCode: number, code: string, message: string): void {
+function recordRejectedRequest(
+  ctx: Context,
+  statusCode: number,
+  code: string,
+  message: string,
+  kind?: RequestLogKind,
+): void {
   if (!isModelApiPath(ctx.path)) {
     return
   }
@@ -126,9 +137,13 @@ function recordRejectedRequest(ctx: Context, statusCode: number, code: string, m
     // A refused request never reaches a route: without the UA the row cannot
     // be attributed to the client that sent it.
     userAgent: ctx.get('user-agent'),
+    kind,
   })
 
   storeManager.addRequestLog(entry)
+  // A probe is kept for diagnostics but is not model traffic: the dashboard's
+  // success rate has to describe served requests, not capability polling.
+  if (kind === 'probe') return
   const client = identifyClient({
     declared: ctx.headers[CLIENT_HEADER],
     userAgent: ctx.headers['user-agent'],
@@ -261,7 +276,10 @@ export class ProxyServer {
                 code: 'missing_api_key',
               },
             }
-        recordRejectedRequest(ctx, 401, 'missing_api_key', 'API key is required')
+        // 未带 key 的能力探测（登录前拉模型列表、证书探测等）必须继续返回
+        // 401，但它是「客户端还没配好」的事实，不是网关服务失败。按探测行
+        // 留证并打进成功率分母之外，和 Ollama 未挂载探测同一口径。
+        recordRejectedRequest(ctx, 401, 'missing_api_key', 'API key is required', 'probe')
         return
       }
 

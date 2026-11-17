@@ -2146,6 +2146,12 @@ would flush the log list.
   constant-time digest compare). With no key configured the server only binds a loopback host
   (`127.0.0.1` / `::1` / `localhost`) and `start()` refuses anything else; CORS `*` is sent only in
   that key-less loopback mode.
+- A request with **no key at all** keeps its 401 `missing_api_key` body and request-log row, but
+  is logged with `kind: 'probe'` and excluded from request/success statistics: it is a client that
+  has not been configured yet, not a failed served request. An explicitly wrong key stays
+  `invalid_api_key` and remains in the error count. `GET /health` is the keyless liveness probe
+  the console's TLS handshake check uses, so opening the certificate panel does not generate a
+  keyless `/v1/models` rejection.
 - Config writes validate `apiKeys`, `proxyHost`, `enableApiKey`; `/v1/management/proxy/start` and
   `/restart` reject non-loopback hosts with `invalid_host`.
 - Errors use OpenAI shapes: 401/403 → `authentication_error`, 429 → `rate_limit_error` plus

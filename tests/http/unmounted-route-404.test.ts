@@ -183,7 +183,7 @@ test('the fallback stops writing request rows for unmounted 404 and traces inste
   assert.match(server, /recordRejectedRequest\(ctx, routeError\.status, routeError\.body\.error\.code/)
 
   // 不许误伤 2：鉴权拒绝行原样保留（fail-closed 的证据链）。
-  assert.match(server, /recordRejectedRequest\(ctx, 401, 'missing_api_key'/)
+  assert.match(server, /recordRejectedRequest\(ctx, 401, 'missing_api_key', 'API key is required', 'probe'\)/)
   assert.match(server, /recordRejectedRequest\(ctx, 401, 'invalid_api_key'/)
 })
 
