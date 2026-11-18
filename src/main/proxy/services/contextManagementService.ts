@@ -136,6 +136,20 @@ export const CONTEXT_WINDOW_TIERS = {
 
 export type ContextWindowTier = keyof typeof CONTEXT_WINDOW_TIERS
 
+/**
+ * 撞过首块超时的通道上，预填充预算的安全上限。
+ *
+ * 读数来自现网（2026-11-18，同一批路由）：成功请求的输入 token 上限 106,826，
+ * 200k 以上的成功 0 条；而 38 万 token 的请求在 loomy/GLM-5.3-Flash 上连续 19 次
+ * 首块超时、一个字节都没吐。超长预填充本身就是那条通道开不了口的直接成因，所以
+ * 对**撞过**首块超时的 (账号, 模型)，把窗口收紧到这个数 —— 10 万 × 客户端
+ * 95% 的压缩点正好落在观测到的成功上限之下，留出本轮新增的余量。
+ *
+ * 这是**窗口**而不是 `costBudget`：成本目标装不下 system+尾巴时会被 `budgetFor`
+ * 拒掉并退回原窗口（那就等于没收紧），窗口则直接参与 `resolveTrimBudget`。
+ */
+export const PREFILL_SAFE_WINDOW_TOKENS = 100_000
+
 /** 只认三个合法档位；别的写法（含老配置里的数字）当作没选。 */
 export function isContextWindowTier(value: unknown): value is ContextWindowTier {
   return typeof value === 'string' && Object.prototype.hasOwnProperty.call(CONTEXT_WINDOW_TIERS, value)

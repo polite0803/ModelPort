@@ -35,6 +35,9 @@ import {
   AUTO_EXHAUSTED_RETRY_AFTER_SECONDS,
   AUTO_WALL_CLOCK_BUDGET_MS,
   autoExhaustedResponse,
+  CLIENT_RETRY_AFTER_CAP_SECONDS,
+  capClientRetryAfterSeconds,
+  capRetryAfterHeader,
   createIdleWatchdog,
   describeAttemptFailure,
   FIRST_EVENT_TIMEOUT_MS,
@@ -751,8 +754,22 @@ test('自动路由候选耗尽：多家试过且失败在候选侧才收口成�
   assert.equal(poolExhausted?.code, 'no_available_model')
   assert.equal(poolExhausted?.retryAfterSeconds, AUTO_EXHAUSTED_RETRY_AFTER_SECONDS)
 
-  // 上游给了解禁时刻就用它，不吃默认值
-  assert.equal(autoExhaustedResponse(429, 'codex', '均在限流中', 4, 1800)?.retryAfterSeconds, 1800)
+  // 上游给了解禁时刻就用它，但对外封顶（`CLIENT_RETRY_AFTER_CAP_SECONDS`）：
+  // 账号冷却仍按事实记，客户端不该被一个十几小时/几天的窗口判死。
+  assert.equal(
+    autoExhaustedResponse(429, 'codex', '均在限流中', 4, 1800)?.retryAfterSeconds,
+    CLIENT_RETRY_AFTER_CAP_SECONDS,
+  )
+  // 2026-11-18 实测值：上游 `weekly usage quota` 的复位时刻被透传成 403612s ≈ 4.65 天。
+  assert.equal(
+    autoExhaustedResponse(429, 'codex', 'weekly usage quota exceeded', 4, 403612)?.retryAfterSeconds,
+    CLIENT_RETRY_AFTER_CAP_SECONDS,
+  )
+  // 封顶只压不抬：短窗口原样保留
+  assert.equal(
+    autoExhaustedResponse(429, 'codex', '排队中', 4, 15)?.retryAfterSeconds,
+    15,
+  )
 
   // 5xx / 401 / 403 在多家之后同属候选侧耗尽
   assert.ok(autoExhaustedResponse(500, 'daily', 'boom', 3))
@@ -782,6 +799,26 @@ test('Retry-After 归一：秒数与 HTTP 日期都读，读不懂就当没给',
   assert.equal(parseRetryAfterSeconds(-1), undefined)
   const seconds = parseRetryAfterSeconds(new Date(Date.now() + 90_000).toUTCString())
   assert.ok(seconds !== undefined && seconds >= 80 && seconds <= 95, `date form -> ${seconds}`)
+})
+
+test('对外 Retry-After 封顶：只压不抬，读不懂的头原样保留', () => {
+  assert.equal(capClientRetryAfterSeconds(403612), CLIENT_RETRY_AFTER_CAP_SECONDS)
+  assert.equal(capClientRetryAfterSeconds(CLIENT_RETRY_AFTER_CAP_SECONDS), CLIENT_RETRY_AFTER_CAP_SECONDS)
+  assert.equal(capClientRetryAfterSeconds(CLIENT_RETRY_AFTER_CAP_SECONDS - 1), CLIENT_RETRY_AFTER_CAP_SECONDS - 1)
+  assert.equal(capClientRetryAfterSeconds(0), 1)
+  assert.equal(capClientRetryAfterSeconds(-5), 1)
+  // 非有限值按上限处理：宁可多等一次，也不要写一个 NaN 进头
+  assert.equal(capClientRetryAfterSeconds(Number.POSITIVE_INFINITY), CLIENT_RETRY_AFTER_CAP_SECONDS)
+  assert.equal(capClientRetryAfterSeconds(Number.NaN), CLIENT_RETRY_AFTER_CAP_SECONDS)
+  // 小数向上取整，不小于 1
+  assert.equal(capClientRetryAfterSeconds(1.2), 2)
+
+  assert.equal(capRetryAfterHeader('403612'), String(CLIENT_RETRY_AFTER_CAP_SECONDS))
+  assert.equal(capRetryAfterHeader('30'), '30')
+  // 读不懂的写法原样保留（让上游字面量说话，不拿猜测值顶掉）；HTTP 日期形式同理
+  const futureDate = new Date(Date.now() + 90_000).toUTCString()
+  assert.equal(capRetryAfterHeader(futureDate), futureDate)
+  assert.equal(capRetryAfterHeader('not a time'), 'not a time')
 })
 
 test('换家取证必须落到源码：循环记录每次失败，日志写出 failures（源码钉点）', () => {

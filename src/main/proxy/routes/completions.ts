@@ -22,7 +22,7 @@ import { routeHeaderValue, toHeaderValue } from '../utils/headerValue'
 import { CLIENT_HEADER, clientHeaderValue, clientStatsKey, identifyClient } from '../../../shared/clientProfile'
 import { nextDailyUsage } from '../../../shared/dailyUsage.ts'
 import { mapForwardFailure, retryAfterHeader, withRequestId } from '../errorMapping'
-import { autoExhaustedResponse, parseRetryAfterSeconds, SILENT_CHANNEL_SKIP_CODE } from '../failover'
+import { autoExhaustedResponse, capRetryAfterHeader, parseRetryAfterSeconds, SILENT_CHANNEL_SKIP_CODE } from '../failover'
 import { accountRuntime } from '../accountRuntime'
 import { startSseHeartbeat } from '../utils/sseHeartbeat'
 import { normalizeOutputCap } from '../utils/outputCap'
@@ -642,7 +642,7 @@ router.post('/completions', async (ctx: Context) => {
         const retryAfter =
           mapped.retryAfter
           ?? retryAfterHeader(result.headers as Record<string, unknown> | undefined)
-        if (retryAfter) ctx.set('Retry-After', retryAfter)
+        if (retryAfter) ctx.set('Retry-After', capRetryAfterHeader(retryAfter))
       }
       const errorBody = {
         error: {

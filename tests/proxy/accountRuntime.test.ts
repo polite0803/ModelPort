@@ -347,6 +347,26 @@ test('静默通道：近期有成功就不判静默（慢但活着的通道）',
   assert.equal(runtime.recordFirstBlockTimeout('ch', 'm', stale), 120_000)
 })
 
+/**
+ * 「撞过首块超时」是裁剪层收紧预填充预算的判据（2026-11-18）。
+ *
+ * 与 `silentChannel` 分开：那个回答「现在要不要跳过」，这个回答「这条通道在多大
+ * 尺寸上开得了口」。一次超时就算 —— 裁剪本来就是一次机会，不该等连击门槛。
+ */
+test('撞过首块超时：一次即记，成功后归零，按 (账号, 模型) 分开', () => {
+  const runtime = new AccountRuntime()
+
+  assert.equal(runtime.firstBlockTimeoutSeen('ch', 'm'), false, '负控：没撞过就是没撞过')
+  runtime.recordFirstBlockTimeout('ch', 'm', NOW)
+  assert.equal(runtime.firstBlockTimeoutSeen('ch', 'm'), true, '一次超时即可收紧，不等连击')
+  assert.equal(runtime.firstBlockTimeoutSeen('ch', 'm2'), false, '别的模型不受牵连')
+  assert.equal(runtime.firstBlockTimeoutSeen('ch2', 'm'), false, '别的账号不受牵连')
+
+  // 成功一次 ⇒ 这个尺寸过得去，判据自动失效（与静默档同一处置）
+  runtime.recordSuccess('ch', 'm', NOW + 1000)
+  assert.equal(runtime.firstBlockTimeoutSeen('ch', 'm'), false)
+})
+
 test('静默通道：探测再超时按指数翻倍、5 分钟封顶，一次成功清零', () => {
   const runtime = new AccountRuntime()
 

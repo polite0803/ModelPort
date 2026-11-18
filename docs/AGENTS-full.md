@@ -1934,6 +1934,18 @@ Numbers live here rather than in `AGENTS.md`; every one of them was read off the
   quota-window exhaustion (`free_usage_limit`, daily limit, all channels throttled). The classifier
   is narrow on purpose and never matches a bare 429, a bare "rate limit", or "for your
   subscription tier" - those are throughput facts, not verdicts about the account.
+- **Client-facing `Retry-After` is capped; the account cooldown is not.** They are two different
+  quantities. `coolingUntil` keeps the upstream's own reset instant - a `weekly usage quota` message
+  legitimately parks an account for days, and shortening it only sends real requests into the same
+  wall. `Retry-After` is only "come back and ask again", and clients read it literally: live
+  2026-11-18 Codex logged `retrying sampling request (1/5 in 401893.998 s)`, spent its whole retry
+  budget waiting, and the turn was dead for 4.65 days. Every client-visible value goes through
+  `capClientRetryAfterSeconds` / `capRetryAfterHeader` (`CLIENT_RETRY_AFTER_CAP_SECONDS` = 5 min, the
+  same order as the silent-channel window's upper bound). A capped client returns, the router
+  re-decides, and a pin still cooling is pruned at candidate selection with no upstream call. The
+  body's `retry_after_seconds` and `X-ModelPort-Pin: ...;retry=<s>` carry the same capped number
+  (tests assert the header and the body agree). The raw upstream instant stays visible in the
+  account's `coolingUntil` / `routes:preview`, which is where diagnosis belongs.
 
 ### Silent single-candidate channel: fast-fail before dispatch (2026-11-16)
 
@@ -2250,6 +2262,20 @@ would flush the log list.
   target would truncate every annotated model to 4000 tokens. Configured in 上下文管理 as one
   `channel: tokens` line per channel; the renderer keeps it in a separate state field from the tier
   so an edit can never rewrite `maxTokens`.
+- **A channel that has never produced a first block gets a narrowed *window*, not a cost target
+  (2026-11-18).** Codex sends its whole conversation when its own catalogue carries no window, and
+  the live failure was one ~380k-token request to `loomy/GLM-5.3-Flash` timing out nineteen times
+  before a single byte (`first_block_timeout`). That path cannot be fixed with
+  `costBudgetByProvider`: a target that does not fit is declined and the window wins, which is
+  exactly "no tightening". So `forwarder.ts` asks
+  `accountRuntime.firstBlockTimeoutSeen(account.id, actualModel)` and, when true, feeds
+  `min(declaredWindow ?? PREFILL_SAFE_WINDOW_TOKENS, PREFILL_SAFE_WINDOW_TOKENS)` as the **window**.
+  The number is measured, not picked: on 2026-11-18 the largest successful input estimate in the
+  whole request log was 106,826 tokens and no ≥200k request succeeded, so 100,000 × the client's
+  95% compaction point sits just under the observed ceiling. `min`, never replace - a model that
+  already declares less must not be widened. One success clears the flag (`clearSilent`), because
+  passing proves the size works; and it only applies where trimming runs at all
+  (`contextManagement.channelIds`).
 - **`trimmed` means "the bytes changed", not "fewer messages".** `ContextProcessResult.changed`
   is what the forwarder adopts (`if (processResult.changed)`); deriving it from `finalCount !==
   originalCount` threw away every truncation, because a truncation keeps the count and rewrites one

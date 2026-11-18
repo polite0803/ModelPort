@@ -11,13 +11,18 @@
  *    档 never fires，落到 60s→10min 指数。对照 B（只有额度文案、无复位时刻）必须
  *    ≥1h；旧判据在这一格只会给 60s。
  * 2. 上游明写的复位时刻从不解析 ⇒ 冷却每到期一次就放一笔真请求去撞同一堵墙再翻倍。
- *    对照 A（额度文案 + 2h 后的复位时刻）必须报到 ~2h，而不是 1h 档。
+ *    对照 A（额度文案 + 2h 后的复位时刻）**内部**必须记 ~2h，而不是 1h 档。
  *
  * 窄判据不许松：对照 C（裸 429 / rate limit）仍是分钟级，否则就是把限流误判成额度耗尽。
  *
  * 3. 终局档（1h/6h）是**没有事实时的估计**，不许与上游写明的复位时刻取更晚者 ——
- *    否则客户端白等最多一整档。对照 E（复位在 45 分钟后）必须报 ~2700s 而不是 3600s；
- *    对照 B 证明没有时刻时终局档仍然兜底。
+ *    否则内部冷却白等最多一整档。对照 E（复位在 45 分钟后）内部必须是 ~2700s 而不是
+ *    3600s；对照 B 证明没有时刻时终局档仍然兜底。
+ *
+ * 4. **对外 `Retry-After` 与内部冷却是两个数（2026-11-18）。** 客户端会照章睡满这个
+ *    头：现网 Codex 读到 401893s 后把 5 次重试全花在等待上，这一轮等于被判死 4.65 天。
+ *    所以对外封顶到 `CLIENT_RETRY_AFTER_CAP_SECONDS`（5 分钟），内部仍按事实时刻记。
+ *    A/B/D/E 里的「事实」断言因此落在 `internalCoolingSeconds` 上。
  */
 import { test, after, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
@@ -26,10 +31,12 @@ import { bootstrapStore, loadModule } from '../routes/harness.mjs'
 import type { ChatCompletionRequest } from '../../src/main/proxy/types.ts'
 import type { ModelRoute } from '../../src/shared/types.ts'
 import {
+  CLIENT_RETRY_AFTER_CAP_SECONDS,
   permanentRefusalCooldownMs,
   quotaWindowResetMs,
   QUOTA_WINDOW_COOLDOWN_MS,
 } from '../../src/main/proxy/failover.ts'
+import { accountRuntime } from '../../src/main/proxy/accountRuntime.ts'
 
 const HOUR = 60 * 60 * 1000
 
@@ -207,6 +214,17 @@ const retrySeconds = (route: ModelRoute): number => {
   return decision.pinCooling?.retryAfterSeconds ?? 0
 }
 
+/**
+ * **内部**冷却还剩多久。与 `retrySeconds` 分属两层：那个是回给客户端的
+ * `Retry-After`（封顶到 `CLIENT_RETRY_AFTER_CAP_SECONDS`），这个是账号事实时刻
+ * （上游写明多久就多久，不改）。2026-11-18 起两者刻意不相等。
+ */
+const internalCoolingSeconds = (): number => {
+  const until = accountRuntime.snapshot('qwr-acct1', Date.now(), 'qwr-upstream').coolingUntil
+  assert.ok(until !== undefined, '内部必须记下冷却事实')
+  return Math.round((until - Date.now()) / 1000)
+}
+
 /** 把时刻写成上游那种 `YYYY-MM-DD HH:MM:SS +0000` 形状（UTC，避免宿主时区影响）。 */
 function upstreamStamp(at: Date): string {
   return `${at.toISOString().slice(0, 19).replace('T', ' ')} +0000`
@@ -217,7 +235,7 @@ afterEach(() => {
 })
 after(() => harness.dispose())
 
-test('A 落库：上游写明 2h 后复位 ⇒ 客户端读到的 Retry-After 是 ~2h，不是 1h 档', () => {
+test('A 落库：上游写明 2h 后复位 ⇒ 内部按 2h 冷却，对外报封顶值', () => {
   const route = pinnedRoute()
   const message =
     'You have exceeded the 5-hour usage quota. It will reset at ' +
@@ -226,7 +244,9 @@ test('A 落库：上游写明 2h 后复位 ⇒ 客户端读到的 Retry-After �
   autoRouter.markAccountCooldown('qwr-acct1', 429, 'qwr-upstream', { message })
 
   const retry = retrySeconds(route)
-  assert.ok(retry > 1.5 * 3600 && retry <= 2 * 3600, `应报 ~7200s（复位时刻），实际 ${retry}s`)
+  assert.equal(retry, CLIENT_RETRY_AFTER_CAP_SECONDS, `对外封顶，实际 ${retry}s`)
+  const internal = internalCoolingSeconds()
+  assert.ok(internal > 1.5 * 3600 && internal <= 2 * 3600, `内部应记 ~7200s（复位时刻），实际 ${internal}s`)
 })
 
 test('B 对照：只有额度文案、没有复位时刻 ⇒ 1 小时档（旧判据在这一格只给 60s）', () => {
@@ -236,7 +256,9 @@ test('B 对照：只有额度文案、没有复位时刻 ⇒ 1 小时档（旧�
   })
 
   const retry = retrySeconds(route)
-  assert.ok(retry > 3500 && retry <= 3600, `应报 ~3600s（额度窗档），实际 ${retry}s`)
+  assert.equal(retry, CLIENT_RETRY_AFTER_CAP_SECONDS, `对外封顶，实际 ${retry}s`)
+  const internal = internalCoolingSeconds()
+  assert.ok(internal > 3500 && internal <= 3600, `内部应记 ~3600s（额度窗档），实际 ${internal}s`)
 })
 
 test('C 对照：裸 429 限流仍是分钟级，不被升成小时级', () => {
@@ -246,10 +268,11 @@ test('C 对照：裸 429 限流仍是分钟级，不被升成小时级', () => {
   })
 
   const retry = retrySeconds(route)
+  // 封顶只压不抬：60s 本来就在上限之内，原样给客户端
   assert.ok(retry > 50 && retry <= 60, `应报 ~60s（指数退避首档），实际 ${retry}s`)
 })
 
-test('D 复位时刻与 Retry-After 取更晚者：上游头更晚时以头为准', () => {
+test('D 复位时刻与 Retry-After 取更晚者：内部按更晚者记，对外仍封顶', () => {
   const route = pinnedRoute()
   autoRouter.markAccountCooldown('qwr-acct1', 429, 'qwr-upstream', {
     message:
@@ -260,10 +283,12 @@ test('D 复位时刻与 Retry-After 取更晚者：上游头更晚时以头为�
   })
 
   const retry = retrySeconds(route)
-  assert.ok(retry > 3.5 * 3600 && retry <= 4 * 3600, `应报 ~14400s（Retry-After 更晚），实际 ${retry}s`)
+  assert.equal(retry, CLIENT_RETRY_AFTER_CAP_SECONDS, `对外封顶，实际 ${retry}s`)
+  const internal = internalCoolingSeconds()
+  assert.ok(internal > 3.5 * 3600 && internal <= 4 * 3600, `内部应记 ~14400s（取更晚者），实际 ${internal}s`)
 })
 
-test('E 事实压过估计：复位在 45 分钟后 ⇒ 报 ~2700s，不被 1h 档抬到 3600s', () => {
+test('E 事实压过估计：内部按 45 分钟记，不被 1h 档抬到 3600s', () => {
   const route = pinnedRoute()
   autoRouter.markAccountCooldown('qwr-acct1', 429, 'qwr-upstream', {
     message:
@@ -273,8 +298,11 @@ test('E 事实压过估计：复位在 45 分钟后 ⇒ 报 ~2700s，不被 1h �
   })
 
   const retry = retrySeconds(route)
-  assert.ok(retry > 2600 && retry <= 2700, `应报 ~2700s（上游写明的复位时刻），实际 ${retry}s`)
+  assert.equal(retry, CLIENT_RETRY_AFTER_CAP_SECONDS, `对外封顶，实际 ${retry}s`)
   // 2026-11-15 现网：真实复位 09:56Z，旧修法把 1h 估计档与事实取更晚者 ⇒ 睡到 10:11Z，
-  // 客户端白等 15 分钟。终局档只在没有事实时刻时兜底（对照 B）。
-  assert.ok(retry < 3500, '1 小时终局档是估计值，不得压过上游写明的事实时刻')
+  // 客户端白等 15 分钟。终局档只在没有事实时刻时兜底（对照 B）。这条判据现在只对
+  // **内部**冷却成立 —— 对外一律封顶，客户端不会被任何一个长窗口判死。
+  const internal = internalCoolingSeconds()
+  assert.ok(internal > 2600 && internal <= 2700, `内部应记 ~2700s（上游写明的复位时刻），实际 ${internal}s`)
+  assert.ok(internal < 3500, '1 小时终局档是估计值，不得压过上游写明的事实时刻')
 })

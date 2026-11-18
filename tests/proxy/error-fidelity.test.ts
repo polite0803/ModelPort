@@ -12,6 +12,7 @@ import {
   mapForwardFailure,
   withRequestId,
 } from '../../src/main/proxy/errorMapping.ts'
+import { CLIENT_RETRY_AFTER_CAP_SECONDS } from '../../src/main/proxy/failover.ts'
 
 test('OpenAI 错误体：message/type/param/code/metadata 全部保留', () => {
   const details = pickUpstreamErrorDetails({
@@ -115,7 +116,21 @@ test('渠道包的额度/限流码：翻译成客户端契约并按 429 交出�
   assert.equal(quota.status, 429, '包在发请求前判定的限流不是服务端故障')
   assert.equal(quota.type, 'rate_limit_error')
   assert.equal(quota.code, 'insufficient_quota')
-  assert.equal(quota.retryAfter, '600', '解禁时刻必须随 429 一起交给客户端')
+  // 解禁时刻随 429 一起交给客户端；超过对外上限的按上限给（客户端会照章睡满）
+  assert.equal(
+    quota.retryAfter,
+    String(CLIENT_RETRY_AFTER_CAP_SECONDS),
+    '超出上限的解禁时刻必须被压到上限',
+  )
+  assert.equal(
+    mapForwardFailure({
+      status: 502,
+      details: { message: 'Raccoon：额度已用尽', code: 'QUOTA_EXCEEDED' },
+      retryAfter: '120',
+    }).retryAfter,
+    '120',
+    '上限之内的解禁时刻原样透传',
+  )
 
   const rate = mapForwardFailure({
     status: 502,

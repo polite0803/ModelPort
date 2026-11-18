@@ -114,7 +114,11 @@ import { FIRST_ATTEMPT_CAP_MS, MIN_REMAINING_FOR_NEXT_ATTEMPT_MS, planAttemptDea
 import { stripUnsupportedForBuiltin } from './parameterPolicy'
 import { ensureAnthropicOutputCap, outputCapFallbackOf } from './utils/outputCap.ts'
 import { opencodeAffinityHeaders } from './utils/opencodeAffinity.ts'
-import { createContextManagementService, trimAppliesToProvider } from './services/contextManagementService'
+import {
+  createContextManagementService,
+  PREFILL_SAFE_WINDOW_TOKENS,
+  trimAppliesToProvider,
+} from './services/contextManagementService'
 import { declaredContextWindowOf } from './modelTrimWindow'
 import { accountChannelManager } from '../providers/accountChannels/manager'
 import { getChannelDefinition } from '../providers/accountChannels/catalogue'
@@ -544,7 +548,14 @@ export class RequestForwarder {
           // 预算按**这一跳真正服务的那个模型**自己的窗口算：路由可以指向任意模型，
           // 同一家供应商也同时挂 128K 与 1M 两档，任何按供应商或全局写的数都会在
           // 某个模型上错。标注缺席时（`undefined`）才回落到配置的档位。
-          const declaredContextWindow = declaredContextWindowOf(provider, actualModel)
+          // 撞过首块超时的 (账号, 模型) 把窗口收紧到实测的预填充安全线：超长预填充
+          // 就是那条通道开不了口的直接成因（2026-11-18 loomy 上 38 万 token 连续 19
+          // 次零字节超时，10 万以内同日有成功）。取 min 不替换 —— 本来就更小的模型
+          // 不该被放大。成功一次后 `firstBlockTimeoutSeen` 自动归零。
+          const declaredWindow = declaredContextWindowOf(provider, actualModel)
+          const declaredContextWindow = accountRuntime.firstBlockTimeoutSeen(account.id, actualModel)
+            ? Math.min(declaredWindow ?? PREFILL_SAFE_WINDOW_TOKENS, PREFILL_SAFE_WINDOW_TOKENS)
+            : declaredWindow
           const contextService = createContextManagementService(
             config.contextManagement || {},
             provider.id,

@@ -614,6 +614,41 @@ export interface AutoExhaustedResponse {
  */
 export const AUTO_EXHAUSTED_RETRY_AFTER_SECONDS = 60
 
+/**
+ * 回给客户端的 `Retry-After` 上限（秒）。
+ *
+ * 账号冷却可以很长，而且必须长：上游写明 `weekly usage quota` 的复位时刻时，
+ * `markAccountCooldown` 会把 4.65 天原样记进 `coolingUntil` —— 那是**账号事实**，
+ * 改成小数只会让网关反复拿真请求去撞同一堵墙。但 `Retry-After` 是**请求级**语义：
+ * 「过多久回来再试一次」。客户端会照章睡满，2026-11-18 Codex 实测
+ * `retrying sampling request (1/5 in 401893.998s)` —— 五次重试预算全花在等待上，
+ * 这一轮等于被一句「此刻没有候选可派」判死。
+ *
+ * 上限取 5 分钟：与静默通道跳过窗口的上界（`accountRuntime.ts::SILENT_MAX_MS`）
+ * 同一个量级 —— 网关在最坏情况下也只期望客户端等这么久。到期后客户端回来，网关
+ * 重新决策一次；被钉住的候选仍在冷却时在选号阶段就剔掉，不产生任何上游调用。
+ *
+ * **内部冷却不经过这里**：`markAccountCooldown` 的 `retryAfterMs` 仍按上游事实走。
+ */
+export const CLIENT_RETRY_AFTER_CAP_SECONDS = 5 * 60
+
+/** 把对外的等待秒数收进 {@link CLIENT_RETRY_AFTER_CAP_SECONDS}。非有限值按上限处理。 */
+export function capClientRetryAfterSeconds(seconds: number): number {
+  if (!Number.isFinite(seconds)) return CLIENT_RETRY_AFTER_CAP_SECONDS
+  return Math.min(CLIENT_RETRY_AFTER_CAP_SECONDS, Math.max(1, Math.ceil(seconds)))
+}
+
+/**
+ * `Retry-After` 头值的封顶。读不懂的写法原样保留 —— 宁可让客户端按上游字面量走，
+ * 也不要拿一个猜测值顶掉它。
+ */
+export function capRetryAfterHeader(value: string): string {
+  const seconds = parseRetryAfterSeconds(value)
+  if (seconds === undefined) return value
+  const capped = capClientRetryAfterSeconds(seconds)
+  return capped === seconds ? value : String(capped)
+}
+
 /** `Retry-After` 可以是秒数也可以是 HTTP 日期；两种都归一成秒数，读不懂就当没给。 */
 export function parseRetryAfterSeconds(
   value: string | number | undefined,
@@ -677,7 +712,9 @@ export function autoExhaustedResponse(
     message: model === undefined
       ? `Route '${routeName}' exhausted all ${attempts} candidates (last: ${lastError ?? status ?? 'no status'})`
       : `Route '${routeName}' exhausted all ${attempts} accounts of '${model}' (last: ${lastError ?? status ?? 'no status'})`,
-    retryAfterSeconds: upstreamRetryAfterSeconds ?? AUTO_EXHAUSTED_RETRY_AFTER_SECONDS,
+    retryAfterSeconds: capClientRetryAfterSeconds(
+      upstreamRetryAfterSeconds ?? AUTO_EXHAUSTED_RETRY_AFTER_SECONDS,
+    ),
   }
 }
 

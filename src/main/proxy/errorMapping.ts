@@ -1,4 +1,4 @@
-import { isChannelCredentialFailure, isChannelRiskControlFailure } from './failover.ts'
+import { capRetryAfterHeader, isChannelCredentialFailure, isChannelRiskControlFailure } from './failover.ts'
 import type { UpstreamErrorDetails } from './types.ts'
 
 export type ErrorProtocol = 'openai' | 'anthropic'
@@ -125,7 +125,7 @@ export function mapForwardFailure(
     param: input.details?.param ?? null,
     code,
     ...(input.details?.metadata === undefined ? {} : { metadata: input.details.metadata }),
-    ...(input.retryAfter === undefined ? {} : { retryAfter: input.retryAfter }),
+    ...(input.retryAfter === undefined ? {} : { retryAfter: capRetryAfterHeader(input.retryAfter) }),
   }
 }
 

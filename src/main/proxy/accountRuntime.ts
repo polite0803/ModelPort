@@ -411,6 +411,20 @@ export class AccountRuntime {
     return { retryAfterMs: flow.silentUntil - now, timeouts: flow.silentTimeouts }
   }
 
+  /**
+   * 这条 (账号, 模型) 自上次成功以来，是否撞过「首块前零字节超时」。
+   *
+   * 与 {@link silentChannel} 回答的不是同一件事：那个是「现在要不要跳过」，这个是
+   * 「这条通道在多大尺寸上开得了口」。裁剪层用它收紧预填充预算 —— 超长预填充本身
+   * 就是首块超时的直接成因（2026-11-18：38 万 token 在 loomy 上连续 19 次一个字节
+   * 都不吐，而 10 万以内同日有成功读数）。成功后 `clearSilent` 把它归零，判据自动
+   * 失效 —— 能过就说明这个尺寸不需要再收紧。
+   */
+  firstBlockTimeoutSeen(accountId: string, model: string): boolean {
+    const flow = this.flows.get(this.flowKey(accountId, model))
+    return flow !== undefined && flow.silentTimeouts > 0
+  }
+
   /** 不带 `model` = 池子/凭据变了（重新登录、账号增删），清该账号全部静默档。 */
   private clearSilent(accountId: string, model?: string, now: number = Date.now()): void {
     if (model !== undefined) {

@@ -13,7 +13,7 @@ import { requestForwarder } from '../forwarder'
 import type { ForwardChainOutcome } from '../forwarder'
 import { isAccountFault, isSameProviderRotationStatus, isContextOverflowError, SILENT_CHANNEL_SKIP_CODE } from '../failover'
 import { isAccountArrearsError, isRecoverableChannelFailure } from '../failover'
-import { autoExhaustedResponse, parseRetryAfterSeconds } from '../failover'
+import { autoExhaustedResponse, capClientRetryAfterSeconds, capRetryAfterHeader, parseRetryAfterSeconds } from '../failover'
 import { SSEParser, extractStreamErrorFrame, streamHandler, type StreamErrorFrame } from '../stream'
 import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
@@ -1030,8 +1030,9 @@ router.post('/completions', async (ctx: Context) => {
     // 面板上没有这一段就再也查不回来了。
     const refusalAuto = autoLogRecord(autoDecision, 0, [], null)
     // 预检剔空、且每一次剔除都是 worker 亲口说的限流：这是「等窗口复位」，不是
-    // 「配置里没有模型」。`Retry-After` 取最早解禁时刻（封顶 1 小时，避免客户端
-    // 按一个十几小时的窗口禁用整条路由）。
+    // 「配置里没有模型」。`Retry-After` 取最早解禁时刻，并收进对外上限
+    // （`capClientRetryAfterSeconds`）—— 客户端会照章睡满，一个十几小时的窗口
+    // 等于把这一轮判死；账号冷却本身仍按事实时刻记。
     const preflightTransient = lastStripped.length > 0
       && lastStripped.every(strip => strip.reason === 'rate_limited')
       ? (() => {
@@ -1040,7 +1041,7 @@ router.post('/completions', async (ctx: Context) => {
           return {
             cause: 'rate_limit' as const,
             skipped: lastStripped.length,
-            retryAfterSeconds: Math.max(1, Math.min(3600, Math.ceil((until - now) / 1000))),
+            retryAfterSeconds: capClientRetryAfterSeconds((until - now) / 1000),
           }
         })()
       : undefined
@@ -1607,7 +1608,7 @@ router.post('/completions', async (ctx: Context) => {
         const retryAfter =
           mapped.retryAfter
           ?? retryAfterHeader(result.headers as Record<string, unknown> | undefined)
-        if (retryAfter) ctx.set('Retry-After', retryAfter)
+        if (retryAfter) ctx.set('Retry-After', capRetryAfterHeader(retryAfter))
       }
       learnQuotaCaps(provider, result.headers, result.error)
       const errorBody = {
