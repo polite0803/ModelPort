@@ -53,8 +53,9 @@ import { getChannelDefinition } from '../providers/accountChannels/catalogue'
 import { getAggregateEntry } from '../providers/aggregate/registry.ts'
 import { promptCacheOf, effectiveAffinityMinutes, type PromptCacheCapability } from '../../shared/promptCache.ts'
 import {
-  advertisedContextFloorOf,
+  advertisedContextCeilingOf,
   advertisedContextTokens,
+  UNANNOTATED_CONTEXT_FALLBACK,
   applyContractFilter,
   applyManualModelSelection,
   applyMinTier,
@@ -853,7 +854,7 @@ class AutoRouter {
    * 空池同样返回 `undefined`：没有候选就没有可说的，键必须省略而不是写个默认值。
    */
   advertisedContextFloor(route?: ModelRoute): number | undefined {
-    return this.floorOfPool(this.advertisedPool(), route)
+    return this.ceilingOfPool(this.advertisedPool(), route)
   }
 
   /**
@@ -866,7 +867,7 @@ class AutoRouter {
     const pool = this.advertisedPool()
     const floors = new Map<string, number | undefined>()
     for (const route of routes) {
-      if (!floors.has(route.name)) floors.set(route.name, this.floorOfPool(pool, route))
+      if (!floors.has(route.name)) floors.set(route.name, this.ceilingOfPool(pool, route))
     }
     return floors
   }
@@ -900,20 +901,23 @@ class AutoRouter {
   }
 
   /**
-   * 一条路由在给定池上的窗口下界。
+   * 一条路由在给定池上对外公布的窗口。
    *
-   * **钉住的路由用它钉的那个模型自己的窗口**，不是整池的最小值：一旦钉住，这条
-   * 路由只会派那一个模型（`select` 里按 `pinRef` 收窄），池里别的模型再小也与它
-   * 无关。拿池的最小值去广告，等于让一个大窗模型（火山 Agent Plan 挂着 1M 的
-   * GLM-5.3）按池里某个 128K 小模型的标准被客户端提前摘要 —— 客户端按这个数定压缩
-   * 点，报小了就是让一段本来能跑完的会话被砍断。
+   * **钉住的路由用它钉的那个模型自己的窗口**：一旦钉住，这条路由只会派那一个模型
+   *（`select` 里按 `pinRef` 收窄），池里别的模型与它无关。
+   *
+   * 未钉住时取池内**最大**的可广告读数（2026-11-18 改口径，此前取 min 是踩过的坑）：
+   * 客户端按这个数决定何时摘要历史，摘要是不可逆的。取 min 会让池里一个 128K 的候选
+   * 把整条路由按 128K 广告——1M 的模型也提前摘要把会话砍断（AGENTS 记载的现网事故）。
+   * 取 max 后客户端尽量不摘要；请求真的落到小窗候选时，由那一跳自己的裁剪按该模型的
+   * 窗口处理，被裁的部分留 CCR 指针可检索。
    *
    * 钉的模型自己没有可广告的窗口（未标注 / 来源不过闸门）时如实返回 `undefined`：
    * 没有证据就不承诺，客户端退回它自己的先验，而不是拿一个别家模型的数糊上去。
-   * 钉子没命中池里任何候选（`pin_stale`）时**回落到整池**下界 —— 那种情况这条路由
-   * 根本不会派发，池的读数才是它与这份配置的关系。
+   * 钉子没命中池里任何候选（`pin_stale`）时回落到整池读数 —— 那种情况这条路由根本
+   * 不会派发，池的读数才是它与这份配置的关系。
    */
-  private floorOfPool(pool: readonly PoolStrategyCandidate[], route?: ModelRoute): number | undefined {
+  private ceilingOfPool(pool: readonly PoolStrategyCandidate[], route?: ModelRoute): number | undefined {
     const kept = this.keptOfPool(pool, route)
     const pinned = route?.preferredModel
     if (pinned !== undefined) {
@@ -923,12 +927,16 @@ class AutoRouter {
       )
       if (matches.length > 0) {
         const windows = matches.map(candidate => advertisedContextTokens(capabilityOfCandidate(candidate)))
-        return advertisedContextFloorOf(windows)
+        const pinnedCeiling = advertisedContextCeilingOf(windows)
+        // 钉住但没有标注：同样给兜底值。这条路由只会派这一个模型，客户端需要一个压缩点。
+        return pinnedCeiling ?? UNANNOTATED_CONTEXT_FALLBACK
       }
     }
-    return advertisedContextFloorOf(
+    const ceiling = advertisedContextCeilingOf(
       kept.map(candidate => advertisedContextTokens(capabilityOfCandidate(candidate)))
     )
+    // 有候选但谁都没标注：用兜底值，而不是省略键（用户裁定 2026-11-18）。空池仍省略。
+    return ceiling ?? (kept.length > 0 ? UNANNOTATED_CONTEXT_FALLBACK : undefined)
   }
 
   /**

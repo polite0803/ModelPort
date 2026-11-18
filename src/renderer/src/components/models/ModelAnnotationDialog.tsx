@@ -30,6 +30,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useToast } from '@/hooks/use-toast'
 import type { Fact, MetadataAttribute, ModelMetadata } from '@shared/modelMetadata'
 import { isAttributeApplicable, METADATA_ATTRIBUTES } from '@shared/modelMetadata'
+import { CONTEXT_WINDOW_TIERS, type ContextWindowTier } from '@shared/types'
 import type {
   CatalogAdoptionField,
   CatalogCandidatesResult,
@@ -204,6 +205,9 @@ type TriStateField = (typeof TRI_STATE_FIELDS)[number][0]
 
 const MODALITIES: InputModality[] = ['text', 'image', 'audio', 'video', 'pdf']
 
+/** 档位键（`Object.keys` 推成 string，这里收窄一次，别在 JSX 里到处断言）。 */
+const WINDOW_TIER_KEYS = Object.keys(CONTEXT_WINDOW_TIERS) as ContextWindowTier[]
+
 /**
  * 两个数值字段的合理上界，与主进程 `store/modelMarks.ts` 的
  * `MAX_CONTEXT_TOKENS` / `MAX_OUTPUT_TOKENS` 同值。这里先做一次人读校验：
@@ -230,6 +234,10 @@ function cleanHint(draft: MarkDraft): ModelCapabilityHint | null {
   if (draft.reasoning !== undefined) hint.reasoning = draft.reasoning
   if (draft.modalities !== undefined) hint.modalities = [...draft.modalities]
   if (draft.contextTokens !== undefined) hint.contextTokens = draft.contextTokens
+  if (draft.contextWindowTier !== undefined) hint.contextWindowTier = draft.contextWindowTier
+  if (draft.supportedContextTiers !== undefined) {
+    hint.supportedContextTiers = [...draft.supportedContextTiers]
+  }
   if (draft.maxOutputTokens !== undefined) hint.maxOutputTokens = draft.maxOutputTokens
   if (draft.weight !== undefined) hint.weight = draft.weight
   if (draft.free !== undefined) hint.free = draft.free
@@ -307,6 +315,23 @@ export function ModelMarkEditor({
       ? current.filter((item) => item !== modality)
       : [...current, modality]
     patch({ modalities: next.length === 0 ? undefined : next })
+  }
+
+  /** 支持档位只是界面的合法集合；空 = 三档都可选。 */
+  const toggleSupportedTier = (tier: ContextWindowTier) => {
+    const current = draft.supportedContextTiers ?? []
+    const next = current.includes(tier)
+      ? current.filter((item) => item !== tier)
+      : [...current, tier]
+    // 取消掉正在生效的那一档时，不能留下「选了但不在支持集合里」的矛盾状态。
+    const keepSelected =
+      draft.contextWindowTier !== undefined && next.includes(draft.contextWindowTier)
+        ? draft.contextWindowTier
+        : undefined
+    patch({
+      supportedContextTiers: next.length === 0 ? undefined : next,
+      ...(draft.contextWindowTier !== undefined ? { contextWindowTier: keepSelected } : {}),
+    })
   }
 
   const contextError = validateMarkTokens(contextDraft, MAX_MARK_CONTEXT_TOKENS, t, 'context')
@@ -419,6 +444,56 @@ export function ModelMarkEditor({
         {contextError !== null && (
           <p className="text-[10px] text-destructive break-words">{contextError}</p>
         )}
+      </div>
+
+      <div className="space-y-1">
+        <Label className="text-xs">{t('proxy.routePoolMarkWindowTier')}</Label>
+        <div className="flex flex-wrap gap-2">
+          {(['inherit', ...WINDOW_TIER_KEYS] as (ContextWindowTier | 'inherit')[]).map((tier) => {
+            const allowed =
+              tier === 'inherit'
+                ? true
+                : draft.supportedContextTiers === undefined
+                  || draft.supportedContextTiers.includes(tier)
+            return (
+              <Button
+                key={tier}
+                type="button"
+                size="sm"
+                variant={(draft.contextWindowTier ?? 'inherit') === tier ? 'default' : 'outline'}
+                disabled={!allowed}
+                onClick={() =>
+                  patch({ contextWindowTier: tier === 'inherit' ? undefined : tier })
+                }
+              >
+                {tier === 'inherit' ? t('proxy.routePoolMarkInherit') : tier.toUpperCase()}
+              </Button>
+            )
+          })}
+        </div>
+        <p className="text-[10px] text-muted-foreground">
+          {t('proxy.routePoolMarkWindowTierHelp')}
+        </p>
+      </div>
+
+      <div className="space-y-1">
+        <Label className="text-xs">{t('proxy.routePoolMarkSupportedTiers')}</Label>
+        <div className="flex flex-wrap gap-2">
+          {(Object.keys(CONTEXT_WINDOW_TIERS) as ContextWindowTier[]).map((tier) => (
+            <label key={tier} className="flex items-center gap-1 text-xs">
+              <input
+                type="checkbox"
+                className="h-3.5 w-3.5 accent-[var(--primary)]"
+                checked={(draft.supportedContextTiers ?? []).includes(tier)}
+                onChange={() => toggleSupportedTier(tier)}
+              />
+              {tier.toUpperCase()}
+            </label>
+          ))}
+        </div>
+        <p className="text-[10px] text-muted-foreground">
+          {t('proxy.routePoolMarkSupportedTiersHelp')}
+        </p>
       </div>
 
       <div className="space-y-1">

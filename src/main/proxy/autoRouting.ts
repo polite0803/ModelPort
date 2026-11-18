@@ -23,7 +23,7 @@ import type { CostBucket } from '../../shared/channels.ts'
 import type { AggregateCostClass } from '../../shared/aggregateCost.ts'
 import { providerDefaultCapability, staticCapabilityHint } from './modelCapabilities.ts'
 import { familyRuleLayer } from '../../shared/modelFamilyRules.ts'
-import { AUTO_POOL_STRATEGIES } from '../../shared/types.ts'
+import { AUTO_POOL_STRATEGIES, CONTEXT_WINDOW_TIERS } from '../../shared/types.ts'
 import { banditAdjustment, createBanditRandom, type BanditStats } from './autoBandit.ts'
 import { STAR_SCORE_STEP, starsFromScore } from '../../shared/modelRecommendation.ts'
 import { costScoreOfWeight } from '../../shared/discountWindow.ts'
@@ -636,6 +636,18 @@ export type { AutoModelTier, CapabilityState, ModelCapabilityHint } from '../../
  */
 export const UNANNOTATED_CONTEXT_FLOOR = 64000
 
+/**
+ * 一条路由的候选**全都没有窗口标注**时，对外公布的兜底值（2026-11-18 用户裁定）。
+ *
+ * 与 {@link UNANNOTATED_CONTEXT_FLOOR}（64,000，只用于打分降权）分开：那个数一旦被拿来
+ * 公布，Codex 会把压缩点定在 60,800，一段 45 turn 的会话在 260K 字符处就被摘要，用户
+ * 看到的是「没有可继续的上文 + 反复啰嗦」。200K 是「不知道真实窗口」时的一个已知可用
+ * 尺寸：它让客户端有压缩点（不会无限膨胀），又不至于把正常会话砍断。
+ *
+ * 只在**有候选但都没有合格读数**时使用；空池仍然省略这个键（没有模型可谈）。
+ */
+export const UNANNOTATED_CONTEXT_FALLBACK = 200_000
+
 /** 在线同步来的未知模型按名字猜档位，猜错只影响档位匹配，不影响可用性 */
 const FAST_NAME_PATTERN = /(flash|turbo|mini|lite|fast|air|small|\d+b|a\d+b)/
 const STRONG_NAME_PATTERN = /(max|pro|expert|ultra|opus|thinking|reason)/
@@ -936,6 +948,19 @@ export function resolveCapabilityDetail(
   const reasoning = pick('reasoning')
   const modalities = pick('modalities')
   const context = pick('contextTokens')
+  // 窗口档位是我们选用的上限，与模型声明取 min：选一档不能把模型撑过它的真窗口。
+  // 出口过 `advertisedContextTokens`，所以池下界（`floorOfPool`）自动跟随 —— 某个
+  // 模型被切进/切出池，对外公布的 `context_window` 随之变，不需要按路由再配一遍。
+  const windowTierPick = pick('contextWindowTier')
+  const tierWindow = windowTierPick.value === undefined
+    ? undefined
+    : CONTEXT_WINDOW_TIERS[windowTierPick.value]
+  const windowValue = tierWindow === undefined
+    ? context.value
+    : context.value === undefined
+      ? tierWindow
+      : Math.min(tierWindow, context.value)
+  const windowSource = tierWindow === undefined ? context.source : windowTierPick.source
   const maxOutput = pick('maxOutputTokens')
 
   return {
@@ -945,7 +970,7 @@ export function resolveCapabilityDetail(
     tools: tools.value ?? 'unknown',
     reasoning: reasoning.value ?? 'unknown',
     ...(modalities.value === undefined ? {} : { modalities: modalities.value }),
-    ...(context.value === undefined ? {} : { contextTokens: context.value }),
+    ...(windowValue === undefined ? {} : { contextTokens: windowValue }),
     ...(maxOutput.value === undefined ? {} : { maxOutputTokens: maxOutput.value }),
     sources: {
       tier: tierSource,
@@ -953,7 +978,7 @@ export function resolveCapabilityDetail(
       tools: tools.source,
       reasoning: reasoning.source,
       modalities: modalities.source,
-      contextTokens: context.source,
+      contextTokens: windowSource,
       maxOutputTokens: maxOutput.source,
     },
   }
@@ -1035,13 +1060,26 @@ function effectiveContextLimit(capability: ModelCapability): number | undefined 
  * 「这一家装不下、换下一家」处理（`failover.ts::isContextOverflowError`），
  * 代价是一次生成前的往返，不是一次误杀，也不是一个假数。
  */
-export function advertisedContextFloorOf(
+/**
+ * 一条路由对外公布的窗口：池内**最大**的可广告读数。
+ *
+ * 2026-11-18 改口径（此前取 `min`，是踩过的坑）：客户端拿这个数决定**何时摘要自己的
+ * 历史**，而摘要是不可逆的——把一段本来跑得完的会话提前压成交接摘要，损失的细节再也
+ * 回不来。池里只要有一个 128K 的候选，取 min 就让整条路由按 128K 广告，1M 的模型也
+ * 跟着被砍。取 max 的方向相反：客户端尽量不摘要，请求真的落到小窗模型上时由**这一跳
+ * 自己的裁剪**按那个模型的窗口处理，被裁掉的部分留 CCR 指针可选回。
+ *
+ * 代价是「客户端不摘要、网关裁块」，所以这条判据只在两侧都留了退路时才成立：
+ * 裁剪预算仍按模型声明取（`declaredContextWindowOf`），指针是真的可检索。
+ * 空池/全池无合格读数仍返回 `undefined` —— 没有证据就不承诺。
+ */
+export function advertisedContextCeilingOf(
   windows: readonly (number | undefined)[]
 ): number | undefined {
   const evidenced = windows.filter((window): window is number =>
     typeof window === 'number' && window > 0)
   if (evidenced.length === 0) return undefined
-  return Math.min(...evidenced)
+  return Math.max(...evidenced)
 }
 
 /**

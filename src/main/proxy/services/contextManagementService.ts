@@ -123,18 +123,13 @@ export interface TokenLimitConfig {
 }
 
 /**
- * The context-window tiers offered by the console, mirroring the picker a coding
- * agent vendor ships. A *fallback*, never the authority: a model that declares
- * its own window is trimmed to that window, and only an unannotated model falls
- * back to the selected tier.
+ * 档位定义已经搬到 `shared/types.ts`：模型标注（`ModelCapabilityHint`）也要用它，
+ * 而 shared 不能反过来 import main。这里保留同名导出，既有调用点不用改。
  */
-export const CONTEXT_WINDOW_TIERS = {
-  '200k': 200_000,
-  '400k': 400_000,
-  '1m': 1_000_000,
-} as const
-
-export type ContextWindowTier = keyof typeof CONTEXT_WINDOW_TIERS
+import { CONTEXT_WINDOW_TIERS } from '../../../shared/types.ts'
+import type { ContextWindowTier } from '../../../shared/types.ts'
+export { CONTEXT_WINDOW_TIERS }
+export type { ContextWindowTier }
 
 /**
  * 撞过首块超时的通道上，预填充预算的安全上限。

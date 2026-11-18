@@ -124,6 +124,18 @@ export type InputModality = 'text' | 'image' | 'audio' | 'video' | 'pdf'
  * Manual values are merged *on top of* whatever the source sync wrote, so a
  * wrong or missing automatic mark is always fixable without touching code.
  */
+/**
+ * 上下文窗口档位。数字只在两处被消费：裁剪预算与 `/v1/models` 的公布值，
+ * 两边读同一个函数，所以档位选择不会在「广告」与「裁剪」之间分叉。
+ */
+export const CONTEXT_WINDOW_TIERS = {
+  '200k': 200_000,
+  '400k': 400_000,
+  '1m': 1_000_000,
+} as const
+
+export type ContextWindowTier = keyof typeof CONTEXT_WINDOW_TIERS
+
 export interface ModelCapabilityHint {
   tier?: AutoModelTier
   vision?: Exclude<CapabilityState, 'unknown'>
@@ -133,6 +145,25 @@ export interface ModelCapabilityHint {
   /** Declared input modalities; absent means unknown (not text-only). */
   modalities?: InputModality[]
   contextTokens?: number
+  /**
+   * 这个模型**实际使用**的窗口档位（200k / 400k / 1m）。
+   *
+   * 与 `contextTokens` 分工不同：那个是上游声明的真实上限，这个是**我们选用**的上限
+   * （通常更小，为了压住每轮发送量）。两者同时存在时取 min —— 选档不能超过真窗口。
+   *
+   * **路由换模型是自动跟随的**：`/v1/models` 公布的 `context_window` 是池内可广告读数的
+   * 最大值（`autoRouter::ceilingOfPool`，2026-11-18 起；此前取最小值，会把大窗模型按
+   * 小窗标准广告）。某个模型在这里设了档位，它的值参与取最大；路由切到哪一档，公布值
+   * 按那一池的最大值算。所以档位挂在模型上，不需要为每一条路由再配一遍。
+   */
+  contextWindowTier?: ContextWindowTier
+  /**
+   * 这个模型**能接受**的档位集合，供界面约束选择；不参与解析。
+   *
+   * 缺席 = 三档都可选。它存在的意义是让界面不提供一个模型根本跑不动的档，
+   * 而不是替解析层做决定。
+   */
+  supportedContextTiers?: ContextWindowTier[]
   /** Declared maximum output length; absent means unknown (not a default cap) */
   maxOutputTokens?: number
   /** Credit multiplier reported by the channel pack; absent means unreported */
