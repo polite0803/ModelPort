@@ -677,6 +677,14 @@ export interface RouteMenuModel {
     /** 这些限流账号里最早解禁的时刻；`limited === 0` 时缺席。 */
     earliestResetAt?: number
   }
+  /**
+   * 这一行在选路时的能力解析（与 `hardFilterFailure` / 池策略读的是**同一份**）。
+   *
+   * 控制台路由页据此画能力标注，并从行上直接开标注对话框；只由
+   * `RouteMenuRequest.includeCapability` 按需索取 —— 托盘不画它，逐行带一份
+   * 来源表会让一次快捷切换的 IPC 载荷白白变重。
+   */
+  capability?: ModelCapability
 }
 
 /** 一条路由的托盘/界面菜单快照。 */
@@ -729,6 +737,11 @@ export interface RouteMenuRequest {
    * 托盘不传：原生菜单塞不下几十行被筛掉的模型。
    */
   includeDropped?: boolean
+  /**
+   * 每行附带能力解析（控制台路由页要显示标注并从行上开标注入口）。
+   * 托盘不传：它不画能力徽标，而这条快照是逐请求现算的。
+   */
+  includeCapability?: boolean
 }
 
 /** 一次切换请求。`model` 缺省 = 「换下一个」：取当前模型在菜单顺序里的下一项。 */

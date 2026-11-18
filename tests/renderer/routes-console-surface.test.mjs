@@ -44,15 +44,42 @@ test('路由页是页内一等入口：侧边栏有、路由表注册、懒加�
 
 test('页面读的是托盘同一份快照，并且显式要满额', () => {
   assert.match(page, /window\.electronAPI\?\.routes/)
-  assert.match(page, /await api\.menu\(\{ route, limit: FULL_LIST_LIMIT, includeDropped: true \}\)/,
+  assert.match(
+    page,
+    /await api\.menu\(\{[\s\S]{0,160}?route,[\s\S]{0,160}?limit: FULL_LIST_LIMIT,[\s\S]{0,160}?includeDropped: true,[\s\S]{0,160}?includeCapability: true,[\s\S]{0,80}?\}\)/,
     '不带 limit 只会拿到托盘默认的 8 个；不带 includeDropped 则看不到被池策略筛掉的模型，'
-    + '而这一页要能就地做排除/加回')
+    + '而这一页要能就地做排除/加回；不带 includeCapability 则行上画不出能力标注',
+  )
   assert.match(page, /const FULL_LIST_LIMIT = 2000/,
     '页面的上限由主进程钳，这里只声明「要全部」，不写第二个默认值')
   // 快照字段是唯一事实：不许页面自己按手动名单重算池子（读写都走主进程）。
   // 「列哪些模型、每行 status 是三态里的哪一个」全部来自同一次 preview 结论。
   assert.doesNotMatch(page, /includeModels|excludeModels/,
     '模型列表必须来自选路器快照，页面重算会与真实选路长期不一致')
+})
+
+test('能力标注在行上显示，并从行上开共用标注入口', () => {
+  // 显示：值与出处来自选路快照的同一份 capability（vision 未知就接不了图，
+  // 所以这一行写的必须是真的判据，不能是页面自己按名字猜的）。
+  assert.match(page, /import \{ CapabilityBadges \} from '@\/components\/models\/CapabilityBadges'/,
+    '徽标要与路由池编辑器共用一份实现，两处判据不许分叉')
+  assert.match(page, /<CapabilityBadges capability=\{model\.capability\} \/>/,
+    '每行渲染选路快照带来的能力解析')
+  assert.match(page, /model\.capability !== undefined/, '能力解析缺席时不画空白行')
+
+  // 入口：与聚合/账号渠道共用同一个三段式对话框，键必须带上供应商 ——
+  // 同名模型多家服务，标注落在「这一家的这个模型」上。
+  assert.match(page, /import \{ ModelAnnotationDialog \} from '@\/components\/models\/ModelAnnotationDialog'/,
+    '入口要用共用对话框，不是在页面里拼第二套表单')
+  assert.match(page, /t\('routes\.annotate'\)/, '行上的按钮要有一个叫得出来的名字')
+  assert.match(page, /t\('routes\.annotateHint'\)/, '按钮要说明点开能做什么')
+  assert.match(
+    page,
+    /<ModelAnnotationDialog[\s\S]{0,400}?providerId=\{annotateTarget\.providerId\}[\s\S]{0,200}?displayName=\{annotateTarget\.displayName\}/,
+    'providerId 与 displayName 必须取自被点的那一行',
+  )
+  assert.match(page, /onChanged=\{\(\) => \{ void refresh\(\) \}\}/,
+    '保存标注后要重取快照，否则行上的徽标停在旧值')
 })
 
 test('搜索作用在满额结果上，按三列匹配', () => {
@@ -202,6 +229,8 @@ test('两种语言写全，插值槽一致', () => {
     listPinnedStale: '{{model}}',
     pinnedBadge: '',
     pinHint: '',
+    annotate: '',
+    annotateHint: '',
     showing: '{{shown}},{{total}}',
     circuit: '{{minutes}}',
     accountCount: '{{n}}',

@@ -47,7 +47,7 @@ import type { ModelProbeRow } from '../../shared/modelProbe.ts'
 import { indexProbeRows, probeRowKey, probeRowToLayer } from '../../shared/modelProbe.ts'
 import { getProbeRowsSync } from '../providers/modelProbeStore.ts'
 import { accountRuntime } from './accountRuntime'
-import { permanentRefusalCooldownMs, quotaWindowResetMs } from './failover.ts'
+import { capClientRetryAfterSeconds, permanentRefusalCooldownMs, quotaWindowResetMs } from './failover.ts'
 import { clearCatalogMissCooldowns, isCatalogMissCoolingDown } from './modelCatalogCooldown'
 import { getChannelDefinition } from '../providers/accountChannels/catalogue'
 import { getAggregateEntry } from '../providers/aggregate/registry.ts'
@@ -763,7 +763,7 @@ export function summarizeTransientSkips(
     skipped: skips.length,
     retryAfterSeconds: unlockAt === Number.POSITIVE_INFINITY
       ? DEFAULT_TRANSIENT_RETRY_AFTER_SECONDS
-      : Math.max(1, Math.ceil((unlockAt - now) / 1000)),
+      : capClientRetryAfterSeconds((unlockAt - now) / 1000),
   }
 }
 
@@ -1502,7 +1502,7 @@ class AutoRouter {
         displayName: pinMiss,
         scope: pinScope,
         source: pinSource,
-        retryAfterSeconds: Math.max(1, Math.ceil((until - now) / 1000)),
+        retryAfterSeconds: capClientRetryAfterSeconds((until - now) / 1000),
       }
     })()
     const pinTransient: AutoRouteDecision['pinTransient'] = (() => {
@@ -2191,6 +2191,11 @@ class AutoRouter {
      * 托盘不传：它只列「能点来固定的」，筛掉的几十行塞进原生菜单滚不动。
      */
     includeDropped = false,
+    /**
+     * 每行附带能力解析（控制台路由页的标注显示与入口）。托盘不传：它不画能力徽标，
+     * 而这条快照是逐请求现算的，逐行一份来源表只会让快捷切换的载荷变重。
+     */
+    includeCapability = false,
   ): RouteMenuEntry {
     this.sweepCircuits(now)
     const { models, current, pin, preferred } = this.selectableModels(route, now, includeDropped)
@@ -2287,6 +2292,7 @@ class AutoRouter {
           // 三态投影：路由页据此显示「策略保留 / 手动加回 / 手动排除 / 被策略筛掉」，
           // 与路由编辑器读同一份 preview 结论（同一个 `status` 字段，不另算）。
           status: model.status,
+          ...(includeCapability ? { capability: model.capability } : {}),
           ...(model.filteredBy === undefined ? {} : { filteredBy: model.filteredBy }),
           ...(model.unavailableReason === undefined ? {} : { unavailableReason: model.unavailableReason }),
           ...(model.status === 'excluded' ? { excluded: true as const } : {}),

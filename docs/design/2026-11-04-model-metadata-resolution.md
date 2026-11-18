@@ -175,9 +175,10 @@ coverageGaps[attr] = applicable - known
 | `main/proxy/modelCapabilities.ts` | 静态表保留；`autoRouting.ts` 在其后叠加家族规则 |
 | `main/proxy/autoRouting.ts` | `ModelCapability` 增加 `maxOutputTokens` 与来源；推定值进入硬过滤/打分 |
 | `renderer/components/models/ModelMetadataPanel.tsx` | 覆盖率看板 + 标准库快照卡片 + 待标注队列（逐模型对话框已抽出共用） |
-| `renderer/components/models/ModelAnnotationDialog.tsx`（2026-11-05 新增） | 逐模型标注对话框，三段：这一家已声明的参数（带出处）→ 标准库逐字段采用/撤销 → 手工标注。`ModelMarkEditor` 与路由池编辑器共用一份表单，三处入口共用一份对话框 |
+| `renderer/components/models/ModelAnnotationDialog.tsx`（2026-11-05 新增） | 逐模型标注对话框，三段：这一家已声明的参数（带出处）→ 标准库逐字段采用/撤销 → 手工标注。`ModelMarkEditor` 与路由池编辑器共用一份表单，四处入口共用一份对话框（元数据队列 / 聚合渠道 / 账号渠道 / 路由与模型页） |
 | `renderer/components/models/CatalogScopeBatchButton.tsx`（2026-11-05 新增） | 按单一供应商范围批量补全：估算 → 确认（含请求数与跳过数）→ 主进程任务；探测开关默认关闭 |
 | `renderer/pages/Models.tsx` | 「标注覆盖」页签入口 |
+| `renderer/pages/Routes.tsx`、`renderer/components/models/CapabilityBadges.tsx`（2026-11-18 新增） | 「路由与模型」页的行内能力标注（V/T/R、档位、输入模态、窗口，均带出处）+ 行内「标注」入口（同一个 `ModelAnnotationDialog`）。数据来自 `routes:menu` 的按需能力解析（`RouteMenuRequest.includeCapability`；托盘不传，免得快捷切换的载荷变重），徽标与路由池编辑器共用一份组件 —— 显示面与派发面同尺 |
 | `renderer/components/aggregate/AggregateDetail.tsx`、`renderer/pages/Channels.tsx`（2026-11-05） | 两个模型界面的行内「标注」入口 + 卡片头部的按本范围批量补全。渠道侧展示名由 `shared/channels.ts::channelModelDisplayName` 现算（与 `syncProviders` 写目录同一个函数）；`disabled` / `dead` 的渠道模型不在目录里，入口禁用并说明原因 |
 | IPC | `providers:getModelMetadata`、`providers:getModelMetadataOne`（单模型解析，逐模型入口用它，不重算整张报表）、`providers:probeModel`、`providers:cancelProbe`、`providers:getProbeJobs`、`providers:probeProgress`（单向事件）、`providers:getCatalogStatuses`、`providers:refreshCatalog`、`providers:getCatalogCandidates`、`providers:adoptCatalogField`、`providers:revokeCatalogAdoption`、`providers:estimateCatalogBatch` / `providers:startCatalogBatch`（可选 `providerId` 收口范围，估算与启动必须同范围）（刷新/探测/批量都只在用户显式触发时执行） |
 

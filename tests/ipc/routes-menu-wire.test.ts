@@ -94,6 +94,19 @@ test('范围参数只收窄取数：一条路由 + 钳过的条数，仍走同�
     '不传条数 = 托盘默认；页面要「全部」就自己传满，不再写第二个默认值')
 })
 
+/**
+ * 能力解析是**按需**载荷：托盘不画徽标，逐行一份来源表只会让快捷切换变重；
+ * 控制台路由页要在行上显示标注并从行上开入口，所以显式索取。默认不给，
+ * 索取时要真的传进 `routeMenu` —— 漏传时页面拿到的永远是 undefined。
+ */
+test('能力解析按需索取：只有显式 includeCapability 才带，且真的传进 routeMenu', () => {
+  const block = handlerBlock('ROUTES_MENU')
+  assert.match(block, /const includeCapability = request\?\.includeCapability === true/,
+    '只有请求显式索取才算，托盘默认不带')
+  assert.match(block, /includeDropped,\s*\n\s*includeCapability,\s*\n\s*\)\)/,
+    '参数必须真的落到 routeMenu 调用上，否则页面拿到的永远是 undefined')
+})
+
 test('切换请求先验形状：缺路由名直接给可读原因', () => {
   const block = handlerBlock('ROUTES_SWITCH')
   assert.match(block, /typeof request\.route !== 'string'/, '非字符串的路由名不许进选路器')

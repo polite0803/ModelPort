@@ -558,6 +558,9 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
       // 控制台路由页要列「策略产出的全部模型」（含被筛掉的）以便就地做排除/加回；
       // 托盘不传这一档，它只列能点来固定的。
       const includeDropped = request?.includeDropped === true
+      // 控制台路由页要在行上显示能力标注（并从行上开标注入口）；托盘不画它，
+      // 逐行一份来源表只会让快捷切换的载荷变重。
+      const includeCapability = request?.includeCapability === true
       try {
         // 菜单行也带 `blocked`（与预览同一份镜像）：打开菜单前预热，理由同 routes:preview。
         await accountChannelManager.prewarmRateLimits()
@@ -570,6 +573,7 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
             generatedAt,
             channelAccounts,
             includeDropped,
+            includeCapability,
           ))
         return { routes, generatedAt }
       } catch (error) {

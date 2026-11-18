@@ -360,6 +360,31 @@ test('菜单：熔断中的模型带 circuitUntil，limit 只影响列表长度�
   assert.equal(full.models.find(model => model.displayName === 'Beta-Lite')?.circuitUntil, undefined)
 })
 
+test('菜单：能力解析只在显式索取时带出，且与选路读的是同一份', () => {
+  const route = makeRoute({ modelScope: 'pool' })
+
+  const plain = autoRouter.routeMenu(route)
+  assert.ok(plain.models.every(model => model.capability === undefined),
+    '托盘不画能力徽标：默认不载荷来源表，免得每次快捷切换都变重')
+
+  // 第 6 参才是 includeCapability：前五个沿用既有语义（limit / now / 账号池 / 含被筛行）。
+  const withCapability = autoRouter.routeMenu(route, 2, Date.now(), undefined, false, true)
+  assert.ok(withCapability.models.length > 0)
+  for (const model of withCapability.models) {
+    assert.ok(model.capability !== undefined, `${model.displayName} 缺能力解析`)
+    assert.ok(model.capability.sources !== undefined, `${model.displayName} 缺每格的出处`)
+  }
+
+  // 与 `hardFilterFailure` 同一份解析：Alpha-Flash 的档位来自供应商记录而不是名字启发式，
+  // 所以标注一改，行上显示的判据随之改 —— 显示面与派发面不许各算一次。
+  const alpha = withCapability.models.find(model => model.displayName === 'Alpha-Flash')
+  assert.ok(alpha?.capability !== undefined)
+  assert.equal(alpha.capability.tier, 'fast')
+  assert.equal(alpha.capability.tierEvidenced, true, '档位来自标注，不是名字启发式')
+  assert.equal(alpha.capability.sources.tier, 'provider-record',
+    '出处如实报给界面：这一格来自供应商记录，不是页面自己猜的')
+})
+
 test('菜单：池被筛空时列不出模型，但路由本身仍然可读', () => {
   const route = makeRoute({ poolStrategies: [{ id: 'aggregate-only', operator: 'and' }] })
   const menu = autoRouter.routeMenu(route)

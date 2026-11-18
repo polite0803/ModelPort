@@ -2175,6 +2175,8 @@
     "currentWithLatency": "Last turn: {{model}} · first token {{ms}}ms",
     "currentBadge": "Last served",
     "currentBadgeHint": "The model this route actually served last turn - not necessarily the next one",
+    "annotate": "Annotate",
+    "annotateHint": "Review what this source declares, complete it field by field from the standard ledgers, or override capabilities (vision / tools / reasoning / context window) by hand; routing follows the saved marks, and image requests require vision = yes.",
     "nextTurn": "Next turn: {{model}}",
     "pinnedBadge": "Pinned",
     "pin": "Pin",

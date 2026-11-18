@@ -2175,6 +2175,8 @@
     "currentWithLatency": "上一轮：{{model}} · 首字 {{ms}}ms",
     "currentBadge": "上轮服务",
     "currentBadgeHint": "这条路由上一轮实际服务的模型，不代表下一轮还是它",
+    "annotate": "标注",
+    "annotateHint": "查看这一家声明的参数、用标准台账逐字段补全，或手工覆盖能力标注（视觉/工具/推理/上下文窗口）；保存后按新标注参与选路，带图请求要求视觉=支持。",
     "nextTurn": "下一轮：{{model}}",
     "pinnedBadge": "已固定",
     "pin": "固定",

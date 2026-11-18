@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSearchParams } from 'react-router-dom'
-import { Ban, Pin, RefreshCw, RotateCcw, Search, SkipForward, Star } from 'lucide-react'
+import { Ban, Pin, RefreshCw, RotateCcw, Search, SkipForward, Star, Tags } from 'lucide-react'
+import { CapabilityBadges } from '@/components/models/CapabilityBadges'
+import { ModelAnnotationDialog } from '@/components/models/ModelAnnotationDialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -215,6 +217,8 @@ export function Routes() {
   const [detail, setDetail] = useState<RouteMenuEntry | null>(null)
   const [loading, setLoading] = useState(true)
   const [detailLoading, setDetailLoading] = useState(false)
+  // 行内「标注」入口的当前目标；关掉对话框时清空。
+  const [annotateTarget, setAnnotateTarget] = useState<RouteMenuModel | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [busy, setBusy] = useState(false)
@@ -265,7 +269,14 @@ export function Routes() {
     if (!api?.menu) return
     setDetailLoading(true)
     try {
-      const snapshot = await api.menu({ route, limit: FULL_LIST_LIMIT, includeDropped: true })
+      // `includeCapability`：行上要显示能力标注（vision/tools/推理/窗口），并从行上开
+      // 标注入口。托盘不传这一档 —— 它不画徽标，逐行一份来源表只是白付载荷。
+      const snapshot = await api.menu({
+        route,
+        limit: FULL_LIST_LIMIT,
+        includeDropped: true,
+        includeCapability: true,
+      })
       if (snapshot.error !== undefined) {
         setError(snapshot.error)
         setDetail(null)
@@ -743,6 +754,14 @@ export function Routes() {
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-medium">{model.displayName}</span>
                     <span className="block truncate text-xs text-muted-foreground">{model.providerName}</span>
+                    {/* 能力标注：这是路由**真实的**硬过滤依据（带图请求要求 vision=yes），
+                        值与出处都来自选路快照的同一份 `capability`。未知照样写出来 ——
+                        留白会被读成「支持」，而路由恰恰是按「未知=接不了图」判的。 */}
+                    {model.capability !== undefined && (
+                      <span className="mt-0.5 block">
+                        <CapabilityBadges capability={model.capability} />
+                      </span>
+                    )}
                     {/* 池层结论（与路由编辑器读 `preview.models[].status` 同一份）：说清
                         这一行为什么不在池里。排除是配置事实，不用警告色 —— 它与限流/额度
                         那种「等一会儿就回来」不是一回事。 */}
@@ -894,11 +913,33 @@ export function Routes() {
                         ? t('routes.restore')
                         : t('routes.include')}
                   </Button>
+                  {/* 标注入口：与聚合/账号渠道共用同一个对话框（声明 → 标准库采用 →
+                      手工覆盖）。不置钉、不改池成员，所以不参与 busy 闸。 */}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    title={t('routes.annotateHint')}
+                    onClick={() => setAnnotateTarget(model)}
+                  >
+                    <Tags className="mr-1.5 h-4 w-4" />
+                    {t('routes.annotate')}
+                  </Button>
                 </div>
               ))}
             </CardContent>
           </Card>
         </div>
+      )}
+      {/* 保存（手工标注 / 标准库采用）都会让 `userModelMarks` / `catalogAdoptions`
+          走结构写，主进程随即推 `routes:pool-changed`；这里再主动重取一次，
+          无头/纯浏览器宿主没订上事件时行上的徽标也不会停在旧值。 */}
+      {annotateTarget !== null && (
+        <ModelAnnotationDialog
+          providerId={annotateTarget.providerId}
+          displayName={annotateTarget.displayName}
+          onClose={() => setAnnotateTarget(null)}
+          onChanged={() => { void refresh() }}
+        />
       )}
     </div>
   )

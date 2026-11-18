@@ -13,12 +13,12 @@ import {
 } from '@/components/ui/dialog'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { RefreshCw, Plus, Minus, RotateCcw, Pencil, Pin, Trash2 } from 'lucide-react'
+import { CapabilityBadges } from '@/components/models/CapabilityBadges'
 import { ModelMarkEditor } from '@/components/models/ModelAnnotationDialog'
 import { weightTone } from '@/lib/costTone'
 import { type CostBucket } from '@shared/channels'
 import type {
   CapabilitySource,
-  ModelCapability,
   ModelCapabilityHint,
   ModelRoute,
   RouteModelRef,
@@ -59,11 +59,6 @@ function sameRef(refs: RouteModelRef[], providerId: string, displayName: string)
 function withoutRef(refs: RouteModelRef[], providerId: string, displayName: string): RouteModelRef[] {
   const key = refKey(providerId, displayName)
   return refs.filter((ref) => refKey(ref.providerId, ref.displayName) !== key)
-}
-
-function formatContext(tokens: number | undefined): string | null {
-  if (tokens === undefined) return null
-  return tokens >= 1000 ? `${Math.round(tokens / 1000)}k` : String(tokens)
 }
 
 export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorProps) {
@@ -303,36 +298,6 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
       default:
         return 'outline' as const
     }
-  }
-
-  const capabilityBadges = (capability: ModelCapability) => {
-    const entries: { key: string; label: string; source: CapabilitySource }[] = [
-      { key: 'vision', label: `V:${capability.vision}`, source: capability.sources.vision },
-      { key: 'tools', label: `T:${capability.tools}`, source: capability.sources.tools },
-      { key: 'reasoning', label: `R:${capability.reasoning}`, source: capability.sources.reasoning },
-      { key: 'tier', label: capability.tier, source: capability.sources.tier },
-    ]
-    const context = formatContext(capability.contextTokens)
-    if (context !== null) {
-      entries.push({ key: 'context', label: `ctx ${context}`, source: capability.sources.contextTokens })
-    }
-    const maxOutput = formatContext(capability.maxOutputTokens)
-    if (maxOutput !== null) {
-      entries.push({ key: 'maxOutput', label: `out ${maxOutput}`, source: capability.sources.maxOutputTokens })
-    }
-    return entries.map((entry) => (
-      <Badge
-        key={entry.key}
-        variant="outline"
-        className="text-[10px] font-normal"
-        title={t(`proxy.routePoolSource_${entry.source}`)}
-      >
-        {entry.label}
-        {entry.source !== 'unknown' && (
-          <span className="ml-1 opacity-60">{t(`proxy.routePoolSourceShort_${entry.source}`)}</span>
-        )}
-      </Badge>
-    ))
   }
 
   return (
@@ -575,7 +540,7 @@ export function RoutePoolEditor({ idPrefix, values, onChange }: RoutePoolEditorP
                 </span>
               )}
               <span className="flex flex-wrap items-center gap-1 ml-auto">
-                {capabilityBadges(model.capability)}
+                <CapabilityBadges capability={model.capability} />
                 {markHasManual(model) && (
                   <Badge variant="outline" className="text-[10px] font-normal">
                     {t('proxy.routePoolManualMark')}
