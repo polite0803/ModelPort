@@ -57,6 +57,7 @@ import {
   type TlsMaterial,
 } from '../proxy/tls'
 import { autoRouter, ROUTE_MENU_MODELS_DEFAULT, ROUTE_MENU_MODELS_MAX } from '../proxy/autoRouter'
+import { syncCodexCatalogs } from '../proxy/catalogSync'
 import type { ChannelAccountCounts, RoutePreviewResult, RoutePreviewSample } from '../proxy/autoRouter'
 import { proxyStatusManager } from '../proxy/status'
 import { ConfigManager } from '../store/config'
@@ -418,6 +419,8 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
         const result = storeManager.updateRoute(currentName, patch)
         if (!result.ok) return result
         broadcastConfigChanged(storeManager.getConfig())
+        // 池策略 / 排除 / 启停改了都会动这条路由的对外窗口 → 同步给客户端
+        syncCodexCatalogs()
         return result
       } catch (error) {
         return { ok: false, error: routeStorageError(error) }
@@ -622,6 +625,8 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
         // 静默/熔断/粘性惯性）当场清掉，下一笔立刻派发，不停在「N 秒后重试」。
         autoRouter.releaseForManualPin(result.route, result.providerId, result.model)
         broadcastConfigChanged(storeManager.getConfig())
+        // 换了钉 → 这条路由的池读数变了 → 客户端窗口跟着变（不用点同步）
+        syncCodexCatalogs()
         return {
           ...result,
           menu: autoRouter.routeMenu(
@@ -662,6 +667,8 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
           }
           broadcastConfigChanged(storeManager.getConfig())
         }
+        // 解钉后这条路重新按池读数公布窗口 → 同步给客户端
+        syncCodexCatalogs()
         const fresh = storeManager.listModelRoutes().find(candidate => candidate.name === routeName)
         const channelAccounts = await channelAccountCounts()
         return {
@@ -1255,7 +1262,10 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
     IpcChannels.PROVIDERS_SET_MODEL_MARK,
     async (_, providerId: string, displayName: string, mark: ModelCapabilityHint | null) => {
       try {
-        return { success: true, marks: storeManager.setUserModelMark(providerId, displayName, mark) }
+        const marks = storeManager.setUserModelMark(providerId, displayName, mark)
+        // 标注会改这个模型的对外窗口：顺手写回客户端 catalog（失败不影响保存本身）
+        syncCodexCatalogs()
+        return { success: true, marks }
       } catch (error) {
         console.error('[IPC] Failed to set model mark:', error)
         return {

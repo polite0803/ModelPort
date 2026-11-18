@@ -13,6 +13,7 @@ import { getHost } from '../runtime/host'
 import { storeManager } from '../store/store'
 import { registerIpcHandlers } from '../ipc/handlers'
 import { proxyServer } from '../proxy/server'
+import { syncCodexCatalogs } from '../proxy/catalogSync'
 import { scheduler } from '../scheduler/Scheduler'
 import { configureModelListRefresh } from '../scheduler/modelListRefresh'
 import { aggregateProviderManager } from '../providers/aggregate'
@@ -101,6 +102,11 @@ export async function bootstrapGateway(input: GatewayBootstrapInput = {}): Promi
         `${storeManager.getStoragePath()}/data.json, then restart.`,
     )
   }
+
+  // 启动兜底：把当前每条路由的对外窗口写回本机各 Codex 的 catalog。
+  // 客户端会在运行中重读 catalog（2026-11-18 实测两次改值都在 2 分钟内生效），
+  // 所以这里做一次就够；之后的变更由 setModelMark / 换钉等事件补。
+  syncCodexCatalogs()
 
   return { ok: true, listening }
 }

@@ -18,6 +18,7 @@
  */
 import path from 'node:path'
 import { KEY_PLACEHOLDER } from '../shared/clientSync.ts'
+import { rewriteCatalogWindows } from '../shared/codexCatalog.ts'
 import type { ClientChange, ClientId } from '../shared/clientSync.ts'
 import { detectIndent, parseJsonObject } from './clientFormats.ts'
 import {
@@ -380,6 +381,36 @@ export function catalogSlugs(raw: string): string[] | null {
 // ---------------------------------------------------------------------------
 // JSON clients
 // ---------------------------------------------------------------------------
+
+/**
+ * 用 `/v1/models` 公布的窗口改写现有 catalog 条目的 `context_window`。
+ *
+ * 本体在 `shared/codexCatalog.ts`：daemon 的自动写入与这里的「手动同步」必须用同一份
+ * 实现，否则两边写出来的值迟早不一致。这里只负责把它包成 `PlanResult`。
+ *
+ * `routes` 为空表示 `/v1/models` 没取到，此时一个字段都不动：网关不可达不等于
+ * 「所有路由都没有窗口」。读数缺席的路由（空池）同样保持原值。
+ */
+export function planCodexCatalogWindow(
+  raw: string,
+  routes: readonly { name: string; contextWindow: number | null }[]
+): PlanResult {
+  if (routes.length === 0) return { kind: 'unchanged' }
+  const advertised = new Map<string, number | undefined>()
+  for (const route of routes) {
+    if (route.contextWindow !== null) advertised.set(route.name, route.contextWindow)
+  }
+  const rewrite = rewriteCatalogWindows(raw, advertised)
+  if (rewrite === null) return { kind: 'unchanged' }
+  return changed(
+    rewrite.content,
+    rewrite.changes.map(change => ({
+      label: `${change.slug} 窗口`,
+      before: change.before === null ? '未设置' : String(change.before),
+      after: change.after === null ? '未设置' : String(change.after),
+    }))
+  )
+}
 
 export interface JsonPlanInput {
   origin: string

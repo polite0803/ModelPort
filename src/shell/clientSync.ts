@@ -24,6 +24,7 @@ import {
   maskSecret,
   planClaudeSettings,
   planCodeBuddySettings,
+  planCodexCatalogWindow,
   planCodexToml,
   planTraeModelList,
   planWorkBuddyModels,
@@ -264,6 +265,16 @@ export async function gather(input: GatherInput): Promise<Gathered> {
       const catalogRaw = readText(input.paths.codexCatalog)
       const slugs = catalogRaw === null ? [] : (catalogSlugs(catalogRaw) ?? [])
       const plan = filePlan('codex', input.paths.codexConfig, result, unservedModels(slugs, routeNames))
+      // 窗口也由网关驱动：/v1/models 公布什么，catalog 就写什么（未公布则清掉这一格），
+      // 让「在模型标注里选一档」同时改到客户端。只看 catalog 已存在的条目，不新增。
+      if (catalogRaw !== null) {
+        const windowPlan = planCodexCatalogWindow(catalogRaw, models)
+        if (windowPlan.kind === 'changed') {
+          plan.files.push({ path: input.paths.codexCatalog, content: windowPlan.content, private: false })
+          plan.row.changes.push(...windowPlan.changes)
+          if (plan.row.state === 'unchanged') plan.row.state = 'ready'
+        }
+      }
       if (key === null && (plan.row.state === 'ready' || plan.row.state === 'unchanged')) {
         plan.row.manualStep = '没有规范 key：地址已改，但 provider 表里没写密钥，请把 experimental_bearer_token 设成目标网关的 key'
       }
