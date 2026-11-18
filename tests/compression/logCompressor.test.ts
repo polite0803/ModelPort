@@ -50,7 +50,7 @@ test('log compressor keeps errors, summaries and drops repeated info lines', () 
   assert.doesNotMatch(result.text, /lines omitted:/)
   assert.match(
     result.text,
-    /\[\d+ lines compressed to \d+\. Retrieve more: hash=[0-9a-f]{24} -> GET \/v1\/ccr\/[0-9a-f]{24}[^\]]*\]/
+    /\[\d+ lines compressed to \d+\. Retrieve more: hash=[0-9a-f]{24}\]/
   )
   assert.ok(result.text.length < original.length * 0.5)
 })

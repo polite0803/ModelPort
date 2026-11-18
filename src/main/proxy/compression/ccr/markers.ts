@@ -27,28 +27,9 @@ export const JSON_HASH_LENGTH = 12
 /** Hash id length used by whole-line and whole-file compressors. */
 export const BLOCK_HASH_LENGTH = 24
 
-/**
- * How to get the original back, spelled out inside the marker itself.
- *
- * This used to live in a leading `system` block (`ccr-protocol`, ~900 B) that the
- * gateway prepended to every turn of a compressed conversation. That block was
- * gateway-authored prompt text sitting at the head of the prompt: it cost prefix
- * bytes on every turn, needed a per-conversation memory just to stay byte-stable,
- * and spoke in general terms ("this gateway may shorten …") about something that
- * only ever happens at a specific place. The marker is that place, so the
- * instruction belongs here - one line, only where a cut actually happened, and
- * impossible to read as anything but a note about the bytes above it.
- */
-function retrievalHint(hash: string): string {
-  return ` -> GET /v1/ccr/${hash} on the same host with the same API key; 404 means it is gone`
-}
-
 /** Build the sentinel object appended after dropped rows. */
 export function makeRowSentinel(hash: string, dropped: number): Record<string, string> {
-  return {
-    [ROW_SENTINEL_KEY]:
-      `<<ccr:${hash} ${dropped}_rows_offloaded${retrievalHint(hash)}>>`,
-  }
+  return { [ROW_SENTINEL_KEY]: `<<ccr:${hash} ${dropped}_rows_offloaded>>` }
 }
 
 /**
@@ -58,17 +39,17 @@ export function makeRowSentinel(hash: string, dropped: number): Record<string, s
  * 它进的是工具结果正文，不是提示词；带哨兵的载荷绝不二次压缩。
  */
 export function makeItemSentinel(hash: string, dropped: number): string {
-  return `… ${dropped} more items <<ccr:${hash} ${dropped}_items_offloaded${retrievalHint(hash)}>>`
+  return `… ${dropped} more items <<ccr:${hash} ${dropped}_items_offloaded>>`
 }
 
 /** Marker appended to a compressed block of log lines. */
 export function makeLogMarker(before: number, after: number, hash: string): string {
-  return `[${before} lines compressed to ${after}. Retrieve more: hash=${hash}${retrievalHint(hash)}]`
+  return `[${before} lines compressed to ${after}. Retrieve more: hash=${hash}]`
 }
 
 /** Marker appended to a compressed set of search matches. */
 export function makeSearchMarker(before: number, after: number, hash: string): string {
-  return `[${before} matches compressed to ${after}. Retrieve more: hash=${hash}${retrievalHint(hash)}]`
+  return `[${before} matches compressed to ${after}. Retrieve more: hash=${hash}]`
 }
 
 /**
@@ -85,7 +66,7 @@ export function makeSearchMarker(before: number, after: number, hash: string): s
  * 上限真的成立的形状。
  */
 export function makeTruncationMarker(totalChars: number, droppedChars: number, hash: string): string {
-  return `\n… [${droppedChars} of ${totalChars} ${TRUNCATION_NOTICE} Retrieve more: hash=${hash}${retrievalHint(hash)}]`
+  return `\n… [${droppedChars} of ${totalChars} ${TRUNCATION_NOTICE} Retrieve more: hash=${hash}]`
 }
 
 /**
@@ -122,9 +103,7 @@ export function parseTruncationMarker(
   const tail = text.slice(at)
   if (!tail.includes(TRUNCATION_NOTICE)) return undefined
 
-  // The hint that follows the hash is free text, so the anchor is "hash=<hex>"
-  // and whatever our own marker appends after it - never a byte-exact tail.
-  const hashed = /^\n… \[(\d+) of (\d+) chars dropped to fit the context budget\. Retrieve more: hash=([a-f0-9]{12,64})[^\]]*\]$/.exec(tail)
+  const hashed = /^\n… \[(\d+) of (\d+) chars dropped to fit the context budget\. Retrieve more: hash=([a-f0-9]{12,64})\]$/.exec(tail)
   if (hashed) {
     return { body: text.slice(0, at), totalChars: Number(hashed[2]), hash: hashed[3] }
   }
@@ -142,9 +121,7 @@ export function parseTruncationMarker(
  */
 export function isCcrSentinel(value: unknown): boolean {
   if (typeof value === 'string') {
-    // The tail is free text (the retrieval hint lives there), so the sentinel is
-    // recognised by its head, not by a byte-exact ending.
-    return value.includes('<<ccr:') && value.includes('_items_offloaded')
+    return value.includes('<<ccr:') && value.includes('_items_offloaded>>')
   }
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     const raw = (value as Record<string, unknown>)[ROW_SENTINEL_KEY]

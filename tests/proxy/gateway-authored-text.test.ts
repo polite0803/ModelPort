@@ -95,12 +95,13 @@ test('the scanner has power: both inventories are populated and disjoint', () =>
  */
 test('only the ruled exceptions still write gateway text', () => {
   const expected = [
+    'ccr-protocol',
     'ccr-sentinel',
-    'freeform-input-schema',
     'liveness-ping',
     'probe-capability',
     'probe-context',
     'probe-output',
+    'say-less-contract',
   ]
   assert.deepEqual([...tags].sort(), expected)
   assert.deepEqual([...documented].sort(), expected)
@@ -110,32 +111,25 @@ test('every retired site keeps its ledger entry and its commit', () => {
   assert.deepEqual(
     [...retired].sort(),
     [
-      'ccr-protocol',
       'context-summary-marker',
       'context-summary-prompt',
       'managed-tool-prompt',
       'output-steering',
-      'say-less-contract',
       'trailing-user-guard',
     ],
   )
-  const cited: Record<string, { commit: string; date: string }> = {
-    'trailing-user-guard': { commit: 'fb720f9', date: '2026-11-03' },
-    'managed-tool-prompt': { commit: 'aee98eb', date: '2026-11-03' },
-    'output-steering': { commit: '9d07417', date: '2026-11-03' },
-    'context-summary-prompt': { commit: '8e744ec', date: '2026-11-03' },
-    'context-summary-marker': { commit: '8e744ec', date: '2026-11-03' },
-    // The two 2026-11-12 exceptions, retired again once the markers learned to
-    // describe themselves (2026-11-18). Their shape survived eight months of
-    // rulings only because a bare hash could not explain itself.
-    'ccr-protocol': { commit: '1775995', date: '2026-11-18' },
-    'say-less-contract': { commit: '1775995', date: '2026-11-18' },
+  const commits: Record<string, string> = {
+    'trailing-user-guard': 'fb720f9',
+    'managed-tool-prompt': 'aee98eb',
+    'output-steering': '9d07417',
+    'context-summary-prompt': '8e744ec',
+    'context-summary-marker': '8e744ec',
   }
-  for (const [id, { commit, date }] of Object.entries(cited)) {
+  for (const [id, commit] of Object.entries(commits)) {
     const entry = retiredEntry(doc, id)
     assert.ok(entry.length > 0, `${id} is not in the retirement ledger`)
     assert.match(entry, new RegExp(commit), `${id} must cite the commit that introduced it`)
-    assert.match(entry, new RegExp(date), `${id} must cite the retirement date`)
+    assert.match(entry, /2026-11-03/, `${id} must cite the retirement date`)
   }
 })
 

@@ -97,38 +97,6 @@ test('function_call_output 的 output 也接受分片数组', () => {
 })
 
 /**
- * 工具结果里的图片必须原样转给上游（2026-11-18 现网）。
- *
- * Codex 的 `view_image` 返回 `[{type:'input_image', image_url}]`；旧实现只取文本，
- * tool 消息的 content 因此是空串，模型把「结果为空」读成「调用没生效」——同一次
- * 会话里 6 秒内对同一个文件重复调用，48 张截图全部落在空结果上，用户看到的就是
- * 「反复啰嗦、推进不动」。图片是这条工具调用的**语义本体**，不能当装饰丢掉。
- */
-test('工具结果里的 input_image 转成 chat 的 content 数组，不退化成空结果', () => {
-  const dataUrl = 'data:image/png;base64,iVBORw0KGgo='
-  const request = responsesToChatRequest(
-    {
-      input: [
-        { type: 'function_call', call_id: 'call_img', name: 'view_image', arguments: '{"path":"/tmp/a.png"}' },
-        { type: 'function_call_output', call_id: 'call_img', output: [{ type: 'input_image', image_url: dataUrl }] },
-      ],
-    },
-    { model: 'auto', stream: false },
-  )
-
-  const tool = request.messages.find(m => m.role === 'tool') as Payload
-  assert.ok(Array.isArray(tool.content), '带图片的工具结果必须是数组，不能是空串')
-  assert.deepEqual(tool.content, [{ type: 'image_url', image_url: { url: dataUrl } }])
-
-  // 负控：纯文本结果仍用字符串，老上游对数组形态的兼容性参差
-  const textOnly = responsesToChatRequest(
-    { input: [{ type: 'function_call_output', call_id: 'c2', output: [{ type: 'output_text', text: 'ok' }] }] },
-    { model: 'auto', stream: false },
-  )
-  assert.equal((textOnly.messages.find(m => m.role === 'tool') as Payload).content, 'ok')
-})
-
-/**
  * 并行调用必须落在**同一条** assistant 上（2026-11-12 现网 400）：
  * `invalid params, tool call result does not follow tool call (2013)`。
  * Responses 的 input 是一次调用一个 item，逐 item 落成多条 assistant 会让结果
@@ -679,10 +647,9 @@ test('自由文本工具的声明折成 chat 的 input 契约：模型不再只�
   )
 
   const patch = (request.tools as Payload[]).find(tool => tool.function.name === 'apply_patch') as Payload
-  // 只声明形状，不带自造说明句：`required` + `type` 已经把契约说完
   assert.deepEqual(patch.function.parameters, {
     type: 'object',
-    properties: { input: { type: 'string' } },
+    properties: { input: { type: 'string', description: 'Raw text payload for this tool, not JSON.' } },
     required: ['input'],
     additionalProperties: false,
   })

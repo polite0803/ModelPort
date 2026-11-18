@@ -67,7 +67,7 @@ test('the dropped-row sentinel is an object and carries a hash', () => {
 
   assert.equal(Object.keys(sentinel).length, 1)
   assert.ok(ROW_SENTINEL_KEY in sentinel)
-  assert.match(sentinel[ROW_SENTINEL_KEY], /^<<ccr:[a-f0-9]{12} \d+_rows_offloaded.*>>$/)
+  assert.match(sentinel[ROW_SENTINEL_KEY], /^<<ccr:[a-f0-9]{12} \d+_rows_offloaded>>$/)
 })
 
 test('a numeric anomaly beyond 2 sigma is preserved', () => {
@@ -129,7 +129,7 @@ test('scalar arrays get the string sentinel, not the object one', () => {
   const last = parsed[parsed.length - 1]
 
   assert.equal(typeof last, 'string')
-  assert.match(last as string, /^… \d+ more items <<ccr:[a-f0-9]{12} \d+_items_offloaded.*>>$/)
+  assert.match(last as string, /^… \d+ more items <<ccr:[a-f0-9]{12} \d+_items_offloaded>>$/)
 })
 
 test('a failing stash refuses compression instead of leaving a dangling marker', () => {

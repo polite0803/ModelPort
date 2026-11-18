@@ -2579,29 +2579,26 @@ left below is the residue that survives that ruling because it is not a claim ab
 a self-describing compression marker and probes that never enter a conversation. Anything else must be
 retired, not documented.
 
-**Enforced by two tests, not by this paragraph (2026-11-18).** `gateway-authored-text.test.ts` keeps the
-tag↔ledger diff exact in both directions; `no-gateway-system-text.test.ts` scans every
-`{ role:'system', content: … }` write site under `src/`, and a site that is neither a declared client
-passthrough nor `GATEWAY-TEXT`-tagged fails the gate. The second exists because the first is blind to
-an untagged injection: it diffs two inventories, so a site missing from both is invisible to it - which
-is exactly how `FREEFORM_INPUT_PARAMETERS` reached the model unaccounted for.
+**Amendment (2026-11-12, 用户拍板)**: the ruling is lifted for exactly two blocks, `ccr-protocol` and
+`say-less-contract`. Both are *protocol* text, not task text: the first describes what this gateway's
+own markers mean, the second states an output shape the user selected in settings. Three conditions
+are enforced in `src/main/proxy/gatewayText.ts` rather than promised here:
 
-**Amendment (2026-11-12, 用户拍板)**: the ruling was lifted for exactly two blocks, `ccr-protocol` and
-`say-less-contract`.
+* the block arrives as its **own leading `system` message** - the client's system prompt is never
+  edited, appended to, or replaced. The 2026-11-03 `trailing-user-guard` wrote a `user` turn and the
+  model echoed it back as its own opening line in 36 of 267 reasoning blocks; a `system` block cannot
+  be mistaken for the user's words in the same way, and it is the shape a client can visibly see;
+* the text is **byte-identical on every turn of a conversation**, so the prefix cache sees the same
+  bytes again. Both blocks are pure functions of their inputs;
+* neither block is ever on by default for traffic that does not need it. `ccr-protocol` is present from
+  the first turn a conversation is compressed and remembered for the rest of it
+  (`gatewayProtocolMemory.ts`), because the block is prepended: if it appeared only on compressing turns
+  and vanished on the others, its presence would rewrite the first bytes of the prompt and drop the
+  entire cached prefix on every flip. A conversation that never compresses pays zero. `say-less-contract`
+  needs an explicit level, only applies to requests that carry `tools`, and is circuit-broken per
+  `(provider, model)` by `outputContractGuard.ts` when the target is already producing degraded turns.
 
-**Re-closed (2026-11-18, 用户拍板)**: both are retired. They existed only because the compression
-marker was a bare hash (`<<ccr:0123… 42_rows_offloaded>>`) that could not explain itself, so a ~900-byte
-leading `system` block had to. That block sat at the head of the prompt, cost bytes on every turn of a
-compressed conversation, and needed a per-conversation memory (`gatewayProtocolMemory.ts`) purely to
-stay byte-stable. The marker now carries its own retrieval line (`markers.ts::retrievalHint`), so the
-explanation arrives exactly where the cut happened and nowhere else. `say-less-contract` went with it:
-output length is the client's parameter (`model_verbosity` in Codex); a gateway deciding how much a
-model should talk is a claim on the user's behalf, and the 2026-11-18 evidence was that no trajectory
-ever selected it. Nothing the gateway writes reaches a user conversation today.
-
-The three conditions the old amendment enforced are kept here as history, because any future attempt
-to add prompt text has to answer them: it must state a protocol rather than a task, arrive as its own
-leading `system` message rather than editing the client's, and be byte-identical on every turn.
+Anything beyond these two is still retired by the 2026-11-03 ruling.
 
 Anything the gateway writes into an outbound request is a claim on the user's behalf, and it is
 also text the model can echo back into the conversation. Every such site carries a
@@ -2616,27 +2613,14 @@ fails if a tagged site is missing from this table or a table row has no tag. Pro
 | `probe-context` | `buildContextProbePrompt()`: repeats `probe ` to push the input to a target token tier | `2026-11-04` 探测阶梯 | context-window ladder probe; carries `probe: true`, so it never enters a client conversation, never counts toward AIMD/Bandit, and is excluded from success statistics. |
 | `probe-output` | `Write the word "ok" repeated on a single line until you are stopped. Do not stop on your own.` | `2026-11-04` 探测阶梯 | output-cap ladder probe: asks the model to keep going so `max_tokens` is the only stop reason; same `probe: true` isolation. |
 | `probe-capability` | `Reply with the single word ok.` (tools) / `What color is this pixel? One word.` (vision) | `2026-11-04` 探测阶梯 | capability probe for `tools` / image input acceptance; same `probe: true` isolation. A one-pixel PNG rides the vision request, but the only authored text is the two short prompts above. |
-| `freeform-input-schema` | `{type:'object',properties:{input:{type:'string'}},required:['input']}` as a freeform tool's `parameters` | `1775995` 2026-11-18 (previously untagged) | protocol translation, not a prompt: Responses `type:'custom'` tools carry no JSON schema, chat `tools[].function.parameters` requires one, and without a contract the model guessed - 4 of 6 `apply_patch` calls came back as `arguments: {}` with the patch body gone. Carries no authored sentence; `required` + `type` state the contract. Tagged on 2026-11-18 because it reached the model while being invisible to this table. |
+| `ccr-protocol` | a leading `system` block naming `<<ccr:hash>>` / `Retrieve more: hash=` and the retrieval endpoint `GET /v1/ccr/<hash>` | `2026-11-12` 裁定放开 | without it the marker is a pointer the model cannot follow: retrieval used to sit behind the management secret (off by default) and the original bytes were swept after 30 minutes. Injected only when the conversation carries a marker, and again byte-identically on every later turn. |
+| `say-less-contract` | a leading `system` block asking for a shorter answer (`concise` / `minimal`) | `2026-11-12` 裁定放开 | output tokens are the expensive side. Default off, opt-in per level, only on requests that carry `tools`, and withdrawn per `(provider, model)` once two degraded turns appear in the newest eight (`outputContractGuard.ts`). |
 
 ### Retired, with the evidence that retired it
 
 A retired site keeps its id here — never in the table above, which the gate reconciles against the
 live `GATEWAY-TEXT:` tags — so the provenance survives without pretending the code still does it.
 
-* **`ccr-protocol`** — retired 2026-11-18 under the re-closed ruling 本网关不向用户对话写入提示词. Provenance:
-  `1775995` 2026-11-12, 刘小平, as one of the two exceptions that amendment allowed. It was a leading
-  `system` block naming `<<ccr:hash>>` / `Retrieve more: hash=` and `GET /v1/ccr/<hash>`. Live reading
-  before retirement: 16 of 26 request rows that carried a compression report still had
-  `gatewayText.protocol: true`, i.e. one 900-byte block on every turn of every compressed conversation,
-  solely to explain a marker whose text the gateway itself chose. Replaced by
-  `markers.ts::retrievalHint`, which appends the endpoint and the 404 meaning to the marker at the cut
-  site, so the explanation is scoped to the bytes it describes and costs nothing on turns with no cut.
-* **`say-less-contract`** — retired 2026-11-18 with `ccr-protocol`. Provenance: `1775995` 2026-11-12,
-  刘小平. A leading `system` block asking for `concise` / `minimal` output, opt-in per level, gated by
-  `outputContractGuard.ts`. Never selected in the live `data.json` (0 rows with
-  `gatewayText.outputContract !== 'default'`), and the underlying parameter belongs to the client
-  (`model_verbosity` in Codex). The settings control, its two i18n keys and the config field were
-  removed with the block.
 * **`trailing-user-guard`** — retired 2026-11-03 under the ruling 本网关不注入任何提示词. It appended a
   **user** turn 「继续执行上一条消息中的任务，直接开始，不要向我确认。」 whenever the outbound sequence ended
   with `role:"tool"`. Provenance: `fb720f9` 2026-11-01, written while chasing the report named in its

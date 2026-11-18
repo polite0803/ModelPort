@@ -50,7 +50,7 @@ test('search compressor handles Windows paths and dash separators', () => {
   assert.match(result.text, /D:\\src\\app\\module:43:search context line/)
   assert.match(
     result.text,
-    /[72 matches compressed to \d+\. Retrieve more: hash=[0-9a-f]{24} -> GET \/v1\/ccr\/[0-9a-f]{24}[^\]]*\]/
+    /\[72 matches compressed to \d+\. Retrieve more: hash=[0-9a-f]{24}\]/
   )
   assert.ok(result.text.length < original.length)
 })

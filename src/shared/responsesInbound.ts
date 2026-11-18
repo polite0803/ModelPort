@@ -53,41 +53,6 @@ function textOfParts(content: unknown): string {
 }
 
 /**
- * `input_image` 项 → chat 的 `image_url` 片段。
- *
- * 用户消息与**工具结果**共用这一处：`view_image` 这类工具返回的就是一整段
- * `data:image/png;base64,…`，只取文本会让工具结果变成空串（见 {@link toolContentOf}）。
- */
-function imagePartsOf(content: unknown): Payload[] {
-  const parts: Payload[] = []
-  for (const rawPart of Array.isArray(content) ? content : []) {
-    const record = asRecord(rawPart)
-    if (!record || stringOf(record.type) !== 'input_image') continue
-    const url = typeof record.image_url === 'string'
-      ? record.image_url
-      : stringOf(asRecord(record.image_url)?.url)
-    if (url !== '') parts.push({ type: 'image_url', image_url: { url } })
-  }
-  return parts
-}
-
-/**
- * 工具结果的内容：只有文本时仍是字符串（老上游对数组形态兼容性参差），
- * 带图片时用 chat 的 content 数组。
- *
- * 2026-11-18 现网：Codex 的 `view_image` 返回 `[{type:'input_image'}]`，旧实现
- * 只取文本 ⇒ tool 消息 content 为空 ⇒ 模型把「结果为空」读成「调用没生效」，
- * 6 秒内对同一个文件重复调用，一次会话 48 张截图全部落在空结果上（用户读到的
- * 就是「反复啰嗦、推进不动」）。丢弃图像不属于「省略」，是把工具的语义擦掉了。
- */
-function toolContentOf(output: unknown): string | Payload[] {
-  const images = imagePartsOf(output)
-  if (images.length === 0) return textOfParts(output)
-  const text = textOfParts(output)
-  return text === '' ? images : [{ type: 'text', text }, ...images]
-}
-
-/**
  * Responses 的 reasoning 项 → 可回灌的思考文本。
  *
  * 优先 `content[].reasoning_text`，其次 `summary[].summary_text`；两者都没有时
@@ -120,14 +85,10 @@ function reasoningTextOf(item: Payload): string {
  * 的契约就是「一段原文」。没有它，上游模型只能从 description 猜形状 —— 实测同一轮
  * 会话里前两次 `apply_patch` 猜对了 `{"input":"*** Begin Patch…"}`，后四次直接交回
  * `arguments: {}`（补丁内容整个没了，模型却以为自己写了）。
- *
- * GATEWAY-TEXT: freeform-input-schema — 这是网关**唯一**仍写进请求的自造结构。
- * 它只声明形状（一个必填字符串），不带任何自造说明句：`required` + `type` 已经
- * 把契约说完，再写一句 "Raw text payload, not JSON." 就是替客户端解释它自己的工具。
  */
 const FREEFORM_INPUT_PARAMETERS = {
   type: 'object',
-  properties: { input: { type: 'string' } },
+  properties: { input: { type: 'string', description: 'Raw text payload for this tool, not JSON.' } },
   required: ['input'],
   additionalProperties: false,
 } as const
@@ -272,7 +233,7 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
         messages.push({
           role: 'tool',
           tool_call_id: stringOf(item.call_id),
-          content: toolContentOf(item.output),
+          content: textOfParts(item.output),
         })
         continue
       }
@@ -300,7 +261,7 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
         messages.push({
           role: 'tool',
           tool_call_id: stringOf(item.call_id),
-          content: toolContentOf(item.output),
+          content: textOfParts(item.output),
         })
         continue
       }
@@ -322,7 +283,15 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
         continue
       }
 
-      const imageParts = imagePartsOf(content)
+      const imageParts: Payload[] = []
+      for (const rawPart of Array.isArray(content) ? content : []) {
+        const record = asRecord(rawPart)
+        if (!record || stringOf(record.type) !== 'input_image') continue
+        const url = typeof record.image_url === 'string'
+          ? record.image_url
+          : stringOf(asRecord(record.image_url)?.url)
+        if (url !== '') imageParts.push({ type: 'image_url', image_url: { url } })
+      }
 
       if (text === '' && imageParts.length === 0) {
         flushReasoning()
