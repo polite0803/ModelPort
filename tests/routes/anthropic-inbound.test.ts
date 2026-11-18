@@ -611,12 +611,11 @@ test('生成的可发现路由：列得到、发得出、上游收到的就是�
   const list = await proxy.request('GET', '/v1/models', { headers: { 'anthropic-version': '2023-06-01' } })
   const rows = (list.json.data as Array<Record<string, any>>).filter(row => row.id === 'claude-opus-5')
   assert.equal(rows.length, 1, `清单里应当恰好一条：${JSON.stringify(list.json.data)}`)
-  // 窗口是**池里已公布窗口的下界**，不是上游声明的上限：这两家都没公布窗口，
-  // 所以没有可承诺的数，键整个省略（原先这里报的是兜底常量 64000，客户端会拿它
-  // 当真实窗口安排压缩时机）。纯函数层那条判据在
-  // `tests/proxy/models-context-window.test.ts`。
-  assert.equal('max_input_tokens' in rows[0], false,
-    `未公布的窗口不该变成一个承诺值：${JSON.stringify(rows[0])}`)
+  // 窗口取自路由池的对外读数。这两家都没公布窗口，2026-11-18 起改为 200K 兜底
+// （用户裁定）：有候选却没有读数时给一个已知可用的尺寸，而不是让客户端完全不压、
+// 历史无限膨胀。空池仍然省略这个键（见 `route-context-floor.test.ts`）。
+  assert.equal(rows[0].max_input_tokens, 200_000,
+    `未标注的候选应拿到 200K 兜底：${JSON.stringify(rows[0])}`)
 
   // 2. 发得出：客户端原样发回这个名字，它被**直接解析**成这条路由。
   const response = await proxy.request('POST', '/v1/messages', { body: messagesBody('claude-opus-5') })

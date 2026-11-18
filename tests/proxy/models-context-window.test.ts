@@ -12,28 +12,31 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { advertisedContextFloorOf, UNANNOTATED_CONTEXT_FLOOR } from '../../src/main/proxy/autoRouting.ts'
+import { advertisedContextCeilingOf, UNANNOTATED_CONTEXT_FLOOR } from '../../src/main/proxy/autoRouting.ts'
 
-// 路由条目（`auto` 与用户自建路由）没有上游目录可查，广告的是**候选里最小的已标注窗口**。
-// 它必须是下界：客户端按这个数安排发出的字节，而路由可能落到任何候选上。
-test('路由广告取候选里最小的已公布窗口；未公布的候选不贡献值', () => {
-  assert.equal(advertisedContextFloorOf([200_000, 32_768, 128_000]), 32_768)
-  // 「没标注」不是「已知 64K」：它既不该把下界压成猜数，也不该被当成上限承诺
-  assert.equal(advertisedContextFloorOf([200_000, undefined]), 200_000)
-  assert.equal(advertisedContextFloorOf([8_192, undefined]), 8_192)
+// 路由条目（`auto` 与用户自建路由）没有上游目录可查，广告的是**候选里最大的已公布窗口**。
+// 2026-11-18 改口径：取最小值会让池里一个 128K 候选把整条路由按 128K 广告，1M 的模型也被
+// 客户端提前摘要把会话砍断；取最大值后客户端尽量不摘要，超出的部分由网关按这一跳真正的
+// 模型裁剪并留 CCR 指针。
+test('路由广告取候选里最大的已公布窗口；未公布的候选不贡献值', () => {
+  assert.equal(advertisedContextCeilingOf([200_000, 32_768, 128_000]), 200_000)
+  // 「没标注」不是「已知 64K」：它既不贡献值，也不被当成上限承诺
+  assert.equal(advertisedContextCeilingOf([200_000, undefined]), 200_000)
+  assert.equal(advertisedContextCeilingOf([8_192, undefined]), 8_192)
+  assert.equal(advertisedContextCeilingOf([undefined, undefined]), undefined)
 })
 
 test('0 / 负数 / 非数字的标注等同未标注（不贡献值，绝不顶大）', () => {
-  assert.equal(advertisedContextFloorOf([0, 200_000]), 200_000)
-  assert.equal(advertisedContextFloorOf([-1, 200_000]), 200_000)
-  assert.equal(advertisedContextFloorOf(['abc' as unknown as number, 200_000]), 200_000)
+  assert.equal(advertisedContextCeilingOf([0, 200_000]), 200_000)
+  assert.equal(advertisedContextCeilingOf([-1, 200_000]), 200_000)
+  assert.equal(advertisedContextCeilingOf(['abc' as unknown as number, 200_000]), 200_000)
 })
 
 test('一家都没公布窗口 → 省略键：没有证据就不承诺（空池同理）', () => {
-  assert.equal(advertisedContextFloorOf([undefined, undefined]), undefined)
-  assert.equal(advertisedContextFloorOf([]), undefined)
+  assert.equal(advertisedContextCeilingOf([undefined, undefined]), undefined)
+  assert.equal(advertisedContextCeilingOf([]), undefined)
 })
 
 test('空池省略键：没有候选就没有可说的，不写默认窗口', () => {
-  assert.equal(advertisedContextFloorOf([]), undefined)
+  assert.equal(advertisedContextCeilingOf([]), undefined)
 })
