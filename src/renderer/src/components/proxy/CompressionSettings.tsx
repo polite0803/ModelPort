@@ -17,7 +17,6 @@ import { Minimize2 } from 'lucide-react'
 import type { CompressionConfig } from '@/types/electron'
 
 const AGGRESSIVENESS = ['conservative', 'moderate', 'aggressive'] as const
-const OUTPUT_LEVELS = ['default', 'concise', 'minimal'] as const
 
 export function CompressionSettings() {
   const { t } = useTranslation()
@@ -124,26 +123,6 @@ export function CompressionSettings() {
                       onClick={() => handleChange({ aggressiveness: level })}
                     >
                       {t(`compression.level.${level}`)}
-                    </Button>
-                  ))}
-                </div>
-
-                <div className="space-y-0.5 pt-2">
-                  <Label>{t('compression.outputContract')}</Label>
-                  <p className="text-sm text-muted-foreground">
-                    {t('compression.outputContractHint')}
-                  </p>
-                </div>
-                <div className="flex gap-2">
-                  {OUTPUT_LEVELS.map(level => (
-                    <Button
-                      key={level}
-                      type="button"
-                      variant={(config.outputContract?.level ?? 'default') === level ? 'default' : 'outline'}
-                      size="sm"
-                      onClick={() => handleChange({ outputContract: { level } })}
-                    >
-                      {t(`compression.outputLevel.${level}`)}
                     </Button>
                   ))}
                 </div>

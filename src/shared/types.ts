@@ -1264,11 +1264,6 @@ export interface SchedulerTaskStatus {
 /** Compression strength; multiplies the adaptive retention budget. */
 export type CompressionAggressiveness = 'conservative' | 'moderate' | 'aggressive'
 
-/** 输出侧「少说」契约的三档；`default` 表示不注入任何文字。 */
-export type OutputContractLevel = 'default' | 'concise' | 'minimal'
-
-export const OUTPUT_CONTRACT_LEVELS: OutputContractLevel[] = ['default', 'concise', 'minimal']
-
 /**
  * Live-zone context compression: the only two knobs the UI exposes.
  *
@@ -1286,11 +1281,6 @@ export interface CompressionConfig {
   cacheFirst?: boolean
   /** Per-provider explicit override; `true`/`false` wins over `cacheFirst`. */
   providerOverrides?: Record<string, boolean>
-  /**
-   * 输出侧「少说」契约。缺省（`undefined` 或 `default`）= 不注入：这是 2026-11-12
-   * 裁定放开后仍然默认关闭的那一半，因为「话说少了」没有副作用证据、只有 token 证据。
-   */
-  outputContract?: { level: OutputContractLevel }
   /**
    * 跨轮重复折叠：把与更早消息逐行相同的**历史**消息替换成可检索的指针。
    * 缺省关闭；开启后仍要过测量门（`foldGate.ts`），不会凭配置单独生效。
