@@ -135,17 +135,6 @@ export interface CompressionReport {
     /** 每条消息原文的 CCR 哈希。 */
     hashes: string[]
   }
-  /**
-   * 本轮注入了哪几块网关自有文本（`gatewayText.ts`）。
-   *
-   * 记在压缩报告里是因为这三格回答的是同一个问题：「这一轮为了让模型看懂
-   * 压缩结果，网关自己多说了什么」。`suspended` 说明用户开了输出契约，但这一家
-   * 的退化窗口已经熔断。
-   */
-  gatewayText?: {
-    protocol: boolean
-    outputContract: 'default' | 'injected' | 'suspended'
-  }
 }
 
 /** One live-zone candidate as the accept gate saw it. */

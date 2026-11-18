@@ -145,18 +145,6 @@ import { measureCrossTurnDuplication, recordDuplication } from './compression/du
 import { recordConversationTurn, recordConversationTurnForRequest, readSurvivorshipStats } from './compression/survivorship.ts'
 import { summarizeDuplication } from './compression/duplicationSummary.ts'
 import { readFoldDecision } from './compression/foldGate.ts'
-import {
-  applyGatewayText,
-  ccrProtocolText,
-  conversationHasCompressionMarker,
-  outputContractText,
-} from './gatewayText'
-import { readDegradationWindow } from './outputContractGuard'
-import {
-  conversationHasProtocolBlock,
-  rememberProtocolBlock,
-} from './gatewayProtocolMemory.ts'
-import { conversationKey } from './autoRouting.ts'
 
 // 换家判据与流首事件等待：本体与测试在 failover.ts（forwarder 背着 electron
 // 依赖，node --test 拉不动，见该模块头注释）。isFailoverEligibleStatus 从这里
@@ -453,68 +441,16 @@ export class RequestForwarder {
       ...(cachePolicy === undefined ? {} : { cachePolicy }),
       ...(foldDecision?.fold === true ? { fold: true } : {}),
     })
-    // Taken before the rewrite: routing keys stickiness and survivorship off the
-    // client's own messages, so the memory has to use the same basis or one
-    // conversation would look like two.
-    const conversationId = conversationKey(request)
     if (compression.messages && compression.messages !== request.messages) {
       request = { ...request, messages: compression.messages }
     }
 
-    // 网关自有文本（2026-11-12 裁定放开的两处，见 `gatewayText.ts`）。
-    //
-    // 压缩协议块的「存在与否」就是提示词前缀的第一个字节：只在压缩发生的回合出现、
-    // 下一回合又消失，等于每翻一次就作废整段前缀缓存。所以它按**会话**记（键取
-    // `conversationKey`，客户端自己的系统提示+首条用户消息，跨轮稳定）：第一次真正
-    // 压缩的回合引入它，之后这个会话每轮都在。没压缩过的会话一分不付。
-    //
-    // 输出契约要用户显式选档，且只在带工具的请求上生效：纯聊天里「少说」不是收益，
-    // 是替用户改变表达。同时受退化窗口熔断（`outputContractGuard.ts`）。
-    const contractLevel = config.compression.outputContract?.level ?? 'default'
-    const blocks: string[] = []
-    const hasMarker = conversationHasCompressionMarker(request.messages)
-    const compressedThisTurn = (compression.report?.applied.length ?? 0) > 0
-    const protocolInjected =
-      hasMarker || compressedThisTurn || conversationHasProtocolBlock(conversationId)
-    if (protocolInjected) {
-      blocks.push(ccrProtocolText())
-      // Only the turn that introduced the block (or that carries markers the
-      // client echoed back) starts the memory; a merely remembered conversation
-      // must not extend its own TTL.
-      if (hasMarker || compressedThisTurn) rememberProtocolBlock(conversationId)
-    }
-
-    let contractState: 'default' | 'injected' | 'suspended' = 'default'
-    if (contractLevel !== 'default' && (request.tools?.length ?? 0) > 0) {
-      const window = readDegradationWindow({
-        entries: storeManager.getRequestLogs(),
-        providerId: provider.id,
-        model: actualModel,
-      })
-      const contract = window.suspended ? null : outputContractText(contractLevel)
-      if (contract) {
-        blocks.push(contract)
-        contractState = 'injected'
-      } else {
-        contractState = 'suspended'
-      }
-    }
-
-    const withGatewayText = applyGatewayText(request.messages, blocks)
-    if (withGatewayText !== request.messages) {
-      request = { ...request, messages: withGatewayText }
-    }
-
+    // 网关不向用户对话写入任何提示词（2026-11-18 裁定，收紧 2026-11-12 的例外）：
+    // 压缩留下的标记自己说明取回方式（`markers.ts::retrievalHint`），所以不再需要
+    // 一段常驻的前导 `system` 块，也不再需要按会话记住「这个会话要不要注入」。
     if (compression.report && request.requestId) {
-      recordCompressionReport(request.requestId, {
-        ...compression.report,
-        gatewayText: { protocol: protocolInjected, outputContract: contractState },
-      })
+      recordCompressionReport(request.requestId, compression.report)
     }
-
-    // 输出侧：2026-11-03 退役的是「追加到用户 system 尾部」的那一版。2026-11-12
-    // 换形态回来了 —— 独立的前导 system 块、默认关闭、带工具才生效、受退化窗口熔断，
-    // 见 `gatewayText.ts` 与 `outputContractGuard.ts`。
 
     let lastError: string | undefined
     let lastStatus: number | undefined

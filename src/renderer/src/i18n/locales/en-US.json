@@ -1523,13 +1523,6 @@
     "aggressivenessHint": "Stronger settings keep fewer rows. Error rows, statistical outliers and numeric anomalies are never dropped at any strength.",
     "cacheFirst": "Cache first (skip compression for cache-friendly providers)",
     "cacheFirstHint": "A compressed block is discarded by the next turn's original bytes, so on providers whose cached input is much cheaper than fresh input (DeepSeek, Anthropic) compression usually costs more than it saves. This policy skips it unless a per-provider override says otherwise.",
-    "outputContract": "Output verbosity",
-    "outputContractHint": "Nothing is injected by default. On \"Concise\" or \"Minimal\", a fixed system block is placed before requests that carry tools, asking for fewer words. It turns itself off for a target that has produced degraded turns (looping, empty turn, announcing work it never does) — at that point the evidence is that this model does not follow the instruction.",
-    "outputLevel": {
-      "default": "Default",
-      "concise": "Concise",
-      "minimal": "Minimal"
-    },
     "foldDuplicates": "Fold repeated history (replace a duplicate message with a retrievable pointer)",
     "foldDuplicatesHint": "When a whole message matches an earlier one line for line, the later copy becomes a pointer and the original stays retrievable locally. Rewriting history costs one prompt-cache miss, so it only runs when the measurement gate passes: at least 20% duplication, a conclusive log window, and at least 2 more turns expected in the conversation.",
     "level": {
