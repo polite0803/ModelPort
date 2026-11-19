@@ -26,7 +26,7 @@ const UPSTREAM_PORT = 18972
 type Payload = Record<string, any>
 
 let seenBodies: Payload[] = []
-let upstreamMode: 'ok' | 'stream' | 'tool' | 'patch' | 'error' = 'ok'
+let upstreamMode: 'ok' | 'stream' | 'tool' | 'patch' | 'error' | 'runaway' = 'ok'
 
 const upstream = createServer((req, res) => {
   const chunks: Buffer[] = []
@@ -38,6 +38,51 @@ const upstream = createServer((req, res) => {
     if (upstreamMode === 'error') {
       res.writeHead(502, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ error: { message: 'upstream exploded', type: 'api_error', param: null, code: null } }))
+      return
+    }
+
+    // 跑飞（2026-11-19 18:54 现网形状）：6400 字、零工具调用、整段复读。
+    // 第一发这样，之后的发恢复正常 —— 用来验证「整发丢弃 + 重发一次」。
+    if (upstreamMode === 'runaway') {
+      const first = seenBodies.length === 1
+      if (first) {
+        if (body.stream === true) {
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+          const frame = `data: ${JSON.stringify({ id: 'chatcmpl-run', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { content: '执行。\n' } }] })}\n\n`
+          for (let index = 0; index < 1600; index += 1) res.write(frame)
+          res.write('data: {"id":"chatcmpl-run","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n')
+          res.write('data: [DONE]\n\n')
+          res.end()
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({
+          id: 'chatcmpl-run',
+          object: 'chat.completion',
+          created: 9,
+          model: body.model ?? '',
+          choices: [{ index: 0, message: { role: 'assistant', content: '执行。\n'.repeat(1600) }, finish_reason: 'stop' }],
+          usage: null,
+        }))
+        return
+      }
+      if (body.stream === true) {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+        res.write('data: {"id":"chatcmpl-s2","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"你好"}}]}\n\n')
+        res.write('data: {"id":"chatcmpl-s2","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n')
+        res.write('data: [DONE]\n\n')
+        res.end()
+        return
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        id: 'chatcmpl-fake2',
+        object: 'chat.completion',
+        created: 10,
+        model: body.model ?? '',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'hello from upstream' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 21, completion_tokens: 7, total_tokens: 28 },
+      }))
       return
     }
 
@@ -486,4 +531,45 @@ test('R2 之后 Codex 在清单里挑得到属于它自己的那条路由，并�
   const run = await proxy.request('POST', '/v1/responses', { body: responsesBody('codex') })
   assert.equal(run.status, 200)
   assert.equal(run.headers['x-modelport-route-name'], 'codex')
+})
+
+// ---------------------------------------------------------------------------
+// 跑飞回合的重发（2026-11-19 18:54：Codex goal 循环里 0 工具调用、16384 字
+// 「执行。」复读，撞输出上限后会话空了 2 小时）。
+// ---------------------------------------------------------------------------
+
+const execTool = { type: 'function', name: 'exec', parameters: { type: 'object', properties: {} } }
+
+test('流式：跑飞的一发整发丢弃并重发一次，客户端只看到重发的结果', async () => {
+  upstreamMode = 'runaway'
+  const response = await proxy.request('POST', '/v1/responses', {
+    body: responsesBody('auto', { stream: true, tools: [execTool] }),
+  })
+
+  assert.equal(response.status, 200)
+  assert.ok(response.text.includes('你好'), '客户端拿到的是第二发')
+  assert.ok(!response.text.includes('执行。'), '跑飞的那一发一个字节都不该到客户端')
+  assert.equal(seenBodies.length, 2, '同一请求被发了两次：第一发跑飞、第二发交付')
+})
+
+test('没带工具时不判跑飞：长正文照常交付，不重发', async () => {
+  upstreamMode = 'runaway'
+  const response = await proxy.request('POST', '/v1/responses', {
+    body: responsesBody('auto', { stream: true }),
+  })
+
+  assert.equal(response.status, 200)
+  assert.ok(response.text.includes('执行。'), '纯问答客户端里长正文就是答案，不许吞')
+  assert.equal(seenBodies.length, 1)
+})
+
+test('非流式：零工具调用的跑飞正文同样重发一次', async () => {
+  upstreamMode = 'runaway'
+  const response = await proxy.request('POST', '/v1/responses', {
+    body: responsesBody('auto', { tools: [execTool] }),
+  })
+
+  assert.equal(response.status, 200)
+  assert.equal(response.json.output[0].content[0].text, 'hello from upstream')
+  assert.equal(seenBodies.length, 2)
 })
