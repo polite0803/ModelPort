@@ -17,8 +17,7 @@
  *    `responsesUnsupportedParams`）。静默接受会让客户端以为后面还取得回来。
  */
 
-import { safeClientToolArguments } from './clientToolArguments.ts'
-import { looksLikeTruncatedToolArguments } from './truncatedToolArguments.ts'
+import { sanitizeClientToolArguments } from './clientToolArguments.ts'
 
 type Payload = Record<string, unknown>
 
@@ -156,9 +155,6 @@ export function freeformToolNamesOf(body: unknown): string[] {
 
 /** chat 侧 `{"input":"…"}` 替身 → responses 侧的原始文本 `input`。 */
 function freeformInputOf(rawArguments: string): string {
-  // 截断的 JSON 外壳先判掉：下面的兜底会把 `{"input":"Begin Patch…` 整串当补丁原文
-  // 交出去，客户端执行的就是半个补丁。空 input 会让它立刻失败，那才是可解释的结果。
-  if (looksLikeTruncatedToolArguments(rawArguments)) return ''
   try {
     const record = asRecord(JSON.parse(rawArguments) as unknown)
     if (record && typeof record.input === 'string') return record.input
@@ -584,7 +580,7 @@ export function chatResponseToResponseBody(payload: unknown, options: ChatToResp
       status: 'completed',
       call_id: callId,
       name: toolName,
-      arguments: safeClientToolArguments(toolName, rawArguments, options.clientPlatform),
+      arguments: sanitizeClientToolArguments(toolName, rawArguments, options.clientPlatform),
     })
   })
 
@@ -720,7 +716,7 @@ export function createResponsesStreamTranslator(options: ChatToResponsesOptions)
         status: 'completed',
         call_id: item.callId ?? '',
         name: item.name ?? '',
-        arguments: safeClientToolArguments(item.name ?? '', item.text, options.clientPlatform),
+        arguments: sanitizeClientToolArguments(item.name ?? '', item.text, options.clientPlatform),
       }
     }
     return {
@@ -765,7 +761,7 @@ export function createResponsesStreamTranslator(options: ChatToResponsesOptions)
         output_index: item.outputIndex,
         call_id: item.callId ?? '',
         name: item.name ?? '',
-        arguments: safeClientToolArguments(item.name ?? '', item.text, options.clientPlatform),
+        arguments: sanitizeClientToolArguments(item.name ?? '', item.text, options.clientPlatform),
       }))
     }
 

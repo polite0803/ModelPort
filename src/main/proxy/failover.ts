@@ -366,28 +366,6 @@ export function isAccountArrearsError(message: string | undefined): boolean {
 }
 
 /**
- * 「这个账号所在的隐私区域拿不到这个模型」类 400 的识别（2026-11-19 实测：
- * `opencode_go/deepseek-v4.1-flash` 回 400
- * 「This OpenCode Go model is hosted outside Europe and the United States.
- *   Select Global at https://opencode.ai/console/org_…/settings/privacy#regions to use it.」）。
- *
- * 区域是**账号（组织）级设置**，与请求体无关：这一家供不了，同池的另一个账号
- * （自己的组织设了 Global）就能成。原先它落进「池语义的裸 400」，计入
- * `MAX_REJECTED_REQUEST_SWITCHES = 2` —— 多账号池里有两把 key 的区域没设对，
- * 第三个账号就永远轮不到。现在与欠费/会话亲和头同一类：换候选、不占换家额度、
- * 不给账号记冷却或故障。
- *
- * ⚠️ 识别口径必须**窄**：只认「hosted outside … Europe … United States」这句
- * 上游文案（两个地名都必须在），不认泛化的 region/地区措辞 —— 403 地区拦截
- * 本来就按状态码换家，把 400 也放宽会误伤客户端自己写坏的请求。
- */
-export function isRegionRestrictedModelError(message: string | undefined): boolean {
-  if (!message) return false
-  return /hosted outside\b[^.]{0,60}\bEurope\b[^.]{0,60}\bUnited States\b/i.test(message)
-    || /hosted outside\b[^.]{0,60}\bUnited States\b[^.]{0,60}\bEurope\b/i.test(message)
-}
-
-/**
  * 整条链的结局是否属于「等一会再走一遍就可能成」。
  *
  * 命中范围刻意**窄**：
@@ -922,9 +900,6 @@ export function describeAttemptFailure(input: {
     // 的尝试记成 `fatal`（2026-11-12 补）。
     || isMissingSessionAffinityError(input.error)
     || isAccountArrearsError(input.error)
-    // 区域限制同因（2026-11-19 opencode_go）：换家循环按「这个账号的组织没开
-    // Global」继续往下试且不记账号故障，漏在这里会让日志把这一面试成 fatal。
-    || isRegionRestrictedModelError(input.error)
     // 普通 404 同因：换家循环按「这一家供不了这个模型」继续往下试且不记账号故障
     // （`forwarder.ts` 的 `capabilityMismatch` 里有这一条），漏在这里就会把同一笔
     // 尝试在 `attempts[].outcome`（capability）与 `auto.failures[].kind`（failover）

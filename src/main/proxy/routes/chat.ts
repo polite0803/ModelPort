@@ -18,7 +18,6 @@ import { SSEParser, extractStreamErrorFrame, streamHandler, type StreamErrorFram
 import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
 import { autoRouter, AUTO_SKIPPED_REPORT_LIMIT, describeTransientCause, summarizeTransientSkips } from '../autoRouter'
-import { cacheMissLedger } from '../cacheMissLedger'
 import type { AutoCandidate, AutoRouteDecision } from '../autoRouter'
 import { profileRequest } from '../autoRouting'
 import { applyVisionRelay, routeDecisionNeedsVisionRelay } from '../visionRelay'
@@ -34,8 +33,6 @@ import { nextDailyUsage } from '../../../shared/dailyUsage.ts'
 import { startSseHeartbeat, type SseHeartbeat } from '../utils/sseHeartbeat'
 import { findUnsupportedParameter, unsupportedParameterError } from '../parameterPolicy'
 import { createToolViolationTap } from '../utils/toolViolationTap'
-import { createTruncatedToolArgsTap } from '../utils/truncatedToolArgsTap'
-import { pruneTruncatedToolCalls } from '../utils/truncatedToolCalls'
 import {
   collectToolCallNames,
   createUndeclaredToolNameTap,
@@ -422,25 +419,13 @@ function meterQuota(
    * 这次请求的压缩判决。按日桶要的不是"省了多少"，而是"为什么没省"——
    * 被拒候选的投影只活在这份报告里，请求日志一两天就滚掉了。
    */
-  compression?: CompressionReport,
-  /**
-   * 这一轮所在会话的键（`AutoRouteDecision.conversationKey`）。只用于把缓存
-   * 缺口归因到四种成因；缺省时账本记不到这一轮，但计数照常累加。
-   */
-  missConversationKey?: string
+  compression?: CompressionReport
 ): void {
   try {
     storeManager.getQuotaLedger().record(provider.id, accountId, modelId, reading)
   } catch (error) {
     console.error('[Chat] quota ledger record failed:', error)
   }
-
-  const missReading = cacheMissLedger.classify({
-    key: missConversationKey,
-    promptTokens: reading.promptTokens,
-    cacheReadTokens: reading.cacheReadTokens,
-    cacheReported: reading.cacheReadReported,
-  })
 
   try {
     storeManager.recordTokenUsage({
@@ -455,7 +440,6 @@ function meterQuota(
       modelId,
       costUsd: estimateRequestCost(provider, modelId, reading),
       ...(compression === undefined ? {} : { compression }),
-      ...(missReading === undefined ? {} : { cacheMissClass: missReading.class }),
     })
   } catch (error) {
     console.error('[Chat] token usage record failed:', error)
@@ -885,10 +869,6 @@ router.post('/completions', async (ctx: Context) => {
 
   let selection: AccountSelection | null = null
   let chainCandidates: AccountSelection[] = []
-  // 缓存缺口分类用的会话键。具名模型没有 `AutoRouteDecision`，但分类仍要按会话
-  // 串起上一轮 —— 两段口径不同会让同一段对话在读数里被拆成两段。
-  const missConversationKey = autoDecision?.conversationKey
-    ?? autoRouter.conversationKeyFor(request, clientSession)
   // 用户通过模型映射点名了具体账号时是硬性指定：命中它失败后不再轮换到同供应商其他 Key
   let preferredAccountId: string | undefined = undefined
   if (!autoDecision) {
@@ -1999,8 +1979,7 @@ router.post('/completions', async (ctx: Context) => {
         compressionReport && compressionReport.applied.length > 0
           ? compressionReport.saved
           : 0,
-        compressionReport,
-        missConversationKey
+        compressionReport
       )
     }
 
@@ -2286,8 +2265,7 @@ router.post('/completions', async (ctx: Context) => {
             compressionReport && compressionReport.applied.length > 0
               ? compressionReport.saved
               : 0,
-            compressionReport,
-            missConversationKey
+            compressionReport
           )
           wrapperStream.end()
           if (streamError) {
@@ -2390,8 +2368,7 @@ router.post('/completions', async (ctx: Context) => {
             compressionReport && compressionReport.applied.length > 0
               ? compressionReport.saved
               : 0,
-            compressionReport,
-            missConversationKey
+            compressionReport
           )
           wrapperStream.end()
         })
@@ -2409,9 +2386,6 @@ router.post('/completions', async (ctx: Context) => {
         }))
       }
       if (requiresToolCall) outStream = outStream.pipe(createToolViolationTap())
-      // 截断标注放最后：它要看完所有 delta 分片才判得出，且只往收尾帧追加一个字段，
-      // 与上面两个 tap 互不改写。
-      outStream = outStream.pipe(createTruncatedToolArgsTap())
       ctx.body = outStream
 
       // 立即发送响应头：客户端通常只对“响应头”计时（例如 10s），首个 token 可能远晚于此
@@ -2465,18 +2439,12 @@ router.post('/completions', async (ctx: Context) => {
         auditUndeclaredToolNames(
           findUndeclaredToolNames(collectToolCallNames(result.body), declaredToolNames),
         )
-        // 截断的参数不交付：整条调用摘掉，这一轮客户端就没有工具可执行 —— 它会按
-        // 自己的策略重试，而不是执行半个补丁。条数写进响应头，降级不静默。
-        const prunedToolCalls = pruneTruncatedToolCalls(result.body)
-        if (prunedToolCalls.dropped > 0) {
-          ctx.set('X-ModelPort-Tool-Args-Truncated', String(prunedToolCalls.dropped))
-        }
         // Check if we need to transform to Anthropic format
         if (isAnthropicToolFormat(request.tool_format)) {
-          ctx.body = transformResponseToAnthropic(prunedToolCalls.body)
+          ctx.body = transformResponseToAnthropic(result.body)
           console.log('[Chat] Transformed response to Anthropic tool format')
         } else {
-          ctx.body = prunedToolCalls.body
+          ctx.body = result.body
         }
       } else {
         ctx.body = {

@@ -41,28 +41,3 @@ test('sanitizeChatToolDefinitions：非 function 工具与非法输入不冒充�
   assert.equal(sanitizeChatToolDefinitions(undefined), undefined)
   assert.equal(sanitizeChatToolDefinitions('not-an-array'), 'not-an-array')
 })
-
-test('sanitizeChatToolDefinitions：按名称排序，使「同集合、不同顺序」出站字节一致', () => {
-  const first = { type: 'function', function: { name: 'zeta', parameters: { type: 'object' } } }
-  const second = { type: 'function', function: { name: 'alpha', parameters: { type: 'object' } } }
-  const third = { type: 'function', function: { name: 'mike', parameters: { type: 'object' } } }
-
-  const a = sanitizeChatToolDefinitions([first, second, third]) as Array<{ function: { name: string } }>
-  const b = sanitizeChatToolDefinitions([third, first, second]) as Array<{ function: { name: string } }>
-
-  assert.deepEqual(a.map(tool => tool.function.name), ['alpha', 'mike', 'zeta'])
-  assert.equal(
-    JSON.stringify(a),
-    JSON.stringify(b),
-    '同一工具集合换了输入顺序后，出站字节必须一致（前缀缓存按字节匹配）',
-  )
-})
-
-test('sanitizeChatToolDefinitions：同名工具保持原有相对顺序', () => {
-  const tools = [
-    { type: 'function', function: { name: 'dup', description: 'first' } },
-    { type: 'function', function: { name: 'dup', description: 'second' } },
-  ]
-  const sanitized = sanitizeChatToolDefinitions(tools) as Array<{ function: { description: string } }>
-  assert.deepEqual(sanitized.map(tool => tool.function.description), ['first', 'second'])
-})

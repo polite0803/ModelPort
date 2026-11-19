@@ -1,5 +1,5 @@
 import { currentLocalDay, recentLocalDays } from './localDay.ts'
-import type { CacheMissClassCounts, DayTokenBucket } from './tokenAccounting.ts'
+import type { DayTokenBucket } from './tokenAccounting.ts'
 
 /**
  * One local day of per-provider counters, in the shape `dailyStats` is stored
@@ -280,11 +280,6 @@ export interface ModelWindowTokenUsage {
    * never report caching as 0% hits.
    */
   promptWithCache: number
-  /**
-   * 缺口成因的请求计数（窗口内求和）。缺省 = 这个模型还没被分类过（旧桶，或
-   * 全部请求都没报缓存字段），不是「四类都是 0」。
-   */
-  cacheMissClasses?: CacheMissClassCounts
   /** Earliest day in the window carrying this model's split. */
   coveredFrom?: string
 }
@@ -318,15 +313,6 @@ export function aggregateModelTokenUsage(
       total.cacheReadTokens += usage.upstreamCacheRead
       total.cacheReportedRequests += usage.cacheReportedRequests
       total.promptWithCache += usage.upstreamPromptWithCache
-      if (usage.cacheMissClasses !== undefined) {
-        const merged = total.cacheMissClasses ?? { cold: 0, rewrite: 0, break: 0, tail: 0 }
-        total.cacheMissClasses = {
-          cold: merged.cold + usage.cacheMissClasses.cold,
-          rewrite: merged.rewrite + usage.cacheMissClasses.rewrite,
-          break: merged.break + usage.cacheMissClasses.break,
-          tail: merged.tail + usage.cacheMissClasses.tail,
-        }
-      }
       if (total.coveredFrom === undefined || compareDayKeys(key, total.coveredFrom) < 0) {
         total.coveredFrom = key
       }

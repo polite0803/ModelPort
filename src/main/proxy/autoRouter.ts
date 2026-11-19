@@ -13,7 +13,6 @@
  */
 
 import { storeManager } from '../store/store'
-import type { CacheAffinityMap } from '../store/cacheAffinity'
 import { accountChannelManager } from '../providers/accountChannels/manager'
 import { resolvePoolRoute } from '../store/modelRoutes'
 import type { Account, Provider, UserModelMarks } from '../store/types'
@@ -50,7 +49,6 @@ import { getProbeRowsSync } from '../providers/modelProbeStore.ts'
 import { accountRuntime } from './accountRuntime'
 import { capClientRetryAfterSeconds, permanentRefusalCooldownMs, quotaWindowResetMs } from './failover.ts'
 import { clearCatalogMissCooldowns, isCatalogMissCoolingDown } from './modelCatalogCooldown'
-import { applyRequestTierFloor, requestWriteToolFloor } from './writeToolFloor.ts'
 import { getChannelDefinition } from '../providers/accountChannels/catalogue'
 import { getAggregateEntry } from '../providers/aggregate/registry.ts'
 import { promptCacheOf, effectiveAffinityMinutes, type PromptCacheCapability } from '../../shared/promptCache.ts'
@@ -120,8 +118,6 @@ const AUTO_MAX_ATTEMPTS = 3
 
 /** 会话粘性表容量上限，超出后按插入顺序淘汰最旧的条目 */
 const STICKY_CAPACITY = 500
-/** 缓存亲和落盘的合并窗：同一段会话连发时只写一次盘。 */
-const AFFINITY_PERSIST_DEBOUNCE_MS = 5_000
 
 /**
  * 单模型作用域（`modelScope: 'single'`）的换家墙钟预算。
@@ -803,17 +799,6 @@ class AutoRouter {
   private cacheAffinity = new Map<string, StickyRoute>()
 
   /**
-   * 磁盘上的亲和读数只载入一次（第一次真正用它时）。进程重启会清掉这个 Map，
-   * 而「重启后仍回同一缓存域」正是它落盘的全部理由；一次载入失败不能让选路变红，
-   * 所以只记一行警告然后按空表继续。
-   */
-  private cacheAffinityHydrated = false
-
-  /** 落盘节流：成功请求可能每秒好几笔，`data.json` 是整档重写。 */
-  private affinityPersistTimer: ReturnType<typeof setTimeout> | null = null
-  private affinityPersistDirty = false
-
-  /**
    * 内存钉：请求头（`X-ModelPort-Model`）点名要的模型，按 (路由, 作用域) 存。
    * 控制台/托盘的路由级钉不走这里 —— 统一落盘成路由配置 `preferredModel`
    * （裁定 2026-11-15）。
@@ -1345,18 +1330,6 @@ class AutoRouter {
   }
 
   /**
-   * 一条请求的会话键，与 `select()` 内部同一个口径。
-   *
-   * 具名模型（不走路由）的请求没有 `AutoRouteDecision`，但缓存缺口分类仍要按会话
-   * 串起上一轮 —— 口径分叉会让同一段对话在读数里变成两段。
-   */
-  conversationKeyFor(request: ChatCompletionRequest, sessionKey?: ClientSessionKey): string | undefined {
-    return sessionKey !== undefined
-      ? `session:${hashString(sessionKey.value)}`
-      : conversationKey(request)
-  }
-
-  /**
    * 为本次请求选出有序候选列表；空数组表示没有可用目标
    *
    * `route` 是这次生效的路由（`AppConfig.routes` 里的一条）。可路由的每一项
@@ -1405,7 +1378,9 @@ class AutoRouter {
     // 第三种表达。这里提前到排序之前算好键，好让候选池在排序前就收窄到被钉的模型。
     const stickyKeySource: 'client-session' | 'content-hash' =
       sessionKey === undefined ? 'content-hash' : 'client-session'
-    const key = this.conversationKeyFor(request, sessionKey)
+    const key = sessionKey !== undefined
+      ? `session:${hashString(sessionKey.value)}`
+      : conversationKey(request)
     if (headerModel !== undefined && headerModel.displayName.trim().length > 0) {
       this.setPin({
         route: routeName,
@@ -1458,23 +1433,14 @@ class AutoRouter {
     // 它是路线级的声明，手动增删也拿不回低于下限的模型。
     const pinnedRankInputs = applyModelNamePin(rankPool, route?.pinModels)
     const tierInputs = applyMinTier(pinnedRankInputs, route?.minTier)
-    // 写入型请求的档位托底：紧接 `minTier`，所以 `includeModels` 也拿不回被托底
-    // 筛掉的低档模型。抬空了就回落并记降级（`write_tool_tier`），不因为「这轮是
-    // 写入」把路由打成 503。广告窗口（`keptOfPool`）**有意**不跟着抬：那是这条路由
-    // 通常能用什么，不是这一轮用了什么。
-    const writeTier = applyRequestTierFloor(
-      tierInputs,
-      requestWriteToolFloor(route?.writeToolTier, request)
-    )
-    const strategyInputs = writeTier.inputs
-    const strategyOutcome = applyPoolStrategiesWithTrace(strategyInputs, poolStrategies)
+    const strategyOutcome = applyPoolStrategiesWithTrace(tierInputs, poolStrategies)
 
     // 手动增删：策略之后、契约过滤之前。exclude 赢过 include，include 只能从
     // 策略前就有资格的候选里取回模型 —— 不会复活停用的模型，也不会绕过下面
     // 的契约过滤与排序阶段的硬过滤。
     const manual = applyManualModelSelection(
       strategyOutcome.kept,
-      strategyInputs,
+      tierInputs,
       route?.includeModels ?? [],
       route?.excludeModels ?? []
     )
@@ -1485,11 +1451,7 @@ class AutoRouter {
     // `response_format` 则照常路由并标记降级——返回自由文本比拒绝可用。
     const contract = applyContractFilter(pool, needs)
     const contractPool = contract.pool
-    // 写入型托底没能兑现（池里没有够档的模型）同样是一条降级，与 `response_format`
-    // 并列透出 —— 客户端至少能从响应头看到「这轮写入没拿到 balanced」。
-    const degraded = writeTier.relaxed
-      ? [...contract.degraded, 'write_tool_tier']
-      : contract.degraded
+    const degraded = contract.degraded
     const missing: string[] = contract.missing
 
     // 空池要能区分「供应商没候选」和「配置把候选筛光了」：后两者指向用户
@@ -1526,7 +1488,6 @@ class AutoRouter {
     const cacheAffinityMinutes = autoConfig?.cacheAffinityMinutes ?? 0
     let cacheHint: StickyHint | undefined
     if (stickyKey && cacheAffinityMinutes > 0) {
-      this.ensureCacheAffinityLoaded()
       const previous = this.cacheAffinity.get(stickyKey)
       if (previous && previous.expiresAt > now) {
         cacheHint = previous.hint
@@ -2193,78 +2154,12 @@ class AutoRouter {
    * 信号，解钉不清（换钉才清：用户点名是对这颗模型的背书）。
    */
   clearRouteInertia(routeName: string): void {
-    this.ensureCacheAffinityLoaded()
     const prefix = `${routeName}|`
     for (const key of [...this.sticky.keys()]) {
       if (key.startsWith(prefix)) this.sticky.delete(key)
     }
     for (const key of [...this.cacheAffinity.keys()]) {
       if (key.startsWith(prefix)) this.cacheAffinity.delete(key)
-    }
-    this.scheduleAffinityPersist()
-  }
-
-  /**
-   * 第一次用到缓存亲和时，把磁盘上的读数并进内存表。
-   *
-   * 只补内存里没有的键：本进程已经写过的新读数优先级更高。过期与形状不合法
-   * 的记录在 `normalizeCacheAffinity` 里就被丢掉了。
-   */
-  private ensureCacheAffinityLoaded(): void {
-    if (this.cacheAffinityHydrated) return
-    this.cacheAffinityHydrated = true
-    let stored: CacheAffinityMap
-    try {
-      stored = storeManager.getCacheAffinity()
-    } catch (error) {
-      console.warn('[AutoRouter] 缓存亲和读数载入失败，按空表继续：', error)
-      return
-    }
-    for (const [key, entry] of Object.entries(stored)) {
-      if (this.cacheAffinity.has(key)) continue
-      this.cacheAffinity.set(key, {
-        hint: {
-          providerId: entry.providerId,
-          displayName: entry.displayName,
-          accountId: entry.accountId,
-        },
-        expiresAt: entry.expiresAt,
-      })
-    }
-  }
-
-  /**
-   * 节流落盘。`data.json` 是整档重写，成功请求密集时每笔都写会把回环中继拖慢；
-   * 定时器 `unref` 掉，不阻止进程退出 —— 最多丢掉窗口内几笔亲和，下一笔成功会重写。
-   */
-  private scheduleAffinityPersist(): void {
-    this.affinityPersistDirty = true
-    if (this.affinityPersistTimer !== null) return
-    this.affinityPersistTimer = setTimeout(() => {
-      this.affinityPersistTimer = null
-      if (!this.affinityPersistDirty) return
-      this.affinityPersistDirty = false
-      this.flushCacheAffinity()
-    }, AFFINITY_PERSIST_DEBOUNCE_MS)
-    // Node 与浏览器的定时器都带 unref；类型上按可选写法访问，避免在两种环境里各写一份。
-    ;(this.affinityPersistTimer as { unref?: () => void }).unref?.()
-  }
-
-  private flushCacheAffinity(): void {
-    // 兜底：任何一次写盘都必须基于「磁盘上的全量」而不是本进程见过的子集，
-    // 否则启动后先发生的一次解钉会把别的路由的亲和整片抹掉。
-    this.ensureCacheAffinityLoaded()
-    const now = Date.now()
-    const out: CacheAffinityMap = {}
-    for (const [key, entry] of this.cacheAffinity) {
-      if (entry.expiresAt <= now) continue
-      out[key] = { ...entry.hint, expiresAt: entry.expiresAt }
-    }
-    try {
-      storeManager.setCacheAffinity(out)
-    } catch (error) {
-      // 落盘失败不能让选路失败：内存里的亲和仍然是这一轮的依据。
-      console.warn('[AutoRouter] 缓存亲和读数落盘失败：', error)
     }
   }
 
@@ -2613,13 +2508,11 @@ class AutoRouter {
    */
   revokeSticky(key: string | undefined, route?: ModelRoute): void {
     if (!key) return
-    this.ensureCacheAffinityLoaded()
     this.sticky.delete(stickyMapKey(route?.name ?? LEGACY_ROUTE_NAME, key))
     // Quality degradation is a correctness signal, not a cache trade-off: a
     // repeating or truncated turn must not stay pinned just because its prefix
     // is warm.
     this.cacheAffinity.delete(stickyMapKey(route?.name ?? LEGACY_ROUTE_NAME, key))
-    this.scheduleAffinityPersist()
   }
 
   /**
@@ -2655,7 +2548,6 @@ class AutoRouter {
 
     if (minutes <= 0 && affinityMinutes <= 0) return
 
-    if (affinityMinutes > 0) this.ensureCacheAffinityLoaded()
     const now = Date.now()
     for (const [existingKey, entry] of this.sticky) {
       if (entry.expiresAt <= now) {
@@ -2695,7 +2587,6 @@ class AutoRouter {
       if (oldest.done) break
       this.cacheAffinity.delete(oldest.value)
     }
-    if (affinityMinutes > 0) this.scheduleAffinityPersist()
   }
 
   /**

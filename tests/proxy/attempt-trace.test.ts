@@ -72,14 +72,3 @@ test('尝试链：账号欠费的 400 记成 capability，不是 fatal', () => {
   // 客户端自己写坏的 400 仍然是终止
   assert.equal(trace({ status: 400, error: 'messages: must be a non-empty array' }).outcome, 'fatal')
 })
-
-test('尝试链：区域限制的 400 记成 capability，不是 fatal', () => {
-  // 2026-11-19 实测：opencode_go 的组织隐私区未设 Global，上游 400 原先落进
-  // fatal（多账号池里两把 key 没设对就能把第三个账号挡在链外）。
-  assert.equal(trace({
-    status: 400,
-    error: 'This OpenCode Go model is hosted outside Europe and the United States. '
-      + 'Select Global at https://opencode.ai/console/org_x/settings/privacy#regions to use it.',
-  }).outcome, 'capability')
-  assert.equal(trace({ status: 400, error: 'region blocked' }).outcome, 'fatal')
-})

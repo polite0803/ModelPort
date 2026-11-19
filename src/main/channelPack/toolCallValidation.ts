@@ -159,12 +159,6 @@ export interface ToolCallShapeCounts {
  *
  * 空名字工具**无法被模型正确调用**，删除不会损失可用能力；把定义原样送上去
  * 只会让整条请求在严格上游直接失败。返回新数组，不修改入参。
- *
- * 出站顺序按 `function.name` 排序：前缀缓存按**字节**匹配，工具定义又作为 system
- * 块的一部分参与缓存计算（百炼 §提高 Function Calling 缓存命中率 明确要求
- * 「工具列表顺序一致」）。多 MCP server 的客户端在轮与轮之间可能抖动顺序，
- * 排序把「同一集合、不同顺序」归一到同一份字节，避免整段 system 前缀失效。
- * 同名工具保持原有相对顺序（`Array#sort` 在 V8 上稳定），语义不变。
  */
 export function sanitizeChatToolDefinitions(tools: unknown): unknown {
   if (!Array.isArray(tools)) return tools
@@ -185,11 +179,6 @@ export function sanitizeChatToolDefinitions(tools: unknown): unknown {
       : fn
     sanitized.push({ ...record, function: nextFunction })
   }
-  sanitized.sort((a, b) => {
-    const an = (a as { function: { name: string } }).function.name
-    const bn = (b as { function: { name: string } }).function.name
-    return an < bn ? -1 : an > bn ? 1 : 0
-  })
   return sanitized
 }
 

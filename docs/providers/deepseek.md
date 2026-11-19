@@ -37,7 +37,7 @@
 
 1. **不注入 `cache_control`** —— 那是 Anthropic 的形状，DeepSeek 自动缓存。
 2. **不改写前缀**：live-zone 压缩默认"缓存优先"跳过（见 `resolveCompressionConfig`），因为下一轮客户端会把原文重新送来。
-3. **账号/模型亲和**：同一会话尽量落在同一个 `(provider, account, model)`。官方 TTL 是"几小时到几天"，`autoRouting.cacheAffinityMinutes` 取 **240 分钟**（仍在文档下界之内），等真机读数再调；亲和坐标落盘（`cacheAffinity`），重启不丢。
+3. **账号/模型亲和**：同一会话尽量落在同一个 `(provider, account, model)`。官方 TTL 是"几小时到几天"，`autoRouting.cacheAffinityMinutes` 取 **60 分钟**（在文档下界之内），等真机读数再调。
 4. `deepseek-chat` 与 `deepseek-reasoner` 是不同模型（不同缓存域），同一会话不得在两者之间轮换。
 
 ## 验收读数（P1 仪表盘按模型行）

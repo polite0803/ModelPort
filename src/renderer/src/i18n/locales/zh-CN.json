@@ -86,12 +86,7 @@
       "expand": "展开全部（{{count}}）",
       "collapse": "收起",
       "note": "缓存读由上游自己报告，且是输入 token 的子集；没有上游用量的模型显示「-」，不显示 0%。",
-      "coverageNote": "本期分模型明细覆盖 {{covered}} / {{total}} 条请求；早于该功能的记录没有模型拆分，不在这张表里。",
-      "missCold": "冷启",
-      "missRewrite": "改写",
-      "missBreak": "断链",
-      "missTail": "新增",
-      "missClassesHint": "缺口成因按会话与上一轮对比分类：冷启=没有上轮读数或命中不足一半；改写=客户端把历史改小；断链=锚点仍在却从中途断开；新增=正常的一轮尾部。只统计上游明确报告了缓存读的请求。"
+      "coverageNote": "本期分模型明细覆盖 {{covered}} / {{total}} 条请求；早于该功能的记录没有模型拆分，不在这张表里。"
     },
     "lastUpdated": "上次更新",
     "refresh": "刷新",
@@ -595,9 +590,6 @@
     "routeMinTier_balanced": "至少 balanced（均衡）",
     "routeMinTier_strong": "至少 strong（强）",
     "routeMinTierHelp": "低于这一档的模型整条路由都不派，且排在池策略与手动加回之前 —— 策略 include 或手动加回都绕不过去。用途是「池里全是免费/小模型，希望至少用中等档」。档位取能力标注，缺标注时按模型名估计，不会是未知态。",
-    "routeWriteToolTier": "写入型请求的档位托底",
-    "routeWriteToolTier_off": "关闭",
-    "routeWriteToolTierHelp": "请求里带写入类工具（apply_patch、Write、Edit 等）时，在上面的能力下限之上再抬一档：改错文件的代价远大于慢一点。只认工具名这一项结构事实，不做语义猜测。池里没有够档模型时照常回落，并在响应头 X-ModelPort-Auto-Degraded 里写明 write_tool_tier。",
     "routeBasedOn": "池来源（引用另一条路由）",
     "routeBasedOnNone": "自带池（不引用）",
     "routeBasedOnHelp": "选一条已有的路由，这条路由的候选池、池策略、钉名与手动增删全部取自它。引用只允许一跳，所以不会出现「A 借 B、B 又借 C」。用途是给同一份池再开一个客户端入口名（例如 Anthropic 档位名），而不是复制一份会各自漂移的配置。",

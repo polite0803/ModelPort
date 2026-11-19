@@ -18,7 +18,6 @@ import { useTranslation } from 'react-i18next'
 import { Database } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
-import type { CacheMissClassCounts } from '@shared/tokenAccounting'
 import type { ModelWindowCoverage, ModelWindowTokenUsage, ProviderStatsWindow } from '@shared/providerUsage'
 import { formatTokens } from './TokenUsageCard'
 import { StatsWindowPresets, StatsWindowRangeInputs } from './StatsWindowPicker'
@@ -36,51 +35,6 @@ const DEFAULT_VISIBLE_ROWS = 8
 function percentOf(numerator: number, denominator: number): string | null {
   if (!(denominator > 0)) return null
   return `${Math.round((numerator / denominator) * 100)}%`
-}
-
-/**
- * 缺口成因的顺序与配色固定：冷启是外部事实，断链才是网关/客户端真把前缀改断了，
- * 所以只有断链用错误色；正常新增用最暗的灰，避免把「一切正常」渲染成告警。
- */
-const MISS_REASONS: ReadonlyArray<{
-  key: keyof CacheMissClassCounts
-  tone: string
-  labelKey: string
-}> = [
-  { key: 'cold', tone: 'var(--text-muted)', labelKey: 'dashboard.modelCache.missCold' },
-  { key: 'rewrite', tone: 'var(--warning)', labelKey: 'dashboard.modelCache.missRewrite' },
-  { key: 'break', tone: 'var(--error)', labelKey: 'dashboard.modelCache.missBreak' },
-  { key: 'tail', tone: 'var(--text-dim)', labelKey: 'dashboard.modelCache.missTail' },
-]
-
-function MissBreakdown({ counts }: { counts?: CacheMissClassCounts }) {
-  const { t } = useTranslation()
-  // 缺省 = 这个模型还没被分类过（旧桶或全部请求都不报缓存），与「四类都是 0」不同。
-  if (counts === undefined) return null
-  const parts = MISS_REASONS.filter((reason) => counts[reason.key] > 0)
-  if (parts.length === 0) return null
-
-  return (
-    <div
-      className="mt-0.5 flex flex-wrap items-center justify-end gap-x-2 gap-y-0.5 text-caption"
-      title={t('dashboard.modelCache.missClassesHint')}
-    >
-      {parts.map((reason) => (
-        <span
-          key={reason.key}
-          className="inline-flex items-center gap-1 whitespace-nowrap"
-          style={{ color: reason.tone }}
-        >
-          <span
-            aria-hidden
-            className="h-1 w-1 shrink-0 rounded-full"
-            style={{ backgroundColor: reason.tone }}
-          />
-          {t(reason.labelKey)} {counts[reason.key]}
-        </span>
-      ))}
-    </div>
-  )
 }
 
 export function ModelCacheCard({
@@ -186,7 +140,6 @@ export function ModelCacheCard({
                         {hitRate === null
                           ? <span className="text-[var(--text-dim)]">-</span>
                           : <span className="text-[var(--text-primary)]">{hitRate}</span>}
-                        <MissBreakdown counts={row.cacheMissClasses} />
                       </td>
                     </tr>
                   )

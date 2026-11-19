@@ -436,12 +436,9 @@ export const DEFAULT_AUTO_ROUTING_CONFIG: AutoRoutingConfig = {
   maxAttempts: 3,
   stickyMinutes: 30,
   // DeepSeek documents "a few hours to a few days" before its cache clears, so
-  // four hours is still inside the documented lower bound and never outlives
-  // the cache. One hour left the affinity dead for any conversation that paused
-  // longer than a coffee break, which is exactly when the upstream cache is
-  // still warm and re-routing costs the whole prefix. Longer values wait for a
-  // measured upper bound rather than a guess.
-  cacheAffinityMinutes: 240,
+  // one hour is inside the documented lower bound and never outlives the cache.
+  // Longer values wait for a measured TTL rather than a guess.
+  cacheAffinityMinutes: 60,
   prefer: 'balanced',
   poolStrategies: [],
 }
@@ -614,19 +611,6 @@ export interface ModelRoute {
    */
   minTier?: AutoModelTier
   /**
-   * 写入型请求的档位托底：请求里带写入类工具（`apply_patch` / `Write` / `Edit` …）时，
-   * 在 `minTier` 之上再抬一档。`off` = 关闭；缺省即 `balanced`。
-   *
-   * 为什么不是让路由器去猜「这个任务难不难」：那是语义判断，网关只有请求结构。
-   * 但「这条请求会不会落盘」是**结构事实**（工具名就是那几个），而写坏的代价远大于
-   * 慢一点。所以判据取结构，不取长度或关键词。
-   *
-   * 应用位置紧接 `minTier`：`includeModels` 也拿不回被托底筛掉的低档模型。抬档把
-   * 整组筛空时**回落并记降级**（`degraded: 'write_tool_tier'`），绝不因为「这轮是
-   * 写入」把一条本来可用的路由打成 503 —— 与 `response_format` 的降级同一口径。
-   */
-  writeToolTier?: WriteToolTier
-  /**
    * 池内模型的星级推荐（1–5 星，`routes:rate` 写入）。
    *
    * 纯标注：只影响路由页的展示与「星级优先」显示排序，**不参与选路打分**——
@@ -642,17 +626,6 @@ export type ModelScope = 'single' | 'family' | 'pool'
 
 /** `ModelScope` 的声明顺序：界面按它列选项，`normalize` 按它收值。 */
 export const MODEL_SCOPES: readonly ModelScope[] = ['single', 'family', 'pool']
-
-/**
- * 写入型请求的档位托底（见 `ModelRoute.writeToolTier`）。`off` 关闭；两个档位值与
- * `AutoModelTier` 同名，界面可以直接复用 `routeMinTier_*` 那组文案。
- */
-export type WriteToolTier = 'off' | 'balanced' | 'strong'
-
-export const WRITE_TOOL_TIERS: readonly WriteToolTier[] = ['off', 'balanced', 'strong']
-
-/** 缺省值：请求里出现写入类工具就至少派 balanced。 */
-export const DEFAULT_WRITE_TOOL_TIER: WriteToolTier = 'balanced'
 
 /** 一次显式切换的发起者；只用于日志与界面口径，不参与判定。 */
 export type ModelPinSource = 'console' | 'tray' | 'header'

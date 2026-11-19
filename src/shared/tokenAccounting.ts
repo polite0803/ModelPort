@@ -67,26 +67,6 @@ export interface ProviderDayUsage {
 export type ProviderDayUsageMap = Record<string, ProviderDayUsage>
 
 /**
- * 缓存缺口成因（`proxy/cacheMissLedger.ts` 的分类结果）。
- *
- * 命中率只说「差多少」，这个分类说「差在哪」：四类的处置完全不同 ——
- * 冷启动与客户端压缩不是网关能消除的，`break` 才是需要查的。
- */
-export type CacheMissClass = 'cold' | 'rewrite' | 'break' | 'tail'
-
-/** 按成因的请求计数；只统计上报了缓存字段的请求。 */
-export interface CacheMissClassCounts {
-  /** 会话首轮 / 锚点过期 / 上游清理造成的整段未命中。 */
-  cold: number
-  /** 客户端把历史改小（压缩、删改），前缀在删除点断裂。 */
-  rewrite: number
-  /** 锚点还在却从中间断开：上游清理或未知重写。 */
-  break: number
-  /** 正常新增尾部（上一轮输出 + 本轮输入），未命中 ≤ 2%。 */
-  tail: number
-}
-
-/**
  * One local day's counters for one `(provider, model)` pair.
  *
  * The pair is the key on purpose: a model served by two endpoints has two cache
@@ -112,11 +92,6 @@ export interface ModelDayUsage {
   cacheReportedRequests: number
   /** Upstream prompt tokens of the cache-reporting requests. */
   upstreamPromptWithCache: number
-  /**
-   * 缺口成因的请求计数。缺省 = 这个模型还没被分类过（旧桶、或全部请求都没报
-   * 缓存字段），不是「四类都是 0」。
-   */
-  cacheMissClasses?: CacheMissClassCounts
 }
 
 export type ModelDayUsageMap = Record<string, ModelDayUsage>
@@ -544,31 +519,6 @@ export function modelBucketKey(providerId: string, model: string): string {
   return `${providerId.replace(/::/g, '_')}::${model.replace(/::/g, '_')}`
 }
 
-/**
- * Clean one persisted class counter. Undefined when the field was never written:
- * a bucket from before this instrument existed says nothing about *why* a turn
- * missed, and rendering four zeroes would claim all four were measured.
- */
-export function normalizeCacheMissClasses(input: unknown): CacheMissClassCounts | undefined {
-  if (input === null || input === undefined || typeof input !== 'object' || Array.isArray(input)) return undefined
-  const raw = input as Record<string, unknown>
-  let seen = false
-  const counts: CacheMissClassCounts = { cold: 0, rewrite: 0, break: 0, tail: 0 }
-  for (const key of Object.keys(counts) as (keyof CacheMissClassCounts)[]) {
-    counts[key] = nonNegative(raw[key] as number)
-    if (raw[key] !== undefined) seen = true
-  }
-  return seen ? counts : undefined
-}
-
-function addCacheMissClass(
-  base: CacheMissClassCounts | undefined,
-  cls: CacheMissClass
-): CacheMissClassCounts {
-  const counts = base ?? { cold: 0, rewrite: 0, break: 0, tail: 0 }
-  return { ...counts, [cls]: counts[cls] + 1 }
-}
-
 function emptyModelUsage(providerId: string, model: string): ModelDayUsage {
   return {
     providerId,
@@ -591,7 +541,6 @@ export function normalizeModelUsage(input: unknown): ModelDayUsageMap | undefine
     const providerId = typeof raw.providerId === 'string' ? raw.providerId.trim() : ''
     const model = typeof raw.model === 'string' ? raw.model.trim() : ''
     if (providerId.length === 0 || model.length === 0) continue
-    const missClasses = normalizeCacheMissClasses(raw.cacheMissClasses)
     next[key] = {
       providerId,
       model,
@@ -601,7 +550,6 @@ export function normalizeModelUsage(input: unknown): ModelDayUsageMap | undefine
       upstreamCacheRead: nonNegative(raw.upstreamCacheRead as number),
       cacheReportedRequests: nonNegative(raw.cacheReportedRequests as number),
       upstreamPromptWithCache: nonNegative(raw.upstreamPromptWithCache as number),
-      ...(missClasses === undefined ? {} : { cacheMissClasses: missClasses }),
     }
   }
   return Object.keys(next).length > 0 ? next : undefined
@@ -614,8 +562,7 @@ function accumulateModelUsage(
   isUpstream: boolean,
   prompt: number,
   cacheRead: number,
-  cacheReported: boolean,
-  missClass?: CacheMissClass
+  cacheReported: boolean
 ): ModelDayUsageMap {
   const known = base ?? {}
   const key = modelBucketKey(providerId, model)
@@ -640,9 +587,6 @@ function accumulateModelUsage(
       upstreamCacheRead: previous.upstreamCacheRead + (isUpstream ? cacheRead : 0),
       cacheReportedRequests: previous.cacheReportedRequests + (cacheReported ? 1 : 0),
       upstreamPromptWithCache: previous.upstreamPromptWithCache + (cacheReported ? prompt : 0),
-      ...(missClass === undefined
-        ? {}
-        : { cacheMissClasses: addCacheMissClass(previous.cacheMissClasses, missClass) }),
     },
   }
 }
@@ -719,11 +663,6 @@ export function accumulateDayBucket(
      * not "compression was off" — the day counters keep no row in that case.
      */
     compression?: CompressionVerdict
-    /**
-     * 这一轮缓存缺口的成因（`proxy/cacheMissLedger.ts`）。只在分模型表里计数；
-     * 缺省 = 没有可归因的上报（本轮没报缓存字段、或调用方没分类）。
-     */
-    cacheMissClass?: CacheMissClass
   }
 ): DayTokenBucket {
   // ⚠️ 走 `normalizeDayBucket` 而不是直接信任入参：调用方喂的是**磁盘上读出来**
@@ -792,17 +731,7 @@ export function accumulateDayBucket(
 
   const modelId = (input.modelId ?? '').trim()
   if (modelId.length > 0) {
-    next.byModel = accumulateModelUsage(
-      base.byModel,
-      providerId,
-      modelId,
-      isUpstream,
-      prompt,
-      cacheRead,
-      cacheReported,
-      // 未上报缓存的请求没有可归因的缺口：分类只能落在"报了缓存"的那些行上。
-      isUpstream && cacheReported ? input.cacheMissClass : undefined
-    )
+    next.byModel = accumulateModelUsage(base.byModel, providerId, modelId, isUpstream, prompt, cacheRead, cacheReported)
   }
 
   return next

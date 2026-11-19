@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
 import type { LoadBalanceStrategy, AutoPreference, ModelRoute } from '@/types/electron'
-import type { AutoModelTier, ModelScope, WriteToolTier } from '../../../../shared/types'
+import type { AutoModelTier, ModelScope } from '../../../../shared/types'
 import {
   AUTO_MODEL_TIERS,
   AUTO_POOL_PRESETS,
@@ -12,10 +12,8 @@ import {
   AUTO_PREFERENCES,
   DEFAULT_AUTO_ROUTING_CONFIG,
   DEFAULT_FAIRNESS_LEAD,
-  DEFAULT_WRITE_TOOL_TIER,
   FAIRNESS_LEAD_MAX,
   MODEL_SCOPES,
-  WRITE_TOOL_TIERS,
   type AutoPoolPresetMeta,
   type AutoPoolStrategy,
   type AutoPoolStrategyCategory,
@@ -46,12 +44,6 @@ export interface ModelRouteFieldValues {
    * 档位以下的模型。空 = 不设下限。
    */
   minTier?: AutoModelTier
-  /**
-   * 写入型请求的档位托底：带写入类工具时在 `minTier` 之上再抬一档。盘上是可选键，
-   * 界面用一个确定的档位 —— 缺键读作 `balanced`，与主进程 `requestWriteToolFloor`
-   * 同一条兜底口径。
-   */
-  writeToolTier: WriteToolTier
   maxAttempts: number
   stickyMinutes: number
   /**
@@ -127,7 +119,6 @@ export function defaultRouteFieldValues(strategy: LoadBalanceStrategy): ModelRou
     // 架构 A 的缺省范围就是主进程读侧的缺省：一轮只服务一个模型。
     modelScope: 'single' as ModelScope,
     minTier: undefined,
-    writeToolTier: DEFAULT_WRITE_TOOL_TIER,
     maxAttempts: DEFAULT_AUTO_ROUTING_CONFIG.maxAttempts,
     stickyMinutes: DEFAULT_AUTO_ROUTING_CONFIG.stickyMinutes,
     // 与主进程同一条判据：缺键即硬钉（`!== false`），新路由的初值因此是开。
@@ -149,8 +140,6 @@ export function routeFieldValuesOf(route: ModelRoute): ModelRouteFieldValues {
     // 盘上缺这一格 = 一轮一个模型，与 `autoRouter` 读侧同一条兜底。
     modelScope: route.modelScope ?? 'single',
     minTier: route.minTier,
-    // 盘上缺这一格 = 出厂默认 balanced，与主进程读侧同一条兜底。
-    writeToolTier: route.writeToolTier ?? DEFAULT_WRITE_TOOL_TIER,
     maxAttempts: route.maxAttempts,
     stickyMinutes: route.stickyMinutes,
     // 盘上没有这一格 = 硬钉开着，与 `autoRouter` 读侧同一条 `!== false` 判据。
@@ -308,26 +297,6 @@ export function ModelRouteFields({
           </SelectContent>
         </Select>
         <p className="text-xs text-muted-foreground">{t('proxy.routeMinTierHelp')}</p>
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor={`route-write-tool-tier-${idPrefix}`}>{t('proxy.routeWriteToolTier')}</Label>
-        <Select
-          value={values.writeToolTier}
-          onValueChange={(value) => onChange({ writeToolTier: value as WriteToolTier })}
-        >
-          <SelectTrigger id={`route-write-tool-tier-${idPrefix}`}>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {WRITE_TOOL_TIERS.map((tier) => (
-              <SelectItem key={tier} value={tier}>
-                {t(tier === 'off' ? 'proxy.routeWriteToolTier_off' : `proxy.routeMinTier_${tier}`)}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">{t('proxy.routeWriteToolTierHelp')}</p>
       </div>
 
       <div className="space-y-2">
