@@ -9,9 +9,9 @@
  * 口径：只有 `tool_call: true` / `reasoning: true` 才算证据，`false` 与缺失一律
  * 不写 —— 社区目录里的 false 更可能是「没填」，把它当「不支持」会误筛。
  *
- * 快照：models.dev https://models.dev/api.json，复核日期 2026-11-19；
- * 31 家 / 132 条模型：tools 129、reasoning 121、
- * 输入模态 132、上下文窗口 132。
+ * 快照：models.dev https://models.dev/api.json，复核日期 2026-10-31；
+ * 24 家 / 93 条模型：tools 90、reasoning 83、
+ * 输入模态 93、上下文窗口 93。
  */
 
 import type { ModelCapabilityHint } from './types.ts'
@@ -28,47 +28,6 @@ export const AGGREGATE_CAPABILITIES: Record<string, AggregateCapabilityRow> = {
     models: {
       'qwen3-coder-plus': { tools: 'yes', modalities: ['text'], contextTokens: 1048576 },
       'qwen3.5-plus': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video'], contextTokens: 1000000 },
-    },
-  },
-  'bailian': {
-    modelsDevProviderId: 'alibaba-cn',
-    models: {
-      'deepseek-v4-pro': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 1000000 },
-      'glm-5.2': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 1000000 },
-      'glm-5.3': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 1000000 },
-      'kimi-k2.5': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video'], contextTokens: 262144 },
-      'MiniMax-M2.5': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 204800 },
-      'qwen3-coder-plus': { tools: 'yes', modalities: ['text'], contextTokens: 1048576 },
-      'qwen3.6-flash': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video'], contextTokens: 1000000 },
-      'qwen3.7-max': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 1000000 },
-      'qwen3.7-plus': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video'], contextTokens: 1000000 },
-      'qwen3.8-flash': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video'], contextTokens: 1000000 },
-      'qwen3.8-max': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video', 'pdf'], contextTokens: 1000000 },
-    },
-  },
-  'bailian_coding_plan': {
-    modelsDevProviderId: 'alibaba-coding-plan-cn',
-    models: {
-      'glm-5': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 202752 },
-      'kimi-k2.5': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image'], contextTokens: 262144 },
-      'MiniMax-M2.5': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 196608 },
-      'qwen3.5-plus': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image'], contextTokens: 1000000 },
-      'qwen3.6-plus': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video'], contextTokens: 1000000 },
-      'qwen3.7-plus': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video'], contextTokens: 1000000 },
-    },
-  },
-  'bailian_token_plan': {
-    modelsDevProviderId: 'alibaba-token-plan-cn',
-    models: {
-      'deepseek-v4-pro': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 1000000 },
-      'deepseek-v4.1-flash': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image'], contextTokens: 1000000 },
-      'glm-5.2': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 1000000 },
-      'glm-5.3': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 1000000 },
-      'qwen3.6-flash': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video'], contextTokens: 1000000 },
-      'qwen3.7-max': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 1000000 },
-      'qwen3.7-plus': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video'], contextTokens: 1000000 },
-      'qwen3.8-flash': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video'], contextTokens: 1000000 },
-      'qwen3.8-max': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video', 'pdf'], contextTokens: 1000000 },
     },
   },
   'cline_pass': {
@@ -195,11 +154,18 @@ export const AGGREGATE_CAPABILITIES: Record<string, AggregateCapabilityRow> = {
       'qwen3.5-plus': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video'], contextTokens: 1000000 },
     },
   },
+  'sambanova': {
+    modelsDevProviderId: 'sambanova',
+    models: {
+      'Meta-Llama-3.3-70B-Instruct': { tools: 'yes', modalities: ['text'], contextTokens: 131072 },
+    },
+  },
   'sensenova': {
     modelsDevProviderId: 'sensenova',
     models: {
       'deepseek-v4-flash': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 1000000 },
       'deepseek-v4-pro': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 1048576 },
+      'deepseek-v4.1-flash': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image'], contextTokens: 1048576 },
       'glm-5.2': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 1000000 },
       'kimi-k3': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image'], contextTokens: 1048576 },
       'sensenova-6.8-flash-lite': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image'], contextTokens: 262144 },
@@ -227,49 +193,10 @@ export const AGGREGATE_CAPABILITIES: Record<string, AggregateCapabilityRow> = {
       'zai-org/GLM-5.1': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 205000 },
     },
   },
-  'siliconflow_cn': {
-    modelsDevProviderId: 'siliconflow-cn',
-    models: {
-      'deepseek-ai/DeepSeek-V3.2': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 164000 },
-      'deepseek-ai/DeepSeek-V4-Flash': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 1000000 },
-      'deepseek-ai/DeepSeek-V4-Pro': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 1049000 },
-      'Qwen/Qwen3.5-122B-A10B': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video'], contextTokens: 262144 },
-    },
-  },
-  'stepfun': {
-    modelsDevProviderId: 'stepfun',
-    models: {
-      'step-3.5-flash': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 256000 },
-      'step-3.5-flash-2603': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 256000 },
-      'step-3.7-flash': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video'], contextTokens: 256000 },
-      'step-5-preview': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video'], contextTokens: 1000000 },
-    },
-  },
-  'stepfun_step_plan': {
-    modelsDevProviderId: 'stepfun-step-plan',
-    models: {
-      'step-3.5-flash': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 256000 },
-      'step-3.5-flash-2603': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 256000 },
-      'step-3.7-flash': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video'], contextTokens: 256000 },
-      'step-5-preview': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video'], contextTokens: 1000000 },
-    },
-  },
-  'tencent_coding_plan': {
-    modelsDevProviderId: 'tencent-coding-plan',
-    models: {
-      'tc-code-latest': { tools: 'yes', modalities: ['text'], contextTokens: 131072 },
-    },
-  },
   'tokenrouter': {
     modelsDevProviderId: 'tokenrouter',
     models: {
       'z-ai/glm-5.3-free': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 1000000 },
-    },
-  },
-  'wafer': {
-    modelsDevProviderId: 'wafer.ai',
-    models: {
-      'DeepSeek-V4-Pro': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 1048576 },
     },
   },
   'wandb': {
@@ -299,7 +226,6 @@ export const AGGREGATE_CAPABILITIES: Record<string, AggregateCapabilityRow> = {
     modelsDevProviderId: 'zai',
     models: {
       'glm-4.6v': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video'], contextTokens: 128000 },
-      'glm-4.6v-flash': { tools: 'yes', reasoning: 'yes', vision: 'yes', modalities: ['text', 'image', 'video'], contextTokens: 128000 },
       'glm-4.7': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 204800 },
       'glm-4.7-flash': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 200000 },
       'glm-5': { tools: 'yes', reasoning: 'yes', modalities: ['text'], contextTokens: 204800 },

@@ -34,8 +34,6 @@ export const IpcChannels = {
   // `<providerId>/<modelId> -> { reason, until }`。模型页徽章读这一份——
   // 「使用前」就知道哪个模型此刻派不出去、什么时候回来。只读内存表，无上游请求。
   AVAILABILITY_BLOCKS: 'availability:blocks',
-  /** 视觉读图两段式的读图器候选链（只读，供设置页下拉）。 */
-  VISION_RELAY_READERS: 'visionRelay:readers',
   // 快捷切换模型（架构 A）：菜单快照、切换/点名、恢复自动排序。
   //
   // 分三条而不是一条 `routes:pin(...args)`：菜单是只读轮询面，切换是写操作，

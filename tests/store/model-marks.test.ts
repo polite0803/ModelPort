@@ -75,25 +75,3 @@ test('倍率允许 0（免费）但不接受负数或非数值', () => {
   assert.equal(normalizeModelMark({ weight: -1 }), undefined)
   assert.equal(normalizeModelMark({ weight: '0.5' }), undefined)
 })
-
-/**
- * 窗口档位必须过白名单（2026-11-18 现网）。
- *
- * 归一化是逐字段白名单，漏一格就是「界面里选了 200K，保存后被静默丢弃、下次打开
- * 退回『用模型自身的声明』」—— 用户看到的是设置不生效，而不是保存失败。
- */
-test('窗口档位被收下；未知档位与坏形状丢弃', () => {
-  assert.deepEqual(normalizeModelMark({ contextWindowTier: '200k' }), { contextWindowTier: '200k' })
-  assert.deepEqual(normalizeModelMark({ contextWindowTier: '1m' }), { contextWindowTier: '1m' })
-  assert.equal(normalizeModelMark({ contextWindowTier: '512k' }), undefined)
-  assert.equal(normalizeModelMark({ contextWindowTier: 200000 }), undefined)
-  assert.deepEqual(
-    normalizeModelMark({ contextWindowTier: '400k', supportedContextTiers: ['200k', '400k', 'bad'] }),
-    { contextWindowTier: '400k', supportedContextTiers: ['200k', '400k'] },
-  )
-  // 与其它字段共存时互不覆盖
-  assert.deepEqual(
-    normalizeModelMark({ vision: 'yes', contextWindowTier: '200k' }),
-    { vision: 'yes', contextWindowTier: '200k' },
-  )
-})

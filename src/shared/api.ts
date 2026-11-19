@@ -978,11 +978,6 @@ const contextManagementAPI = {
     wire.invoke(IpcChannels.CONTEXT_MANAGEMENT_UPDATE_CONFIG, updates),
 }
 
-const visionRelayAPI = {
-  readers: (): Promise<{ readers: Array<{ displayName: string; providerName: string }> }> =>
-    wire.invoke(IpcChannels.VISION_RELAY_READERS),
-}
-
 const trayAPI = {
   openDashboard: (): void => 
     wire.send('tray:open-dashboard'),
@@ -1141,7 +1136,6 @@ const electronAPI = {
   },
   managementApi: managementApiAPI,
   contextManagement: contextManagementAPI,
-  visionRelay: visionRelayAPI,
   tray: trayAPI,
   modelRefresh: modelRefreshAPI,
 

@@ -1636,17 +1636,6 @@
       "costBudget": "成本目标",
       "costBudgetHint": "按渠道填一个更小的 token 目标，只在这些渠道上把 prompt 压到该尺寸（例如 trae 按体量计费、拿不到前缀缓存）。它只能收紧、不能放大窗口；如果小到装不下系统提示词加当前指令，会自动退回窗口并在日志里提示。留空＝不限成本。",
       "costBudgetPlaceholder": "渠道 ID: token 数，每行一条"
-    },
-    "visionRelay": {
-      "title": "视觉读图两段式",
-      "enable": "启用视觉读图两段式",
-      "enableHint": "这一轮真正服务的模型收不下图时，先用一个免费视觉模型把图片转述成文字，再交给原模型推理。已标注支持视觉的模型直发、不介入；图片不会被丢弃，而是替换成带上出处的文字标记。",
-      "reader": "读图器",
-      "readerAuto": "自动（免费视觉模型候选链）",
-      "readerHint": "自动模式只用免费视觉模型，官方免费证据优先；也可点名一个模型，失败时不自动换家。",
-      "maxImageBytes": "单图上限（MB）",
-      "maxImageBytesHint": "超过上限的图片直接判失败（走原错误），不做静默压缩。",
-      "saved": "视觉读图设置已保存"
     }
   },
   "aggregate": {
@@ -1703,13 +1692,6 @@
       "paramsApply": "应用",
       "paramsClear": "清除",
       "paramsExtra": "其他参数（JSON）",
-      "paramsWindow": "上下文窗口档位",
-      "paramsWindowInherit": "用模型自身的声明",
-      "paramsWindowHelp": "这里的档位决定客户端何时压缩历史，也决定网关裁剪预算。与模型自身声明的窗口取较小值：选 1M 也撑不过它的真实窗口。选「继承」表示不做额外收紧。",
-      "paramsWindowFailed": "请求参数已保存，但窗口档位没写进去（可在「标注」里重试）",
-      "paramsWindowTooLarge": "这个档撑过了模型自己声明的窗口（{{declared}} token），不能选",
-      "paramsWindowTitle": "模型参数 · {{model}}",
-      "paramsWindowSubtitle": "窗口档位决定客户端何时压缩历史，也决定网关裁剪预算。",
       "paramsInvalid": "参数格式有误：数值字段必须是数字，其他参数必须是 JSON 对象",
       "enabled": "启用"
     },
@@ -2192,8 +2174,6 @@
     "currentBadgeHint": "这条路由上一轮实际服务的模型，不代表下一轮还是它",
     "annotate": "标注",
     "annotateHint": "查看这一家声明的参数、用标准台账逐字段补全，或手工覆盖能力标注（视觉/工具/推理/上下文窗口）；保存后按新标注参与选路，带图请求要求视觉=支持。",
-    "params": "参数",
-    "paramsHint": "设置这个模型使用的上下文窗口档位（200K / 400K / 1M）",
     "nextTurn": "下一轮：{{model}}",
     "pinnedBadge": "已固定",
     "pin": "固定",

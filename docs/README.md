@@ -79,7 +79,6 @@
 | [`plan/PLAN-docker-release-and-235-deploy.md`](plan/PLAN-docker-release-and-235-deploy.md) | Docker 发布形态（镜像 tar.gz 资产 + CI + 部署指南）与 192.168.0.235 容器部署 | v1.8.12 | 实施中 | 2026-11-14 |
 | [`plan/PLAN-client-config-switch.md`](plan/PLAN-client-config-switch.md) | 客户端自定义模型代写（CCSwitch 式）：六家客户端一次配好，切网关不再手改 baseURL / key | v1.9.0（待定） | 实施中 | 2026-11-14 |
 | [`plan/PLAN-fault-injection-failover.md`](plan/PLAN-fault-injection-failover.md) | 故障注入集成测试：钉住换家链、首块前才能切换、流中断不重播三条边界 | v1.8.23 | 已实施 | 2026-11-16 |
-| [`plan/PLAN-vision-relay.md`](plan/PLAN-vision-relay.md) | 视觉读图两段式：vision 模型直发豁免；文本目标 + 图片时经免费读图器转述后转发（默认关） | v1.8.31+ | 已实施 | 2026-11-19 |
 | [`plan/2026-05-26-in-app-update.md`](plan/2026-05-26-in-app-update.md) | 应用内更新的任务拆解与测试计划 | v1.3.0 | 历史记录 | 2026-05-26 |
 | [`plan/2026-05-27-modelport-tool-testing-skills.md`](plan/2026-05-27-modelport-tool-testing-skills.md) | 工具调用测试技能集的目录、脚本与验收计划 | v1.3.0 | 历史记录 | 2026-05-27 |
 
@@ -107,7 +106,6 @@
 | [`features/logging-diagnostics.md`](features/logging-diagnostics.md) | 日志与诊断：请求行的尝试/`streamTrace` 读数、错误保留下限、脱敏与截断、`X-ModelPort-Trace` 与诊断包导出 | v1.8.27 | 现行 | 2026-11-18 |
 | [`features/providers-accounts.md`](features/providers-accounts.md) | 渠道与账号：聚合目录（89 条 / 568 模型）、账号渠道、自定义供应商三类的记录来源、凭据与清单归属 | v1.7.3 | 现行 | 2026-11-04 |
 | [`features/wsl-daemon.md`](features/wsl-daemon.md) | 无头守护进程与远程管理：三种运行形态、WSL 安装与 systemd 常驻、`--init-host` / `--import-backup`、管理面 RPC/SSE/`/ui` 的鉴权口径与不变量 | v1.8.0 | 现行 | 2026-11-06 |
-| [`features/vision-relay.md`](features/vision-relay.md) | 视觉读图两段式：文本目标收不下图时经免费视觉读图器转述（默认关）、触发判据与派发同源、图片全量转述不删除、LRU 稳定历史前缀、probe 隔离与独立日志行 | v1.8.31+ | 现行 | 2026-11-19 |
 
 ## 参考与旁支目录
 

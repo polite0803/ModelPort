@@ -13,7 +13,7 @@
  */
 import { chownSync, existsSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { rewriteCatalog, type CatalogAdvertisement } from '../../shared/codexCatalog.ts'
+import { rewriteCatalogWindows } from '../../shared/codexCatalog.ts'
 import { storeManager } from '../store/store'
 import { autoRouter } from './autoRouter'
 
@@ -59,42 +59,35 @@ export function syncCodexCatalogs(): { written: string[]; floors: Map<string, nu
   const written: string[] = []
   let floors = new Map<string, number | undefined>()
   // 测试进程会调用 bootstrap / IPC handler，而这里扫的是**真实用户目录**：不拦住就等于
-  // 跑一次测试改一次用户的 Codex 配置。纯函数（`rewriteCatalog`）仍可单独测。
+  // 跑一次测试改一次用户的 Codex 配置。纯函数（`rewriteCatalogWindows`）仍可单独测。
   if (process.env.NODE_TEST_CONTEXT !== undefined) return { written, floors }
   try {
-    const routes = storeManager.listModelRoutes()
-    floors = autoRouter.advertisedContextFloors(routes)
-    // 能力与窗口一起写：客户端按 `input_modalities` 决定能不能发图，路由换家换掉这个
-    // 能力时它必须知道，否则等到 503 `missing:['vision']` 才发现。
-    const vision = autoRouter.advertisedVision(routes)
-    const advertised: Map<string, CatalogAdvertisement> = new Map()
-    for (const [name, window] of floors) {
-      advertised.set(name, { contextWindow: window, vision: vision.get(name) })
-    }
-    for (const path of codexCatalogCandidates()) {
-      try {
-        const raw = readFileSync(path, 'utf8')
-        const rewrite = rewriteCatalog(raw, advertised)
-        if (rewrite === null) continue
-        if (lastWritten.get(path) === rewrite.content) continue
-        const stat = statSync(path)
-        const tmp = `${path}.tmp-${process.pid}`
-        writeFileSync(tmp, rewrite.content)
-        renameSync(tmp, path)
-        // daemon 是 root：不改回属主的话，客户端（polit）下次可能写不了自己的 catalog。
-        try {
-          chownSync(path, stat.uid, stat.gid)
-        } catch {
-          // 跨文件系统（/mnt/c）不支持 chown：那里本来就不承载 unix 属主语义
-        }
-        lastWritten.set(path, rewrite.content)
-        written.push(path)
-      } catch (error) {
-        console.error(`[CatalogSync] failed for ${path}:`, error)
-      }
-    }
+    floors = autoRouter.advertisedContextFloors(storeManager.listModelRoutes())
   } catch (error) {
-    console.error('[CatalogSync] route advertisement unavailable:', error)
+    console.error('[CatalogSync] route windows unavailable:', error)
+    return { written, floors }
+  }
+  for (const path of codexCatalogCandidates()) {
+    try {
+      const raw = readFileSync(path, 'utf8')
+      const rewrite = rewriteCatalogWindows(raw, floors)
+      if (rewrite === null) continue
+      if (lastWritten.get(path) === rewrite.content) continue
+      const stat = statSync(path)
+      const tmp = `${path}.tmp-${process.pid}`
+      writeFileSync(tmp, rewrite.content)
+      renameSync(tmp, path)
+      // daemon 是 root：不改回属主的话，客户端（polit）下次可能写不了自己的 catalog。
+      try {
+        chownSync(path, stat.uid, stat.gid)
+      } catch {
+        // 跨文件系统（/mnt/c）不支持 chown：那里本来就不承载 unix 属主语义
+      }
+      lastWritten.set(path, rewrite.content)
+      written.push(path)
+    } catch (error) {
+      console.error(`[CatalogSync] failed for ${path}:`, error)
+    }
   }
   return { written, floors }
 }

@@ -254,36 +254,6 @@ test('没有任何证据的字段是 unknown，来源也是 unknown', () => {
   assert.equal(resolved.sources.contextTokens, 'unknown')
 })
 
-/**
- * 窗口档位（2026-11-18）：标注里选一档，对外公布与裁剪预算同时生效。
- *
- * 语义是「我们选用的上限」，不是「上游声明的上限」：模型能跑 1M，也可以只让它用
- * 200k 来压住每轮发送量。两者取 min —— 选档不能把模型撑过它的真窗口。
- */
-test('窗口档位：单独选一档即可作为窗口，来源仍是 manual', () => {
-  const only = resolveCapabilityDetail('p', 'M', { manual: { contextWindowTier: '200k' } })
-  assert.equal(only.contextTokens, 200_000)
-  assert.equal(only.sources.contextTokens, 'manual')
-})
-
-test('窗口档位：与上游声明取 min（选档不能撑过真窗口）', () => {
-  const shrink = resolveCapabilityDetail('p', 'M', {
-    manual: { contextTokens: 1_000_000, contextWindowTier: '200k' },
-  })
-  assert.equal(shrink.contextTokens, 200_000, '模型声明 1M，选用 200k ⇒ 200k')
-
-  const keep = resolveCapabilityDetail('p', 'M', {
-    manual: { contextTokens: 128_000, contextWindowTier: '1m' },
-  })
-  assert.equal(keep.contextTokens, 128_000, '模型只声明 128K，不能靠选 1m 放大')
-})
-
-test('窗口档位：没选档时行为与以前一致', () => {
-  const before = resolveCapabilityDetail('p', 'M', { manual: { contextTokens: 1_000_000 } })
-  assert.equal(before.contextTokens, 1_000_000)
-  assert.equal(before.sources.contextTokens, 'manual')
-})
-
 test('档位没人标注时来自名字启发式，tierEvidenced=false', () => {
   const guessed = resolveCapabilityDetail('some-provider', 'Something-Flash')
   assert.equal(guessed.tier, 'fast')

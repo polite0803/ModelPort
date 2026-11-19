@@ -101,8 +101,6 @@ test('only the ruled exceptions still write gateway text', () => {
     'probe-capability',
     'probe-context',
     'probe-output',
-    'vision-relay-marker',
-    'vision-relay-prompt',
   ]
   assert.deepEqual([...tags].sort(), expected)
   assert.deepEqual([...documented].sort(), expected)

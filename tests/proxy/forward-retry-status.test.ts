@@ -104,8 +104,7 @@ test('单候选链的连接层失败给一次原地重试；多家链仍是零',
     /const soloRetry =\s*candidates\.length === 1 && remainingBudgetMs >= MIN_REMAINING_FOR_NEXT_ATTEMPT_MS \? 1 : 0/,
     '单候选 + 预算还够，才给这一次原地重试',
   )
-  // 2026-11-19 起同一对象后面还挂着裁剪预算的展开项，不再以 `}` 紧接收尾。
-  assert.match(source, /maxRetries: soloRetry,/)
+  assert.match(source, /\{ maxRetries: soloRetry \}/)
   assert.doesNotMatch(source, /\{ maxRetries: 0 \}/, '链上不得再留写死的零重试')
 
   // 放宽只到「一次」，且不得绕过原地重试的状态码闸门：额度/请求/超时类仍就地停手。

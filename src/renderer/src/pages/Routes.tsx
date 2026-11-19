@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useSearchParams } from 'react-router-dom'
-import { Ban, Pin, RefreshCw, RotateCcw, Search, SkipForward, SlidersHorizontal, Star, Tags } from 'lucide-react'
+import { Ban, Pin, RefreshCw, RotateCcw, Search, SkipForward, Star, Tags } from 'lucide-react'
 import { CapabilityBadges } from '@/components/models/CapabilityBadges'
 import { ModelAnnotationDialog } from '@/components/models/ModelAnnotationDialog'
-import { ModelParamsDialog } from '@/components/models/ModelParamsDialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -220,8 +219,6 @@ export function Routes() {
   const [detailLoading, setDetailLoading] = useState(false)
   // 行内「标注」入口的当前目标；关掉对话框时清空。
   const [annotateTarget, setAnnotateTarget] = useState<RouteMenuModel | null>(null)
-  /** 「参数」入口：与「标注」并列，凡是有标注按钮的行都能打开窗口档位。 */
-  const [paramsTarget, setParamsTarget] = useState<RouteMenuModel | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [busy, setBusy] = useState(false)
@@ -927,16 +924,6 @@ export function Routes() {
                     <Tags className="mr-1.5 h-4 w-4" />
                     {t('routes.annotate')}
                   </Button>
-                  {/* 「参数」与「标注」并列：窗口档位属于模型的设置，不该只藏在标注里。 */}
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    title={t('routes.paramsHint')}
-                    onClick={() => setParamsTarget(model)}
-                  >
-                    <SlidersHorizontal className="mr-1.5 h-4 w-4" />
-                    {t('routes.params')}
-                  </Button>
                 </div>
               ))}
             </CardContent>
@@ -952,14 +939,6 @@ export function Routes() {
           displayName={annotateTarget.displayName}
           onClose={() => setAnnotateTarget(null)}
           onChanged={() => { void refresh() }}
-        />
-      )}
-      {paramsTarget !== null && (
-        <ModelParamsDialog
-          providerId={paramsTarget.providerId}
-          displayName={paramsTarget.displayName}
-          onClose={() => setParamsTarget(null)}
-          onSaved={() => { void refresh() }}
         />
       )}
     </div>

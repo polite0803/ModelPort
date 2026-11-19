@@ -636,8 +636,17 @@ export type { AutoModelTier, CapabilityState, ModelCapabilityHint } from '../../
  */
 export const UNANNOTATED_CONTEXT_FLOOR = 64000
 
-/** 未标注窗口时的公布/裁剪兜底：定义已移到 `shared/types.ts`，广告与裁剪共用一份。 */
-export { UNANNOTATED_CONTEXT_FALLBACK } from '../../shared/types.ts'
+/**
+ * 一条路由的候选**全都没有窗口标注**时，对外公布的兜底值（2026-11-18 用户裁定）。
+ *
+ * 与 {@link UNANNOTATED_CONTEXT_FLOOR}（64,000，只用于打分降权）分开：那个数一旦被拿来
+ * 公布，Codex 会把压缩点定在 60,800，一段 45 turn 的会话在 260K 字符处就被摘要，用户
+ * 看到的是「没有可继续的上文 + 反复啰嗦」。200K 是「不知道真实窗口」时的一个已知可用
+ * 尺寸：它让客户端有压缩点（不会无限膨胀），又不至于把正常会话砍断。
+ *
+ * 只在**有候选但都没有合格读数**时使用；空池仍然省略这个键（没有模型可谈）。
+ */
+export const UNANNOTATED_CONTEXT_FALLBACK = 200_000
 
 /** 在线同步来的未知模型按名字猜档位，猜错只影响档位匹配，不影响可用性 */
 const FAST_NAME_PATTERN = /(flash|turbo|mini|lite|fast|air|small|\d+b|a\d+b)/
@@ -1052,23 +1061,25 @@ function effectiveContextLimit(capability: ModelCapability): number | undefined 
  * 代价是一次生成前的往返，不是一次误杀，也不是一个假数。
  */
 /**
- * 一条路由对外公布的窗口：池内**最小**的可广告读数（未钉住时）。
+ * 一条路由对外公布的窗口：池内**最大**的可广告读数。
  *
- * 为什么取小：这条路由会落到池里**任意**一个候选上，报比某个候选更大的窗口，就是让
- * 客户端按一个大尺寸压缩、再被那个候选装不下 —— 要么被选路的 context 硬过滤掉换成
- * 503，要么被网关裁掉中间一段。报小则客户端压到所有候选都装得下，请求永远发得出去。
+ * 2026-11-18 改口径（此前取 `min`，是踩过的坑）：客户端拿这个数决定**何时摘要自己的
+ * 历史**，而摘要是不可逆的——把一段本来跑得完的会话提前压成交接摘要，损失的细节再也
+ * 回不来。池里只要有一个 128K 的候选，取 min 就让整条路由按 128K 广告，1M 的模型也
+ * 跟着被砍。取 max 的方向相反：客户端尽量不摘要，请求真的落到小窗模型上时由**这一跳
+ * 自己的裁剪**按那个模型的窗口处理，被裁掉的部分留 CCR 指针可选回。
  *
- * 钉住的路由不走这里（`ceilingOfPool` 先按 `preferredModel` 收窄）：一旦钉住只会派
- * 那一个模型，池里别的模型再小与它无关 —— 那才是 2026-11-16 那个「1M 模型被 128K
- * 标准砍断」的坑。空池/全池无合格读数返回 `undefined`，由调用方决定兜底。
+ * 代价是「客户端不摘要、网关裁块」，所以这条判据只在两侧都留了退路时才成立：
+ * 裁剪预算仍按模型声明取（`declaredContextWindowOf`），指针是真的可检索。
+ * 空池/全池无合格读数仍返回 `undefined` —— 没有证据就不承诺。
  */
-export function advertisedContextFloorOf(
+export function advertisedContextCeilingOf(
   windows: readonly (number | undefined)[]
 ): number | undefined {
   const evidenced = windows.filter((window): window is number =>
     typeof window === 'number' && window > 0)
   if (evidenced.length === 0) return undefined
-  return Math.min(...evidenced)
+  return Math.max(...evidenced)
 }
 
 /**
@@ -1722,4 +1733,3 @@ export function poolLatencyGateMs(
   const index = Math.max(0, Math.ceil(readings.length * 0.75) - 1)
   return readings[index]
 }
-export function advertisedContextCeilingOf(w: readonly (number|undefined)[]): number|undefined { const e=w.filter((x): x is number=>typeof x==="number"&&x>0); return e.length?Math.max(...e):undefined }

@@ -1,10 +1,10 @@
 {
   "source": "models.dev",
   "url": "https://models.dev/api.json",
-  "asOf": "2026-11-19",
+  "asOf": "2026-10-29",
   "currency": "USD",
   "unit": "per-million-tokens",
-  "note": "第三方聚合清单的逐模型标价；不是厂商倍率、不是厂商官方口径。对齐只认完全相同的 baseUrl。",
+  "note": "第三方聚合清单的逐模型标价，不是厂商倍率、不是厂商官方口径；对齐只认完全相同的 baseUrl。",
   "entries": [
     {
       "entryId": "alibaba_cloud",
@@ -18,177 +18,6 @@
         "qwen3-coder-plus": {
           "input": 1,
           "output": 5
-        }
-      }
-    },
-    {
-      "entryId": "bailian",
-      "modelsDevProviderId": "alibaba-cn",
-      "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-      "models": {
-        "qwen3.8-max": {
-          "input": 1.77744,
-          "output": 5.33231,
-          "cacheRead": 0.22218,
-          "cacheWrite": 2.22179
-        },
-        "qwen3.8-flash": {
-          "input": 0.11875,
-          "output": 0.40073,
-          "cacheRead": 0.014844,
-          "cacheWrite": 0.185547
-        },
-        "qwen3.7-max": {
-          "input": 1.65,
-          "output": 4.951,
-          "cacheRead": 0.33,
-          "cacheWrite": 2.0625
-        },
-        "qwen3.7-plus": {
-          "input": 0.276,
-          "output": 1.101,
-          "cacheRead": 0.0552,
-          "cacheWrite": 0.345
-        },
-        "qwen3.6-flash": {
-          "input": 0.165,
-          "output": 0.99,
-          "cacheRead": 0.0165,
-          "cacheWrite": 0.20625
-        },
-        "qwen3-coder-plus": {
-          "input": 0.574,
-          "output": 2.296
-        },
-        "deepseek-v4-pro": {
-          "input": 1.65,
-          "output": 3.301
-        },
-        "glm-5.3": {
-          "input": 1.1,
-          "output": 3.851,
-          "cacheRead": 0.275,
-          "cacheWrite": 0
-        },
-        "glm-5.2": {
-          "input": 1.1,
-          "output": 3.851,
-          "cacheRead": 0.275,
-          "cacheWrite": 0
-        },
-        "MiniMax-M2.5": {
-          "input": 0.3,
-          "output": 1.2
-        },
-        "kimi-k2.5": {
-          "input": 0.574,
-          "output": 3.011,
-          "cacheRead": 0.1148,
-          "cacheWrite": 0.7175
-        }
-      }
-    },
-    {
-      "entryId": "bailian_coding_plan",
-      "modelsDevProviderId": "alibaba-coding-plan-cn",
-      "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
-      "models": {
-        "qwen3.7-plus": {
-          "input": 0,
-          "output": 0,
-          "cacheRead": 0,
-          "cacheWrite": 0
-        },
-        "qwen3.6-plus": {
-          "input": 0,
-          "output": 0,
-          "cacheRead": 0,
-          "cacheWrite": 0
-        },
-        "qwen3.5-plus": {
-          "input": 0,
-          "output": 0,
-          "cacheRead": 0,
-          "cacheWrite": 0
-        },
-        "kimi-k2.5": {
-          "input": 0,
-          "output": 0,
-          "cacheRead": 0,
-          "cacheWrite": 0
-        },
-        "glm-5": {
-          "input": 0,
-          "output": 0,
-          "cacheRead": 0,
-          "cacheWrite": 0
-        },
-        "MiniMax-M2.5": {
-          "input": 0,
-          "output": 0,
-          "cacheRead": 0,
-          "cacheWrite": 0
-        }
-      }
-    },
-    {
-      "entryId": "bailian_token_plan",
-      "modelsDevProviderId": "alibaba-token-plan-cn",
-      "baseUrl": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
-      "models": {
-        "qwen3.8-max": {
-          "input": 0,
-          "output": 0,
-          "cacheRead": 0,
-          "cacheWrite": 0
-        },
-        "qwen3.8-flash": {
-          "input": 0,
-          "output": 0,
-          "cacheRead": 0,
-          "cacheWrite": 0
-        },
-        "qwen3.7-max": {
-          "input": 0,
-          "output": 0,
-          "cacheRead": 0,
-          "cacheWrite": 0
-        },
-        "qwen3.7-plus": {
-          "input": 0,
-          "output": 0,
-          "cacheRead": 0,
-          "cacheWrite": 0
-        },
-        "qwen3.6-flash": {
-          "input": 0,
-          "output": 0,
-          "cacheRead": 0,
-          "cacheWrite": 0
-        },
-        "deepseek-v4.1-flash": {
-          "input": 0,
-          "output": 0,
-          "cacheRead": 0,
-          "cacheWrite": 0
-        },
-        "deepseek-v4-pro": {
-          "input": 0,
-          "output": 0,
-          "cacheRead": 0,
-          "cacheWrite": 0
-        },
-        "glm-5.3": {
-          "input": 0,
-          "output": 0,
-          "cacheRead": 0,
-          "cacheWrite": 0
-        },
-        "glm-5.2": {
-          "input": 0,
-          "output": 0,
-          "cacheRead": 0,
-          "cacheWrite": 0
         }
       }
     },
@@ -433,21 +262,6 @@
       }
     },
     {
-      "entryId": "ovh",
-      "modelsDevProviderId": "ovhcloud",
-      "baseUrl": "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
-      "models": {
-        "gpt-oss-120b": {
-          "input": 0.09,
-          "output": 0.47
-        },
-        "gpt-oss-20b": {
-          "input": 0.05,
-          "output": 0.18
-        }
-      }
-    },
-    {
       "entryId": "poolside",
       "modelsDevProviderId": "poolside",
       "baseUrl": "https://inference.poolside.ai/v1",
@@ -559,6 +373,17 @@
       }
     },
     {
+      "entryId": "sambanova",
+      "modelsDevProviderId": "sambanova",
+      "baseUrl": "https://api.sambanova.ai/v1",
+      "models": {
+        "Meta-Llama-3.3-70B-Instruct": {
+          "input": 0.6,
+          "output": 1.2
+        }
+      }
+    },
+    {
       "entryId": "sensenova",
       "modelsDevProviderId": "sensenova",
       "baseUrl": "https://token.sensenova.cn/v1",
@@ -569,6 +394,11 @@
           "cacheRead": 0
         },
         "deepseek-v4-flash": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0
+        },
+        "deepseek-v4.1-flash": {
           "input": 0,
           "output": 0,
           "cacheRead": 0
@@ -675,72 +505,6 @@
       }
     },
     {
-      "entryId": "siliconflow_cn",
-      "modelsDevProviderId": "siliconflow-cn",
-      "baseUrl": "https://api.siliconflow.cn/v1",
-      "models": {
-        "deepseek-ai/DeepSeek-V4-Pro": {
-          "input": 1.79336973,
-          "output": 3.58673947,
-          "cacheRead": 0.14944748
-        },
-        "deepseek-ai/DeepSeek-V4-Flash": {
-          "input": 0.44834243,
-          "output": 1.3450273,
-          "cacheRead": 0.04483424
-        },
-        "deepseek-ai/DeepSeek-V3.2": {
-          "input": 0.59778991,
-          "output": 0.89668487,
-          "cacheRead": 0.05977899
-        },
-        "Qwen/Qwen3.5-122B-A10B": {
-          "input": 0.11955798,
-          "output": 0.95646386
-        }
-      }
-    },
-    {
-      "entryId": "stepfun",
-      "modelsDevProviderId": "stepfun",
-      "baseUrl": "https://api.stepfun.com/v1",
-      "models": {
-        "step-5-preview": {
-          "input": 1.04613,
-          "output": 2.98895,
-          "cacheRead": 0.10461
-        },
-        "step-3.7-flash": {
-          "input": 0.20175,
-          "output": 1.21052,
-          "cacheRead": 0.04035
-        },
-        "step-3.5-flash": {
-          "input": 0.10461,
-          "output": 0.31384,
-          "cacheRead": 0.02092
-        },
-        "step-3.5-flash-2603": {
-          "input": 0.10461,
-          "output": 0.31384,
-          "cacheRead": 0.02092
-        }
-      }
-    },
-    {
-      "entryId": "tencent_coding_plan",
-      "modelsDevProviderId": "tencent-coding-plan",
-      "baseUrl": "https://api.lkeap.cloud.tencent.com/coding/v3",
-      "models": {
-        "tc-code-latest": {
-          "input": 0,
-          "output": 0,
-          "cacheRead": 0,
-          "cacheWrite": 0
-        }
-      }
-    },
-    {
       "entryId": "tokenrouter",
       "modelsDevProviderId": "tokenrouter",
       "baseUrl": "https://api.tokenrouter.com/v1",
@@ -748,18 +512,6 @@
         "z-ai/glm-5.3-free": {
           "input": 0,
           "output": 0
-        }
-      }
-    },
-    {
-      "entryId": "wafer",
-      "modelsDevProviderId": "wafer.ai",
-      "baseUrl": "https://pass.wafer.ai/v1",
-      "models": {
-        "DeepSeek-V4-Pro": {
-          "input": 0.28,
-          "output": 3.96,
-          "cacheRead": 0.044
         }
       }
     },
@@ -883,12 +635,6 @@
           "cacheWrite": 0
         },
         "glm-4.7-flash": {
-          "input": 0,
-          "output": 0,
-          "cacheRead": 0,
-          "cacheWrite": 0
-        },
-        "glm-4.6v-flash": {
           "input": 0,
           "output": 0,
           "cacheRead": 0,

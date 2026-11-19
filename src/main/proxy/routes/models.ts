@@ -75,15 +75,9 @@ router.get('/models', async (ctx: Context) => {
   // 用全局未筛池会让一条只钉了大窗模型的路由被别家小窗模型压到 64K，报出来的数
   // 跟这条路由毫无关系。
   const routeFloors = autoRouter.advertisedContextFloors(advertisedRoutes)
-  // 能力也按池算：`input_modalities` 取池内交集，客户端据此决定能不能发图。取并集
-  // 就是广告一个不存在的承诺 —— 附图请求落到纯文本候选上只会得到 503。
-  const routeVision = autoRouter.advertisedVision(advertisedRoutes)
-  const models: ModelInfo[] = advertisedRoutes.map(route => {
-    const entry = routeEntry(route.name, now, routeFloors.get(route.name))
-    const vision = routeVision.get(route.name)
-    // 未知（空池）就省略这一格：没有候选就不该承诺模态。
-    return vision === undefined ? entry : { ...entry, input_modalities: vision ? ['text', 'image'] : ['text'] }
-  })
+  const models: ModelInfo[] = advertisedRoutes.map(route =>
+    routeEntry(route.name, now, routeFloors.get(route.name)),
+  )
 
   ctx.set('Content-Type', 'application/json')
   // 只会说 anthropic 的客户端（Claude Code / Claude Desktop / 官方 SDK）带着

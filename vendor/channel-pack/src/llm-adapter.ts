@@ -13,8 +13,6 @@ import { settingsNamespaceFor } from './settings-compat.js'
 import { nextUtc8DayStartMs } from './model-queue.js'
 import { isCodeArtsBenefitModel } from './models.js'
 import { normalizeHarnessMessages } from './message-shape.js'
-import { projectRequestImage, type ImageRequestTarget } from './image-budget.js'
-import { collectImages, TOOL_RESULT_IMAGE_TEXT, userContentParts } from './openai-compat.js'
 import { signRequestHuawei } from './sign.js'
 import { createBlankReasoningSuppressor, createReasoningLoopDetector, hasUsableToolName, incompleteStep, isReasoningLoopGuardEnabled, isTruncatedArguments, normalizeToolArguments, readWithIdleTimeout, reasoningLoopFailure, resolveEmptyResponseReason, resolveToolPairing, stripCourseLeakFromHistoryContent, stripCourseLeakIfEnabled } from './sse.js'
 import type { CodeArtsCredential } from './types.js'
@@ -25,23 +23,6 @@ import { reportLedgerAccount } from './token-ledger.js'
 
 export const CHAT_API_BASE = 'https://snap-access.cn-north-4.myhuaweicloud.com/api/v2'
 export const PROVIDER = 'codearts'
-
-/**
- * 已实测能收图片的模型。
- *
- * 2026-11-18 直连端点探测：`messages[].content` 带
- * `{type:'image_url', image_url:{url:'data:image/png;base64,...'}}`（1×1 纯红）
- * 的请求直接回出「Red」—— 端点接受 OpenAI 形态的图片块，不需要先上传。
- *
- * 只登记探测过的模型：没测过的保持纯文本，硬过滤会照旧挡下图片请求，
- * 不按家族或名字类推（`glm-5.3` 非 flash 就是纯文本）。
- */
-const VISION_MODELS: ReadonlySet<string> = new Set(['glm-5.3-flash'])
-
-/** 适配器对外的输入模态播报：DSH 按它决定是否把图片交给本适配器。 */
-function inputModalitiesOf(modelId: string): readonly ('text' | 'image')[] {
-  return VISION_MODELS.has(modelId) ? ['text', 'image'] : ['text']
-}
 /**
  * 「该账号没有 benefit（免费额度）包」的稳定失败码。
  *
@@ -113,18 +94,6 @@ export interface CodeArtsAdapterOptions {
   fetchImpl?: typeof fetch
   chatId?: string
   sessionId?: string
-  /**
-   * 附件字节读取：把 harness 的 `{type:'image', attachment}` 内联成 data URL。
-   *
-   * ⚠️ 端点接受 `image_url`（含 data URL）已实测（见 {@link VISION_MODELS}），
-   * 所以这条渠道**不需要**先上传再引用；缺了这个桥接，图片只能被丢弃。
-   */
-  readImage?: (ref: never) => Promise<{ data: Uint8Array; mediaType: string }>
-  /** 请求版本（按尺寸/字节预算缩放）读取；不可用时回退原图。 */
-  readImageRequest?: (
-    attachment: unknown,
-    target: ImageRequestTarget,
-  ) => Promise<{ data: Uint8Array; mediaType: string } | undefined>
   /** 多账号池（用于限流时切换账号） */
   accountPool?: AccountPool
 }
@@ -132,14 +101,9 @@ export interface CodeArtsAdapterOptions {
 /**
  * 将消息内容载荷展平为纯文本字符串。Harness 消息
  * 以 OpenAI 风格的块数组形式携带内容（`[{type:'text',...}]`，且
- * 助手历史可能包含 `{type:'reasoning',...}` 块），只保留 `text` 块并拼接。
- *
- * 图片**不**在这里处理：它是 user 消息的多模态 parts（见
- * {@link serializeMessages} 的 `imageUrls`）。
- *
- * ⚠️ 这段注释曾断言「CodeArts 端点会拒绝非 text 块类型并返回空流」。
- * 2026-11-18 直连探测推翻了它：带 `image_url`（data URL）的请求正常出流、
- * 并正确答出图片颜色。当时缺的是本适配器的图片读取与序列化，不是端点的能力。
+ * 助手历史可能包含 `{type:'reasoning',...}` 块）；CodeArts
+ * 端点会拒绝非 `text` 块类型并返回空流，因此只保留
+ * `text` 块并拼接。
  */
 function contentToText(content: unknown): string {
   if (typeof content === 'string') return content
@@ -158,35 +122,18 @@ function contentToText(content: unknown): string {
  * 校验要求 assistant 消息必须携带该字段，缺失会报 "Missing
  * `reasoning_content` field"）；工具结果（搭载在 harness 用户消息中）
  * 展开为独立的 `{role: 'tool'}` 消息，使模型能看到其调用的返回值。
- *
- * 图片：`imageUrls` 为 `undefined` 表示整轮没有图片（纯文本路径，线上字节
- * 不变）；非 `undefined`（**含空 Map**）时把 user 消息升级成
- * `[{type:'text'}, {type:'image_url'}]` 多模态 parts。空 Map 不能降级为
- * `undefined` —— 那会让「图片存在但字节读取失败」的 `[image unavailable]`
- * 占位也被跳过，图片静默消失。工具结果里的图片提升为其后的独立 user 消息
- * （`role:'tool'` 的 content 只能是字符串）。
+ * 其余非文本块（图片）被丢弃，与端点接受的格式一致。
  *
  * ⚠️ 入口先做 **DSH 0.1.7 消息形状归一化**（见 `message-shape.ts`）：0.1.7 把工具
  * 结果改为一等 `role:'tool'` 消息，若不归一化，下面的 `type === 'tool-result'`
  * 判据恒不命中 → 工具调用被 `resolveToolPairing` 整体剔除。
  */
-export function serializeMessages(
-  messages: readonly { role: string; content: unknown }[],
-  imageUrls?: ReadonlyMap<string, string>,
-): Array<Record<string, unknown>> {
+export function serializeMessages(messages: readonly { role: string; content: unknown }[]): Array<Record<string, unknown>> {
   const normalized = normalizeHarnessMessages(messages)
   const wire: Array<Record<string, unknown>> = []
   // 剔除无法配对的工具调用/结果（详见 resolveToolPairing）：孤儿 tool_calls
   // 会让后端对之后每一条消息都返回 400，整个会话永久报废。
   const { keepCallIds, keepResultIds } = resolveToolPairing(normalized)
-  // 工具结果里的图片不能留在 role:'tool' 消息上（该角色 content 只能是字符串，
-  // 且必须紧跟其 assistant tool_call），故挂起到其后的一条独立 user 消息。
-  const pendingImages: Array<Record<string, unknown>> = []
-  const flushPendingImages = (): void => {
-    if (pendingImages.length === 0) return
-    wire.push({ role: 'user', content: [{ type: 'text', text: TOOL_RESULT_IMAGE_TEXT }, ...pendingImages] })
-    pendingImages.length = 0
-  }
   for (const message of normalized) {
     if (message.role === 'assistant') {
       // 存量自愈：清洗历史里已持久化的行首 `course` / `课` 泄漏
@@ -210,9 +157,6 @@ export function serializeMessages(
           typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'reasoning')
         .map((block) => String(block.text))
         .join('')
-      // 挂起图片必须在 assistant 之前发出，否则会漂到这条 assistant 之后，
-      // 与产生它们的工具调用脱节。
-      flushPendingImages()
       wire.push({
         role: 'assistant',
         content: contentToText(content),
@@ -226,7 +170,6 @@ export function serializeMessages(
       continue
     }
     if (message.role === 'system') {
-      flushPendingImages()
       wire.push({ role: 'system', content: contentToText(message.content) })
       continue
     }
@@ -239,46 +182,17 @@ export function serializeMessages(
     // 字符串时直接返回，但这里不能用 `content`（非数组时为 []）——否则
     // 字符串 user 消息会被序列化成空串，模型看不到任务指令。
     const text = contentToText(message.content)
-    // 顶层图片升级成多模态 parts；`imageUrls` 为 undefined 表示整轮没有图片，
-    // 走原来的纯文本路径（线上字节不变）。
-    const regular = content.filter((block) =>
-      !(typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'tool-result'))
-    const parts = imageUrls === undefined ? undefined : userContentParts(regular, imageUrls)
-    if (parts !== undefined) {
-      flushPendingImages()
-      wire.push({ role: 'user', content: parts })
-    } else if (text.length > 0 || toolResults.length === 0) {
-      flushPendingImages()
-      wire.push({ role: 'user', content: text })
-    }
+    if (text.length > 0 || toolResults.length === 0) wire.push({ role: 'user', content: text })
     for (const result of toolResults) {
       // 丢弃孤儿工具结果：没有对应 tool_call 其结果同样会让后端 400。
       if (!keepResultIds.has(String(result.toolCallId))) continue
-      // 工具结果内嵌的图片挂起到其后一条 user 消息（role:'tool' 只能带字符串）。
-      let resultText = '(no output)'
-      if (imageUrls !== undefined && Array.isArray(result.content)) {
-        const resultParts = userContentParts(result.content, imageUrls)
-        if (resultParts !== undefined) {
-          pendingImages.push(...resultParts.filter((part) => part.type !== 'text'))
-          const joined = resultParts
-            .filter((part) => part.type === 'text')
-            .map((part) => String(part.text))
-            .join('')
-          if (joined.length > 0) resultText = joined
-        } else {
-          resultText = contentToText(result.content) || '(no output)'
-        }
-      } else {
-        resultText = contentToText(result.content) || '(no output)'
-      }
       wire.push({
         role: 'tool',
         tool_call_id: String(result.toolCallId),
-        content: resultText,
+        content: contentToText(result.content) || '(no output)',
       })
     }
   }
-  flushPendingImages()
   return wire
 }
 
@@ -1109,18 +1023,13 @@ export class CodeArtsAdapter extends LlmAdapter {
    * （用户报障：「关闭的就没有显示倍率」）。CodeArts 目录虽无倍率，但同样
    * 需要正确的 `name`（否则关闭项显示 `deepseek-v4-flash` 这类裸 id）。
    */
-  listAllModels(): readonly { id: string; name: string; supportsImage?: boolean }[] {
+  listAllModels(): readonly { id: string; name: string }[] {
     const source = this.remoteModels ?? DEFAULT_MODELS.map((id) => ({ id, name: id }))
     // 与 listModels 保持同一套「可见性」过滤（VL 多模态不参与），
     // 唯一区别是不套用户黑名单。
     return source
       .filter((m) => !/-VL-/i.test(m.id) && !/-VL$/i.test(m.id))
-      .map((m) => ({
-        id: m.id,
-        name: m.name,
-        // 只报实测过的模型；没测过的不写（宿主记为未知，而不是编造 false）。
-        ...VISION_MODELS.has(m.id) ? { supportsImage: true } : {},
-      }))
+      .map((m) => ({ id: m.id, name: m.name }))
   }
 
   async listModels(_provider: string): Promise<readonly LlmModelInfo[]> {
@@ -1149,12 +1058,7 @@ export class CodeArtsAdapter extends LlmAdapter {
     const listed = disabled === undefined || disabled.size === 0
       ? visible
       : visible.filter((m) => !disabled.has(m.id))
-    return listed.map((m) => ({
-      provider: PROVIDER,
-      id: m.id,
-      name: m.name,
-      inputModalities: inputModalitiesOf(m.id),
-    }))
+    return listed.map((m) => ({ provider: PROVIDER, id: m.id, name: m.name, inputModalities: ['text'] as const }))
   }
 
   async resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
@@ -1185,7 +1089,7 @@ export class CodeArtsAdapter extends LlmAdapter {
     signal?: AbortSignal,
   ): Promise<{ model: LlmResolvedModelInfo; stream: (options: GenerateOptions) => AsyncIterable<StreamChunk> }> {
     return {
-      model: { ...await this.resolveModel(provider, model, signal), inputModalities: inputModalitiesOf(model) },
+      model: { ...await this.resolveModel(provider, model, signal), inputModalities: ['text'] as const },
       stream: (options: GenerateOptions) => this.stream(options),
     }
   }
@@ -1215,40 +1119,7 @@ export class CodeArtsAdapter extends LlmAdapter {
       if (currentAccountId) reportLedgerAccount(PROVIDER, currentAccountId)
     }
 
-    // 图片：端点接受 OpenAI 形态的 `image_url`（含 data URL，已实测），所以把
-    // 附件字节就地内联，不需要先上传再引用。读取失败的图片留给序列化层变成
-    // `[image unavailable]` 占位符 —— 模型至少知道「本该有图」。
-    const imageRefs = new Map<string, unknown>()
-    for (const message of options.messages) {
-      if (Array.isArray(message.content)) collectImages(message.content, imageRefs)
-    }
-    let imageUrls: Map<string, string> | undefined
-    if (imageRefs.size > 0) {
-      const readImage = this.options.readImage
-      if (readImage === undefined) {
-        throw new LlmError(
-          'codearts: 图片输入需要附件服务（宿主未提供 attachments.readImage）',
-          'UNSUPPORTED_CONTENT',
-        )
-      }
-      // 保留空 Map（而非降级为 undefined）：全部读取失败时要产出占位符，
-      // 不能让图片静默消失。
-      imageUrls = new Map()
-      for (const [id, ref] of imageRefs) {
-        try {
-          const projected = await projectRequestImage(ref, {
-            readImageRequest: this.options.readImageRequest,
-          })
-          const image = projected ?? await readImage(ref as never)
-          if (image === undefined) continue
-          imageUrls.set(id, `data:${image.mediaType};base64,${Buffer.from(image.data).toString('base64')}`)
-        } catch {
-          // 单张失败不影响其余。
-        }
-      }
-    }
-
-    const messages = serializeMessages(options.messages, imageUrls)
+    const messages = serializeMessages(options.messages)
     // harness 的 GenerateOptions.system 是独立的系统提示（如标题生成的
     // systemPrompt、agent 的 persona）。后端 chat/completions 只接受
     // messages 数组里的 system 角色，必须显式插入——否则模型看不到

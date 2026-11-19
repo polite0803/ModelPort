@@ -39,10 +39,7 @@ test('the catalogue carries the entries that can actually be wired', () => {
   // official 2026-11-11 console list (10 -> 14: +doubao-seed-evolving/2.1-pro/2.1-lite/
   // 2.0-mini, deepseek-v4.1-flash[-economy], glm-5.3[-flash], kimi-k3.1-pro/k2.8-preview/k3,
   // retiring the stale 2.0-pro/lite/code, glm-5.2, kimi-k2.7-code, minimax-m3).
-  // plus 1 on 2026-11-19: zai_api +glm-4.6v-flash — official free vision SKU
-  // (docs.z.ai pricing Vision Models table), live-verified 200 with image input
-  // (green/blue color probes); upstream /models omits it, same as glm-4.7-flash.
-  assert.equal(AGGREGATE_REGISTRY.reduce((sum, entry) => sum + entry.models.length, 0), 626)
+  assert.equal(AGGREGATE_REGISTRY.reduce((sum, entry) => sum + entry.models.length, 0), 625)
 
   // Browser-login account channels are retired; the responses-only relay is not wired.
   for (const excluded of ['openai', 'github_copilot', 'fleetrelay_t1']) {

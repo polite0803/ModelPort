@@ -611,11 +611,12 @@ test('生成的可发现路由：列得到、发得出、上游收到的就是�
   const list = await proxy.request('GET', '/v1/models', { headers: { 'anthropic-version': '2023-06-01' } })
   const rows = (list.json.data as Array<Record<string, any>>).filter(row => row.id === 'claude-opus-5')
   assert.equal(rows.length, 1, `清单里应当恰好一条：${JSON.stringify(list.json.data)}`)
-  // 窗口取自路由池的对外读数。这两家都没公布窗口，2026-11-18 起改为 200K 兜底
-// （用户裁定）：有候选却没有读数时给一个已知可用的尺寸，而不是让客户端完全不压、
-// 历史无限膨胀。空池仍然省略这个键（见 `route-context-floor.test.ts`）。
-  assert.equal(rows[0].max_input_tokens, 200_000,
-    `未标注的候选应拿到 200K 兜底：${JSON.stringify(rows[0])}`)
+  // 窗口是**池里已公布窗口的下界**，不是上游声明的上限：这两家都没公布窗口，
+  // 所以没有可承诺的数，键整个省略（原先这里报的是兜底常量 64000，客户端会拿它
+  // 当真实窗口安排压缩时机）。纯函数层那条判据在
+  // `tests/proxy/models-context-window.test.ts`。
+  assert.equal('max_input_tokens' in rows[0], false,
+    `未公布的窗口不该变成一个承诺值：${JSON.stringify(rows[0])}`)
 
   // 2. 发得出：客户端原样发回这个名字，它被**直接解析**成这条路由。
   const response = await proxy.request('POST', '/v1/messages', { body: messagesBody('claude-opus-5') })
@@ -831,10 +832,6 @@ function assertRowMatchesList(listRows: Array<Record<string, any>>, item: Record
 
 test('单条检索带 anthropic-version 时回 anthropic 形状；不带时 OpenAI 形状一字不变', async () => {
   // `auto` 的池下界走真实管线：只有 antp 那家标了窗口，llm7 未标注、不参与下界。
-  // 先清掉「上一轮服务过谁」：对外窗口优先跟随当前模型（2026-11-18），不清的话这一格
-  // 会取决于前面哪个测试 POST 过 auto，断言就不可复现。
-  const { autoRouter } = await loadModule('main/proxy/autoRouter.ts')
-  autoRouter.reset()
   sm.updateProvider('antp', { modelCapabilities: { 'Test-Model': { contextTokens: 128000 } } } as never)
   const created = sm.createRoute({
     name: 'antempty',
@@ -856,7 +853,6 @@ test('单条检索带 anthropic-version 时回 anthropic 形状；不带时 Open
     assert.equal(anthAuto.json.id, 'auto')
     assert.equal(anthAuto.json.display_name, 'auto', 'display_name 恒等于 id：客户端筛的和发回来的是同一个名字')
     assert.match(anthAuto.json.created_at, /T.*Z/, 'anthropic 这一版是 ISO 字符串，不是秒数')
-    // reset 之后没有「当前模型」，走池最小：只有 antp 标了 128K，llm7 未标注不参与。
     assert.equal(anthAuto.json.max_input_tokens, 128000, '有窗口才发：与列表那一行同一个数')
     assert.equal(anthAuto.json.object, undefined, 'anthropic 形状里没有 object/owned_by')
     assert.equal(anthAuto.json.owned_by, undefined)
@@ -892,9 +888,6 @@ test('单条检索带 anthropic-version 时回 anthropic 形状；不带时 Open
 })
 
 test('列表广告过的 modelMap 键单查必须答话，且与列表那一行逐字段同源', async () => {
-  // 同前一条：对外窗口优先跟随「当前模型」，这里要先清掉，让读数回到池最小。
-  const { autoRouter } = await loadModule('main/proxy/autoRouter.ts')
-  autoRouter.reset()
   sm.updateProvider('antp', { modelCapabilities: { 'Test-Model': { contextTokens: 128000 } } } as never)
   const off = sm.createRoute({
     name: 'antoff',
@@ -921,8 +914,7 @@ test('列表广告过的 modelMap 键单查必须答话，且与列表那一行�
     const mapped = await proxy.request('GET', '/v1/models/claude-mapped', { headers: ANTHROPIC_HEADERS })
     assert.equal(mapped.status, 200, `列表广告了这个名字，单查不能 404：${JSON.stringify(mapped.json)}`)
     assert.equal(mapped.json.id, 'claude-mapped')
-    // reset 之后没有「当前模型」→ 池最小 128K。
-    assert.equal(mapped.json.max_input_tokens, 128000, '窗口取映射目标那条路由的对外读数')
+    assert.equal(mapped.json.max_input_tokens, 128000, '窗口取映射目标那条路由的下界')
     assert.equal(mapped.json.anthropic_family_tier, 'sonnet', '映射键行继承目标路由的档位（与列表同一判据）')
     assertRowMatchesList(rows, mapped.json, '映射键')
 

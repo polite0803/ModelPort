@@ -19,8 +19,6 @@ import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
 import { autoRouter, AUTO_SKIPPED_REPORT_LIMIT, describeTransientCause, summarizeTransientSkips } from '../autoRouter'
 import type { AutoCandidate, AutoRouteDecision } from '../autoRouter'
-import { profileRequest } from '../autoRouting'
-import { applyVisionRelay, routeDecisionNeedsVisionRelay } from '../visionRelay'
 import { resolveRouteRequest, routePoolBreakMessage } from '../../store/modelRoutes'
 import type {
   AutoAttemptFailure,
@@ -54,7 +52,6 @@ import { storeManager } from '../../store/store'
 import { AUTO_PREFERENCES, type AutoPreference } from '../../../shared/types'
 import { INCOMPLETE_STEP_CODE, isEmptyTurnAfterStream, isAnnouncedStopAfterStream, modelQualityDegradation, shouldRevokeStickyAfterStream } from '../streamOutcomePolicy'
 import { readRequestContextFit } from '../../../shared/requestContextFit.ts'
-import { measuredContextLimitOf } from '../contextOverflowLimits.ts'
 import { DEFAULT_REPETITION_GUARD, measureStreamEmptyTurn, measureStreamRepetition } from '../../../shared/streamRepetition.ts'
 import { readOrEstimateUsage, usageInputText, type UsageReading } from '../quota/usage'
 import { aggregateCostUsdOf } from '../../../shared/aggregateCost.ts'
@@ -140,40 +137,6 @@ function isZeroOutputCapacityFailure(result: ForwardResult): boolean {
   if (result.localAdmissionRejected === true) return false
   if (result.status === 402 || result.status === 429) return true
   return isRecoverableChannelFailure(result.error) || isAccountArrearsError(result.error)
-}
-
-/**
- * 上游在**产出任何字节之前**回「这批输入超出我的窗口」（用户报障 2026-11-19）：
- * 这一发在客户端看来还没开始，换一个窗口更大的模型重放不伤上下文 / 工具协议 /
- * 前缀缓存 —— 与额度类零产出同一个口径（`single` 收口禁止的是「产出到一半换
- * 实现」，不是禁止在同一条空结果上重新开局）。
- *
- * 池里没有别的候选时，调用方还可以按报文里写明的上界裁一次再发（见循环内 ②）。
- */
-function isZeroOutputContextMismatch(result: ForwardResult): boolean {
-  if (result.success || result.stream !== undefined) return false
-  if (result.status !== 400 && result.status !== 413) return false
-  return isContextOverflowError(result.error)
-}
-
-/**
- * 已按上游给的上界裁过一次、重发仍被判超限：把第二发上游 400 换成**本地**说明，
- * 并给一个稳定的机读码。
- *
- * 保持 400：这是输入本身装不下，不是渠道故障，不换账号、不记罚。写清楚「已经裁过
- * 一次、上界是多少」，客户端才不会把同一句话当成「网关没做事又原样转发」。
- */
-function trimExhaustedResult(limit: number | undefined, from: ForwardResult): ForwardResult {
-  const bound = limit === undefined ? 'its context limit' : `its ${limit}-token context limit`
-  const message =
-    `Input still exceeds ${bound} after one trimmed retry; shorten the conversation or switch to a model with a larger window.`
-  return {
-    success: false,
-    status: 400,
-    error: message,
-    errorDetails: { message, type: 'invalid_request_error', code: 'context_overflow' },
-    latency: from.latency,
-  }
 }
 
 /**
@@ -795,19 +758,6 @@ router.post('/completions', async (ctx: Context) => {
     ? autoRouter.select(request, config.loadBalanceStrategy, autoPreference, route, clientSession, headerModel)
     : null
 
-  // 视觉读图两段式（PLAN-vision-relay，缺省关）：`select` 自己就是「这一轮服务谁」
-  // 的权威答案 —— 候选非空 ⇔ 有能收图的候选（硬过滤保证），此时零介入；只有
-  // 「缺的正是 vision」才值得一次转述。转述成功后请求已无图，按新画像重选一次
-  // （钉/粘性/策略都在新请求上重新落定，语义不变）。
-  if (autoDecision !== null && routeDecisionNeedsVisionRelay(autoDecision)) {
-    const relayed = await applyVisionRelay(request, config.visionRelay)
-    if (relayed !== null) {
-      request = relayed.request
-      ctx.set('X-ModelPort-Vision-Relay', toHeaderValue(relayed.reader))
-      autoDecision = autoRouter.select(request, config.loadBalanceStrategy, autoPreference, route, clientSession, headerModel)
-    }
-  }
-
   // 请求前预检：worker 的模型级限流与 pack 服务清单（两块合并进
   // `applyChannelPreflights`）。剔空之后必须**带着排除集重选** —— 两道预检都跑在
   // `single` 作用域裁剪之后，剔掉头部而不重选就是整轮零候选。重选发生在任何上游
@@ -946,25 +896,6 @@ router.post('/completions', async (ctx: Context) => {
         },
       }
       return
-    }
-
-    // 视觉读图两段式（具名路径）：目标模型已标注 vision=yes 就直发、零介入；
-    // 收不下图时（含 unknown —— 与硬过滤同一判据 `vision !== 'yes'`）先转述。
-    // 失败保持今天的形态（原请求原样转发，由上游判对错），不发明新错误。
-    // 落成 const 再进闭包：`selection` 是 let，在 .find 回调里会丢失收窄。
-    const namedSelection = selection
-    if (profileRequest(request).needsVision) {
-      const catalogueRow = storeManager
-        .getModelCatalogue(namedSelection.provider.id)
-        .find(model => model.actualModelId === namedSelection.actualModel)
-      const displayName = catalogueRow?.displayName ?? request.model
-      if (autoRouter.visionOf(namedSelection.provider.id, displayName, namedSelection.actualModel) !== 'yes') {
-        const relayed = await applyVisionRelay(request, config.visionRelay)
-        if (relayed !== null) {
-          request = relayed.request
-          ctx.set('X-ModelPort-Vision-Relay', toHeaderValue(relayed.reader))
-        }
-      }
     }
 
     // 服务清单预检（点名/显式选模路径）：与上面 auto 路径的预检同一判据、同一个
@@ -1390,10 +1321,6 @@ router.post('/completions', async (ctx: Context) => {
       // 兜住预检看不见的那一类（渠道匿名池的 `free_usage_limit` 等）。
       const triedModels = new Map<string, { providerId: string; displayName: string }>()
       const capacitySkipped: string[] = []
-      const contextSkipped: string[] = []
-      // 400 之后「同一候选、按上游给的上界裁一次再发」的状态：每回合最多一次。
-      let forceTrim: { maxTokens: number } | undefined
-      let trimmedOnce = false
       let outcome: ForwardChainOutcome<AutoCandidate> | null = null
       let attemptsTotal = 0
       let failuresTotal: AutoAttemptFailure[] = []
@@ -1417,75 +1344,18 @@ router.post('/completions', async (ctx: Context) => {
             ...(autoDecision.wallClockBudgetMs === undefined
               ? {}
               : { wallClockBudgetMs: autoDecision.wallClockBudgetMs }),
-            // 路由级承诺（与 `/v1/models` 同一个数）：转发层用它判「这一跳的模型窗口
-            // 低于承诺」，低于时就地裁到该模型的窗口，不等上游 400。
-            ...(autoDecision.routeAdvertisedWindow === undefined
-              ? {}
-              : { advertisedContextWindow: autoDecision.routeAdvertisedWindow }),
-            ...(forceTrim === undefined ? {} : { forceContextTrim: forceTrim }),
           }
         )
         if (!outcome) break
         attemptsTotal += outcome.attempts
         failuresTotal = [...failuresTotal, ...outcome.failures]
         traceTotal = [...traceTotal, ...outcome.attemptTrace]
-
-        const contextMismatch = isZeroOutputContextMismatch(outcome.result)
-        if (!contextMismatch && !isZeroOutputCapacityFailure(outcome.result)) break
-
-        const aborted = request.signal?.aborted === true
-        // 钉子与「一条都没选出来」都不换模型：钉子换模型等于静默违背用户选择；
-        // 空链留给下面的 429/503 投影。强制裁重发不换模型，钉子下仍然允许。
-        const canSwitchModel = autoDecision.pin === undefined
-          && route !== undefined
-          && hop < MAX_CAPACITY_MODEL_SWITCHES
-          && !aborted
-
-        if (contextMismatch) {
-          // 裁过一次仍装不下：同一个上界只会裁出同一个结果。把上游第二次的报文
-          // 换成一句带「已按 N 裁过」的本地 400，而不是把同一句话原样复制给客户端。
-          if (trimmedOnce) {
-            outcome = { ...outcome, result: trimExhaustedResult(forceTrim?.maxTokens, outcome.result) }
-            break
-          }
-          // ① 先换一个模型：请求在生成前就被拒，客户端一个字节都没看到，完整历史
-          // 直接重发不伤上下文 / 工具协议 / 前缀缓存 —— 这是首选，裁掉历史不可逆。
-          if (canSwitchModel) {
-            const retry = autoRouter.select(
-              request,
-              config.loadBalanceStrategy,
-              autoPreference,
-              route,
-              clientSession,
-              headerModel,
-              [...triedModels.values()]
-            )
-            if (retry.candidates.length > 0) {
-              const failed = outcome.candidate
-              const marker = `${failed.provider.id}/${failed.displayName}:context-mismatch`
-              if (!contextSkipped.includes(marker)) contextSkipped.push(marker)
-              for (const skip of contextSkipped) {
-                if (!retry.skipped.includes(skip)) retry.skipped.push(skip)
-              }
-              autoDecision = retry
-              const skippedHeader = autoSkippedHeader(retry.skipped)
-              if (skippedHeader !== undefined) ctx.set('X-ModelPort-Auto-Skipped', skippedHeader)
-              continue
-            }
-          }
-          // ② 池里没有装得下的别的候选：按上游亲口给的上界裁一次，同一候选重发。
-          // 预算不猜比例 —— 报文写了区间就用那个数；没写就没得救，原样交给客户端。
-          const limit = measuredContextLimitOf(outcome.candidate.provider.id, outcome.candidate.actualModel)
-          if (limit !== undefined && !aborted) {
-            forceTrim = { maxTokens: limit }
-            trimmedOnce = true
-            autoDecision = { ...autoDecision, candidates: [outcome.candidate] }
-            continue
-          }
-          break
-        }
-
-        if (!canSwitchModel) break
+        if (!isZeroOutputCapacityFailure(outcome.result)) break
+        if (hop >= MAX_CAPACITY_MODEL_SWITCHES) break
+        // 钉子与「一条都没选出来」都不换：钉子换模型等于静默违背用户选择；
+        // 空链留给下面的 429/503 投影。
+        if (autoDecision.pin !== undefined || route === undefined) break
+        if (request.signal?.aborted === true) break
         const retry = autoRouter.select(
           request,
           config.loadBalanceStrategy,
@@ -1497,8 +1367,6 @@ router.post('/completions', async (ctx: Context) => {
         )
         if (retry.candidates.length === 0) break
         for (const { providerId, displayName } of triedModels.values()) {
-          // 窗口装不下的已按 `context-mismatch` 记过，不再冒记成额度耗尽。
-          if (contextSkipped.some(skip => skip.startsWith(`${providerId}/${displayName}:`))) continue
           const marker = `${providerId}/${displayName}:quota-exhausted`
           if (!capacitySkipped.includes(marker)) capacitySkipped.push(marker)
         }
@@ -1506,8 +1374,6 @@ router.post('/completions', async (ctx: Context) => {
           if (!retry.skipped.includes(marker)) retry.skipped.push(marker)
         }
         autoDecision = retry
-        // 换到别的模型就不再带着上一家的裁剪预算（那是「这一家装得下多少」的判决）。
-        forceTrim = undefined
         // 换模型发生在任何响应字节写出之前：把新的跳过清单补发一次，客户端看到的
         // 「为什么绕开上一家」与请求日志是同一份。
         const skippedHeader = autoSkippedHeader(retry.skipped)

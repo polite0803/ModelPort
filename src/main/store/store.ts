@@ -54,7 +54,6 @@ import {
 import { localDayKey, recentLocalDays } from '../../shared/localDay'
 import { normalizeSanHostList } from '../../shared/httpsConfig'
 import { normalizeStreamRepetitionGuard } from '../../shared/streamRepetition'
-import { normalizeVisionRelay } from '../../shared/visionRelayConfig.ts'
 import {
   accumulateDayBucket,
   normalizeDayBucket,
@@ -787,7 +786,6 @@ class StoreManager {
       httpsSanHosts: normalizeSanHostList(rawConfig.httpsSanHosts),
       autoRouting: normalizeAutoRoutingConfig(rawConfig.autoRouting),
       streamRepetitionGuard: normalizeStreamRepetitionGuard(rawConfig.streamRepetitionGuard),
-      visionRelay: normalizeVisionRelay(rawConfig.visionRelay),
       routes: this.normalizeRoutes(config, rawConfig),
       compression: normalizeCompressionConfig(rawConfig.compression),
       promptCaching: normalizePromptCachingConfig(rawConfig.promptCaching),

@@ -7,9 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { useToast } from '@/hooks/use-toast'
-import { useProxyStore } from '@/stores/proxyStore'
-import { Layers, Eye } from 'lucide-react'
-import { normalizeVisionRelay, type VisionRelaySettings } from '@shared/visionRelayConfig'
+import { Layers } from 'lucide-react'
 
 type ContextWindowTier = '200k' | '400k' | '1m'
 
@@ -76,37 +74,6 @@ export function ContextManagement() {
   const [hasChanges, setHasChanges] = useState(false)
   const [channelIdsText, setChannelIdsText] = useState('')
   const [costBudgetText, setCostBudgetText] = useState('')
-
-  // 视觉读图两段式（PLAN-vision-relay）。读到持久化配置之前不渲染可编辑控件：
-  // 否则默认值会在用户没碰过的情况下被保存回盘，把「出厂关闭」伪装成用户的选择。
-  const { appConfig, isLoading, saveAppConfig } = useProxyStore()
-  const [visionRelay, setVisionRelay] = useState<VisionRelaySettings | null>(null)
-  const [relayReaders, setRelayReaders] = useState<Array<{ displayName: string; providerName: string }>>([])
-  const [relaySaving, setRelaySaving] = useState(false)
-
-  useEffect(() => {
-    if (isLoading || !appConfig) return
-    setVisionRelay(normalizeVisionRelay(appConfig.visionRelay) ?? { enabled: false, maxImageBytes: 8 * 1024 * 1024 })
-  }, [isLoading, appConfig])
-
-  useEffect(() => {
-    window.electronAPI.visionRelay.readers()
-      .then(result => setRelayReaders(result.readers ?? []))
-      .catch(error => console.error('Failed to load vision relay readers:', error))
-  }, [])
-
-  const saveVisionRelay = async () => {
-    if (visionRelay === null) return
-    setRelaySaving(true)
-    try {
-      const success = await saveAppConfig({ visionRelay })
-      if (success) {
-        toast({ title: t('common.success'), description: t('contextManagement.visionRelay.saved') })
-      }
-    } finally {
-      setRelaySaving(false)
-    }
-  }
 
   useEffect(() => {
     loadConfig()
@@ -344,95 +311,6 @@ export function ContextManagement() {
                 {t('common.save')}
               </Button>
             </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* 视觉读图两段式：这一轮服务的模型收不下图时，先用免费视觉模型把图转述成文字。
-          已标注 vision 的目标直发、零介入；默认关闭，行为与从前逐字节相同。 */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Eye className="h-5 w-5" />
-            {t('contextManagement.visionRelay.title')}
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-6">
-          {visionRelay === null ? null : (
-            <>
-              <div className="flex items-center justify-between p-4 bg-muted/30 rounded-lg">
-                <div className="space-y-0.5">
-                  <Label htmlFor="vision-relay-enabled">{t('contextManagement.visionRelay.enable')}</Label>
-                  <p className="text-sm text-muted-foreground">
-                    {t('contextManagement.visionRelay.enableHint')}
-                  </p>
-                </div>
-                <Switch
-                  id="vision-relay-enabled"
-                  checked={visionRelay.enabled}
-                  onCheckedChange={(checked) => setVisionRelay(prev => (prev ? { ...prev, enabled: checked } : prev))}
-                />
-              </div>
-
-              {visionRelay.enabled && (
-                <div className="space-y-4 pt-4 border-t">
-                  <div className="space-y-2">
-                    <Label htmlFor="vision-relay-reader">{t('contextManagement.visionRelay.reader')}</Label>
-                    <Select
-                      value={visionRelay.reader ?? '__auto__'}
-                      onValueChange={(value) => setVisionRelay(prev => {
-                        if (!prev) return prev
-                        return value === '__auto__' ? { enabled: prev.enabled, maxImageBytes: prev.maxImageBytes } : { ...prev, reader: value }
-                      })}
-                    >
-                      <SelectTrigger id="vision-relay-reader">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="__auto__">{t('contextManagement.visionRelay.readerAuto')}</SelectItem>
-                        {relayReaders.map(reader => (
-                          <SelectItem key={reader.displayName} value={reader.displayName}>
-                            {reader.displayName}
-                          </SelectItem>
-                        ))}
-                        {visionRelay.reader !== undefined
-                          && !relayReaders.some(reader => reader.displayName === visionRelay.reader) && (
-                            <SelectItem value={visionRelay.reader}>{visionRelay.reader}</SelectItem>
-                          )}
-                      </SelectContent>
-                    </Select>
-                    <p className="text-xs text-muted-foreground">
-                      {t('contextManagement.visionRelay.readerHint')}
-                    </p>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="vision-relay-max-bytes">{t('contextManagement.visionRelay.maxImageBytes')}</Label>
-                    <Input
-                      id="vision-relay-max-bytes"
-                      type="number"
-                      min={1}
-                      value={Math.round(visionRelay.maxImageBytes / (1024 * 1024))}
-                      onChange={(event) => {
-                        const mb = Number(event.target.value)
-                        if (Number.isFinite(mb) && mb > 0) {
-                          setVisionRelay(prev => (prev ? { ...prev, maxImageBytes: Math.floor(mb * 1024 * 1024) } : prev))
-                        }
-                      }}
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      {t('contextManagement.visionRelay.maxImageBytesHint')}
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              <div className="flex justify-end pt-4 border-t">
-                <Button onClick={saveVisionRelay} disabled={relaySaving}>
-                  {t('common.save')}
-                </Button>
-              </div>
-            </>
           )}
         </CardContent>
       </Card>

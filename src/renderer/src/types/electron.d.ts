@@ -759,11 +759,6 @@ interface ContextManagementAPI {
   updateConfig: (updates: Partial<ContextManagementConfig>) => Promise<ContextManagementConfig>
 }
 
-interface VisionRelayAPI {
-  /** 读图器候选链（vision=yes 且免费；官方免费证据优先，元路由最后）。只读。 */
-  readers: () => Promise<{ readers: Array<{ displayName: string; providerName: string }> }>
-}
-
 interface ChannelsAPI {
   list: () => Promise<{ success: boolean; reason?: string; channels: ChannelView[] }>
   accountCounts: () => Promise<Record<string, { total: number; enabled: number }>>
@@ -830,7 +825,6 @@ interface ElectronAPI {
   }
   managementApi: ManagementApiAPI
   contextManagement: ContextManagementAPI
-  visionRelay: VisionRelayAPI
   tray: TrayAPI
   modelRefresh: ModelRefreshAPI
 }

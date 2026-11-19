@@ -112,32 +112,3 @@ test('非 JSON 参数原样返回，不制造新的坏参数', () => {
   const raw = '{not json'
   assert.equal(sanitizeClientToolArguments('exec_command', raw, 'win32'), raw)
 })
-
-/**
- * 2026-11-19：deepseek 系把整数工具参数写成浮点（1000.0 / 14000.0），Codex serde
- * 报 invalid type: floating point, expected usize。网关做无损归一。
- */
-test('整数值浮点归一回整数（所有工具），真小数保留', () => {
-  const out = sanitizeClientToolArguments(
-    'exec_command',
-    '{"cmd":"cargo check","yield_time_ms":1000.0,"max_output_tokens":14000.0}',
-  )
-  assert.equal(out.includes('1000.0'), false)
-  assert.equal(out.includes('14000.0'), false)
-  const parsed = JSON.parse(out)
-  assert.equal(parsed.yield_time_ms, 1000)
-  assert.equal(parsed.max_output_tokens, 14000)
-
-  // 非 exec_command 也归一（任何工具的整数字段都拒收浮点）
-  const other = sanitizeClientToolArguments('write_stdin', '{"session_id":123.0,"chars":""}')
-  assert.equal(JSON.parse(other).session_id, 123)
-
-  // 真小数不动
-  const frac = sanitizeClientToolArguments('exec_command', '{"cmd":"x","temperature":1.5}')
-  assert.equal(JSON.parse(frac).temperature, 1.5)
-})
-
-test('无浮点字面量时原样返回（不重序列化、不改键序）', () => {
-  const raw = '{"cmd":"git status","yield_time_ms":1000}'
-  assert.equal(sanitizeClientToolArguments('exec_command', raw), raw)
-})

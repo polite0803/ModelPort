@@ -11,13 +11,11 @@
  *   未写，而不是存一个 `unknown` 进去再遮住自动证据。
  */
 import type { InputModality, ModelCapabilityHint } from '../../shared/types.ts'
-import { CONTEXT_WINDOW_TIERS, type ContextWindowTier } from '../../shared/types.ts'
 import { parseSlotBoundary, type DiscountSlot, type DiscountWindow } from '../../shared/discountWindow.ts'
 
 const TIERS = new Set(['fast', 'balanced', 'strong'])
 const STATES = new Set(['yes', 'no'])
 const MODALITIES = new Set<InputModality>(['text', 'image', 'audio', 'video', 'pdf'])
-const WINDOW_TIERS = new Set(Object.keys(CONTEXT_WINDOW_TIERS) as ContextWindowTier[])
 
 /** 上下文窗口的合理上界：防止手滑输入 1e12 让「长上下文」策略永远命中 */
 const MAX_CONTEXT_TOKENS = 100_000_000
@@ -113,20 +111,6 @@ export function normalizeModelMark(input: unknown): ModelCapabilityHint | undefi
   const contextTokens = positiveInt(raw.contextTokens)
   if (contextTokens !== undefined && contextTokens <= MAX_CONTEXT_TOKENS) {
     mark.contextTokens = contextTokens
-  }
-  // 窗口档位是「我们选用」的上限，与 contextTokens（上游声明）分开存。它是白名单
-  // 之外的字段时必须显式收下 —— 否则「参数」里选了 200K，保存后被这里静默丢弃，
-  // 下次打开就退回「用模型自身的声明」（2026-11-18 现网实测）。
-  if (typeof raw.contextWindowTier === 'string' && WINDOW_TIERS.has(raw.contextWindowTier as ContextWindowTier)) {
-    mark.contextWindowTier = raw.contextWindowTier as ContextWindowTier
-  }
-  if (Array.isArray(raw.supportedContextTiers)) {
-    const tiers: ContextWindowTier[] = []
-    for (const entry of raw.supportedContextTiers as unknown[]) {
-      if (typeof entry !== 'string' || !WINDOW_TIERS.has(entry as ContextWindowTier)) continue
-      if (!tiers.includes(entry as ContextWindowTier)) tiers.push(entry as ContextWindowTier)
-    }
-    if (tiers.length > 0) mark.supportedContextTiers = tiers
   }
   const maxOutputTokens = positiveInt(raw.maxOutputTokens)
   if (maxOutputTokens !== undefined && maxOutputTokens <= MAX_OUTPUT_TOKENS) {

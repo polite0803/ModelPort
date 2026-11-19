@@ -99,12 +99,11 @@ test('点名渠道用覆盖值，未点名渠道用全局值，不传 providerId
   const legacyTokens = tokensOf(legacy.messages)
 
   assert.ok(planTokens <= 5000, `plan 应被裁到 ≤5000，实际 ${planTokens}`)
-  assert.equal(legacyTokens, traeTokens, '不传 providerId 与未点名渠道走同一个兜底')
-  // 2026-11-18 改：未点名且无覆盖时用 200K 兜底（与 `/v1/models` 的广告同一个数），
-  // 所以 trae 不该再被全局 1000 压低 —— 它现在保留得比 plan 更多。
+  assert.ok(traeTokens <= 1000, `trae 应被裁到 ≤1000，实际 ${traeTokens}`)
+  assert.equal(legacyTokens, traeTokens, '不传 providerId 的既有调用方行为不变')
   assert.ok(
-    traeTokens > planTokens,
-    `未点名的渠道走 200K 兜底（trae=${traeTokens} 应大于 plan=${planTokens}）；相等即覆盖或兜底被忽略`,
+    planTokens > traeTokens,
+    `覆盖值必须真的生效：plan(${planTokens}) 应严格大于 trae(${traeTokens})；相等即覆盖被忽略`,
   )
 })
 
