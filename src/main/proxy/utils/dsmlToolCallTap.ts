@@ -6,44 +6,41 @@ import {
 } from '../../../shared/dsmlToolCalls.ts'
 
 export interface DsmlTapReport {
-  /** 还原成 tool_calls 的条数（请求声明了工具时）。 */
+  /** 从正文还原成 tool_calls 的条数。 */
   convertedCalls: number
   convertedNames: string[]
-  /** 整块丢弃的条数（请求没声明工具时：没有执行器，留着只会被渲染给用户）。 */
-  droppedCalls: number
   /** 收尾帧是补出来的（上游给了 [DONE] 却没有 finish_reason）。 */
   synthesizedFinish?: 'stop' | 'tool_calls'
 }
 
 export interface DsmlToolCallTapOptions {
-  /** 客户端本次声明的工具名；为空集时整块丢弃而不是还原。 */
+  /** 客户端本次声明的工具名；模型造出的名字不在其中时仍会还原（见下方说明）。 */
   declared: ReadonlySet<string>
   onReport?: (report: DsmlTapReport) => void
 }
 
 /**
- * chat SSE 泳道里的 DSML 标记处置。
+ * chat SSE 泳道里「模型用文本写出的工具调用」的还原。
  *
- * 真实成因（2026-11-20 对照实测，两个上游一致）：DeepSeek 系模型在**请求没有声明
- * 工具**、上下文却像 agent 任务时，会把工具调用写成 `<｜DSML｜ calls>` 文本。声明了
- * 工具时同一提示走结构化 `tool_calls`，两种上游各 3/3 无泄漏。所以两种处置：
+ * 两种格式（见 `shared/dsmlToolCalls.ts`）：DSML 原生标记、`<tool_call>` JSON。
+ * 成因是模型没拿到可用工具声明时自己发明调用语法，因此**一律还原成
+ * `tool_calls`**：文本里带着完整意图（名字 + 参数），丢掉等于把模型的决策作废，
+ * 客户端只会看到空回复；还原后至少有一个可执行对象，名字对不上时客户端会以
+ * 明确的 `unknown tool` 失败，那是可解释的结果。
  *
- * - 声明了工具 → 还原成 `tool_calls`（带工具才有人执行）；
- * - 没声明工具 → 整块丢弃（这一轮没有执行器，还原出来没人调用，留着就是把标记
- *   渲染进对话），并让 `X-ModelPort-Dsml-Dropped` 与日志记下条数。
- *
- * 形态判据（与供应商无关，只看响应本身）：正文在出现任何非空白前就进入 DSML 块，
+ * 形态判据（与供应商无关，只看响应本身）：正文在出现任何非空白前就进入调用块，
  * 且块后除空白/下一个块外没有正文 —— 带前言、讲解语法的回合一律锁存为纯文本，
  * 逐字节原样放行。
  *
- * 另修一种上游收尾缺陷：整条流给了 `[DONE]` 却没有任何 `finish_reason` 时，按已交付
- * 内容补一个结束帧（有工具调用 → `tool_calls`，否则 `stop`）—— 否则严格客户端
- * （Qoder）会把整轮判成「流没完成」。
+ * 还原出的调用帧**暂存到收尾前**才下发：上游若在正文之后又给了结构化调用，
+ * 暂存的这份就是同一意图的重复，直接丢弃 —— 否则一次写入会被执行两遍。
+ *
+ * 另修一种上游收尾缺陷：整条流给了 `[DONE]` 却没有任何 `finish_reason` 时，
+ * 按已交付内容补一个结束帧（有调用 → `tool_calls`，否则 `stop`）。
  */
 export function createDsmlToolCallTap(options: DsmlToolCallTapOptions): Transform {
-  const declared = options.declared
-  const converting = declared.size > 0
-  const accept = (call: DsmlToolCall): boolean => !conversionDisabled && declared.has(call.name)
+  // declared 只用于「越界审计」的语义对齐；还原本身不看它 —— 见上：丢掉比还原更糟。
+  const accept = (call: DsmlToolCall): boolean => call.name !== ''
   const filters = new Map<number, DsmlContentFilter>()
 
   let buffer = ''
@@ -54,7 +51,6 @@ export function createDsmlToolCallTap(options: DsmlToolCallTapOptions): Transfor
   let doneSeen = false
   let contentDelivered = false
   let convertedCalls = 0
-  let droppedCalls = 0
   let callIndex = 0
   /** 已还原、尚未下发的调用帧。 */
   let pendingCalls = ''
@@ -65,7 +61,7 @@ export function createDsmlToolCallTap(options: DsmlToolCallTapOptions): Transfor
   const filterFor = (index: number): DsmlContentFilter => {
     let filter = filters.get(index)
     if (filter === undefined) {
-      filter = createDsmlContentFilter(accept, converting ? 'convert' : 'drop')
+      filter = createDsmlContentFilter(accept)
       filters.set(index, filter)
     }
     return filter
@@ -85,11 +81,10 @@ export function createDsmlToolCallTap(options: DsmlToolCallTapOptions): Transfor
   const report = (): void => {
     if (reported) return
     reported = true
-    if (convertedCalls === 0 && droppedCalls === 0 && synthesizedFinish === undefined) return
+    if (convertedCalls === 0 && synthesizedFinish === undefined) return
     options.onReport?.({
       convertedCalls,
       convertedNames: [...new Set(convertedNames)],
-      droppedCalls,
       ...(synthesizedFinish === undefined ? {} : { synthesizedFinish }),
     })
   }
@@ -119,7 +114,6 @@ export function createDsmlToolCallTap(options: DsmlToolCallTapOptions): Transfor
         contentDelivered = true
       }
       if (event.calls.length > 0) holdCalls(index, event.calls)
-      droppedCalls += event.dropped
     }
     filters.clear()
     return out
@@ -174,10 +168,6 @@ export function createDsmlToolCallTap(options: DsmlToolCallTapOptions): Transfor
           const event = filterFor(index).push(delta.content)
           if (event.calls.length > 0) {
             holdCalls(index, event.calls)
-            mutated = true
-          }
-          if (event.dropped > 0) {
-            droppedCalls += event.dropped
             mutated = true
           }
           if (event.text === '') {

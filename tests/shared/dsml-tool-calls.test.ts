@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 import {
   createDsmlContentFilter,
   parseDsmlToolCalls,
+  parseToolCallBlock,
 } from '../../src/shared/dsmlToolCalls.ts'
 
 const LEAK_BLOCK = [
@@ -112,7 +113,7 @@ test('流式：正文带前言时锁存纯文本，逐字放行不解析', () =>
   assert.equal(rest.calls.length, 0)
 })
 
-test('流式：调用名不在声明集合时整块按文本放行', () => {
+test('流式：accept 拒绝时整块按文本放行（过滤器保留该能力，tap 侧恒接受）', () => {
   const filter = createDsmlContentFilter(() => false)
   const event = filter.push(LEAK_BLOCK)
   assert.equal(event.calls.length, 0)
@@ -139,4 +140,77 @@ test('流式：两个连续块之间只有空白也能各出一条调用', () =>
   const event = filter.push(`${LEAK_BLOCK}\n\n${second}`)
   assert.equal(event.text, '')
   assert.deepEqual(event.calls.map(call => JSON.parse(call.arguments).cmd), ['git status --short', 'git diff --stat'])
+})
+
+/* ------------------------------------------------------------------ *
+ * 第二种形态：<tool_call> JSON（relayai 一类「模拟工具」网关的约定）  *
+ * 实测出现条件：请求没有声明工具时，模型自己写出这种文本。            *
+ * ------------------------------------------------------------------ */
+
+test('<tool_call> JSON：relayai 形状还原成调用，arguments 原样保留', () => {
+  const block = '<tool_call>{"name":"run_command","arguments":{"command":"git status --short"}}</tool_call>'
+  const calls = parseToolCallBlock(block)
+  assert.ok(calls)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].name, 'run_command')
+  assert.deepEqual(JSON.parse(calls[0].arguments), { command: 'git status --short' })
+})
+
+test('<tool_call> JSON：Anthropic 风格的 input 与 tool/parameters 也能认', () => {
+  const withInput = parseToolCallBlock('<tool_call>{"name":"read_file","input":{"path":"a.ts"}}</tool_call>')
+  assert.ok(withInput)
+  assert.deepEqual(JSON.parse(withInput[0].arguments), { path: 'a.ts' })
+
+  const withTool = parseToolCallBlock('<tool_call>{"tool":"grep","parameters":{"pattern":"x"}}</tool_call>')
+  assert.ok(withTool)
+  assert.equal(withTool[0].name, 'grep')
+  assert.deepEqual(JSON.parse(withTool[0].arguments), { pattern: 'x' })
+})
+
+test('<tool_call> JSON：一次多个调用（数组形态）', () => {
+  const block = '<tool_call>[{"name":"a","arguments":{}},{"name":"b","arguments":{"x":1}}]</tool_call>'
+  const calls = parseToolCallBlock(block)
+  assert.ok(calls)
+  assert.deepEqual(calls.map(call => call.name), ['a', 'b'])
+  assert.deepEqual(JSON.parse(calls[1].arguments), { x: 1 })
+})
+
+test('<tool_call> JSON：自由文本参数包成 input，非法 JSON 不猜', () => {
+  const freeform = parseToolCallBlock('<tool_call>{"name":"apply_patch","arguments":"*** Begin Patch"}</tool_call>')
+  assert.ok(freeform)
+  assert.deepEqual(JSON.parse(freeform[0].arguments), { input: '*** Begin Patch' })
+
+  assert.equal(parseToolCallBlock('<tool_call>not json at all</tool_call>'), undefined)
+  assert.equal(parseToolCallBlock('<tool_call>{"arguments":{}}</tool_call>'), undefined, '没有名字不能造')
+})
+
+test('流式：<tool_call> 标签跨 chunk 切断仍能还原，且不吞正文', () => {
+  const block = '<tool_call>{"name":"run_command","arguments":{"command":"ls"}}</tool_call>'
+  const filter = createDsmlContentFilter()
+  let text = ''
+  const names: string[] = []
+  for (let i = 0; i < block.length; i += 6) {
+    const event = filter.push(block.slice(i, i + 6))
+    text += event.text
+    names.push(...event.calls.map(call => call.name))
+  }
+  assert.equal(text, '')
+  assert.deepEqual(names, ['run_command'])
+})
+
+test('流式：<tool_call> 带前言时锁存纯文本，不解析', () => {
+  const filter = createDsmlContentFilter()
+  const first = filter.push('示例格式如下：')
+  assert.equal(first.text, '示例格式如下：')
+  const rest = filter.push('<tool_call>{"name":"a","arguments":{}}</tool_call>')
+  assert.equal(rest.calls.length, 0)
+  assert.ok(rest.text.includes('<tool_call>'))
+})
+
+test('流式：DSML 与 <tool_call> 连续出现，两种都能还原', () => {
+  const filter = createDsmlContentFilter()
+  const json = '<tool_call>{"name":"second","arguments":{}}</tool_call>'
+  const event = filter.push(`${LEAK_BLOCK}\n\n${json}`)
+  assert.equal(event.text, '')
+  assert.deepEqual(event.calls.map(call => call.name), ['exec_command', 'second'])
 })

@@ -1480,29 +1480,37 @@ re-anchoring the conversation to it.
   threshold-is-a-real-knob), `tests/proxy/bandit-repetition.test.ts` (streak + no regression on the
   length rule), `tests/renderer/repetition-guard-wiring.test.mjs` (wiring, with six in-memory
   mutations as negative controls).
-* **DSML tool markup never reaches the client as prose (2026-11-20).** Two independent DeepSeek
-  hosts leaked the model's native tool-call syntax into `delta.content`: OpenCode Go on 2026-11-19
-  18:02 (Codex session `rollout-2026-11-19T17-49-36…`, byte-verified shape `<｜DSML｜ calls>` /
-  `<｜DSML｜ invoke name="exec_command">` / `<｜DSML｜ parameter name="cmd" string="true">…` with
-  U+FF5C bars and a space after the second bar) and Alibaba Bailian the next session. The gateway
-  relayed it verbatim, so the markup was rendered in the conversation; in the Codex thread it also
-  got folded into the compaction summary, which keeps feeding the thread. `dsmlToolCallTap`
-  (`src/main/proxy/utils/dsmlToolCallTap.ts` + `src/shared/dsmlToolCalls.ts`) now converts such a
-  turn into real `tool_calls` under three structural conditions - the request declared tools, the
-  visible text is nothing but DSML blocks (any prose in front latches text mode for the rest of the
-  turn), and every parsed name is in the declared set. Those conditions are response-shaped, not
-  provider-shaped, so a provider that never emits DSML is untouched; a text turn that happens to
-  mention the syntax keeps its prose byte-for-byte. When the upstream *also* emits structured
+* **Model-authored tool-call text is restored to real `tool_calls`, never shown as prose (2026-11-20).**
+  Two formats are known and both are parsed. **DSML** is DeepSeek's native special-token syntax,
+  byte-verified from the OpenCode Go leak on 2026-11-19 18:02 (Codex session
+  `rollout-2026-11-19T17-49-36…`): `<｜DSML｜ calls>` / `<｜DSML｜ invoke name="exec_command">` /
+  `<｜DSML｜ parameter name="cmd" string="true">…`, with U+FF5C bars, an optional space after the
+  second bar, and `calls` / `tool_calls` both in use (the CodeArts channel pack emits the latter).
+  **`<tool_call>` JSON** is the convention relayai-style "simulated tool" gateways define -
+  `<tool_call>{"name":…,"arguments":…}</tool_call>`, also accepting `input` and `tool`+`parameters`
+  spellings, arrays for parallel calls, and free-text arguments wrapped into `{input}` for freeform
+  tools. Both appear when the model got no usable tool declaration and invented syntax instead: the
+  gateway previously relayed them verbatim, so the markup was rendered in the conversation and, in
+  the Codex thread, got folded into the compaction summary that keeps feeding the thread.
+  `dsmlToolCallTap` (`src/main/proxy/utils/dsmlToolCallTap.ts` + `src/shared/dsmlToolCalls.ts`)
+  converts such a turn into real `tool_calls` on a purely response-shaped test: the visible text
+  starts with a call block before any prose, and nothing but whitespace or another block follows it.
+  Any prose in front latches text mode for the rest of the turn, so a message *about* the syntax
+  keeps its bytes and a provider that never emits these formats is untouched. **The declared-name
+  check is deliberately not applied to the conversion**: the block carries the model's complete
+  intent (name plus arguments), so discarding it because the name looks unfamiliar would erase a
+  decision the model already made and leave the client with an empty turn; an unrecognized name is
+  surfaced by the existing undeclared-name audit instead. When the upstream *also* emits structured
   `tool_calls`, the converted copy is dropped (same intent twice would run a write twice). Residual
-  risk stated plainly: a turn that intends a call but interleaves prose is delivered as text, which
-  is the pre-existing behaviour, not a regression. A second defect on the same path is repaired
-  here: an upstream stream that ends with `[DONE]` but never sends a `finish_reason` gets a
-  synthesised closing frame (`tool_calls` when calls were delivered, else `stop`) right before
-  `[DONE]`, because Qoder rejects the whole turn as "Model stream ended before completion"
-  otherwise. The request log still records the upstream fact (`streamTruncated: true`), so the
-  repair never masks a truncated stream. Evidence: `tests/proxy/dsml-tool-call-tap.test.ts`,
-  `tests/shared/dsml-tool-calls.test.ts`, `tests/routes/chat-dsml-tool-calls.test.ts` (end-to-end:
-  with tools / without tools / upstream missing finish).
+  risk stated plainly: a turn that interleaves prose with calls is delivered as text, which is the
+  pre-existing behaviour, not a regression. A second defect on the same path is repaired here: an
+  upstream stream that ends with `[DONE]` but never sends a `finish_reason` gets a synthesised
+  closing frame (`tool_calls` when calls were delivered, else `stop`) right before `[DONE]`, because
+  Qoder rejects the whole turn as "Model stream ended before completion" otherwise. The request log
+  still records the upstream fact (`streamTruncated: true`), so the repair never masks a truncated
+  stream. Evidence: `tests/proxy/dsml-tool-call-tap.test.ts`, `tests/shared/dsml-tool-calls.test.ts`,
+  `tests/routes/chat-dsml-tool-calls.test.ts` (end-to-end: with tools / without tools / upstream
+  missing finish).
 
 ### Pool failover, and latency as a gate (2026-11-12)
 

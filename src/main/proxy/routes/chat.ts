@@ -2406,7 +2406,7 @@ router.post('/completions', async (ctx: Context) => {
       let outStream: Readable = wrapperStream
       // 非法工具名在出站被改名（点号/斜杠会让严格上游整条 400）；回来的调用名
       // 必须先还原成客户端自己那个名字，否则它按名字找不到执行器。这一步排在
-      // 最前：后面的越界审计看到的是还原后的真名。
+      // 最前：后面的还原与越界审计看到的都是还原后的真名。
       if (result.toolRenames !== undefined && result.toolRenames.length > 0) {
         outStream = outStream.pipe(createToolNameRestoreTap(result.toolRenames))
         storeManager.addLog('warn', '工具名非法，已改名后发送并还原', {
@@ -2417,24 +2417,13 @@ router.post('/completions', async (ctx: Context) => {
           data: { actualModel, renames: result.toolRenames.slice(0, 12) },
         })
       }
-      // DSML 标记处置对**所有**请求挂载：泄漏的真实成因恰恰是「没声明工具却像 agent 任务」
-      // （2026-11-20 两个上游对照实测：带工具 3/3 正常，不带工具才吐标记）。声明了工具
-      // 就还原成调用，没声明就整块丢弃 —— 那一轮没有执行器，留着只会把标记渲染进对话。
-      // 形态判据在 tap 内部，普通文本回合逐字节不变。
-      let dsmlDroppedSeen = 0
+      // 模型用文本写出的工具调用（DSML 原生标记 / `<tool_call>` JSON）在这里还原成
+      // 真正的 `tool_calls`。判据只看响应形态，普通文本回合逐字节不变。
       outStream = outStream.pipe(createDsmlToolCallTap({
         declared: declaredToolNames,
         onReport: (report) => {
-          const converted = report.convertedCalls > 0
-          const dropped = report.droppedCalls > 0
-          if (!converted && !dropped) return
-          if (dropped) {
-            dsmlDroppedSeen = report.droppedCalls
-            ctx.set('X-ModelPort-Dsml-Dropped', String(report.droppedCalls))
-          }
-          storeManager.addLog('warn', converted
-            ? 'DSML 工具调用已从正文还原'
-            : 'DSML 工具调用已从正文丢弃（本轮未声明工具）', {
+          if (report.convertedCalls === 0) return
+          storeManager.addLog('warn', '工具调用以文本下发，已还原成 tool_calls', {
             requestId,
             providerId: provider.id,
             accountId: account.id,

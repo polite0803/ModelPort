@@ -142,7 +142,7 @@ test('带工具：DSML 正文还原成 tool_calls，标记不落客户端', asyn
   assert.equal(res.text.match(/data: \[DONE\]/g)?.length, 1)
 })
 
-test('不带工具：整块丢弃而不是把标记交付给用户', async () => {
+test('不带工具时也还原：标记不交付，调用照常给出', async () => {
   const res = await proxy.request('POST', '/v1/chat/completions', {
     body: {
       model: 'Dsml-Turn',
@@ -151,9 +151,10 @@ test('不带工具：整块丢弃而不是把标记交付给用户', async () =>
     },
   })
   assert.equal(res.status, 200)
-  // 这一轮没有执行器，还原成调用也没人执行；留着只会把标记渲染进对话。
   assert.equal(res.text.includes('｜DSML｜'), false, '标记不能交付')
-  assert.equal(dataFrames(res.text).some(entry => entry.choices[0].delta.tool_calls !== undefined), false)
+  const call = dataFrames(res.text).flatMap(entry => entry.choices[0].delta.tool_calls ?? [])[0]
+  assert.ok(call, '必须还原成一条可执行的调用')
+  assert.equal(call.function.name, 'exec_command')
 })
 
 test('上游缺 finish_reason：客户端仍收到一个结束帧', async () => {

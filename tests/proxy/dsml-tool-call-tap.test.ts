@@ -69,7 +69,7 @@ test('DSML 正文被还原成一个 tool_call，结束帧改写成 tool_calls', 
   const finish = frames.find(entry => entry.choices[0].finish_reason !== undefined)
   assert.equal(finish!.choices[0].finish_reason, 'tool_calls')
   assert.equal(text.match(/data: \[DONE\]/g)?.length, 1)
-  assert.deepEqual(reports, [{ convertedCalls: 1, convertedNames: ['exec_command'], droppedCalls: 0 }])
+  assert.deepEqual(reports, [{ convertedCalls: 1, convertedNames: ['exec_command'] }])
 })
 
 test('上游有 [DONE] 却没有任何结束帧：补一个 stop，客户端看到完整的一轮', async () => {
@@ -91,7 +91,7 @@ test('上游有 [DONE] 却没有任何结束帧：补一个 stop，客户端看�
   assert.ok(finish, '必须补一个结束帧')
   assert.equal(finish!.choices[0].finish_reason, 'stop')
   assert.equal(text.match(/data: \[DONE\]/g)?.length, 1)
-  assert.deepEqual(reports, [{ convertedCalls: 0, convertedNames: [], droppedCalls: 0, synthesizedFinish: 'stop' }])
+  assert.deepEqual(reports, [{ convertedCalls: 0, convertedNames: [], synthesizedFinish: 'stop' }])
 })
 
 test('上游正常带 finish_reason 时一个字节都不补', async () => {
@@ -120,7 +120,7 @@ test('正文带前言时锁存纯文本：DSML 原样放行，不产出调用', 
   assert.equal(dataFrames(text).some(entry => entry.choices[0].delta.tool_calls !== undefined), false)
 })
 
-test('调用名未声明：整块按文本交付', async () => {
+test('调用名不在声明集合里也还原：丢掉会让模型这一轮的决策凭空消失', async () => {
   const tap = createDsmlToolCallTap({ declared: new Set(['read_file']) })
   const done = collect(tap)
 
@@ -130,11 +130,12 @@ test('调用名未声明：整块按文本交付', async () => {
   tap.end()
 
   const text = await done
-  assert.ok(text.includes('｜DSML｜'))
-  assert.equal(dataFrames(text).some(entry => entry.choices[0].delta.tool_calls !== undefined), false)
+  assert.equal(text.includes('｜DSML｜'), false)
+  const call = dataFrames(text).flatMap(entry => entry.choices[0].delta.tool_calls ?? [])[0]
+  assert.equal(call.function.name, 'exec_command', '名字原样给出，越界由审计层报')
 })
 
-test('没声明工具：整块丢弃并计数（这一轮没有执行器，留着只会渲染给用户）', async () => {
+test('没声明工具时同样还原：文本里带着完整意图，丢掉等于作废模型的决策', async () => {
   const reports: DsmlTapReport[] = []
   const tap = createDsmlToolCallTap({ declared: new Set(), onReport: report => reports.push(report) })
   const done = collect(tap)
@@ -145,9 +146,11 @@ test('没声明工具：整块丢弃并计数（这一轮没有执行器，留�
   tap.end()
 
   const text = await done
-  assert.equal(text.includes('｜DSML｜'), false, '标记不能进客户端正文')
-  assert.equal(dataFrames(text).some(entry => entry.choices[0].delta.tool_calls !== undefined), false)
-  assert.deepEqual(reports, [{ convertedCalls: 0, convertedNames: [], droppedCalls: 1 }])
+  assert.equal(text.includes('｜DSML｜'), false, '标记不交付')
+  const call = dataFrames(text).flatMap(entry => entry.choices[0].delta.tool_calls ?? [])[0]
+  assert.ok(call, '必须还原成一条调用')
+  assert.equal(call.function.name, 'exec_command')
+  assert.deepEqual(reports, [{ convertedCalls: 1, convertedNames: ['exec_command'] }])
 })
 
 test('上游已给结构化 tool_calls 时，正文里的 DSML 被丢弃而不是重复交付', async () => {

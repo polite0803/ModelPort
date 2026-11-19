@@ -67,13 +67,15 @@ scheduler/）、`src/preload/`、`src/renderer/`（React）、`src/shared/`。�
   **不按钉/供应商归因**——同一钉两点会话一个跑飞一个健康时，分水岭是单轮塌进复读。流式在 responses 入口
   压到首个工具调用或流结束再交付；重发打不通才交第一发。非流式同判据（`judgeRunawayText`）。§Degenerate
   Stream Detection。
-- **DSML 工具调用标记不得进客户端正文。** DeepSeek 系上游（实测 OpenCode Go 与百炼）会把工具调用写进
-  `delta.content`：`<｜DSML｜ calls>` / `<｜DSML｜ invoke name="…">` / `<｜DSML｜ parameter …>`（`｜` 为 U+FF5C
-  全角竖线，`DSML｜` 后可带空格，关键字有 `calls` 与 `tool_calls` 两种写法）。`dsmlToolCallTap` 只在三个条件
-  同时成立时还原成 `tool_calls`：请求声明了工具、正文整体就是 DSML 块、调用名都在声明集合里；带前言或名字
-  不符一律按纯文本原样放行，因此不影响其它供应商。上游已经给了结构化调用时，正文里那份是重复意图，丢弃。
-  上游给完 `[DONE]` 却没有 `finish_reason` 时补一个结束帧（有调用 → `tool_calls`，否则 `stop`），否则严格客户端
-  判「流没完成」。§Degenerate Stream Detection。
+- **模型用文本写出的工具调用必须还原成 `tool_calls`，不得进客户端正文。** 两种已知格式：DSML 原生标记
+  （`<｜DSML｜ calls>` / `invoke` / `parameter`，`｜` 为 U+FF5C 全角竖线，`DSML｜` 后可带空格，关键字有
+  `calls` 与 `tool_calls` 两种）与 `<tool_call>{"name":…,"arguments":…}</tool_call>` JSON（另认
+  `input` / `tool`+`parameters` 两种写法）。成因是模型没拿到可用工具声明时自己发明语法。`dsmlToolCallTap`
+  判据只看响应形态：正文在出现任何非空白前就是调用块、块后除空白/下一个块外没有正文；带前言的回合一律按
+  纯文本原样放行，因此不影响其它供应商。**还原不看调用名是否在声明集合里**——文本带着完整意图，丢掉等于
+  作废模型的决策，客户端看到的是空回复；名字对不上时由越界审计报出来。上游已经给了结构化调用时，正文里
+  那份是重复意图，丢弃。上游给完 `[DONE]` 却没有 `finish_reason` 时补一个结束帧（有调用 → `tool_calls`，
+  否则 `stop`），否则严格客户端判「流没完成」。§Degenerate Stream Detection。
 - **证书进系统库不等于客户端信任。** `installCertificateTrust()` 只满足 Chromium/Schannel；Node 客户端需要
   `NODE_EXTRA_CA_CERTS`（PEM 来自 `GET /v1/management/tls/ca`）。握手被拒时不写行、也没有 `X-Request-Id`：先看
   `handshakeRejections` 再断言网关没收到。
