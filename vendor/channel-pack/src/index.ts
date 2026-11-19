@@ -850,6 +850,10 @@ export function apply(ctx: Context, config: {
       }
     },
     fetchRemoteModels: () => codeartsService.refreshModels(pool),
+    // 图片字节桥接：端点接受 `image_url`（含 data URL，2026-11-18 实测），
+    // 这里把附件内联成 data URL；`readImageRequest` 只是缩小体积的优化。
+    readImage: makeReadImage(ctx),
+    readImageRequest: makeReadImageRequest(ctx),
     accountPool: pool,
   })
 
