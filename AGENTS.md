@@ -54,7 +54,10 @@ scheduler/）、`src/preload/`、`src/renderer/`（React）、`src/shared/`。�
 - **自由格式（`custom`）工具在 Responses 通道上必须保持条目类型。** Codex `apply_patch` 是 `custom_tool_call`
   / `custom_tool_call_output`，`input` 为必填字符串；出站要回同样类型（回成 `function_call` 会静默丢掉写入），
   这些条目也必须能从历史里读回。**并行工具调用在 chat 通道上合并成一条 assistant 消息**。`type:'namespace'`
-  分组与无名托管工具在入向整条丢弃并写 `X-ModelPort-Tools-Dropped`——压成同名空参函数就是 `unsupported call`。§Tool Calling。
+  分组**必须把子工具展开送出**（`mcp__<namespace>__<child>`，客户端 `tools/router.rs` 认这个形状），整组丢弃会
+  让 Codex 的 22 个 app 能力彻底消失、模型只能自己发明调用语法；只有无名托管工具才丢弃并写
+  `X-ModelPort-Tools-Dropped`。**非法工具名（点号/斜杠/超 64 字符）必须改名后发送、响应里还原**
+  （`shared/toolNameSafety.ts`）——直接透传会让严格上游整条 400，一个坏名字连累全部工具。§Tool Calling。
 - **网关不向用户对话写入任何提示词（铁律）。** 压缩标记自己说明取回方式（`markers.ts::retrievalHint`），
   「少说」是客户端参数（Codex 的 `model_verbosity`）——都不是网关该替用户说的话。唯一写进请求的自造结构是
   自由文本工具的参数形状（`freeform-input-schema`：只有 schema 无句子）。新增自造文本必须打 `GATEWAY-TEXT: <id>`
@@ -64,6 +67,13 @@ scheduler/）、`src/preload/`、`src/renderer/`（React）、`src/shared/`。�
   **不按钉/供应商归因**——同一钉两点会话一个跑飞一个健康时，分水岭是单轮塌进复读。流式在 responses 入口
   压到首个工具调用或流结束再交付；重发打不通才交第一发。非流式同判据（`judgeRunawayText`）。§Degenerate
   Stream Detection。
+- **DSML 工具调用标记不得进客户端正文。** DeepSeek 系上游（实测 OpenCode Go 与百炼）会把工具调用写进
+  `delta.content`：`<｜DSML｜ calls>` / `<｜DSML｜ invoke name="…">` / `<｜DSML｜ parameter …>`（`｜` 为 U+FF5C
+  全角竖线，`DSML｜` 后可带空格，关键字有 `calls` 与 `tool_calls` 两种写法）。`dsmlToolCallTap` 只在三个条件
+  同时成立时还原成 `tool_calls`：请求声明了工具、正文整体就是 DSML 块、调用名都在声明集合里；带前言或名字
+  不符一律按纯文本原样放行，因此不影响其它供应商。上游已经给了结构化调用时，正文里那份是重复意图，丢弃。
+  上游给完 `[DONE]` 却没有 `finish_reason` 时补一个结束帧（有调用 → `tool_calls`，否则 `stop`），否则严格客户端
+  判「流没完成」。§Degenerate Stream Detection。
 - **证书进系统库不等于客户端信任。** `installCertificateTrust()` 只满足 Chromium/Schannel；Node 客户端需要
   `NODE_EXTRA_CA_CERTS`（PEM 来自 `GET /v1/management/tls/ca`）。握手被拒时不写行、也没有 `X-Request-Id`：先看
   `handshakeRejections` 再断言网关没收到。

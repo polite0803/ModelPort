@@ -1480,6 +1480,29 @@ re-anchoring the conversation to it.
   threshold-is-a-real-knob), `tests/proxy/bandit-repetition.test.ts` (streak + no regression on the
   length rule), `tests/renderer/repetition-guard-wiring.test.mjs` (wiring, with six in-memory
   mutations as negative controls).
+* **DSML tool markup never reaches the client as prose (2026-11-20).** Two independent DeepSeek
+  hosts leaked the model's native tool-call syntax into `delta.content`: OpenCode Go on 2026-11-19
+  18:02 (Codex session `rollout-2026-11-19T17-49-36…`, byte-verified shape `<｜DSML｜ calls>` /
+  `<｜DSML｜ invoke name="exec_command">` / `<｜DSML｜ parameter name="cmd" string="true">…` with
+  U+FF5C bars and a space after the second bar) and Alibaba Bailian the next session. The gateway
+  relayed it verbatim, so the markup was rendered in the conversation; in the Codex thread it also
+  got folded into the compaction summary, which keeps feeding the thread. `dsmlToolCallTap`
+  (`src/main/proxy/utils/dsmlToolCallTap.ts` + `src/shared/dsmlToolCalls.ts`) now converts such a
+  turn into real `tool_calls` under three structural conditions - the request declared tools, the
+  visible text is nothing but DSML blocks (any prose in front latches text mode for the rest of the
+  turn), and every parsed name is in the declared set. Those conditions are response-shaped, not
+  provider-shaped, so a provider that never emits DSML is untouched; a text turn that happens to
+  mention the syntax keeps its prose byte-for-byte. When the upstream *also* emits structured
+  `tool_calls`, the converted copy is dropped (same intent twice would run a write twice). Residual
+  risk stated plainly: a turn that intends a call but interleaves prose is delivered as text, which
+  is the pre-existing behaviour, not a regression. A second defect on the same path is repaired
+  here: an upstream stream that ends with `[DONE]` but never sends a `finish_reason` gets a
+  synthesised closing frame (`tool_calls` when calls were delivered, else `stop`) right before
+  `[DONE]`, because Qoder rejects the whole turn as "Model stream ended before completion"
+  otherwise. The request log still records the upstream fact (`streamTruncated: true`), so the
+  repair never masks a truncated stream. Evidence: `tests/proxy/dsml-tool-call-tap.test.ts`,
+  `tests/shared/dsml-tool-calls.test.ts`, `tests/routes/chat-dsml-tool-calls.test.ts` (end-to-end:
+  with tools / without tools / upstream missing finish).
 
 ### Pool failover, and latency as a gate (2026-11-12)
 
@@ -2148,20 +2171,49 @@ whitelists all three (after `sanitizeChatToolDefinitions` drops unusable definit
 empty-name placeholders), and the reply is forwarded as-is - upstream produces the `tool_calls`, the
 client executes them and sends the results back. Nothing in the gateway rewrites either side.
 
-**Two Responses-side declaration shapes cannot be expressed in chat, and are dropped at the inbound
-mapping** (`responsesInbound.ts`), not left for the sanitizer to mangle: `type:'namespace'` groups
-(Codex 0.169 sends `codex_app` / `multi_agent_v1` with their children nested) and unnamed hosted
-tools (`type:'web_search'`, `file_search`). A namespace group used to be flattened into a single
-same-named `function` with no parameters; the model then called that name, the client's router had no
-such tool, and the turn died with `unsupported call: mcp__codex_app` (25 occurrences across the
-2026-11-18 sessions, plus 8 for the bare `codex_app`) while every child tool inside the group was
-invisible. Dropping the whole group is the honest end state: the model never learns a callable name
-that cannot be dispatched, and the client's own `<tools>` note still tells it the namespace exists.
-Both cases are reported per request in `X-ModelPort-Tools-Dropped`
-(`namespace/<name>`, `<type>` for unnamed entries), so "the model never used a sub-agent / web
-search" is traceable instead of being read as model reluctance. When every declared tool is dropped
-the request carries no `tools` and no `tool_choice` - an `auto`/`required` choice over an empty tool
-set is just a 400 waiting to happen.
+**A Responses-side `type:'namespace'` group is expanded, not dropped** (`responsesInbound.ts`,
+2026-11-20). Codex 0.169 sends `codex_app` / `multi_agent_v1` with their children nested (22 tools
+under `codex_app`: worktrees, projects, threads, artifacts, sidebar preferences). Chat has no
+namespace layer, so the children are sent as ordinary functions named
+`mcp__<namespace>__<child>` - the shape the client's own router accepts (its `core/src/tools/router.rs`
+carries four spellings, `app`/`apps` crossed with `__`/`_` separators, so this one dispatches).
+Evidence for why dropping the group was wrong: the previous commit discarded it whole, the model
+then called the bare group name 19 times and every call came back `unsupported call:
+mcp__codex_app` / `unsupported call: codex_app` (verified in the 2026-11-18 rollouts), and once the
+tool set was effectively empty the model started inventing call syntax - `<tool_call>{...}` in chat
+and DSML markup in Responses. Children without `parameters` get an empty object schema so strict
+upstreams do not reject the whole request. Expansion is reported per request in
+`X-ModelPort-Tools-Expanded: <count>(<namespaces>)`.
+
+Still dropped, honestly: unnamed hosted tools (`type:'web_search'`, `file_search`) - chat only has
+the empty name left, which `sanitizeChatToolDefinitions` would delete anyway - reported in
+`X-ModelPort-Tools-Dropped` as `<type>`. Name extraction for that judgement reads `name` **or**
+`function.name`, because responses keeps the name at the top level while chat nests it; the
+top-level-only check mislabelled working chat-shape functions as dropped
+(`X-ModelPort-Tools-Dropped: function`, reproduced 2026-11-20).
+
+When every declared tool is dropped the request carries no `tools` and no `tool_choice` - an
+`auto`/`required` choice over an empty tool set is just a 400 waiting to happen - and that state is
+now visible instead of silent: `X-ModelPort-Tools-Empty: 1` plus a warn log line
+("客户端声明了工具但一条都没送到上游"). No placeholder tool is invented to paper over it: a
+fabricated definition is the gateway writing on the client's behalf.
+
+**Illegal tool names are renamed on the way out and restored on the way back** (`shared/toolNameSafety.ts`,
+2026-11-20). MCP servers routinely use dots and slashes - `filesystem.read_file`, `shell/run` - which
+the MCP spec allows but every OpenAI-compatible upstream rejects: reproduced live against WorkBuddy,
+`{"message":"buddy: 工具名称不规范，请新建任务重试 the tool name is invalid or duplicated"}` with HTTP
+400. The blast radius is the whole request: one illegal name means **no tool reaches the model**, and
+an empty tool set is exactly the state where the model starts inventing call syntax. The gateway now
+replaces every character outside `[A-Za-z0-9_-]` with `_`, truncates to 64 (OpenAI's limit; DeepSeek
+allows 128 but the same character set), and resolves collisions by appending `_2`, `_3` so the mapping
+stays one-to-one. The rename is a pure function of the name, so the same client always gets the same
+safe name. On the response side the reverse mapping is applied before audit and pruning
+(`createToolNameRestoreTap` for streams, `restoreToolNamesInBody` for one-shot bodies), so the client
+gets back **its own** name and its dispatcher still matches; names the model invented are not in the
+mapping and pass through untouched, where the existing undeclared-name audit reports them. Each rename
+is logged once per request with up to 12 entries. Legal names - including the expanded
+`mcp__<namespace>__<child>` form - are byte-identical to before, so providers that never saw this
+defect are unaffected.
 
 Since 2026-11-04 there is one observation-only exception on this path. When a request declared at
 least one tool and the reply carries a `tool_calls[].function.name` outside that declared set,
