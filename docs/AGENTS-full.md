@@ -1562,6 +1562,29 @@ result reports `missing: ['min_tier']` (not `pool_strategy`), the preview marks 
 the advertised context floor (`keptOfPool`) applies the same filter, and the write path rejects an
 unknown value instead of silently storing "no floor".
 
+**Write requests get a higher floor than reads.** `ModelRoute.writeToolTier` (`off` / `balanced` /
+`strong`, default `balanced`) raises the floor by one more tier when the request itself carries a
+write tool (`apply_patch`, `Write`, `Edit`, `str_replace_editor`, ... - `WRITE_TOOL_NAMES` in
+`proxy/writeToolFloor.ts`). The signal is the tool name only: the gateway cannot judge whether a task
+is hard, but "this request will land on disk" is a structural fact, and a broken edit costs more than
+a slow answer. `applyRequestTierFloor` runs immediately after `applyMinTier`, so `includeModels`
+cannot bring a below-floor model back. If the raised floor would empty the pool the route **falls
+back** to the pre-floor pool and reports `degraded: 'write_tool_tier'` in `X-ModelPort-Auto-Degraded` -
+a write request must never turn a usable route into a 503. The advertised floor (`keptOfPool`) and
+the preview deliberately keep the route-level `minTier`: they describe what the route normally
+serves, not what one request used. Names are matched exactly (lower-cased); custom/MCP tool names
+are not recognized and are treated as ordinary requests.
+
+**Truncated tool arguments never reach the client as executable parameters.** When upstream ends on
+`finish_reason:"length"` mid-JSON (`{"input":"Begin Patch...`), three translation layers used to pass
+it through: `sanitizeClientToolArguments` returned it verbatim, `freeformInputOf` treated the half
+string as a freeform patch, and the non-streaming chat body was forwarded untouched. One predicate
+(`looksLikeTruncatedToolArguments`: non-empty, starts with `{`/`[`, does not parse) now drives all
+three: the responses translator emits `input: ''` (the patch fails immediately instead of writing half
+a file), non-streaming chat drops the whole call and sets `X-ModelPort-Tool-Args-Truncated: n`, and
+the streaming chat tap appends `x_modelport_tool_args_truncated` to the finish frame because a stream
+cannot be retracted.
+
 **Fast switching, and its precedence.** There is exactly one pin concept, 「固定」 (ruling 2026-11-15).
 A route holds at most one pinned model, and both the console and the tray write it through
 `routes:switch` into config `ModelRoute.preferredModel` - one persistent hard pin, never two stores.

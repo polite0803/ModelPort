@@ -33,6 +33,8 @@ import { nextDailyUsage } from '../../../shared/dailyUsage.ts'
 import { startSseHeartbeat, type SseHeartbeat } from '../utils/sseHeartbeat'
 import { findUnsupportedParameter, unsupportedParameterError } from '../parameterPolicy'
 import { createToolViolationTap } from '../utils/toolViolationTap'
+import { createTruncatedToolArgsTap } from '../utils/truncatedToolArgsTap'
+import { pruneTruncatedToolCalls } from '../utils/truncatedToolCalls'
 import {
   collectToolCallNames,
   createUndeclaredToolNameTap,
@@ -2386,6 +2388,9 @@ router.post('/completions', async (ctx: Context) => {
         }))
       }
       if (requiresToolCall) outStream = outStream.pipe(createToolViolationTap())
+      // 截断标注放最后：它要看完所有 delta 分片才判得出，且只往收尾帧追加一个字段，
+      // 与上面两个 tap 互不改写。
+      outStream = outStream.pipe(createTruncatedToolArgsTap())
       ctx.body = outStream
 
       // 立即发送响应头：客户端通常只对“响应头”计时（例如 10s），首个 token 可能远晚于此
@@ -2439,12 +2444,18 @@ router.post('/completions', async (ctx: Context) => {
         auditUndeclaredToolNames(
           findUndeclaredToolNames(collectToolCallNames(result.body), declaredToolNames),
         )
+        // 截断的参数不交付：整条调用摘掉，这一轮客户端就没有工具可执行 —— 它会按
+        // 自己的策略重试，而不是执行半个补丁。条数写进响应头，降级不静默。
+        const prunedToolCalls = pruneTruncatedToolCalls(result.body)
+        if (prunedToolCalls.dropped > 0) {
+          ctx.set('X-ModelPort-Tool-Args-Truncated', String(prunedToolCalls.dropped))
+        }
         // Check if we need to transform to Anthropic format
         if (isAnthropicToolFormat(request.tool_format)) {
-          ctx.body = transformResponseToAnthropic(result.body)
+          ctx.body = transformResponseToAnthropic(prunedToolCalls.body)
           console.log('[Chat] Transformed response to Anthropic tool format')
         } else {
-          ctx.body = result.body
+          ctx.body = prunedToolCalls.body
         }
       } else {
         ctx.body = {

@@ -22,6 +22,8 @@
  * 里的线索（`workdir` 是盘符路径就一定是 Windows 客户端）加网关自身平台判断。
  */
 
+import { looksLikeTruncatedToolArguments } from './truncatedToolArguments.ts'
+
 const POWERSHELL_SHELLS = new Set(['powershell', 'powershell.exe', 'ps', 'pwsh', 'pwsh.exe'])
 const WINDOWS_WORKDIR = /^[a-z]:[\\/]|^\\\\/i
 
@@ -105,4 +107,18 @@ export function sanitizeClientToolArguments(
   }
 
   return changed ? JSON.stringify(args) : rawArguments
+}
+
+/**
+ * 交付前的最后一道：截断的参数不能原样交给客户端。
+ *
+ * `sanitizeClientToolArguments` 对解析失败的串**有意**原样返回（它只做字段校正，
+ * 不改写上游内容）。但截断的 `{"input":"Begin Patch…` 属于「能过语法检查、内容却
+ * 少一半」的那一类，执行它会写出半个补丁。这里换成空参数对象：工具会因缺必填参数
+ * 立刻失败，用户看到的是「这轮没产出」，而不是半个补丁落盘。
+ */
+export function safeClientToolArguments(name: string, rawArguments: string, platform?: string): string {
+  return looksLikeTruncatedToolArguments(rawArguments)
+    ? '{}'
+    : sanitizeClientToolArguments(name, rawArguments, platform)
 }

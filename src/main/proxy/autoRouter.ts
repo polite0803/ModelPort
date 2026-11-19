@@ -49,6 +49,7 @@ import { getProbeRowsSync } from '../providers/modelProbeStore.ts'
 import { accountRuntime } from './accountRuntime'
 import { capClientRetryAfterSeconds, permanentRefusalCooldownMs, quotaWindowResetMs } from './failover.ts'
 import { clearCatalogMissCooldowns, isCatalogMissCoolingDown } from './modelCatalogCooldown'
+import { applyRequestTierFloor, requestWriteToolFloor } from './writeToolFloor.ts'
 import { getChannelDefinition } from '../providers/accountChannels/catalogue'
 import { getAggregateEntry } from '../providers/aggregate/registry.ts'
 import { promptCacheOf, effectiveAffinityMinutes, type PromptCacheCapability } from '../../shared/promptCache.ts'
@@ -1433,14 +1434,23 @@ class AutoRouter {
     // 它是路线级的声明，手动增删也拿不回低于下限的模型。
     const pinnedRankInputs = applyModelNamePin(rankPool, route?.pinModels)
     const tierInputs = applyMinTier(pinnedRankInputs, route?.minTier)
-    const strategyOutcome = applyPoolStrategiesWithTrace(tierInputs, poolStrategies)
+    // 写入型请求的档位托底：紧接 `minTier`，所以 `includeModels` 也拿不回被托底
+    // 筛掉的低档模型。抬空了就回落并记降级（`write_tool_tier`），不因为「这轮是
+    // 写入」把路由打成 503。广告窗口（`keptOfPool`）**有意**不跟着抬：那是这条路由
+    // 通常能用什么，不是这一轮用了什么。
+    const writeTier = applyRequestTierFloor(
+      tierInputs,
+      requestWriteToolFloor(route?.writeToolTier, request)
+    )
+    const strategyInputs = writeTier.inputs
+    const strategyOutcome = applyPoolStrategiesWithTrace(strategyInputs, poolStrategies)
 
     // 手动增删：策略之后、契约过滤之前。exclude 赢过 include，include 只能从
     // 策略前就有资格的候选里取回模型 —— 不会复活停用的模型，也不会绕过下面
     // 的契约过滤与排序阶段的硬过滤。
     const manual = applyManualModelSelection(
       strategyOutcome.kept,
-      tierInputs,
+      strategyInputs,
       route?.includeModels ?? [],
       route?.excludeModels ?? []
     )
@@ -1451,7 +1461,11 @@ class AutoRouter {
     // `response_format` 则照常路由并标记降级——返回自由文本比拒绝可用。
     const contract = applyContractFilter(pool, needs)
     const contractPool = contract.pool
-    const degraded = contract.degraded
+    // 写入型托底没能兑现（池里没有够档的模型）同样是一条降级，与 `response_format`
+    // 并列透出 —— 客户端至少能从响应头看到「这轮写入没拿到 balanced」。
+    const degraded = writeTier.relaxed
+      ? [...contract.degraded, 'write_tool_tier']
+      : contract.degraded
     const missing: string[] = contract.missing
 
     // 空池要能区分「供应商没候选」和「配置把候选筛光了」：后两者指向用户

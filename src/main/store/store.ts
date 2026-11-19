@@ -90,6 +90,7 @@ import {
   checkRouteName,
   findModelRoute,
   isRouteMinTierValue,
+  isRouteWriteToolTierValue,
   isRouteStrategyValue,
   LEGACY_AUTO_ROUTE_NAME,
   normalizeModelRoutes,
@@ -2014,6 +2015,9 @@ class StoreManager {
     }
     if (input.minTier !== undefined && !isRouteMinTierValue(input.minTier)) {
       return { code: 'invalid_input', message: `Unknown route minTier: ${JSON.stringify(input.minTier)}` }
+    }
+    if (input.writeToolTier !== undefined && !isRouteWriteToolTierValue(input.writeToolTier)) {
+      return { code: 'invalid_input', message: `Unknown route writeToolTier: ${JSON.stringify(input.writeToolTier)}` }
     }
     const includeError = checkRouteModelRefs('includeModels', input.includeModels)
     if (includeError !== undefined) return includeError
