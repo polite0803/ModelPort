@@ -371,6 +371,114 @@ export function trimAppliesToProvider(
   return (config.channelIds ?? []).some(id => id.trim() === providerId)
 }
 
+export type ContextTrimReason =
+  | 'off'
+  | 'whitelist'
+  | 'forced'
+  | 'measured-limit'
+  | 'below-advertised'
+
+export interface ContextTrimPlan {
+  applies: boolean
+  /**
+   * 本次裁剪的预算覆盖。`undefined` 表示沿用调用方算好的模型声明窗口/配置档位
+   * （点名渠道的老路径）。
+   */
+  budget?: number
+  reason: ContextTrimReason
+}
+
+function minDefined(...values: readonly (number | undefined)[]): number | undefined {
+  let best: number | undefined
+  for (const value of values) {
+    if (value === undefined) continue
+    if (best === undefined || value < best) best = value
+  }
+  return best
+}
+
+/**
+ * 「这一跳要不要裁、按多少预算裁」。
+ *
+ * 点名渠道（`channelIds`）是有前缀缓存成本的 opt-in，但它不该是唯一入口：
+ * - `forced`：本轮刚撞过 400，按上游给的区间上界裁一次再重发（同一候选，只一次）。
+ * - `measured-limit`：这个 `(provider, 模型)` 已经亲口说过自己的输入上界
+ *   （`contextOverflowLimits.ts`）。不裁就是排定一次必败的 400。
+ * - `below-advertised`：路由此刻对客户端承诺的窗口**大于**这一跳真正服务的模型
+ *   所能装下的（客户端按大窗攒的历史打在小窗成员上）。承诺大值 + 服务端按实际
+ *   后端裁剪是同一条裁定（2026-11-18）的两半，缺了这一半，大窗成员一被限流跳过，
+ *   会话就撞墙（2026-11-19 `daily` 实测）。
+ *
+ * 预算一律取最紧的那一个：上游判决 > 已知窗口 > 点名的旧路径。
+ * `enabled: false` 仍然一票否决 —— 那是用户明确关掉的开关。
+ */
+export function planContextTrim(input: {
+  config: Pick<ContextManagementConfig, 'enabled' | 'channelIds'>
+  providerId: string
+  /** 路由此刻对客户端承诺的窗口（`/v1/models` 与客户端 catalog 同一个数） */
+  advertisedContextWindow?: number
+  /** 这一跳模型的已知窗口（任何来源，与派发适配同一把尺） */
+  knownContextWindow?: number
+  /** 上游亲口给出的输入上界 */
+  measuredContextLimit?: number
+  /** 本轮 400 之后要求的一次性强制预算 */
+  forcedContextLimit?: number
+}): ContextTrimPlan {
+  if (!input.config.enabled) return { applies: false, reason: 'off' }
+
+  const measured = input.measuredContextLimit
+  const known = minDefined(input.knownContextWindow, measured)
+
+  if (input.forcedContextLimit !== undefined) {
+    return {
+      applies: true,
+      budget: minDefined(input.forcedContextLimit, known) ?? input.forcedContextLimit,
+      reason: 'forced',
+    }
+  }
+  if (measured !== undefined) {
+    return { applies: true, ...(known === undefined ? {} : { budget: known }), reason: 'measured-limit' }
+  }
+
+  const advertised = input.advertisedContextWindow
+  if (known !== undefined && advertised !== undefined && known < advertised) {
+    return { applies: true, budget: known, reason: 'below-advertised' }
+  }
+
+  return trimAppliesToProvider(input.config, input.providerId)
+    ? { applies: true, reason: 'whitelist' }
+    : { applies: false, reason: 'off' }
+}
+
+/**
+ * `tools` 声明在请求体里占的 token。
+ *
+ * 裁剪器只给 `messages` 计价，工具定义由 `buildRequestBody` 另行组装 —— 不计入时，
+ * 「预算已经取到上游上界」的那份历史再加上工具仍然超限，上游只会再回一次 400
+ * （2026-11-19 ModelScope 实测：估算 255,812、上游判 258,048，差额主要来自工具与
+ * 模板）。用同一把尺（3 / 1.5 / 3.2 字符每 token）定价，宁高不低。
+ */
+export function estimateToolDefinitionsTokens(tools: unknown): number {
+  if (!Array.isArray(tools) || tools.length === 0) return 0
+  try {
+    return estimateTextTokens(JSON.stringify(tools))
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * 估计器按字符定价，上游按**整个请求体**计 token（模板、message 包装、工具描述
+ * 都在里面），实测差值约 1–2%。留这一点余量，换取「裁完一次就够」：少留 2% 历史，
+ * 比多撞一次 400 便宜。
+ */
+export const TRIM_BUDGET_HEADROOM = 0.98
+
+/** 把整份请求的预算折成「只给 messages 用」的预算。 */
+export function trimBudgetForPayload(rawBudget: number, toolTokens: number): number {
+  return Math.max(1, Math.floor(rawBudget * TRIM_BUDGET_HEADROOM) - Math.max(0, toolTokens))
+}
+
 /**
  * Characters per token for the non-CJK bulk of a message.
  *
@@ -1061,6 +1169,7 @@ export class ContextManagementService {
   private tokenLimitStrategy: TokenLimitStrategy
   private providerId?: string
   private declaredContextWindow?: number
+  private onlyBudget: boolean
 
   /**
    * @param providerId - resolves the per-provider fallbacks.
@@ -1073,10 +1182,12 @@ export class ContextManagementService {
   constructor(
     config: ContextManagementConfig = DEFAULT_CONTEXT_MANAGEMENT_CONFIG,
     providerId?: string,
-    declaredContextWindow?: number
+    declaredContextWindow?: number,
+    options?: { onlyBudget?: boolean }
   ) {
     this.providerId = providerId
     this.declaredContextWindow = declaredContextWindow
+    this.onlyBudget = options?.onlyBudget === true
     this.config = normalizeContextManagementConfig(config)
     this.slidingWindowStrategy = new SlidingWindowStrategy(
       this.resolveSlidingWindowConfig(this.config.strategies.slidingWindow, providerId)
@@ -1088,9 +1199,12 @@ export class ContextManagementService {
 
   /** Fold `maxMessagesByProvider` onto the message window. */
   private resolveSlidingWindowConfig(config: SlidingWindowConfig, providerId?: string): SlidingWindowConfig {
-    if (providerId === undefined) return config
-    const window = config.maxMessagesByProvider?.[providerId]
-    return window === undefined ? config : { ...config, maxMessages: window }
+    const providerWindow = providerId === undefined ? undefined : config.maxMessagesByProvider?.[providerId]
+    const window = providerWindow === undefined ? config : { ...config, maxMessages: providerWindow }
+    // 「按条数丢历史」与「这批输入装不装得下」无关。非白名单入口（承诺 / 实测上界 /
+    // 本轮强制）只该按 token 预算裁：否则一旦某个 (provider, 模型) 命中一次，之后
+    // 每轮都无条件切到 40 条，前缀缓存也跟着每轮失效（2026-11-19 补充）。
+    return this.onlyBudget ? { ...window, enabled: false } : window
   }
 
   /**
@@ -1243,11 +1357,13 @@ export class ContextManagementService {
 export function createContextManagementService(
   config?: Partial<ContextManagementConfig>,
   providerId?: string,
-  declaredContextWindow?: number
+  declaredContextWindow?: number,
+  options?: { onlyBudget?: boolean }
 ): ContextManagementService {
   return new ContextManagementService(
     normalizeContextManagementConfig(config),
     providerId,
-    declaredContextWindow
+    declaredContextWindow,
+    options
   )
 }

@@ -106,6 +106,16 @@ export interface FailoverBudget {
    * 多挂几十秒才发现「这家现在接不了」。
    */
   wallClockBudgetMs?: number
+  /**
+   * 本轮 400 说过「这批输入超出我的上界」之后的一次性强制裁剪预算（取上游报文里
+   * 写明的区间上界）。只在调用方决定「同一候选裁完重发一次」时出现。
+   */
+  forceContextTrim?: { maxTokens: number }
+  /**
+   * 路由此刻对客户端承诺的窗口（`AutoRouteDecision.routeAdvertisedWindow`）。
+   * 低于这一跳模型实际能装下的窗口时就地裁剪，不等上游 400。
+   */
+  advertisedContextWindow?: number
 }
 import { attemptTraceOf } from './attemptTrace.ts'
 import { accountRuntime } from './accountRuntime'
@@ -116,10 +126,13 @@ import { ensureAnthropicOutputCap, outputCapFallbackOf } from './utils/outputCap
 import { opencodeAffinityHeaders } from './utils/opencodeAffinity.ts'
 import {
   createContextManagementService,
+  estimateToolDefinitionsTokens,
   PREFILL_SAFE_WINDOW_TOKENS,
-  trimAppliesToProvider,
+  planContextTrim,
+  trimBudgetForPayload,
 } from './services/contextManagementService'
-import { declaredContextWindowOf } from './modelTrimWindow'
+import { declaredContextWindowOf, knownContextWindowOf } from './modelTrimWindow'
+import { measuredContextLimitOf, recordMeasuredContextLimitFromError } from './contextOverflowLimits.ts'
 import { accountChannelManager } from '../providers/accountChannels/manager'
 import { getChannelDefinition } from '../providers/accountChannels/catalogue'
 import {
@@ -343,7 +356,12 @@ export class RequestForwarder {
     provider: Provider,
     actualModel: string,
     context: ProxyContext,
-    options: { maxRetries?: number; probe?: boolean } = {}
+    options: {
+      maxRetries?: number
+      probe?: boolean
+      forceContextTrim?: { maxTokens: number }
+      advertisedContextWindow?: number
+    } = {}
   ): Promise<ForwardResult> {
     const startTime = Date.now()
     const config = storeManager.getConfig()
@@ -468,11 +486,32 @@ export class RequestForwarder {
       let modifiedRequest = request
 
       // 探测请求的提示词长度就是被测的档位；上下文管理会把它裁短，必须跳过。
-      // 裁剪只在 `channelIds` 点名的渠道上运行：头切会把历史前缀逐轮变异，
-      // 对有前缀缓存的渠道是每轮全价重读（2026-11-10 回归，PLAN §9.12）。
+      // 点名渠道（`channelIds`）是老入口：头切会把历史前缀逐轮变异，对有前缀缓存的
+      // 渠道是每轮全价重读（2026-11-10 回归，PLAN §9.12）。
+      //
+      // 现在另有三个**不靠白名单**的入口，都是「不裁就一定输」的事实：
+      // ① 这一跳模型的已知窗口低于路由此刻的承诺（客户端已按大窗攒了历史）；
+      // ② 这个 (provider, 模型) 曾经亲口报过自己的输入上界；
+      // ③ 本轮刚撞过这条 400，按报文里的上界裁一次再重发（`forceContextTrim`）。
+      // 判据全在 `planContextTrim` 里，转发层只负责把三个读数交给它。
+      const knownWindow = knownContextWindowOf(provider, actualModel)
+      const measuredLimit = measuredContextLimitOf(provider.id, actualModel)
+      const trimPlan = isProbe
+        ? { applies: false as const, reason: 'off' as const }
+        : planContextTrim({
+            config: config.contextManagement ?? {},
+            providerId: provider.id,
+            ...(options.advertisedContextWindow === undefined
+              ? {}
+              : { advertisedContextWindow: options.advertisedContextWindow }),
+            ...(knownWindow === undefined ? {} : { knownContextWindow: knownWindow }),
+            ...(measuredLimit === undefined ? {} : { measuredContextLimit: measuredLimit }),
+            ...(options.forceContextTrim === undefined
+              ? {}
+              : { forcedContextLimit: options.forceContextTrim.maxTokens }),
+          })
       if (
-        !isProbe &&
-        trimAppliesToProvider(config.contextManagement ?? {}, provider.id) &&
+        trimPlan.applies &&
         modifiedRequest.messages &&
         modifiedRequest.messages.length > 0
       ) {
@@ -489,13 +528,26 @@ export class RequestForwarder {
           // 次零字节超时，10 万以内同日有成功）。取 min 不替换 —— 本来就更小的模型
           // 不该被放大。成功一次后 `firstBlockTimeoutSeen` 自动归零。
           const declaredWindow = declaredContextWindowOf(provider, actualModel)
-          const declaredContextWindow = accountRuntime.firstBlockTimeoutSeen(account.id, actualModel)
+          const prefillClamped = accountRuntime.firstBlockTimeoutSeen(account.id, actualModel)
             ? Math.min(declaredWindow ?? PREFILL_SAFE_WINDOW_TOKENS, PREFILL_SAFE_WINDOW_TOKENS)
             : declaredWindow
+          // 计划给的预算（承诺/实测/强制）与预填充安全线取小：两者都是「不许超过」的上界。
+          const rawBudget = trimPlan.budget === undefined
+            ? prefillClamped
+            : prefillClamped === undefined
+              ? trimPlan.budget
+              : Math.min(trimPlan.budget, prefillClamped)
+          // 上游的判决针对**整个请求体**：tools 声明与估计误差都要从这份预算里扣掉，
+          // 否则「按 N 裁过」仍然超限，只能再打一次上游。白名单入口保持旧口径不动
+          // （那里是已发布的行为基线）。
+          const declaredContextWindow = rawBudget === undefined || trimPlan.reason === 'whitelist'
+            ? rawBudget
+            : trimBudgetForPayload(rawBudget, estimateToolDefinitionsTokens(request.tools))
           const contextService = createContextManagementService(
             config.contextManagement || {},
             provider.id,
-            declaredContextWindow
+            declaredContextWindow,
+            { onlyBudget: trimPlan.reason !== 'whitelist' }
           )
 
           const originalCount = modifiedRequest.messages.length
@@ -527,6 +579,12 @@ export class RequestForwarder {
           // —— 用条数判断会把截断结果整份丢掉，超预算的原文照发（2026-11-16：
           // 一笔 125,024 token 的请求就这样打在 65,536 的上限上）。
           if (processResult.changed) {
+            if (trimPlan.reason !== 'whitelist') {
+              console.log(
+                `[Forwarder] Context trim (${trimPlan.reason}): budget ` +
+                  `${declaredContextWindow ?? 'config'} tokens, model ${actualModel}`
+              )
+            }
             console.log(
               `[Forwarder] Context management applied: ${originalCount} -> ${processResult.finalCount} messages`
             )
@@ -929,8 +987,24 @@ export class RequestForwarder {
         candidate.provider,
         candidate.actualModel,
         attemptContext,
-        { maxRetries: soloRetry }
+        {
+          maxRetries: soloRetry,
+          ...(budget.forceContextTrim === undefined ? {} : { forceContextTrim: budget.forceContextTrim }),
+          ...(budget.advertisedContextWindow === undefined
+            ? {}
+            : { advertisedContextWindow: budget.advertisedContextWindow }),
+        }
       )
+
+      // 上游报过区间上界就记下来，供这一跳的裁剪与后续回合的适配闸共用。
+      // 只认 400：5xx 的错误体里偶尔也会带同一句话，那不是这家对输入长度的判决。
+      if (!result.success && result.status === 400) {
+        recordMeasuredContextLimitFromError(
+          candidate.provider.id,
+          candidate.actualModel,
+          result.errorDetails?.message ?? result.error
+        )
+      }
 
       attemptTrace.push(...(result.attempts ?? []))
       attempts += 1

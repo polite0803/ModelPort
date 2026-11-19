@@ -65,11 +65,30 @@ const CONTEXT_OVERFLOW_PATTERNS: readonly RegExp[] = [
   /input[^.\n]{0,30}tokens[^.\n]{0,30}exceed/i,
   /上下文(?:长度|窗口)?[^.\n]{0,12}(?:超出|超过|过长|不足)/,
   /(?:超过|超出)(?:了)?(?:该?模型)?(?:的)?(?:上下文|窗口)(?:长度)?/,
+  // ModelScope / 阿里系推理服务（用户报障 2026-11-19）：
+  // `<400> InternalError.Algo.InvalidParameter: Range of input length should be [1, 258048]`。
+  /range of input length should be \[\s*\d+\s*,\s*\d+\s*\]/i,
 ]
 
 export function isContextOverflowError(message: string | undefined): boolean {
   if (!message) return false
   return CONTEXT_OVERFLOW_PATTERNS.some(pattern => pattern.test(message))
+}
+
+/**
+ * 上游在 overflow 报文里给出的「合法输入区间上界」。
+ *
+ * 只有明确写出区间的那一类才有这个数（ModelScope 的
+ * `Range of input length should be [1, N]`）。它比目录窗口更可信 —— 目录是转述，
+ * 这个数是上游自己对这次请求的判决（2026-11-19：目录 262,144，实际 258,048）。
+ * 没写区间的不返回，由调用方回落到模型自己的已知窗口，绝不猜比例。
+ */
+export function measuredContextLimitFromError(message: string | undefined): number | undefined {
+  if (!message) return undefined
+  const match = /range of input length should be \[\s*\d+\s*,\s*(\d+)\s*\]/i.exec(message)
+  if (match === null) return undefined
+  const limit = Number.parseInt(match[1] ?? '', 10)
+  return Number.isFinite(limit) && limit > 0 ? limit : undefined
 }
 
 /**

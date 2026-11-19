@@ -235,6 +235,15 @@ export interface AutoRouteDecision {
    */
   advertisedContextWindow?: number
   /**
+   * 这条**路由**此刻对客户端承诺的窗口 —— 与 `/v1/models` 和客户端模型目录同一个数
+   * （`floorOfPool`：钉住 > 当前模型 > 池内可广告最小值）。
+   *
+   * 转发层用它判断「这一跳真正服务的模型窗口是否低于承诺」：低了就必须就地裁剪到
+   * 该模型的窗口，而不是把客户端按大窗攒的历史原样打上去等 400。2026-11-19
+   * `daily` 实测：上一轮 1M 模型承诺、本轮被限流跳过、派给 262K 成员。
+   */
+  routeAdvertisedWindow?: number
+  /**
    * 本轮决策之前这条会话的锚点（上一轮成功的模型/账号）。
    *
    * 只用于**事后对照**：服务者若与它不同，这一轮就是一次中途换家 —— 响应头
@@ -1755,6 +1764,13 @@ class AutoRouter {
     const servedAdvertisedWindow = servedCapability === undefined
       ? undefined
       : advertisedContextTokens(servedCapability)
+    // 路由级承诺与 `/v1/models` 同一套折叠（`floorOfPool`），池用本次请求的候选采集：
+    // 瞬时不可用不改变窗口，差别只在「上一轮那个模型此刻还能不能派」，不影响这里要
+    // 回答的问题 —— 客户端此刻按多大的窗口攒历史。路由缺省（legacy 全局口径）时没有
+    // 承诺可谈，不写这一格。
+    const routeAdvertisedWindow = route === undefined
+      ? undefined
+      : this.floorOfPool(collectedInputs, route)
 
     return {
       profile,
@@ -1765,6 +1781,7 @@ class AutoRouter {
         ? {}
         : { contextWindow: servedCapability.contextTokens }),
       ...(servedAdvertisedWindow === undefined ? {} : { advertisedContextWindow: servedAdvertisedWindow }),
+      ...(routeAdvertisedWindow === undefined ? {} : { routeAdvertisedWindow }),
       // 换家的基础上限随 decision 交给 forwarder：转发层不许再自己去读
       // legacy 全局 `autoRouting.maxAttempts`，那样逐路由的设置只对账号故障类的
       // 收口生效、对失败换家不生效。
