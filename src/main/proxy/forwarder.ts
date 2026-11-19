@@ -142,6 +142,7 @@ import {
   sanitizeChatToolDefinitions,
 } from '../channelPack/toolCallValidation'
 import { getAggregateEntry } from '../providers/aggregate/registry'
+import { planToolNameRenames, type ToolNameRename } from '../../shared/toolNameSafety'
 import { resolveAggregateEndpoint, aggregateEndpointMissingMessage } from '../providers/aggregate/endpoint'
 import { isPlanEntry } from '../../shared/aggregateCost'
 import { applyAggregateDropParams } from './aggregateParams'
@@ -1222,11 +1223,17 @@ export class RequestForwarder {
       ...rest
     } = inbound
     const openAi = { ...rest, model: channelModel } as Record<string, unknown>
+    let channelToolRenames: ToolNameRename[] = []
     // Codex 的延迟工具发现会发 `function.name: ''` 的占位定义；chat 上游会整条
     // 拒绝（Raccoon 实测 `tools[14].function.name is invalid or missing`）。
     // 空名字工具本身不可调用，删掉比让整轮失败更安全。
     if (openAi.tools !== undefined) {
       openAi.tools = sanitizeChatToolDefinitions(openAi.tools)
+      // 与聚合线同一处置：点号/斜杠等字符会让严格上游整条 400
+      // （WorkBuddy 实测 `工具名称不规范`），一个坏名字连累全部工具。
+      const plan = planToolNameRenames(openAi.tools)
+      openAi.tools = plan.tools
+      if (plan.renames.length > 0) channelToolRenames = plan.renames
     }
 
     try {
@@ -1240,6 +1247,7 @@ export class RequestForwarder {
           body,
           latency: Date.now() - startTime,
           providerSessionId: requestId,
+          ...(channelToolRenames.length > 0 ? { toolRenames: channelToolRenames } : {}),
         }
       }
       const upstream = await accountChannelManager.openStream({ requestId, model: channelModel, openAi })
@@ -1406,6 +1414,7 @@ export class RequestForwarder {
         deferred: true,
         latency: Date.now() - startTime,
         providerSessionId: requestId,
+        ...(channelToolRenames.length > 0 ? { toolRenames: channelToolRenames } : {}),
       }
     } catch (error) {
       const failure = error as { message?: string; status?: number; retryAfterMs?: number; code?: string }
@@ -1556,8 +1565,8 @@ export class RequestForwarder {
       const outbound = reasoningEcho
         ? this.withReplayedReasoning(request, provider)
         : request
-      const body = this.buildRequestBody(outbound, actualModel, account)
-
+      const toolRenames: { value: ToolNameRename[] } = { value: [] }
+      const body = this.buildRequestBody(outbound, actualModel, account, toolRenames)
       // buildRequestBody 只挑白名单字段；每模型参数里的其余键（top_k、seed、reasoning_effort…）
       // 在这里显式补进上游请求体。保留字段 model/messages/stream 不允许被覆盖。
       const modelParams = provider.modelParameters?.[actualModel]
@@ -1622,8 +1631,7 @@ export class RequestForwarder {
             errorDetails: probed.details,
             ...(retryAfter === undefined ? {} : { retryAfter }),
             upstreamRequestId: upstreamRequestIdOf(response.headers),
-            latency: Date.now() - startTime,
-          }
+            latency: Date.now() - startTime,          }
         }
         return {
           success: true,
@@ -1632,6 +1640,7 @@ export class RequestForwarder {
           upstreamRequestId: upstreamRequestIdOf(response.headers),
           stream: probed.stream as any,
           latency: Date.now() - startTime,
+          ...(toolRenames.value.length > 0 ? { toolRenames: toolRenames.value } : {}),
         }
       }
 
@@ -1644,6 +1653,7 @@ export class RequestForwarder {
         upstreamRequestId: upstreamRequestIdOf(response.headers),
         body: response.data,
         latency,
+        ...(toolRenames.value.length > 0 ? { toolRenames: toolRenames.value } : {}),
       }
     } catch (error) {
       const latency = Date.now() - startTime
@@ -1981,12 +1991,17 @@ export class RequestForwarder {
 
   /**
    * Build Request Body
+   *
+   * `toolRenames` 是出口：非法工具名被确定性改名后，调用方要拿到「安全名 → 原名」
+   * 才能把上游回来的调用名还原成客户端自己的名字。
    */
   private buildRequestBody(
     request: ChatCompletionRequest,
     actualModel: string,
-    account: Account
+    account: Account,
+    toolRenames: { value: ToolNameRename[] } = { value: [] },
   ): Record<string, unknown> {
+    toolRenames.value = []
     const body: Record<string, unknown> = {
       model: actualModel,
       messages: request.messages,
@@ -2035,7 +2050,12 @@ export class RequestForwarder {
     if (request.tools !== undefined && request.tools.length > 0) {
       const sanitizedTools = sanitizeChatToolDefinitions(request.tools)
       if (Array.isArray(sanitizedTools) && sanitizedTools.length > 0) {
-        body.tools = sanitizedTools
+        // 非法字符（点号、斜杠、中文…）会整条 400（WorkBuddy 实测
+        // `工具名称不规范 the tool name is invalid or duplicated`），一个坏名字
+        // 连累全部工具。确定性改名，响应侧按映射还原成客户端自己的名字。
+        const plan = planToolNameRenames(sanitizedTools)
+        toolRenames.value = plan.renames
+        body.tools = plan.tools
         if (request.tool_choice !== undefined) body.tool_choice = request.tool_choice
         if (request.parallel_tool_calls !== undefined) body.parallel_tool_calls = request.parallel_tool_calls
       }

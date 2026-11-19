@@ -154,6 +154,107 @@ export function freeformToolNamesOf(body: unknown): string[] {
   return names
 }
 
+/**
+ * 客户端声明了、但 chat 协议表达不了的条目。
+ *
+ * 只剩一类：**没有名字**的托管工具（`type:'web_search'` 这类）。它们一条都不发，
+ * 入向转换必须把这件事说出来（`/v1/responses` 写成 `X-ModelPort-Tools-Dropped`），
+ * 否则「模型怎么从来不用联网搜索」在链路上无迹可查。
+ *
+ * `type:'namespace'` 分组**不再算丢弃**：它的子工具会被展开成可调用条目
+ * （见 `namespaceChildrenOf`），展开数与原名一并上报。
+ */
+export interface UndeliverableToolDeclaration {
+  /** 客户端给的托管类型名（`web_search` 等）；无名 function 报 `unnamed`。 */
+  kind: string
+  /** 工具名；无名条目为空串。 */
+  name: string
+}
+
+/**
+ * 取一个工具条目**任意形状**下的名字。
+ *
+ * responses 把 `name` 抬在 tool 自身，chat 形状则嵌在 `function.name` 里。只看
+ * 顶层会把「本来能送出去的 chat 形状 function」误报成无名丢弃（2026-11-20 实测：
+ * `X-ModelPort-Tools-Dropped: function`）。
+ */
+export function toolNameOf(raw: unknown): string {
+  const record = asRecord(raw)
+  if (!record) return ''
+  const top = stringOf(record.name)
+  if (top !== '') return top
+  return stringOf(asRecord(record.function)?.name)
+}
+
+export function undeliverableToolDeclarations(body: unknown): UndeliverableToolDeclaration[] {
+  const source = asRecord(body) ?? {}
+  const tools = Array.isArray(source.tools) ? source.tools : []
+  const dropped: UndeliverableToolDeclaration[] = []
+  for (const raw of tools) {
+    const record = asRecord(raw)
+    if (!record) continue
+    const type = stringOf(record.type)
+    // namespace 会被展开发送，不算丢弃。
+    if (type === 'namespace') continue
+    if (toolNameOf(record) === '') dropped.push({ kind: type === '' ? 'unnamed' : type, name: '' })
+  }
+  return dropped
+}
+
+/** namespace 分组里可以展开成独立工具的子条目。 */
+export interface NamespaceChild {
+  /** 分组名（`codex_app`），用于拼调用名与留痕。 */
+  namespace: string
+  /** 子工具名（`list_projects`）。 */
+  name: string
+  description: string
+  parameters: Record<string, unknown> | undefined
+}
+
+/**
+ * 把 `type:'namespace'` 分组的子工具摊平。
+ *
+ * Codex 0.169 的 `codex_app` 里挂着 22 个子工具（worktree / 项目 / 线程管理），
+ * `multi_agent_v1` 同理。整组丢弃会让这些能力在链路上彻底消失：模型连「有这个
+ * 工具」都不知道，于是自己发明调用语法（实测 `unsupported call: mcp__codex_app`
+ * 19 次，以及后来的 DSML 文本）。
+ *
+ * 调用名按客户端路由的写法拼：`mcp__<namespace>__<child>`。客户端 `tools/router.rs`
+ * 对 MCP 工具同时接受 `__`/`_` 两种分隔与 `codex_app`/`codex_apps` 两种前缀，
+ * 所以这个形状是它认得的那一种。
+ */
+export function namespaceChildrenOf(body: unknown): NamespaceChild[] {
+  const source = asRecord(body) ?? {}
+  const tools = Array.isArray(source.tools) ? source.tools : []
+  const children: NamespaceChild[] = []
+  for (const raw of tools) {
+    const record = asRecord(raw)
+    if (!record || stringOf(record.type) !== 'namespace') continue
+    const namespace = stringOf(record.name)
+    if (namespace === '') continue
+    const nested = Array.isArray(record.tools) ? record.tools : []
+    for (const entry of nested) {
+      const child = asRecord(entry)
+      if (!child) continue
+      const name = toolNameOf(child)
+      if (name === '') continue
+      const parameters = asRecord(child.parameters) ?? asRecord(child.input_schema)
+      children.push({
+        namespace,
+        name,
+        description: stringOf(child.description),
+        parameters: parameters ?? undefined,
+      })
+    }
+  }
+  return children
+}
+
+/** 展开后的调用名：`mcp__<namespace>__<child>`。 */
+export function namespacedToolName(namespace: string, child: string): string {
+  return `mcp__${namespace}__${child}`
+}
+
 /** chat 侧 `{"input":"…"}` 替身 → responses 侧的原始文本 `input`。 */
 function freeformInputOf(rawArguments: string): string {
   // 截断的 JSON 外壳先判掉：下面的兜底会把 `{"input":"Begin Patch…` 整串当补丁原文
@@ -172,6 +273,103 @@ export interface ResponsesToChatOptions {
   /** 交给 chat 那条链的模型名（名字怎么解析由调用方决定，这里只负责搬过去）。 */
   model: string
   stream: boolean
+}
+
+/**
+ * 客户端自己追加的上下文块（Codex 的 goal 驱动是 `<codex_internal_context …>`）。
+ *
+ * 这类块每一步都重新追加一份，除 `Tokens used: N` 之外逐字相同。它在历史里堆成
+ * 几十份近重复的「继续做 X」指令，模型看到的是一轮一轮「再读一遍目标 → 再说一遍
+ * 我要执行 → 再说一遍现在调用 → 收尾」，长会话里最后退化成整段复读并提前收工。
+ * 只折叠**重复的注入块**：用户真的重复说了两遍的话一个字都不动。
+ */
+const CLIENT_INJECTION_MARKER = '<codex_internal_context'
+
+function isClientInjection(message: Payload): boolean {
+  if (message.role !== 'user') return false
+  const content = message.content
+  return typeof content === 'string' && content.trimStart().startsWith(CLIENT_INJECTION_MARKER)
+}
+
+/** 归一化掉每轮都会变的计数（`Tokens used: 165722`）与空白，剩下的才是「同一段话」。 */
+function injectionFingerprint(content: string): string {
+  return content.replace(/\d+/g, '#').replace(/\s+/g, ' ').trim()
+}
+
+function hasToolCalls(message: Payload): boolean {
+  return Array.isArray(message.tool_calls) && message.tool_calls.length > 0
+}
+
+function textOf(message: Payload): string | null {
+  return typeof message.content === 'string' ? message.content : null
+}
+
+/**
+ * 同一个指纹的注入块只留**最新**一份。
+ *
+ * 删掉旧块之后，两侧的 assistant 会相邻。多数上游容忍同角色相邻，但严格上游会拒，
+ * 所以把它们并成一条（文本与 `reasoning_content` 都保留，不丢模型说过的话）。
+ * 带 `tool_calls` 的 assistant 永不合并 —— 那会破坏「结果紧跟调用」。
+ */
+export function collapseRepeatedClientInjections(messages: Payload[]): Payload[] {
+  const first = new Map<string, number>()
+  const latest = new Map<string, Payload>()
+  messages.forEach((message, index) => {
+    if (!isClientInjection(message)) return
+    const key = injectionFingerprint(message.content as string)
+    if (!first.has(key)) first.set(key, index)
+    latest.set(key, message)
+  })
+  // 同组只留**组内第一条的位置**，文本用组内最新那份（目标不变、计数最新）。
+  // 留最新那条的位置会把 user 排到它后面的 assistant 之后，序列开头可能变成
+  // assistant —— 严格上游当场 400。
+  const replacement = new Map<number, Payload>()
+  const drop = new Set<number>()
+  messages.forEach((message, index) => {
+    if (!isClientInjection(message)) return
+    const key = injectionFingerprint(message.content as string)
+    const anchor = first.get(key)
+    if (anchor === undefined) return
+    if (anchor !== index) {
+      drop.add(index)
+      return
+    }
+    const newest = latest.get(key)
+    if (newest !== undefined && newest !== message) replacement.set(index, newest)
+  })
+  if (drop.size === 0) return messages
+
+  const kept: Payload[] = []
+  messages.forEach((raw, index) => {
+    if (drop.has(index)) return
+    const message = replacement.get(index) ?? raw
+    const previous = kept[kept.length - 1]
+    if (
+      previous !== undefined
+      && previous.role === 'assistant'
+      && message.role === 'assistant'
+      && !hasToolCalls(previous)
+      && !hasToolCalls(message)
+    ) {
+      // `content: null` 的 assistant（只有 reasoning）也要能被并掉：删掉注入后它
+      // 会与下一条 assistant 相邻，而 `content:null` 的单独一条会被上游当成空回复。
+      const join = (left: string, right: string): string =>
+        left === '' ? right : right === '' ? left : `${left}\n\n${right}`
+      const content = join(textOf(previous) ?? '', textOf(message) ?? '')
+      const reasoning = join(
+        typeof previous.reasoning_content === 'string' ? previous.reasoning_content : '',
+        typeof message.reasoning_content === 'string' ? message.reasoning_content : '',
+      )
+      kept[kept.length - 1] = {
+        ...previous,
+        content: content === '' ? null : content,
+        ...(reasoning !== '' ? { reasoning_content: reasoning } : {}),
+      }
+      return
+    }
+    kept.push(message)
+  })
+  return kept
 }
 
 /**
@@ -349,7 +547,7 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
     flushReasoning()
   }
 
-  const request: Payload = { model: options.model, messages }
+  const request: Payload = { model: options.model, messages: collapseRepeatedClientInjections(messages) }
   if (options.stream) {
     request.stream = true
     // 流式必须主动要 usage：OpenAI 形状的上游默认不发最后一个 usage 块，不要就拿不到数。
@@ -374,25 +572,54 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
   const tools = Array.isArray(source.tools) ? source.tools : []
   if (tools.length > 0) {
     const freeform = new Set(freeformToolNamesOf(source))
-    request.tools = tools.map(tool => {
+    // `type:'namespace'` 是客户端的分组声明（Codex 的 `codex_app` / `multi_agent_v1`）。
+    // chat 协议没有分组这一层，但**必须把子工具展开送出去**：整组丢弃会让这 20 多个
+    // 能力（worktree / 项目 / 线程管理）在链路上彻底消失，模型连「有这个工具」都不
+    // 知道，于是自己发明调用语法（2026-11-18 实测 `unsupported call: mcp__codex_app`
+    // 19 次；后来退化成把 DSML 标记写进正文）。
+    // 展开名用 `mcp__<namespace>__<child>`：客户端 `tools/router.rs` 对 MCP 工具同时
+    // 接受 `__`/`_` 分隔与 `app`/`apps` 前缀，这个形状是它认的。
+    // 无名字段（`type:'web_search'` 这类托管工具）仍不发：chat 侧只剩空名，必被
+    // `sanitizeChatToolDefinitions` 删掉，`undeliverableToolDeclarations` 负责报出来。
+    const mapped = tools.flatMap(tool => {
       const record = asRecord(tool) ?? {}
+      if (stringOf(record.type) === 'namespace') {
+        const namespace = stringOf(record.name)
+        if (namespace === '') return []
+        return namespaceChildrenOf(source)
+          .filter(child => child.namespace === namespace)
+          .map(child => ({
+            type: 'function',
+            function: {
+              name: namespacedToolName(child.namespace, child.name),
+              ...(child.description !== '' ? { description: child.description } : {}),
+              parameters: child.parameters ?? { type: 'object', properties: {} },
+            },
+          }))
+      }
+      const name = stringOf(record.name)
+      if (name === '') return []
       // responses 把 function 的字段抬在 tool 自身，chat 要求嵌进 `function`。
       const parameters = asRecord(record.parameters)
         ?? asRecord(record.input_schema)
-        ?? (freeform.has(stringOf(record.name)) ? FREEFORM_INPUT_PARAMETERS : undefined)
-      return {
+        ?? (freeform.has(name) ? FREEFORM_INPUT_PARAMETERS : undefined)
+      return [{
         type: 'function',
         function: {
-          name: stringOf(record.name),
+          name,
           ...(stringOf(record.description) !== '' ? { description: stringOf(record.description) } : {}),
           ...(parameters ? { parameters } : {}),
         },
-      }
+      }]
     })
+    if (mapped.length > 0) request.tools = mapped
   }
 
   const toolChoice = responsesToolChoiceToChat(source.tool_choice)
-  if (toolChoice !== undefined) request.tool_choice = toolChoice
+  // 声明过工具、但一条都没送出去时 `tool_choice` 没有指涉对象；带着它等于让上游对一个
+  // 空工具集决定「auto 还是必调」，那是自找的 400。客户端压根没声明工具的请求原样放行。
+  const toolsAllDropped = tools.length > 0 && request.tools === undefined
+  if (toolChoice !== undefined && !toolsAllDropped) request.tool_choice = toolChoice
 
   const responseFormat = responsesTextToResponseFormat(source.text)
   if (responseFormat !== undefined) request.response_format = responseFormat

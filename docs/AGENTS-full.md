@@ -1457,11 +1457,60 @@ re-anchoring the conversation to it.
   so the correction has to happen after the stream ends.
 * **Non-streaming responses are not judged, and the panel says so.** There is no per-chunk signal
   and the body only exists when body logging is on; claiming coverage there would be a fabricated
-  reading.
+  reading. (The `/v1/responses` entry's runaway retry below is the one exception, and it is not a
+  reading: it decides delivery from the response body itself and stores nothing.)
+* **Responses-lane runaway turns are re-issued instead of delivered (2026-11-19).** That evening's
+  Codex goal loop produced a turn with **zero tool calls and 16 384 characters of `执行。` repetition**
+  (`routes/responses.ts`), cut by the output cap after five minutes; the client recorded
+  `Incomplete response returned, reason: max_output_tokens`, stopped for two hours, and the garbage
+  went into the conversation history. The same model, provider, pin and injected goal template served
+  a parallel session that stayed healthy, and that session had the same ~46 % share of text-only
+  turns - so the discriminator is a single turn collapsing into a repetition loop, not routing. The
+  guard therefore judges the turn, not the route: client offered tools, zero tool-call deltas,
+  ≥ `RUNAWAY_MIN_CHARS` (6000) characters of visible text, and the tail dedup ratio below the
+  existing repetition threshold (`judgeRunawayTurn` / `judgeRunawayText`, same accumulators via
+  `createChatStreamProbe`). On a hit the attempt is **discarded whole** - the entry holds assistant
+  text from the first byte until a tool call appears (then it flushes and streams live) or the
+  stream ends (then it judges) - and the same loopback request is re-posted once. If the re-issue
+  cannot be reached, attempt one is delivered rather than leaving the client with nothing. Cost:
+  tool-offering turns that end with prose only show their text at turn end (~4-11 s in the
+  reference session). Evidence: `tests/routes/responses-inbound.test.ts` (runaway mode: stream and
+  non-stream re-issue, and no re-issue when the client offered no tools).
 * Tests: `tests/shared/stream-repetition.test.ts` (verdict, tail window, short-answer exemption,
   threshold-is-a-real-knob), `tests/proxy/bandit-repetition.test.ts` (streak + no regression on the
   length rule), `tests/renderer/repetition-guard-wiring.test.mjs` (wiring, with six in-memory
   mutations as negative controls).
+* **Model-authored tool-call text is restored to real `tool_calls`, never shown as prose (2026-11-20).**
+  Two formats are known and both are parsed. **DSML** is DeepSeek's native special-token syntax,
+  byte-verified from the OpenCode Go leak on 2026-11-19 18:02 (Codex session
+  `rollout-2026-11-19T17-49-36…`): `<｜DSML｜ calls>` / `<｜DSML｜ invoke name="exec_command">` /
+  `<｜DSML｜ parameter name="cmd" string="true">…`, with U+FF5C bars, an optional space after the
+  second bar, and `calls` / `tool_calls` both in use (the CodeArts channel pack emits the latter).
+  **`<tool_call>` JSON** is the convention relayai-style "simulated tool" gateways define -
+  `<tool_call>{"name":…,"arguments":…}</tool_call>`, also accepting `input` and `tool`+`parameters`
+  spellings, arrays for parallel calls, and free-text arguments wrapped into `{input}` for freeform
+  tools. Both appear when the model got no usable tool declaration and invented syntax instead: the
+  gateway previously relayed them verbatim, so the markup was rendered in the conversation and, in
+  the Codex thread, got folded into the compaction summary that keeps feeding the thread.
+  `dsmlToolCallTap` (`src/main/proxy/utils/dsmlToolCallTap.ts` + `src/shared/dsmlToolCalls.ts`)
+  converts such a turn into real `tool_calls` on a purely response-shaped test: the visible text
+  starts with a call block before any prose, and nothing but whitespace or another block follows it.
+  Any prose in front latches text mode for the rest of the turn, so a message *about* the syntax
+  keeps its bytes and a provider that never emits these formats is untouched. **The declared-name
+  check is deliberately not applied to the conversion**: the block carries the model's complete
+  intent (name plus arguments), so discarding it because the name looks unfamiliar would erase a
+  decision the model already made and leave the client with an empty turn; an unrecognized name is
+  surfaced by the existing undeclared-name audit instead. When the upstream *also* emits structured
+  `tool_calls`, the converted copy is dropped (same intent twice would run a write twice). Residual
+  risk stated plainly: a turn that interleaves prose with calls is delivered as text, which is the
+  pre-existing behaviour, not a regression. A second defect on the same path is repaired here: an
+  upstream stream that ends with `[DONE]` but never sends a `finish_reason` gets a synthesised
+  closing frame (`tool_calls` when calls were delivered, else `stop`) right before `[DONE]`, because
+  Qoder rejects the whole turn as "Model stream ended before completion" otherwise. The request log
+  still records the upstream fact (`streamTruncated: true`), so the repair never masks a truncated
+  stream. Evidence: `tests/proxy/dsml-tool-call-tap.test.ts`, `tests/shared/dsml-tool-calls.test.ts`,
+  `tests/routes/chat-dsml-tool-calls.test.ts` (end-to-end: with tools / without tools / upstream
+  missing finish).
 
 ### Pool failover, and latency as a gate (2026-11-12)
 
@@ -1571,8 +1620,12 @@ write tool (`apply_patch`, `Write`, `Edit`, `str_replace_editor`, ... - `WRITE_T
 is hard, but "this request will land on disk" is a structural fact, and a broken edit costs more than
 a slow answer. `applyRequestTierFloor` runs immediately after `applyMinTier`, so `includeModels`
 cannot bring a below-floor model back. If the raised floor would empty the pool the route **falls
-back** to the pre-floor pool and reports `degraded: 'write_tool_tier'` in `X-ModelPort-Auto-Degraded` -
-a write request must never turn a usable route into a 503. The advertised floor (`keptOfPool`) and
+back** to the pre-floor pool and reports a degraded token in `X-ModelPort-Auto-Degraded` - a write
+request must never turn a usable route into a 503. The token distinguishes the two causes:
+`write_tool_tier` means the pool itself has no model at that tier, `write_tool_tier_pin` means the
+pool was already narrowed to a pin (`preferredModel` / header pin) that sits below the floor - the
+fixes differ (add models vs. change the pin), so one umbrella token would send the reader to the
+wrong place. `writeToolFloorDegraded` owns that mapping. The advertised floor (`keptOfPool`) and
 the preview deliberately keep the route-level `minTier`: they describe what the route normally
 serves, not what one request used. Names are matched exactly (lower-cased); custom/MCP tool names
 are not recognized and are treated as ordinary requests.
@@ -2125,6 +2178,50 @@ All main-renderer communication uses IPC channels defined in `src/main/ipc/chann
 whitelists all three (after `sanitizeChatToolDefinitions` drops unusable definitions, e.g. Codex's
 empty-name placeholders), and the reply is forwarded as-is - upstream produces the `tool_calls`, the
 client executes them and sends the results back. Nothing in the gateway rewrites either side.
+
+**A Responses-side `type:'namespace'` group is expanded, not dropped** (`responsesInbound.ts`,
+2026-11-20). Codex 0.169 sends `codex_app` / `multi_agent_v1` with their children nested (22 tools
+under `codex_app`: worktrees, projects, threads, artifacts, sidebar preferences). Chat has no
+namespace layer, so the children are sent as ordinary functions named
+`mcp__<namespace>__<child>` - the shape the client's own router accepts (its `core/src/tools/router.rs`
+carries four spellings, `app`/`apps` crossed with `__`/`_` separators, so this one dispatches).
+Evidence for why dropping the group was wrong: the previous commit discarded it whole, the model
+then called the bare group name 19 times and every call came back `unsupported call:
+mcp__codex_app` / `unsupported call: codex_app` (verified in the 2026-11-18 rollouts), and once the
+tool set was effectively empty the model started inventing call syntax - `<tool_call>{...}` in chat
+and DSML markup in Responses. Children without `parameters` get an empty object schema so strict
+upstreams do not reject the whole request. Expansion is reported per request in
+`X-ModelPort-Tools-Expanded: <count>(<namespaces>)`.
+
+Still dropped, honestly: unnamed hosted tools (`type:'web_search'`, `file_search`) - chat only has
+the empty name left, which `sanitizeChatToolDefinitions` would delete anyway - reported in
+`X-ModelPort-Tools-Dropped` as `<type>`. Name extraction for that judgement reads `name` **or**
+`function.name`, because responses keeps the name at the top level while chat nests it; the
+top-level-only check mislabelled working chat-shape functions as dropped
+(`X-ModelPort-Tools-Dropped: function`, reproduced 2026-11-20).
+
+When every declared tool is dropped the request carries no `tools` and no `tool_choice` - an
+`auto`/`required` choice over an empty tool set is just a 400 waiting to happen - and that state is
+now visible instead of silent: `X-ModelPort-Tools-Empty: 1` plus a warn log line
+("客户端声明了工具但一条都没送到上游"). No placeholder tool is invented to paper over it: a
+fabricated definition is the gateway writing on the client's behalf.
+
+**Illegal tool names are renamed on the way out and restored on the way back** (`shared/toolNameSafety.ts`,
+2026-11-20). MCP servers routinely use dots and slashes - `filesystem.read_file`, `shell/run` - which
+the MCP spec allows but every OpenAI-compatible upstream rejects: reproduced live against WorkBuddy,
+`{"message":"buddy: 工具名称不规范，请新建任务重试 the tool name is invalid or duplicated"}` with HTTP
+400. The blast radius is the whole request: one illegal name means **no tool reaches the model**, and
+an empty tool set is exactly the state where the model starts inventing call syntax. The gateway now
+replaces every character outside `[A-Za-z0-9_-]` with `_`, truncates to 64 (OpenAI's limit; DeepSeek
+allows 128 but the same character set), and resolves collisions by appending `_2`, `_3` so the mapping
+stays one-to-one. The rename is a pure function of the name, so the same client always gets the same
+safe name. On the response side the reverse mapping is applied before audit and pruning
+(`createToolNameRestoreTap` for streams, `restoreToolNamesInBody` for one-shot bodies), so the client
+gets back **its own** name and its dispatcher still matches; names the model invented are not in the
+mapping and pass through untouched, where the existing undeclared-name audit reports them. Each rename
+is logged once per request with up to 12 entries. Legal names - including the expanded
+`mcp__<namespace>__<child>` form - are byte-identical to before, so providers that never saw this
+defect are unaffected.
 
 Since 2026-11-04 there is one observation-only exception on this path. When a request declared at
 least one tool and the reply carries a `tool_calls[].function.name` outside that declared set,

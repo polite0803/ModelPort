@@ -43,10 +43,21 @@ import {
   chatResponseToResponseBody,
   createResponsesStreamTranslator,
   freeformToolNamesOf,
+  namespaceChildrenOf,
   responsesHasInput,
   responsesToChatRequest,
   responsesUnsupportedParams,
+  undeliverableToolDeclarations,
 } from '../../../shared/responsesInbound'
+import { toHeaderValue } from '../utils/headerValue'
+import {
+  DEFAULT_REPETITION_GUARD,
+  RUNAWAY_MIN_CHARS,
+  createChatStreamProbe,
+  judgeRunawayText,
+  judgeRunawayTurn,
+  type RunawayTurnReading,
+} from '../../../shared/streamRepetition'
 
 type Payload = Record<string, any>
 
@@ -96,6 +107,28 @@ function recordRejection(ctx: Context, status: number, code: string, message: st
   )
 }
 
+/**
+ * 「重发」是网关单方面的决定，客户端看不见（响应头早已发出），因此必须留一行日志：
+ * 否则同一回合的两次上游消耗在面板上只是两条互不相关、都写 success 的请求行。
+ */
+function logRunawayRetry(
+  requestId: string,
+  model: string,
+  attempt: number,
+  verdict: RunawayTurnReading,
+): void {
+  storeManager.addLog('warn', `Responses runaway turn re-issued (attempt ${attempt} -> ${attempt + 1})`, {
+    requestId,
+    data: {
+      model,
+      contentChars: verdict.contentChars,
+      toolCallDeltas: verdict.toolCallDeltas,
+      lines: verdict.repetition?.lines,
+      dedupRatio: verdict.repetition?.dedupRatio,
+    },
+  })
+}
+
 router.post('/responses', async (ctx: Context) => {
   const requestId = randomUUID()
   const started = Date.now()
@@ -140,22 +173,63 @@ router.post('/responses', async (ctx: Context) => {
   // 自由文本工具（Codex 的 apply_patch）的名字要一路带到出向：回来的调用项得是
   // `custom_tool_call`，客户端才会真的执行它。
   const freeformTools = freeformToolNamesOf(body)
+  // 声明了但 chat 协议表达不了的条目（无名托管工具），逐请求报出来。
+  // `type:'namespace'` 分组不在这里：子工具已展开成可调用条目，另有 `…-Expanded` 头。
+  const undeliverable = undeliverableToolDeclarations(body)
+  if (undeliverable.length > 0) {
+    ctx.set(
+      'X-ModelPort-Tools-Dropped',
+      toHeaderValue(undeliverable.map(entry => (entry.name === '' ? entry.kind : `${entry.kind}/${entry.name}`)).join(',')),
+    )
+  }
+  // namespace 分组的子工具已展开送出：数量写进响应头，排障时能分清「模型不肯用」
+  // 与「网关没送到」。
+  const expandedChildren = namespaceChildrenOf(body)
+  if (expandedChildren.length > 0) {
+    ctx.set(
+      'X-ModelPort-Tools-Expanded',
+      toHeaderValue(`${expandedChildren.length}(${[...new Set(expandedChildren.map(child => child.namespace))].join('+')})`),
+    )
+  }
+  // 客户端声明了工具、最后一条都没送到上游：这一轮模型手里没有任何可调用对象。
+  // 不伪造占位定义（那等于网关替客户端发明工具），也不退回原始定义（严格上游会整条
+  // 400，把本来能用的回合打没），但必须让这件事可见 —— 2026-11-20 实测正是这种
+  // 「空工具集」促使模型自己发明调用语法（`<tool_call>` / DSML 文本）。
+  const declaredCount = Array.isArray((body as Payload)?.tools) ? (body as Payload).tools.length : 0
+  if (declaredCount > 0 && chatRequest.tools === undefined) {
+    ctx.set('X-ModelPort-Tools-Empty', '1')
+    storeManager.addLog('warn', '客户端声明了工具但一条都没送到上游', {
+      requestId,
+      data: { declared: declaredCount, dropped: undeliverable.map(entry => entry.kind) },
+    })
+  }
 
   // 客户端申报「允许保存这次 response」。本代理没有 response 存储，这一格是 no-op，
   // 但必须说出来：不然客户端会以为后面能按 id 取回（而那个 GET 本来也不存在）。
   if (body.store === true) ctx.set('X-ModelPort-Responses-Store', 'not-retained')
 
   const endpoint = `http://${loopbackHostOf(config)}:${config.proxyPort}/v1/chat/completions`
+  // 「本轮带了工具」是跑飞判据的前提：纯问答客户端里一段长正文就是合法答案，只有
+  // agent 回合里「一个工具调用都没有」才等于这一轮什么也没做。
+  const toolsOffered = Array.isArray(chatRequest.tools) && chatRequest.tools.length > 0
+  const repetitionGuard = config.streamRepetitionGuard ?? DEFAULT_REPETITION_GUARD
+  // 重发上限：两发都跑飞说明上游这一刻就是这个状态，再重发只是多烧一遍配额。
+  const maxAttempts = toolsOffered && repetitionGuard.enabled ? 2 : 1
 
   // 客户端断开就掐掉回环请求：否则已经在跑的转发会继续占着账号和上游配额。
-  const abort = new AbortController()
+  // 每次重发换一个 controller，但「断开」是粘的 —— 断开之后不再发起新的一发。
+  let clientGone = false
+  let attemptAbort = new AbortController()
   ctx.res.once('close', () => {
-    if (!ctx.res.writableEnded) abort.abort()
+    if (ctx.res.writableEnded) return
+    clientGone = true
+    attemptAbort.abort()
   })
 
-  let response: Response
-  try {
-    response = await fetch(endpoint, {
+  const requestChat = (): Promise<Response> => {
+    attemptAbort = new AbortController()
+    if (clientGone) attemptAbort.abort()
+    return fetch(endpoint, {
       method: 'POST',
       headers: loopbackRequestHeaders({
         authorization: ctx.get('Authorization'),
@@ -172,10 +246,15 @@ router.post('/responses', async (ctx: Context) => {
         })(),
       }),
       body: JSON.stringify(chatRequest),
-      signal: abort.signal,
+      signal: attemptAbort.signal,
     })
+  }
+
+  let response: Response
+  try {
+    response = await requestChat()
   } catch (error) {
-    if (abort.signal.aborted) return
+    if (attemptAbort.signal.aborted) return
     const detail = error instanceof Error ? error.message : String(error)
     const cause = (error as { cause?: unknown }).cause
     // Node 的 `fetch failed` 把真正的原因（ECONNREFUSED / ENETUNREACH）藏在 cause 里，
@@ -222,11 +301,29 @@ router.post('/responses', async (ctx: Context) => {
 
   if (!wantsStream) {
     let payload: unknown
-    try {
-      payload = await response.json()
-    } catch {
-      failWith(ctx, 502, 'Upstream returned a non-JSON response', 'invalid_upstream_response')
-      return
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        payload = await response.json()
+      } catch {
+        failWith(ctx, 502, 'Upstream returned a non-JSON response', 'invalid_upstream_response')
+        return
+      }
+      if (attempt >= maxAttempts) break
+      const message = (payload as Payload | undefined)?.choices?.[0]?.message as Payload | undefined
+      const text = typeof message?.content === 'string' ? message.content : ''
+      const calls = Array.isArray(message?.tool_calls) ? message.tool_calls.length : 0
+      const verdict = judgeRunawayText(text, calls, toolsOffered, repetitionGuard)
+      if (!verdict.degenerate) break
+      // 跑飞的一发不进客户端历史：重发同一条请求，把第二发当交付物。
+      logRunawayRetry(relayRequestId, requestedModel, attempt, verdict)
+      let next: Response | undefined
+      try {
+        next = await requestChat()
+      } catch {
+        next = undefined
+      }
+      if (next === undefined || !next.ok) break // 重发打不通：第一发至少有内容，交它
+      response = next
     }
     // 回显客户端发来的模型名：它按这个名字做上下文预算与计费，换成网关内部
     // 名字（比如客户端点名路由、实际跑的是某个真模型）会被读成「模型被换了」。
@@ -247,39 +344,143 @@ router.post('/responses', async (ctx: Context) => {
 
   // Responses 的 `usage` 在没报到时就是 `null`（本仓不变量），没有 anthropic 那个
   // 「`message_start` 必须给数字」的坑，所以这里不需要估算，也不需要估算声明头。
-  const translator = createResponsesStreamTranslator({
+  const makeTranslator = () => createResponsesStreamTranslator({
     model: requestedModel,
     fallbackId: relayRequestId,
     clientPlatform: process.platform,
     freeformTools,
   })
   const out = new PassThrough()
+  out.on('error', () => {})
 
-  void (async () => {
-    const reader = (response.body as ReadableStream<Uint8Array>).getReader()
+  /** 一发里攒下的、**还没交给客户端**的翻译帧（重发时整发丢弃）。 */
+  type Held = { pieces: string[]; translator: ReturnType<typeof makeTranslator> }
+
+  const finishHeld = (held: Held): void => {
+    if (!out.destroyed) for (const piece of held.pieces) out.write(piece)
+    held.pieces.length = 0
+    const tail = held.translator.end()
+    if (tail !== '' && !out.destroyed) out.write(tail)
+  }
+
+  type AttemptResult =
+    | { kind: 'delivered' }
+    | { kind: 'end'; held: Held }
+    | { kind: 'retry'; held: Held; verdict: RunawayTurnReading }
+
+  /**
+   * 跑一发回环流，并决定「交出去」还是「整发丢掉重发」。
+   *
+   * 为什么要缓冲：重发的前提是客户端还没看到第一发。assistant 正文从第一个字节起
+   * 就压着不交，直到 (a) 出现工具调用增量 —— 说明这一轮确实在干活，立刻放行并转为
+   * 实时转发；或 (b) 流结束 —— 判跑飞（0 调用 + ≥6000 字 + 尾部去重率塌了），
+   * 判中就整发丢弃；或 (c) 中途已经攒到 6000 字还没调用且尾部塌了 —— 不必等模型
+   * 把输出上限撞满（2026-11-19 那一轮跑了 5 分钟），当场掐掉这一发上游再重发。
+   *
+   * 代价：带工具且「只有正文」的回合，正文会等到回合结束才一次出现。这类回合在
+   * Codex goal 循环里通常只有一两句计划（本机实测 ~4-11 s）；长正文回合很少。
+   * 换来的是客户端历史里不会再落进 16 KB 的 `执行。` 复读。
+   */
+  const runAttempt = async (incoming: Response, attempt: number): Promise<AttemptResult> => {
+    const translator = makeTranslator()
+    const held: Held = { pieces: [], translator }
+    let holding = true
+    const probe = createChatStreamProbe()
+    let raw = ''
+    const flush = (): void => {
+      holding = false
+      if (out.destroyed) return
+      for (const piece of held.pieces) out.write(piece)
+      held.pieces.length = 0
+    }
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
     try {
+      reader = (incoming.body as ReadableStream<Uint8Array>).getReader()
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
-        const text = translator.push(Buffer.from(value).toString('utf8'))
-        if (text !== '') out.write(text)
+        const chunk = Buffer.from(value).toString('utf8')
+        raw += chunk
+        probe.push(chunk)
+        const piece = translator.push(chunk)
+        if (!holding) {
+          if (piece !== '' && !out.destroyed) out.write(piece)
+          continue
+        }
+        if (piece !== '') held.pieces.push(piece)
+        const reading = probe.reading()
+        if (reading.toolCallDeltas > 0) {
+          flush()
+          continue
+        }
+        if (reading.contentChars < RUNAWAY_MIN_CHARS) continue
+        const verdict = judgeRunawayTurn(raw, toolsOffered, repetitionGuard)
+        if (!verdict.degenerate || attempt >= maxAttempts) continue
+        await reader.cancel().catch(() => {})
+        return { kind: 'retry', held, verdict }
       }
-      const tail = translator.end()
-      if (tail !== '') out.write(tail)
     } catch (error) {
-      if (out.destroyed) return
+      if (out.destroyed) return { kind: 'delivered' }
       const message = error instanceof Error ? error.message : 'stream failed'
+      if (!holding) {
+        const frame = translator.fail(message)
+        if (frame !== '' && !out.destroyed) out.write(frame)
+        storeManager.addLog('error', `Responses stream error: ${message}`, {
+          requestId: relayRequestId,
+          data: { requestedModel, latency: Date.now() - started },
+        })
+        return { kind: 'delivered' }
+      }
+      // 一个字节都还没交出去：把这一发的部分帧与错误帧一起给出，不能静默断开。
       const frame = translator.fail(message)
-      if (frame !== '') out.write(frame)
-      storeManager.addLog('error', `Responses stream error: ${message}`, {
-        requestId: relayRequestId,
-        data: { requestedModel, latency: Date.now() - started },
-      })
+      if (frame !== '') held.pieces.push(frame)
+      return { kind: 'end', held }
     } finally {
-      reader.releaseLock?.()
-      if (!out.destroyed) out.end()
+      if (reader !== undefined) {
+        try {
+          reader.releaseLock()
+        } catch {
+          // 已 cancel 的 reader releaseLock 会抛，这里不关心。
+        }
+      }
     }
-  })()
+    if (holding) {
+      const verdict = judgeRunawayTurn(raw, toolsOffered, repetitionGuard)
+      if (verdict.degenerate && attempt < maxAttempts) return { kind: 'retry', held, verdict }
+      flush()
+    }
+    const tail = translator.end()
+    if (tail !== '' && !out.destroyed) out.write(tail)
+    return { kind: 'delivered' }
+  }
+
+  void (async () => {
+    let current = response
+    for (let attempt = 1; ; attempt += 1) {
+      const result = await runAttempt(current, attempt)
+      if (result.kind === 'delivered') return
+      if (result.kind === 'end') {
+        finishHeld(result.held)
+        return
+      }
+      logRunawayRetry(relayRequestId, requestedModel, attempt, result.verdict)
+      let next: Response | undefined
+      try {
+        next = await requestChat()
+      } catch {
+        next = undefined
+      }
+      if (next === undefined || !next.ok) {
+        // 重发打不通：把跑飞的那一发交出去并正常收尾。它至少是上游的真实回答，
+        // 比让客户端空等到超时强。
+        finishHeld(result.held)
+        return
+      }
+      current = next
+    }
+  })().finally(() => {
+    if (!out.destroyed) out.end()
+  })
 
   setSseHeaders(ctx)
   ctx.status = 200

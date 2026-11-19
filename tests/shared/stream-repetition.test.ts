@@ -4,9 +4,14 @@ import assert from 'node:assert/strict'
 import {
   DEFAULT_REPETITION_GUARD,
   REPETITION_TAIL_LINES,
+  RUNAWAY_MIN_CHARS,
+  createChatStreamProbe,
   extractStreamText,
+  judgeRunawayText,
+  judgeRunawayTurn,
   measureStreamEmptyTurn,
   measureStreamRepetition,
+  measureTextRepetition,
   normalizeStreamRepetitionGuard,
 } from '../../src/shared/streamRepetition.ts'
 
@@ -231,4 +236,72 @@ test('有工具调用、没给工具、或正文为空时都不判宣布即停',
   assert.equal(empty.empty, true)
   assert.equal(empty.announcedStop, false, '零正文归 empty 那一格')
   assert.equal('lastChar' in empty, false, '没有正文时不该造出收尾字符')
+})
+
+// ---------------------------------------------------------------------------
+// 跑飞判据（2026-11-19 18:54 现网：0 工具调用、16384 字「执行。」复读、撞输出上限）
+// 与它的逐块探测器。
+// ---------------------------------------------------------------------------
+
+/** 2000 行同一句 ⇒ 正文 ~8000 字，尾部 128 行去重率 1/128。 */
+const RUNAWAY_LINES = Array.from({ length: 2000 }, () => '执行。')
+
+test('跑飞：零工具调用 + 长 + 尾部塌陷才算；短复读或干净长文都不算', () => {
+  const runaway = judgeRunawayTurn(sse(RUNAWAY_LINES), true)
+  assert.equal(runaway.degenerate, true, JSON.stringify({ ...runaway, repetition: runaway.repetition?.dedupRatio }))
+  assert.ok(runaway.contentChars >= RUNAWAY_MIN_CHARS)
+
+  assert.equal(judgeRunawayTurn(sse(RUNAWAY_LINES), false).degenerate, false, '客户端没带工具时不判')
+  assert.equal(
+    judgeRunawayTurn(sse(Array.from({ length: 2000 }, (_, i) => `distinct line ${i} with content`)), true).degenerate,
+    false,
+    '长但干净的正文是合法答案',
+  )
+  // 同样的复读但不足 6000 字：一次跑飞至少要有这么多内容，否则重发成本高于收益。
+  const short = judgeRunawayTurn(sse(RUNAWAY_LINES.slice(0, 60)), true)
+  assert.equal(short.degenerate, false)
+  assert.ok(short.contentChars < RUNAWAY_MIN_CHARS)
+})
+
+test('一旦出现工具调用增量就不是跑飞（这一轮确实在干活）', () => {
+  const withCall = sse(RUNAWAY_LINES)
+    + frames([{ choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'exec', arguments: '' } }] } }] }])
+  const reading = judgeRunawayTurn(withCall, true)
+  assert.equal(reading.toolCallDeltas, 1)
+  assert.equal(reading.degenerate, false)
+})
+
+test('非流式与流式对同一段正文给出同一个去重读数', () => {
+  const text = RUNAWAY_LINES.join('\n')
+  const streamed = measureStreamRepetition(sse(RUNAWAY_LINES))
+  const direct = measureTextRepetition(text)
+  assert.deepEqual(direct, streamed)
+  assert.equal(judgeRunawayText(text, 0, true).degenerate, true)
+  assert.equal(judgeRunawayText(text, 1, true).degenerate, false, '有工具调用就不判')
+})
+
+test('逐块探测器：帧被切在中间也算得准，半个帧不算数', () => {
+  const stream = sse(['甲乙', '丙丁', '戊己'])
+  const call = frames([{ choices: [{ delta: { tool_calls: [{ index: 0, id: 'c1', function: { name: 'exec' } }] } }] }])
+  const full = stream + call
+
+  const whole = createChatStreamProbe()
+  whole.push(full)
+  const wholeReading = whole.reading()
+
+  // 每 7 个字符切一刀：帧边界、括号、中文都被切开过。
+  const sliced = createChatStreamProbe()
+  for (let i = 0; i < full.length; i += 7) sliced.push(full.slice(i, i + 7))
+  assert.deepEqual(sliced.reading(), wholeReading, '分块怎么切都不该改读数')
+
+  // sse() 每行带一个换行：三行各 2 字 + 换行 = 9。
+  assert.equal(wholeReading.contentChars, 9)
+  assert.equal(wholeReading.toolCallDeltas, 1)
+
+  // 尾部残片（没有换行收尾）在下一次 push 补齐前不计入。
+  const partial = createChatStreamProbe()
+  partial.push('data: {"choices":[{"delta":{"content":"未完成')
+  assert.equal(partial.reading().contentChars, 0)
+  partial.push('的帧"}}]}\n\n')
+  assert.equal(partial.reading().contentChars, 5)
 })
