@@ -1503,7 +1503,10 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
       field: CatalogAdoptionField,
     ) => {
       try {
-        return await adoptCatalogField({ providerId, displayName, catalogId, field })
+        const result = await adoptCatalogField({ providerId, displayName, catalogId, field })
+        // 采用标准库字段会改这个模型的声明（含窗口）→ 对外读数跟着变。
+        if (result.success) syncCodexCatalogs()
+        return result
       } catch (error) {
         console.error('[IPC] Failed to adopt catalog field:', error)
         return { success: false, error: error instanceof Error ? error.message : 'adopt failed' }
@@ -1515,7 +1518,10 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
     IpcChannels.PROVIDERS_REVOKE_CATALOG_ADOPTION,
     async (_, providerId: string, displayName: string, field?: CatalogAdoptionField) => {
       try {
-        return revokeCatalogAdoption({ providerId, displayName, ...(field ? { field } : {}) })
+        const result = revokeCatalogAdoption({ providerId, displayName, ...(field ? { field } : {}) })
+        // 撤销同样改声明（窗口会退回上一层读数）→ 同步一次。
+        if (result.success) syncCodexCatalogs()
+        return result
       } catch (error) {
         console.error('[IPC] Failed to revoke catalog adoption:', error)
         return { success: false, error: error instanceof Error ? error.message : 'revoke failed' }
@@ -1829,7 +1835,10 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
 
   registerMainHandler(IpcChannels.CHANNELS_REFRESH_MODELS, async (_, id: string) => {
     try {
-      return await accountChannelManager.refreshModels(id)
+      const result = await accountChannelManager.refreshModels(id)
+      // 在线刷新目录会增删模型：池成员变了，路由的对外窗口也可能变。
+      syncCodexCatalogs()
+      return result
     } catch (error) {
       return {
         success: false,
@@ -1842,7 +1851,10 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
     IpcChannels.CHANNELS_SET_MODEL_DISABLED,
     async (_, id: string, modelId: string, disabled: boolean) => {
       try {
-        return await accountChannelManager.setModelDisabled(id, modelId, disabled)
+        const result = await accountChannelManager.setModelDisabled(id, modelId, disabled)
+        // 模型启停改的是池成员：这条路由的对外窗口可能跟着变，catalog 要跟上。
+        syncCodexCatalogs()
+        return result
       } catch (error) {
         return {
           success: false,
