@@ -43,6 +43,7 @@ import {
   chatResponseToResponseBody,
   createResponsesStreamTranslator,
   freeformToolNamesOf,
+  namespaceChildrenOf,
   responsesHasInput,
   responsesToChatRequest,
   responsesUnsupportedParams,
@@ -172,15 +173,35 @@ router.post('/responses', async (ctx: Context) => {
   // 自由文本工具（Codex 的 apply_patch）的名字要一路带到出向：回来的调用项得是
   // `custom_tool_call`，客户端才会真的执行它。
   const freeformTools = freeformToolNamesOf(body)
-  // 声明了但 chat 协议表达不了的条目（`type:'namespace'` 分组、无名托管工具）。
-  // 它们一条都不会发出去，必须让客户端/排障者看得见：否则「模型从不用子代理/联网
-  // 搜索」在链路上没有任何痕迹，只能被读成模型自己不肯用。
+  // 声明了但 chat 协议表达不了的条目（无名托管工具），逐请求报出来。
+  // `type:'namespace'` 分组不在这里：子工具已展开成可调用条目，另有 `…-Expanded` 头。
   const undeliverable = undeliverableToolDeclarations(body)
   if (undeliverable.length > 0) {
     ctx.set(
       'X-ModelPort-Tools-Dropped',
       toHeaderValue(undeliverable.map(entry => (entry.name === '' ? entry.kind : `${entry.kind}/${entry.name}`)).join(',')),
     )
+  }
+  // namespace 分组的子工具已展开送出：数量写进响应头，排障时能分清「模型不肯用」
+  // 与「网关没送到」。
+  const expandedChildren = namespaceChildrenOf(body)
+  if (expandedChildren.length > 0) {
+    ctx.set(
+      'X-ModelPort-Tools-Expanded',
+      toHeaderValue(`${expandedChildren.length}(${[...new Set(expandedChildren.map(child => child.namespace))].join('+')})`),
+    )
+  }
+  // 客户端声明了工具、最后一条都没送到上游：这一轮模型手里没有任何可调用对象。
+  // 不伪造占位定义（那等于网关替客户端发明工具），也不退回原始定义（严格上游会整条
+  // 400，把本来能用的回合打没），但必须让这件事可见 —— 2026-11-20 实测正是这种
+  // 「空工具集」促使模型自己发明调用语法（`<tool_call>` / DSML 文本）。
+  const declaredCount = Array.isArray((body as Payload)?.tools) ? (body as Payload).tools.length : 0
+  if (declaredCount > 0 && chatRequest.tools === undefined) {
+    ctx.set('X-ModelPort-Tools-Empty', '1')
+    storeManager.addLog('warn', '客户端声明了工具但一条都没送到上游', {
+      requestId,
+      data: { declared: declaredCount, dropped: undeliverable.map(entry => entry.kind) },
+    })
   }
 
   // 客户端申报「允许保存这次 response」。本代理没有 response 存储，这一格是 no-op，

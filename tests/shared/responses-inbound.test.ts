@@ -12,6 +12,8 @@ import {
   chatResponseToResponseBody,
   createResponsesStreamTranslator,
   freeformToolNamesOf,
+  namespaceChildrenOf,
+  namespacedToolName,
   responsesHasInput,
   responsesToChatRequest,
   responsesUnsupportedParams,
@@ -280,7 +282,7 @@ test('tool_choice 的字符串形态直通', () => {
   assert.equal(responsesToChatRequest({ input: 'x', tool_choice: 'required' }, { model: 'auto', stream: false }).tool_choice, 'required')
 })
 
-test('namespace 分组与无名托管工具一条都不发：不发客户端认不出的假函数', () => {
+test('namespace 分组的子工具展开成 mcp__<ns>__<child>，不是一条假函数', () => {
   const request = responsesToChatRequest(
     {
       input: 'x',
@@ -290,7 +292,10 @@ test('namespace 分组与无名托管工具一条都不发：不发客户端认�
           type: 'namespace',
           name: 'multi_agent_v1',
           description: 'Tools for spawning and managing sub-agents.',
-          tools: [{ type: 'function', name: 'spawn_agent', parameters: { type: 'object', properties: {} } }],
+          tools: [
+            { type: 'function', name: 'spawn_agent', description: 'Spawn a sub-agent.' },
+            { type: 'function', name: 'list_agents', parameters: { type: 'object', properties: {} } },
+          ],
         },
         { type: 'web_search', external_web_access: true },
       ],
@@ -299,9 +304,17 @@ test('namespace 分组与无名托管工具一条都不发：不发客户端认�
     { model: 'auto', stream: false },
   )
 
-  // 分组塌成同名空参函数会让模型去调一个客户端路由表里不存在的名字
-  // （实测 `unsupported call: mcp__codex_app` 被拒 25 次），子工具也一个都到不了。
-  assert.deepEqual((request.tools as Payload[]).map(tool => tool.function.name), ['exec_command'])
+  // 客户端 tools/router.rs 认的是 MCP 形状的调用名；压成同名空参函数只会得到
+  // `unsupported call`（实测 19 次），整组丢弃又会让这 20 多个能力彻底消失。
+  assert.deepEqual((request.tools as Payload[]).map(tool => tool.function.name), [
+    'exec_command',
+    'mcp__multi_agent_v1__spawn_agent',
+    'mcp__multi_agent_v1__list_agents',
+  ])
+  const spawn = (request.tools as Payload[])[1].function
+  assert.equal(spawn.description, 'Spawn a sub-agent.')
+  // 没有 parameters 的子工具补空 schema，严格上游才不会拒收整条请求。
+  assert.deepEqual(spawn.parameters, { type: 'object', properties: {} })
   assert.equal(request.tool_choice, 'auto')
 })
 
@@ -318,21 +331,44 @@ test('工具全被挡下时不带 tool_choice：空工具集上没有可选对�
   assert.equal(request.tool_choice, undefined)
 })
 
-test('挡下的声明要能被点名：namespace 带分组名，无名条目带类型', () => {
+test('挡下的声明只报真正的无名条目：namespace 已展开、chat 形状名字取 function.name', () => {
   assert.deepEqual(
     undeliverableToolDeclarations({
       tools: [
         { type: 'function', name: 'exec_command' },
-        { type: 'namespace', name: 'codex_app', tools: [] },
+        // chat 形状：名字嵌在 function 里，本来就能送出去，不能报成 dropped。
+        { type: 'function', function: { name: 'read_file' } },
+        { type: 'namespace', name: 'codex_app', tools: [{ type: 'function', name: 'list_projects' }] },
         { type: 'web_search' },
       ],
     }),
-    [
-      { kind: 'namespace', name: 'codex_app' },
-      { kind: 'web_search', name: '' },
-    ],
+    [{ kind: 'web_search', name: '' }],
   )
   assert.deepEqual(undeliverableToolDeclarations({ input: 'x' }), [])
+})
+
+test('namespace 子工具能逐项取出来，展开名与分组名一致', () => {
+  assert.deepEqual(
+    namespaceChildrenOf({
+      tools: [
+        { type: 'function', name: 'exec_command' },
+        {
+          type: 'namespace',
+          name: 'codex_app',
+          tools: [
+            { type: 'function', name: 'list_projects', description: 'List projects.', input_schema: { type: 'object' } },
+            { type: 'custom', name: 'attach_artifact' },
+            { type: 'function' },
+          ],
+        },
+      ],
+    }),
+    [
+      { namespace: 'codex_app', name: 'list_projects', description: 'List projects.', parameters: { type: 'object' } },
+      { namespace: 'codex_app', name: 'attach_artifact', description: '', parameters: undefined },
+    ],
+  )
+  assert.equal(namespacedToolName('codex_app', 'list_projects'), 'mcp__codex_app__list_projects')
 })
 
 test('参数改名与直通：max_output_tokens、text.format、reasoning.effort', () => {

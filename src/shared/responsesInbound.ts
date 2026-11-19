@@ -157,16 +157,33 @@ export function freeformToolNamesOf(body: unknown): string[] {
 /**
  * 客户端声明了、但 chat 协议表达不了的条目。
  *
- * 目前两类：`type:'namespace'` 分组（Codex 的 `codex_app` / `multi_agent_v1`）与没有
- * 名字的托管工具（`web_search` / `file_search`）。它们**一条都不发**——理由见下方
- * tools 映射处的注释——所以入向转换必须把这件事说出来：`/v1/responses` 把它写成
- * `X-ModelPort-Tools-Dropped`，否则「模型怎么从来不用子代理/联网搜索」在链路上无迹可查。
+ * 只剩一类：**没有名字**的托管工具（`type:'web_search'` 这类）。它们一条都不发，
+ * 入向转换必须把这件事说出来（`/v1/responses` 写成 `X-ModelPort-Tools-Dropped`），
+ * 否则「模型怎么从来不用联网搜索」在链路上无迹可查。
+ *
+ * `type:'namespace'` 分组**不再算丢弃**：它的子工具会被展开成可调用条目
+ * （见 `namespaceChildrenOf`），展开数与原名一并上报。
  */
 export interface UndeliverableToolDeclaration {
-  /** 声明形态：`namespace`，或客户端给的托管类型名（`web_search` 等）。 */
+  /** 客户端给的托管类型名（`web_search` 等）；无名 function 报 `unnamed`。 */
   kind: string
-  /** 分组名或工具名；无名条目为空串。 */
+  /** 工具名；无名条目为空串。 */
   name: string
+}
+
+/**
+ * 取一个工具条目**任意形状**下的名字。
+ *
+ * responses 把 `name` 抬在 tool 自身，chat 形状则嵌在 `function.name` 里。只看
+ * 顶层会把「本来能送出去的 chat 形状 function」误报成无名丢弃（2026-11-20 实测：
+ * `X-ModelPort-Tools-Dropped: function`）。
+ */
+export function toolNameOf(raw: unknown): string {
+  const record = asRecord(raw)
+  if (!record) return ''
+  const top = stringOf(record.name)
+  if (top !== '') return top
+  return stringOf(asRecord(record.function)?.name)
 }
 
 export function undeliverableToolDeclarations(body: unknown): UndeliverableToolDeclaration[] {
@@ -177,14 +194,65 @@ export function undeliverableToolDeclarations(body: unknown): UndeliverableToolD
     const record = asRecord(raw)
     if (!record) continue
     const type = stringOf(record.type)
-    const name = stringOf(record.name)
-    if (type === 'namespace') {
-      dropped.push({ kind: 'namespace', name })
-      continue
-    }
-    if (name === '') dropped.push({ kind: type === '' ? 'unnamed' : type, name: '' })
+    // namespace 会被展开发送，不算丢弃。
+    if (type === 'namespace') continue
+    if (toolNameOf(record) === '') dropped.push({ kind: type === '' ? 'unnamed' : type, name: '' })
   }
   return dropped
+}
+
+/** namespace 分组里可以展开成独立工具的子条目。 */
+export interface NamespaceChild {
+  /** 分组名（`codex_app`），用于拼调用名与留痕。 */
+  namespace: string
+  /** 子工具名（`list_projects`）。 */
+  name: string
+  description: string
+  parameters: Record<string, unknown> | undefined
+}
+
+/**
+ * 把 `type:'namespace'` 分组的子工具摊平。
+ *
+ * Codex 0.169 的 `codex_app` 里挂着 22 个子工具（worktree / 项目 / 线程管理），
+ * `multi_agent_v1` 同理。整组丢弃会让这些能力在链路上彻底消失：模型连「有这个
+ * 工具」都不知道，于是自己发明调用语法（实测 `unsupported call: mcp__codex_app`
+ * 19 次，以及后来的 DSML 文本）。
+ *
+ * 调用名按客户端路由的写法拼：`mcp__<namespace>__<child>`。客户端 `tools/router.rs`
+ * 对 MCP 工具同时接受 `__`/`_` 两种分隔与 `codex_app`/`codex_apps` 两种前缀，
+ * 所以这个形状是它认得的那一种。
+ */
+export function namespaceChildrenOf(body: unknown): NamespaceChild[] {
+  const source = asRecord(body) ?? {}
+  const tools = Array.isArray(source.tools) ? source.tools : []
+  const children: NamespaceChild[] = []
+  for (const raw of tools) {
+    const record = asRecord(raw)
+    if (!record || stringOf(record.type) !== 'namespace') continue
+    const namespace = stringOf(record.name)
+    if (namespace === '') continue
+    const nested = Array.isArray(record.tools) ? record.tools : []
+    for (const entry of nested) {
+      const child = asRecord(entry)
+      if (!child) continue
+      const name = toolNameOf(child)
+      if (name === '') continue
+      const parameters = asRecord(child.parameters) ?? asRecord(child.input_schema)
+      children.push({
+        namespace,
+        name,
+        description: stringOf(child.description),
+        parameters: parameters ?? undefined,
+      })
+    }
+  }
+  return children
+}
+
+/** 展开后的调用名：`mcp__<namespace>__<child>`。 */
+export function namespacedToolName(namespace: string, child: string): string {
+  return `mcp__${namespace}__${child}`
 }
 
 /** chat 侧 `{"input":"…"}` 替身 → responses 侧的原始文本 `input`。 */
@@ -504,17 +572,31 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
   const tools = Array.isArray(source.tools) ? source.tools : []
   if (tools.length > 0) {
     const freeform = new Set(freeformToolNamesOf(source))
-    // `type:'namespace'` 是客户端的分组声明（Codex 的 `codex_app` / `multi_agent_v1`，
-    // 子工具带自己的 name 与 schema），chat 协议没有分组这一层。压成一条同名、无参的
-    // function 等于告诉模型「有这么个可调用的东西」，而客户端路由表里根本没有这个名字：
-    // 实测 `unsupported call: mcp__codex_app` 被拒 25 次，组内子工具一个也到不了模型。
-    // 整组不发 —— 宁可少一个够不着的工具，也不发一条假的。
-    // 无名条目（`type:'web_search'` 这类托管工具）同理：chat 侧只剩空名，必被
-    // `sanitizeChatToolDefinitions` 删掉，这里先不发，`undeliverableToolDeclarations`
-    // 负责把「声明了但没送到」说出来。
+    // `type:'namespace'` 是客户端的分组声明（Codex 的 `codex_app` / `multi_agent_v1`）。
+    // chat 协议没有分组这一层，但**必须把子工具展开送出去**：整组丢弃会让这 20 多个
+    // 能力（worktree / 项目 / 线程管理）在链路上彻底消失，模型连「有这个工具」都不
+    // 知道，于是自己发明调用语法（2026-11-18 实测 `unsupported call: mcp__codex_app`
+    // 19 次；后来退化成把 DSML 标记写进正文）。
+    // 展开名用 `mcp__<namespace>__<child>`：客户端 `tools/router.rs` 对 MCP 工具同时
+    // 接受 `__`/`_` 分隔与 `app`/`apps` 前缀，这个形状是它认的。
+    // 无名字段（`type:'web_search'` 这类托管工具）仍不发：chat 侧只剩空名，必被
+    // `sanitizeChatToolDefinitions` 删掉，`undeliverableToolDeclarations` 负责报出来。
     const mapped = tools.flatMap(tool => {
       const record = asRecord(tool) ?? {}
-      if (stringOf(record.type) === 'namespace') return []
+      if (stringOf(record.type) === 'namespace') {
+        const namespace = stringOf(record.name)
+        if (namespace === '') return []
+        return namespaceChildrenOf(source)
+          .filter(child => child.namespace === namespace)
+          .map(child => ({
+            type: 'function',
+            function: {
+              name: namespacedToolName(child.namespace, child.name),
+              ...(child.description !== '' ? { description: child.description } : {}),
+              parameters: child.parameters ?? { type: 'object', properties: {} },
+            },
+          }))
+      }
       const name = stringOf(record.name)
       if (name === '') return []
       // responses 把 function 的字段抬在 tool 自身，chat 要求嵌进 `function`。
