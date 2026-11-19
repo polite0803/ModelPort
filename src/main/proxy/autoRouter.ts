@@ -50,7 +50,7 @@ import { getProbeRowsSync } from '../providers/modelProbeStore.ts'
 import { accountRuntime } from './accountRuntime'
 import { capClientRetryAfterSeconds, permanentRefusalCooldownMs, quotaWindowResetMs } from './failover.ts'
 import { clearCatalogMissCooldowns, isCatalogMissCoolingDown } from './modelCatalogCooldown'
-import { applyRequestTierFloor, requestWriteToolFloor } from './writeToolFloor.ts'
+import { applyRequestTierFloor, requestWriteToolFloor, writeToolFloorDegraded } from './writeToolFloor.ts'
 import { getChannelDefinition } from '../providers/accountChannels/catalogue'
 import { getAggregateEntry } from '../providers/aggregate/registry.ts'
 import { promptCacheOf, effectiveAffinityMinutes, type PromptCacheCapability } from '../../shared/promptCache.ts'
@@ -1486,10 +1486,13 @@ class AutoRouter {
     const contract = applyContractFilter(pool, needs)
     const contractPool = contract.pool
     // 写入型托底没能兑现（池里没有够档的模型）同样是一条降级，与 `response_format`
-    // 并列透出 —— 客户端至少能从响应头看到「这轮写入没拿到 balanced」。
-    const degraded = writeTier.relaxed
-      ? [...contract.degraded, 'write_tool_tier']
-      : contract.degraded
+    // 并列透出 —— 客户端至少能从响应头看到「这轮写入没拿到 balanced」。池被钉收窄过时
+    // 回落的原因只能是钉本身低于托底档，报 `write_tool_tier_pin`（见
+    // `writeToolFloorDegraded`）。
+    const degraded = [
+      ...contract.degraded,
+      ...writeToolFloorDegraded(writeTier, earlyPinRef !== undefined),
+    ]
     const missing: string[] = contract.missing
 
     // 空池要能区分「供应商没候选」和「配置把候选筛光了」：后两者指向用户
