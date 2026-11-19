@@ -154,39 +154,6 @@ export function freeformToolNamesOf(body: unknown): string[] {
   return names
 }
 
-/**
- * 客户端声明了、但 chat 协议表达不了的条目。
- *
- * 目前两类：`type:'namespace'` 分组（Codex 的 `codex_app` / `multi_agent_v1`）与没有
- * 名字的托管工具（`web_search` / `file_search`）。它们**一条都不发**——理由见下方
- * tools 映射处的注释——所以入向转换必须把这件事说出来：`/v1/responses` 把它写成
- * `X-ModelPort-Tools-Dropped`，否则「模型怎么从来不用子代理/联网搜索」在链路上无迹可查。
- */
-export interface UndeliverableToolDeclaration {
-  /** 声明形态：`namespace`，或客户端给的托管类型名（`web_search` 等）。 */
-  kind: string
-  /** 分组名或工具名；无名条目为空串。 */
-  name: string
-}
-
-export function undeliverableToolDeclarations(body: unknown): UndeliverableToolDeclaration[] {
-  const source = asRecord(body) ?? {}
-  const tools = Array.isArray(source.tools) ? source.tools : []
-  const dropped: UndeliverableToolDeclaration[] = []
-  for (const raw of tools) {
-    const record = asRecord(raw)
-    if (!record) continue
-    const type = stringOf(record.type)
-    const name = stringOf(record.name)
-    if (type === 'namespace') {
-      dropped.push({ kind: 'namespace', name })
-      continue
-    }
-    if (name === '') dropped.push({ kind: type === '' ? 'unnamed' : type, name: '' })
-  }
-  return dropped
-}
-
 /** chat 侧 `{"input":"…"}` 替身 → responses 侧的原始文本 `input`。 */
 function freeformInputOf(rawArguments: string): string {
   // 截断的 JSON 外壳先判掉：下面的兜底会把 `{"input":"Begin Patch…` 整串当补丁原文
@@ -205,103 +172,6 @@ export interface ResponsesToChatOptions {
   /** 交给 chat 那条链的模型名（名字怎么解析由调用方决定，这里只负责搬过去）。 */
   model: string
   stream: boolean
-}
-
-/**
- * 客户端自己追加的上下文块（Codex 的 goal 驱动是 `<codex_internal_context …>`）。
- *
- * 这类块每一步都重新追加一份，除 `Tokens used: N` 之外逐字相同。它在历史里堆成
- * 几十份近重复的「继续做 X」指令，模型看到的是一轮一轮「再读一遍目标 → 再说一遍
- * 我要执行 → 再说一遍现在调用 → 收尾」，长会话里最后退化成整段复读并提前收工。
- * 只折叠**重复的注入块**：用户真的重复说了两遍的话一个字都不动。
- */
-const CLIENT_INJECTION_MARKER = '<codex_internal_context'
-
-function isClientInjection(message: Payload): boolean {
-  if (message.role !== 'user') return false
-  const content = message.content
-  return typeof content === 'string' && content.trimStart().startsWith(CLIENT_INJECTION_MARKER)
-}
-
-/** 归一化掉每轮都会变的计数（`Tokens used: 165722`）与空白，剩下的才是「同一段话」。 */
-function injectionFingerprint(content: string): string {
-  return content.replace(/\d+/g, '#').replace(/\s+/g, ' ').trim()
-}
-
-function hasToolCalls(message: Payload): boolean {
-  return Array.isArray(message.tool_calls) && message.tool_calls.length > 0
-}
-
-function textOf(message: Payload): string | null {
-  return typeof message.content === 'string' ? message.content : null
-}
-
-/**
- * 同一个指纹的注入块只留**最新**一份。
- *
- * 删掉旧块之后，两侧的 assistant 会相邻。多数上游容忍同角色相邻，但严格上游会拒，
- * 所以把它们并成一条（文本与 `reasoning_content` 都保留，不丢模型说过的话）。
- * 带 `tool_calls` 的 assistant 永不合并 —— 那会破坏「结果紧跟调用」。
- */
-export function collapseRepeatedClientInjections(messages: Payload[]): Payload[] {
-  const first = new Map<string, number>()
-  const latest = new Map<string, Payload>()
-  messages.forEach((message, index) => {
-    if (!isClientInjection(message)) return
-    const key = injectionFingerprint(message.content as string)
-    if (!first.has(key)) first.set(key, index)
-    latest.set(key, message)
-  })
-  // 同组只留**组内第一条的位置**，文本用组内最新那份（目标不变、计数最新）。
-  // 留最新那条的位置会把 user 排到它后面的 assistant 之后，序列开头可能变成
-  // assistant —— 严格上游当场 400。
-  const replacement = new Map<number, Payload>()
-  const drop = new Set<number>()
-  messages.forEach((message, index) => {
-    if (!isClientInjection(message)) return
-    const key = injectionFingerprint(message.content as string)
-    const anchor = first.get(key)
-    if (anchor === undefined) return
-    if (anchor !== index) {
-      drop.add(index)
-      return
-    }
-    const newest = latest.get(key)
-    if (newest !== undefined && newest !== message) replacement.set(index, newest)
-  })
-  if (drop.size === 0) return messages
-
-  const kept: Payload[] = []
-  messages.forEach((raw, index) => {
-    if (drop.has(index)) return
-    const message = replacement.get(index) ?? raw
-    const previous = kept[kept.length - 1]
-    if (
-      previous !== undefined
-      && previous.role === 'assistant'
-      && message.role === 'assistant'
-      && !hasToolCalls(previous)
-      && !hasToolCalls(message)
-    ) {
-      // `content: null` 的 assistant（只有 reasoning）也要能被并掉：删掉注入后它
-      // 会与下一条 assistant 相邻，而 `content:null` 的单独一条会被上游当成空回复。
-      const join = (left: string, right: string): string =>
-        left === '' ? right : right === '' ? left : `${left}\n\n${right}`
-      const content = join(textOf(previous) ?? '', textOf(message) ?? '')
-      const reasoning = join(
-        typeof previous.reasoning_content === 'string' ? previous.reasoning_content : '',
-        typeof message.reasoning_content === 'string' ? message.reasoning_content : '',
-      )
-      kept[kept.length - 1] = {
-        ...previous,
-        content: content === '' ? null : content,
-        ...(reasoning !== '' ? { reasoning_content: reasoning } : {}),
-      }
-      return
-    }
-    kept.push(message)
-  })
-  return kept
 }
 
 /**
@@ -479,7 +349,7 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
     flushReasoning()
   }
 
-  const request: Payload = { model: options.model, messages: collapseRepeatedClientInjections(messages) }
+  const request: Payload = { model: options.model, messages }
   if (options.stream) {
     request.stream = true
     // 流式必须主动要 usage：OpenAI 形状的上游默认不发最后一个 usage 块，不要就拿不到数。
@@ -504,40 +374,25 @@ export function responsesToChatRequest(body: unknown, options: ResponsesToChatOp
   const tools = Array.isArray(source.tools) ? source.tools : []
   if (tools.length > 0) {
     const freeform = new Set(freeformToolNamesOf(source))
-    // `type:'namespace'` 是客户端的分组声明（Codex 的 `codex_app` / `multi_agent_v1`，
-    // 子工具带自己的 name 与 schema），chat 协议没有分组这一层。压成一条同名、无参的
-    // function 等于告诉模型「有这么个可调用的东西」，而客户端路由表里根本没有这个名字：
-    // 实测 `unsupported call: mcp__codex_app` 被拒 25 次，组内子工具一个也到不了模型。
-    // 整组不发 —— 宁可少一个够不着的工具，也不发一条假的。
-    // 无名条目（`type:'web_search'` 这类托管工具）同理：chat 侧只剩空名，必被
-    // `sanitizeChatToolDefinitions` 删掉，这里先不发，`undeliverableToolDeclarations`
-    // 负责把「声明了但没送到」说出来。
-    const mapped = tools.flatMap(tool => {
+    request.tools = tools.map(tool => {
       const record = asRecord(tool) ?? {}
-      if (stringOf(record.type) === 'namespace') return []
-      const name = stringOf(record.name)
-      if (name === '') return []
       // responses 把 function 的字段抬在 tool 自身，chat 要求嵌进 `function`。
       const parameters = asRecord(record.parameters)
         ?? asRecord(record.input_schema)
-        ?? (freeform.has(name) ? FREEFORM_INPUT_PARAMETERS : undefined)
-      return [{
+        ?? (freeform.has(stringOf(record.name)) ? FREEFORM_INPUT_PARAMETERS : undefined)
+      return {
         type: 'function',
         function: {
-          name,
+          name: stringOf(record.name),
           ...(stringOf(record.description) !== '' ? { description: stringOf(record.description) } : {}),
           ...(parameters ? { parameters } : {}),
         },
-      }]
+      }
     })
-    if (mapped.length > 0) request.tools = mapped
   }
 
   const toolChoice = responsesToolChoiceToChat(source.tool_choice)
-  // 声明过工具、但一条都没送出去时 `tool_choice` 没有指涉对象；带着它等于让上游对一个
-  // 空工具集决定「auto 还是必调」，那是自找的 400。客户端压根没声明工具的请求原样放行。
-  const toolsAllDropped = tools.length > 0 && request.tools === undefined
-  if (toolChoice !== undefined && !toolsAllDropped) request.tool_choice = toolChoice
+  if (toolChoice !== undefined) request.tool_choice = toolChoice
 
   const responseFormat = responsesTextToResponseFormat(source.text)
   if (responseFormat !== undefined) request.response_format = responseFormat

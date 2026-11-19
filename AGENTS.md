@@ -53,17 +53,11 @@ scheduler/）、`src/preload/`、`src/renderer/`（React）、`src/shared/`。�
   401。**
 - **自由格式（`custom`）工具在 Responses 通道上必须保持条目类型。** Codex `apply_patch` 是 `custom_tool_call`
   / `custom_tool_call_output`，`input` 为必填字符串；出站要回同样类型（回成 `function_call` 会静默丢掉写入），
-  这些条目也必须能从历史里读回。**并行工具调用在 chat 通道上合并成一条 assistant 消息**。`type:'namespace'`
-  分组与无名托管工具在入向整条丢弃并写 `X-ModelPort-Tools-Dropped`——压成同名空参函数就是 `unsupported call`。§Tool Calling。
+  这些条目也必须能从历史里读回。**并行工具调用在 chat 通道上合并成一条 assistant 消息**。§Tool Calling。
 - **网关不向用户对话写入任何提示词（铁律）。** 压缩标记自己说明取回方式（`markers.ts::retrievalHint`），
   「少说」是客户端参数（Codex 的 `model_verbosity`）——都不是网关该替用户说的话。唯一写进请求的自造结构是
   自由文本工具的参数形状（`freeform-input-schema`：只有 schema 无句子）。新增自造文本必须打 `GATEWAY-TEXT: <id>`
   并登记台账：`gateway-authored-text.test.ts` 精确集合对拍 + `no-gateway-system-text.test.ts` 扫全部 system 落点。
-- **跑到复读的回合整发丢弃、重发一次，绝不把复读交给客户端。** 判据：客户端带了工具、零工具调用增量、
-  可见正文 ≥6000 字、尾部去重率已过重复守卫（`streamRepetition.ts::judgeRunawayTurn`）。只认「这一轮退化」，
-  **不按钉/供应商归因**——同一钉两点会话一个跑飞一个健康时，分水岭是单轮塌进复读。流式在 responses 入口
-  压到首个工具调用或流结束再交付；重发打不通才交第一发。非流式同判据（`judgeRunawayText`）。§Degenerate
-  Stream Detection。
 - **证书进系统库不等于客户端信任。** `installCertificateTrust()` 只满足 Chromium/Schannel；Node 客户端需要
   `NODE_EXTRA_CA_CERTS`（PEM 来自 `GET /v1/management/tls/ca`）。握手被拒时不写行、也没有 `X-Request-Id`：先看
   `handshakeRejections` 再断言网关没收到。

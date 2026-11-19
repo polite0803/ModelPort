@@ -15,7 +15,6 @@ import {
   responsesHasInput,
   responsesToChatRequest,
   responsesUnsupportedParams,
-  undeliverableToolDeclarations,
 } from '../../src/shared/responsesInbound.ts'
 
 type Payload = Record<string, any>
@@ -278,61 +277,6 @@ test('tools 的字段从 tool 自身嵌回 chat 的 function', () => {
 
 test('tool_choice 的字符串形态直通', () => {
   assert.equal(responsesToChatRequest({ input: 'x', tool_choice: 'required' }, { model: 'auto', stream: false }).tool_choice, 'required')
-})
-
-test('namespace 分组与无名托管工具一条都不发：不发客户端认不出的假函数', () => {
-  const request = responsesToChatRequest(
-    {
-      input: 'x',
-      tools: [
-        { type: 'function', name: 'exec_command', parameters: { type: 'object', properties: {} } },
-        {
-          type: 'namespace',
-          name: 'multi_agent_v1',
-          description: 'Tools for spawning and managing sub-agents.',
-          tools: [{ type: 'function', name: 'spawn_agent', parameters: { type: 'object', properties: {} } }],
-        },
-        { type: 'web_search', external_web_access: true },
-      ],
-      tool_choice: 'auto',
-    },
-    { model: 'auto', stream: false },
-  )
-
-  // 分组塌成同名空参函数会让模型去调一个客户端路由表里不存在的名字
-  // （实测 `unsupported call: mcp__codex_app` 被拒 25 次），子工具也一个都到不了。
-  assert.deepEqual((request.tools as Payload[]).map(tool => tool.function.name), ['exec_command'])
-  assert.equal(request.tool_choice, 'auto')
-})
-
-test('工具全被挡下时不带 tool_choice：空工具集上没有可选对象', () => {
-  const request = responsesToChatRequest(
-    {
-      input: 'x',
-      tools: [{ type: 'web_search' }],
-      tool_choice: 'required',
-    },
-    { model: 'auto', stream: false },
-  )
-  assert.equal(request.tools, undefined)
-  assert.equal(request.tool_choice, undefined)
-})
-
-test('挡下的声明要能被点名：namespace 带分组名，无名条目带类型', () => {
-  assert.deepEqual(
-    undeliverableToolDeclarations({
-      tools: [
-        { type: 'function', name: 'exec_command' },
-        { type: 'namespace', name: 'codex_app', tools: [] },
-        { type: 'web_search' },
-      ],
-    }),
-    [
-      { kind: 'namespace', name: 'codex_app' },
-      { kind: 'web_search', name: '' },
-    ],
-  )
-  assert.deepEqual(undeliverableToolDeclarations({ input: 'x' }), [])
 })
 
 test('参数改名与直通：max_output_tokens、text.format、reasoning.effort', () => {
@@ -894,79 +838,4 @@ test('非流式：缺 call_id 时造稳定 id，空名字的调用丢弃', () =>
   assert.equal(output[0]?.call_id, 'call_rr_0')
   assert.equal(output[0]?.name, 'get_weather')
   assert.equal(output[0]?.id, 'fc_rr_0')
-})
-
-/* ------------------------------------------------ 重复注入块（goal 驱动） */
-
-// Codex 每步追加一份 `<codex_internal_context source="goal">`，除 `Tokens used: N`
-// 之外逐字相同。几十份堆在历史里，模型读到一轮一轮「再读一遍目标」，退化成整段复读。
-// 折叠成一份：位置留在**第一份**（否则序列开头会变成 assistant），文本用最新那份。
-test('重复的 goal 注入只留一份，位置在原处、文本取最新', () => {
-  const injection = (tokens: number): Payload => ({
-    role: 'user',
-    content: [{
-      type: 'input_text',
-      text: `<codex_internal_context source="goal">\nObjective: ship 1.8.34\nTokens used: ${tokens}\n</codex_internal_context>`,
-    }],
-  })
-  const request = responsesToChatRequest({
-    input: [
-      injection(100),
-      { role: 'assistant', content: [{ type: 'output_text', text: '我会执行。' }] },
-      injection(200),
-      { role: 'assistant', content: [{ type: 'output_text', text: '现在调用。' }] },
-      injection(300),
-    ],
-  }, { model: 'auto', stream: false })
-
-  const messages = request.messages as Payload[]
-  assert.equal(messages.length, 2, '只应剩一份注入与一条合并后的 assistant')
-  assert.match(String(messages[0]?.content), /Tokens used: 300/)
-  assert.equal(messages[0]?.role, 'user')
-  assert.equal(messages[1]?.role, 'assistant')
-  assert.equal(messages[1]?.content, '我会执行。\n\n现在调用。')
-})
-
-test('内容不同的注入一份都不删', () => {
-  const request = responsesToChatRequest({
-    input: [
-      { role: 'user', content: [{ type: 'input_text', text: '<codex_internal_context source="goal">Alpha</codex_internal_context>' }] },
-      { role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] },
-      { role: 'user', content: [{ type: 'input_text', text: '<codex_internal_context source="goal">Beta</codex_internal_context>' }] },
-    ],
-  }, { model: 'auto', stream: false })
-
-  const messages = request.messages as Payload[]
-  assert.equal(messages.length, 3)
-})
-
-test('用户真的重复说了两遍同样的话，一个字都不动', () => {
-  const request = responsesToChatRequest({
-    input: [
-      { role: 'user', content: [{ type: 'input_text', text: '再跑一遍测试' }] },
-      { role: 'assistant', content: [{ type: 'output_text', text: '好' }] },
-      { role: 'user', content: [{ type: 'input_text', text: '再跑一遍测试' }] },
-    ],
-  }, { model: 'auto', stream: false })
-
-  const messages = request.messages as Payload[]
-  assert.equal(messages.length, 3)
-  assert.equal(messages[0]?.content, '再跑一遍测试')
-  assert.equal(messages[2]?.content, '再跑一遍测试')
-})
-
-test('删掉注入后若夹着工具调用，那条 assistant 不参与合并', () => {
-  const request = responsesToChatRequest({
-    input: [
-      { type: 'function_call', call_id: 'call_a', name: 'exec_command', arguments: '{"cmd":"ls"}' },
-      { type: 'function_call_output', call_id: 'call_a', output: 'a.ts' },
-      { role: 'user', content: [{ type: 'input_text', text: '<codex_internal_context source="goal">X</codex_internal_context>' }] },
-      { role: 'assistant', content: [{ type: 'output_text', text: '继续。' }] },
-      { role: 'user', content: [{ type: 'input_text', text: '<codex_internal_context source="goal">X</codex_internal_context>' }] },
-    ],
-  }, { model: 'auto', stream: false })
-
-  const messages = request.messages as Payload[]
-  assert.equal(messages.length, 4, 'assistant(tool_calls) 与后续 assistant 不能被并成一条')
-  assert.ok(Array.isArray(messages[0]?.tool_calls))
 })

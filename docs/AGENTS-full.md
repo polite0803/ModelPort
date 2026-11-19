@@ -1457,25 +1457,7 @@ re-anchoring the conversation to it.
   so the correction has to happen after the stream ends.
 * **Non-streaming responses are not judged, and the panel says so.** There is no per-chunk signal
   and the body only exists when body logging is on; claiming coverage there would be a fabricated
-  reading. (The `/v1/responses` entry's runaway retry below is the one exception, and it is not a
-  reading: it decides delivery from the response body itself and stores nothing.)
-* **Responses-lane runaway turns are re-issued instead of delivered (2026-11-19).** That evening's
-  Codex goal loop produced a turn with **zero tool calls and 16 384 characters of `执行。` repetition**
-  (`routes/responses.ts`), cut by the output cap after five minutes; the client recorded
-  `Incomplete response returned, reason: max_output_tokens`, stopped for two hours, and the garbage
-  went into the conversation history. The same model, provider, pin and injected goal template served
-  a parallel session that stayed healthy, and that session had the same ~46 % share of text-only
-  turns - so the discriminator is a single turn collapsing into a repetition loop, not routing. The
-  guard therefore judges the turn, not the route: client offered tools, zero tool-call deltas,
-  ≥ `RUNAWAY_MIN_CHARS` (6000) characters of visible text, and the tail dedup ratio below the
-  existing repetition threshold (`judgeRunawayTurn` / `judgeRunawayText`, same accumulators via
-  `createChatStreamProbe`). On a hit the attempt is **discarded whole** - the entry holds assistant
-  text from the first byte until a tool call appears (then it flushes and streams live) or the
-  stream ends (then it judges) - and the same loopback request is re-posted once. If the re-issue
-  cannot be reached, attempt one is delivered rather than leaving the client with nothing. Cost:
-  tool-offering turns that end with prose only show their text at turn end (~4-11 s in the
-  reference session). Evidence: `tests/routes/responses-inbound.test.ts` (runaway mode: stream and
-  non-stream re-issue, and no re-issue when the client offered no tools).
+  reading.
 * Tests: `tests/shared/stream-repetition.test.ts` (verdict, tail window, short-answer exemption,
   threshold-is-a-real-knob), `tests/proxy/bandit-repetition.test.ts` (streak + no regression on the
   length rule), `tests/renderer/repetition-guard-wiring.test.mjs` (wiring, with six in-memory
@@ -1589,12 +1571,8 @@ write tool (`apply_patch`, `Write`, `Edit`, `str_replace_editor`, ... - `WRITE_T
 is hard, but "this request will land on disk" is a structural fact, and a broken edit costs more than
 a slow answer. `applyRequestTierFloor` runs immediately after `applyMinTier`, so `includeModels`
 cannot bring a below-floor model back. If the raised floor would empty the pool the route **falls
-back** to the pre-floor pool and reports a degraded token in `X-ModelPort-Auto-Degraded` - a write
-request must never turn a usable route into a 503. The token distinguishes the two causes:
-`write_tool_tier` means the pool itself has no model at that tier, `write_tool_tier_pin` means the
-pool was already narrowed to a pin (`preferredModel` / header pin) that sits below the floor - the
-fixes differ (add models vs. change the pin), so one umbrella token would send the reader to the
-wrong place. `writeToolFloorDegraded` owns that mapping. The advertised floor (`keptOfPool`) and
+back** to the pre-floor pool and reports `degraded: 'write_tool_tier'` in `X-ModelPort-Auto-Degraded` -
+a write request must never turn a usable route into a 503. The advertised floor (`keptOfPool`) and
 the preview deliberately keep the route-level `minTier`: they describe what the route normally
 serves, not what one request used. Names are matched exactly (lower-cased); custom/MCP tool names
 are not recognized and are treated as ordinary requests.
@@ -2147,21 +2125,6 @@ All main-renderer communication uses IPC channels defined in `src/main/ipc/chann
 whitelists all three (after `sanitizeChatToolDefinitions` drops unusable definitions, e.g. Codex's
 empty-name placeholders), and the reply is forwarded as-is - upstream produces the `tool_calls`, the
 client executes them and sends the results back. Nothing in the gateway rewrites either side.
-
-**Two Responses-side declaration shapes cannot be expressed in chat, and are dropped at the inbound
-mapping** (`responsesInbound.ts`), not left for the sanitizer to mangle: `type:'namespace'` groups
-(Codex 0.169 sends `codex_app` / `multi_agent_v1` with their children nested) and unnamed hosted
-tools (`type:'web_search'`, `file_search`). A namespace group used to be flattened into a single
-same-named `function` with no parameters; the model then called that name, the client's router had no
-such tool, and the turn died with `unsupported call: mcp__codex_app` (25 occurrences across the
-2026-11-18 sessions, plus 8 for the bare `codex_app`) while every child tool inside the group was
-invisible. Dropping the whole group is the honest end state: the model never learns a callable name
-that cannot be dispatched, and the client's own `<tools>` note still tells it the namespace exists.
-Both cases are reported per request in `X-ModelPort-Tools-Dropped`
-(`namespace/<name>`, `<type>` for unnamed entries), so "the model never used a sub-agent / web
-search" is traceable instead of being read as model reluctance. When every declared tool is dropped
-the request carries no `tools` and no `tool_choice` - an `auto`/`required` choice over an empty tool
-set is just a 400 waiting to happen.
 
 Since 2026-11-04 there is one observation-only exception on this path. When a request declared at
 least one tool and the reply carries a `tool_calls[].function.name` outside that declared set,

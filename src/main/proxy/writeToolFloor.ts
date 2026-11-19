@@ -84,22 +84,6 @@ export interface RequestTierFloorOutcome<T extends PoolStrategyCandidate> {
 }
 
 /**
- * 托底没兑现时该报的降级标记。
- *
- * 池被钉收窄过（`pinned`）时，回落的原因只可能是那一颗钉本身低于托底档 ——
- * 报 `write_tool_tier_pin`，让「钉了 flash 却在做写入任务」在响应头里能与
- * 「池子里就是没有够档模型」分开。两者处置完全不同：后者该补模型 / 关托底，
- * 前者要么换钉，要么接受这轮用低档模型。
- */
-export function writeToolFloorDegraded(
-  outcome: { relaxed: boolean },
-  pinned: boolean,
-): string[] {
-  if (!outcome.relaxed) return []
-  return [pinned ? 'write_tool_tier_pin' : 'write_tool_tier']
-}
-
-/**
  * 抬高下限；抬空了就回落。
  *
  * 回落不是「偷偷降回去」：调用方把 `relaxed` 写进 `degraded`，响应头
