@@ -14,6 +14,7 @@ import {
   Network,
   Plus,
   RefreshCw,
+  SlidersHorizontal,
   Tags,
   Ticket,
   Trash2,
@@ -40,6 +41,7 @@ import type { CatalogAdoption } from '../../../shared/modelCatalog'
 import type { ModelMetadata } from '../../../shared/modelMetadata'
 import { CatalogScopeBatchButton } from '@/components/models/CatalogScopeBatchButton'
 import { ModelAnnotationDialog } from '@/components/models/ModelAnnotationDialog'
+import { ModelParamsDialog } from '@/components/models/ModelParamsDialog'
 import { ModelAnnotationSummary } from '@/components/models/ModelAnnotationSummary'
 import { useDiscountClock } from '@/hooks/useDiscountClock'
 import { Badge } from '@/components/ui/badge'
@@ -287,6 +289,11 @@ export function Channels() {
    * 抄一份字符串只会和目录漂移（漂移后每次标注都拿归属错误）。
    */
   const [annotateTarget, setAnnotateTarget] = useState<{
+    channel: ChannelView
+    model: ChannelModelInfo
+  } | null>(null)
+  /** 「参数」入口：与「标注」并列，窗口档位不该只藏在标注里。 */
+  const [paramsTarget, setParamsTarget] = useState<{
     channel: ChannelView
     model: ChannelModelInfo
   } | null>(null)
@@ -1899,6 +1906,15 @@ export function Channels() {
                                 >
                                   <Tags className="h-3.5 w-3.5" />
                                 </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="shrink-0 px-1"
+                                  title={`${t('routes.params')} · ${t('routes.paramsHint')}`}
+                                  onClick={() => setParamsTarget({ channel, model })}
+                                >
+                                  <SlidersHorizontal className="h-3.5 w-3.5" />
+                                </Button>
                                 {model.dead
                                   ? (
                                     // 失效模型只能恢复、不能开关：它已经不在目录里了。
@@ -2466,6 +2482,20 @@ export function Channels() {
             void loadModels(annotateTarget.channel)
             void refreshAdoptions()
           }}
+        />
+      )}
+
+      {paramsTarget && (
+        <ModelParamsDialog
+          providerId={paramsTarget.channel.id}
+          displayName={channelModelDisplayName(
+            paramsTarget.channel.name,
+            paramsTarget.channel.id,
+            paramsTarget.model,
+          )}
+          modelLabel={paramsTarget.model.name}
+          onClose={() => setParamsTarget(null)}
+          onSaved={() => { void loadModels(paramsTarget.channel) }}
         />
       )}
     </div>

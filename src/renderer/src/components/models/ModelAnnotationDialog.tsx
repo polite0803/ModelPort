@@ -30,7 +30,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useToast } from '@/hooks/use-toast'
 import type { Fact, MetadataAttribute, ModelMetadata } from '@shared/modelMetadata'
 import { isAttributeApplicable, METADATA_ATTRIBUTES } from '@shared/modelMetadata'
-import { CONTEXT_WINDOW_TIERS, type ContextWindowTier } from '@shared/types'
 import type {
   CatalogAdoptionField,
   CatalogCandidatesResult,
@@ -205,9 +204,6 @@ type TriStateField = (typeof TRI_STATE_FIELDS)[number][0]
 
 const MODALITIES: InputModality[] = ['text', 'image', 'audio', 'video', 'pdf']
 
-/** 档位键（`Object.keys` 推成 string，这里收窄一次，别在 JSX 里到处断言）。 */
-const WINDOW_TIER_KEYS = Object.keys(CONTEXT_WINDOW_TIERS) as ContextWindowTier[]
-
 /**
  * 两个数值字段的合理上界，与主进程 `store/modelMarks.ts` 的
  * `MAX_CONTEXT_TOKENS` / `MAX_OUTPUT_TOKENS` 同值。这里先做一次人读校验：
@@ -275,6 +271,9 @@ export function ModelMarkEditor({
   const [draft, setDraft] = useState<MarkDraft>({})
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // 「已保存基线」：保存按钮只在草稿偏离基线时可点。保存成功后基线更新为主进程
+  // 归一结果，按钮随即回到禁用态——否则点完保存按钮还亮着，像没存上。
+  const [baseline, setBaseline] = useState(() => JSON.stringify(cleanHint((mark ?? {}) as MarkDraft)))
   // 两个数值字段用文本草稿：非法输入要留在框里并给出提示，不能一按保存就被归一函数静默丢掉。
   const [contextDraft, setContextDraft] = useState('')
   const [outputDraft, setOutputDraft] = useState('')
@@ -288,6 +287,7 @@ export function ModelMarkEditor({
     setContextDraft(mark?.contextTokens !== undefined ? String(mark.contextTokens) : '')
     setOutputDraft(mark?.maxOutputTokens !== undefined ? String(mark.maxOutputTokens) : '')
     setWeightDraft(mark?.weight !== undefined ? String(mark.weight) : '')
+    setBaseline(JSON.stringify(cleanHint((mark ?? {}) as MarkDraft)))
     setError(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [providerId, displayName])
@@ -318,25 +318,12 @@ export function ModelMarkEditor({
   }
 
   /** 支持档位只是界面的合法集合；空 = 三档都可选。 */
-  const toggleSupportedTier = (tier: ContextWindowTier) => {
-    const current = draft.supportedContextTiers ?? []
-    const next = current.includes(tier)
-      ? current.filter((item) => item !== tier)
-      : [...current, tier]
-    // 取消掉正在生效的那一档时，不能留下「选了但不在支持集合里」的矛盾状态。
-    const keepSelected =
-      draft.contextWindowTier !== undefined && next.includes(draft.contextWindowTier)
-        ? draft.contextWindowTier
-        : undefined
-    patch({
-      supportedContextTiers: next.length === 0 ? undefined : next,
-      ...(draft.contextWindowTier !== undefined ? { contextWindowTier: keepSelected } : {}),
-    })
-  }
 
   const contextError = validateMarkTokens(contextDraft, MAX_MARK_CONTEXT_TOKENS, t, 'context')
   const outputError = validateMarkTokens(outputDraft, MAX_MARK_OUTPUT_TOKENS, t, 'output')
   const weightError = validateMarkWeight(weightDraft, t)
+  // 与基线逐字段比（cleanHint 的键序稳定）：没有可保存的改动时按钮禁用。
+  const dirty = JSON.stringify(cleanHint(draft)) !== baseline
 
   const changeWeight = (raw: string) => {
     setWeightDraft(raw)
@@ -376,6 +363,7 @@ export function ModelMarkEditor({
         setContextDraft(saved?.contextTokens !== undefined ? String(saved.contextTokens) : '')
         setOutputDraft(saved?.maxOutputTokens !== undefined ? String(saved.maxOutputTokens) : '')
         setWeightDraft(saved?.weight !== undefined ? String(saved.weight) : '')
+        setBaseline(JSON.stringify(cleanHint((saved ?? {}) as MarkDraft)))
         onSaved(result.marks)
       } else {
         setError(result.error ?? t('proxy.routePoolMarkSaveFailed'))
@@ -444,56 +432,6 @@ export function ModelMarkEditor({
         {contextError !== null && (
           <p className="text-[10px] text-destructive break-words">{contextError}</p>
         )}
-      </div>
-
-      <div className="space-y-1">
-        <Label className="text-xs">{t('proxy.routePoolMarkWindowTier')}</Label>
-        <div className="flex flex-wrap gap-2">
-          {(['inherit', ...WINDOW_TIER_KEYS] as (ContextWindowTier | 'inherit')[]).map((tier) => {
-            const allowed =
-              tier === 'inherit'
-                ? true
-                : draft.supportedContextTiers === undefined
-                  || draft.supportedContextTiers.includes(tier)
-            return (
-              <Button
-                key={tier}
-                type="button"
-                size="sm"
-                variant={(draft.contextWindowTier ?? 'inherit') === tier ? 'default' : 'outline'}
-                disabled={!allowed}
-                onClick={() =>
-                  patch({ contextWindowTier: tier === 'inherit' ? undefined : tier })
-                }
-              >
-                {tier === 'inherit' ? t('proxy.routePoolMarkInherit') : tier.toUpperCase()}
-              </Button>
-            )
-          })}
-        </div>
-        <p className="text-[10px] text-muted-foreground">
-          {t('proxy.routePoolMarkWindowTierHelp')}
-        </p>
-      </div>
-
-      <div className="space-y-1">
-        <Label className="text-xs">{t('proxy.routePoolMarkSupportedTiers')}</Label>
-        <div className="flex flex-wrap gap-2">
-          {(Object.keys(CONTEXT_WINDOW_TIERS) as ContextWindowTier[]).map((tier) => (
-            <label key={tier} className="flex items-center gap-1 text-xs">
-              <input
-                type="checkbox"
-                className="h-3.5 w-3.5 accent-[var(--primary)]"
-                checked={(draft.supportedContextTiers ?? []).includes(tier)}
-                onChange={() => toggleSupportedTier(tier)}
-              />
-              {tier.toUpperCase()}
-            </label>
-          ))}
-        </div>
-        <p className="text-[10px] text-muted-foreground">
-          {t('proxy.routePoolMarkSupportedTiersHelp')}
-        </p>
       </div>
 
       <div className="space-y-1">
@@ -592,7 +530,7 @@ export function ModelMarkEditor({
             {t('common.cancel')}
           </Button>
         )}
-        <Button type="button" size="sm" onClick={() => void handleSave()} disabled={saving}>
+        <Button type="button" size="sm" onClick={() => void handleSave()} disabled={saving || !dirty}>
           {saving ? t('proxy.saving') : t('common.save')}
         </Button>
       </div>
@@ -841,6 +779,18 @@ function AnnotationBody({
 
   return (
     <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+      {/* 人工标注放在最前面：下面是「这一家声明了什么」与第三方台账，两段都很长，
+          编辑区垫在末尾时打开对话框根本看不见它（用户实测反馈）。 */}
+      <section className="space-y-2">
+        <h3 className="text-sm font-medium">{t('models.annotation.markSection')}</h3>
+        <ModelMarkEditor
+          providerId={providerId}
+          displayName={displayName}
+          mark={mark}
+          onSaved={() => void afterChange()}
+        />
+      </section>
+
       <section className="space-y-2">
         <h3 className="text-sm font-medium">{t('models.annotation.factsSection')}</h3>
         {metadataError && <p className="text-xs text-destructive break-words">{metadataError}</p>}
@@ -993,16 +943,6 @@ function AnnotationBody({
             })}
           </div>
         )}
-      </section>
-
-      <section className="space-y-2">
-        <h3 className="text-sm font-medium">{t('models.annotation.markSection')}</h3>
-        <ModelMarkEditor
-          providerId={providerId}
-          displayName={displayName}
-          mark={mark}
-          onSaved={() => void afterChange()}
-        />
       </section>
     </div>
   )

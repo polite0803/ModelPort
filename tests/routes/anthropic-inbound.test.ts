@@ -831,6 +831,10 @@ function assertRowMatchesList(listRows: Array<Record<string, any>>, item: Record
 
 test('单条检索带 anthropic-version 时回 anthropic 形状；不带时 OpenAI 形状一字不变', async () => {
   // `auto` 的池下界走真实管线：只有 antp 那家标了窗口，llm7 未标注、不参与下界。
+  // 先清掉「上一轮服务过谁」：对外窗口优先跟随当前模型（2026-11-18），不清的话这一格
+  // 会取决于前面哪个测试 POST 过 auto，断言就不可复现。
+  const { autoRouter } = await loadModule('main/proxy/autoRouter.ts')
+  autoRouter.reset()
   sm.updateProvider('antp', { modelCapabilities: { 'Test-Model': { contextTokens: 128000 } } } as never)
   const created = sm.createRoute({
     name: 'antempty',
@@ -852,6 +856,7 @@ test('单条检索带 anthropic-version 时回 anthropic 形状；不带时 Open
     assert.equal(anthAuto.json.id, 'auto')
     assert.equal(anthAuto.json.display_name, 'auto', 'display_name 恒等于 id：客户端筛的和发回来的是同一个名字')
     assert.match(anthAuto.json.created_at, /T.*Z/, 'anthropic 这一版是 ISO 字符串，不是秒数')
+    // reset 之后没有「当前模型」，走池最小：只有 antp 标了 128K，llm7 未标注不参与。
     assert.equal(anthAuto.json.max_input_tokens, 128000, '有窗口才发：与列表那一行同一个数')
     assert.equal(anthAuto.json.object, undefined, 'anthropic 形状里没有 object/owned_by')
     assert.equal(anthAuto.json.owned_by, undefined)
@@ -887,6 +892,9 @@ test('单条检索带 anthropic-version 时回 anthropic 形状；不带时 Open
 })
 
 test('列表广告过的 modelMap 键单查必须答话，且与列表那一行逐字段同源', async () => {
+  // 同前一条：对外窗口优先跟随「当前模型」，这里要先清掉，让读数回到池最小。
+  const { autoRouter } = await loadModule('main/proxy/autoRouter.ts')
+  autoRouter.reset()
   sm.updateProvider('antp', { modelCapabilities: { 'Test-Model': { contextTokens: 128000 } } } as never)
   const off = sm.createRoute({
     name: 'antoff',
@@ -913,7 +921,8 @@ test('列表广告过的 modelMap 键单查必须答话，且与列表那一行�
     const mapped = await proxy.request('GET', '/v1/models/claude-mapped', { headers: ANTHROPIC_HEADERS })
     assert.equal(mapped.status, 200, `列表广告了这个名字，单查不能 404：${JSON.stringify(mapped.json)}`)
     assert.equal(mapped.json.id, 'claude-mapped')
-    assert.equal(mapped.json.max_input_tokens, 128000, '窗口取映射目标那条路由的下界')
+    // reset 之后没有「当前模型」→ 池最小 128K。
+    assert.equal(mapped.json.max_input_tokens, 128000, '窗口取映射目标那条路由的对外读数')
     assert.equal(mapped.json.anthropic_family_tier, 'sonnet', '映射键行继承目标路由的档位（与列表同一判据）')
     assertRowMatchesList(rows, mapped.json, '映射键')
 

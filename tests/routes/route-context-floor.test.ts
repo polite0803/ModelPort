@@ -134,36 +134,35 @@ const floorOf = async (id: string): Promise<number | undefined> => {
 
 // 池成员：{big 1M, mid 128K, small 8192, noann 未标注}（wild 的通配符永不进池）
 
-test('A：每条路由报**自己池**的最大可广告窗口，同一次响应里出现不同的数字', async () => {
-  // 默认 `auto`：无策略 → 全池最大值是 Big-1M 的 1,000,000（2026-11-18 起取最大值：
-  // 取最小会让池里一个 8K 候选把 1M 模型也按 8K 广告，客户端提前把会话摘要掉）
-  assert.equal(await floorOf('auto'), 1_000_000)
+test('A：每条路由报**自己池**的最小可广告窗口，同一次响应里出现不同的数字', async () => {
+  // 默认 `auto`：无策略 → 全池最小值是 Small-8K 的 8192。这条路由会落到池里任意
+  // 一个候选上，报大就是让客户端按大尺寸压缩、再被小窗候选装不下。
+  assert.equal(await floorOf('auto'), 8192)
 
   // 只钉一家大窗（B）：候选收敛到一个模型 → 就是它自己的窗口
   const wide = makeRoute('wide', { excludeModels: [ref('mid', 'Mid-128K'), ref('small', 'Small-8K'), ref('noann', 'Unknown-W')] })
   assert.equal(await floorOf('wide'), 1_000_000)
 
-  // 两家：取两者里更大的那个（客户端少摘要，超出的部分由网关按实际模型裁剪）
+  // 两家：取两者里更小的那个，仍然与别家小窗模型无关
   const pair = makeRoute('pair', { excludeModels: [ref('small', 'Small-8K'), ref('noann', 'Unknown-W')] })
-  assert.equal(await floorOf('pair'), 1_000_000,
+  assert.equal(await floorOf('pair'), 128_000,
     '未标注候选与通配符都不参与（改之前这里会被全局池压成 8192）')
 
   // 池策略同样进算：`long-context` 要求已标注且 ≥128000
   makeRoute('longonly', { poolStrategies: [{ id: 'long-context', operator: 'and' }] })
-  assert.equal(await floorOf('longonly'), 1_000_000)
+  assert.equal(await floorOf('longonly'), 128_000)
 
   // 只剩未标注候选：有候选但没有读数 → 200K 兜底（用户裁定 2026-11-18），
-  // 不省略键也不退成 8K 那种会把会话砍断的小数
+  // 不省略键（省略会让客户端完全不压、历史无限膨胀）
   const onlyUnknown = makeRoute('onlyunknown', {
     excludeModels: [ref('big', 'Big-1M'), ref('mid', 'Mid-128K'), ref('small', 'Small-8K')],
   })
-  assert.equal(await floorOf('onlyunknown'), 200_000,
-    '这里原先报 undefined（键省略），客户端因此完全不压、历史无限膨胀')
+  assert.equal(await floorOf('onlyunknown'), 200_000)
 
   // 手动标注是唯一能把这个数抬起来的杠杆（标注优先级最高，且不被模型同步清掉）
   sm.setUserModelMark('noann', 'Unknown-W', { contextTokens: 256_000 })
   assert.equal(await floorOf('onlyunknown'), 256_000)
-  assert.equal(await floorOf('auto'), 1_000_000, '标注不会让小窗模型顶上去：全池仍取最大值')
+  assert.equal(await floorOf('auto'), 8192, '标注不会把小窗模型顶上去：全池仍取最小值')
   sm.setUserModelMark('noann', 'Unknown-W', null)
 })
 
@@ -188,7 +187,7 @@ test('钉住的路由报**钉的那个模型**的窗口，与整池读数无关'
     preferredModel: ref('small', 'Small-8K'),
     poolStrategies: [{ id: 'long-context', operator: 'and' }],
   })
-  assert.equal(await floorOf('pinnedout'), 1_000_000, '钉不在池内时不拿钉的窗口说话')
+  assert.equal(await floorOf('pinnedout'), 128_000, '钉不在池内时不拿钉的窗口说话：池内最小是 128K')
 })
 
 test('池被策略剔空 → 省略键而不是写个默认窗口（与 503 同源）', async () => {
@@ -213,7 +212,7 @@ test('单查 `/v1/models/<路由名>` 与列表同口径（都用那条路由自
 })
 
 test('瞬时状态不动广告值：账号当日额度打满后读数仍是原来的数', async () => {
-  assert.equal(await floorOf('auto'), 1_000_000, 'Big-1M 在池里时读数是它的窗口')
+  assert.equal(await floorOf('auto'), 8192, 'Small-8K 在池里时读数是 8K')
 
   // 把 small 的账号标成当日已用满：请求决策会把它的模型剔掉（否则就是白发的上游请求），
   // 但广告值不能跟着抖 —— 客户端按它安排压缩时机，一个每次请求都可能变小的数更糟。
@@ -222,7 +221,7 @@ test('瞬时状态不动广告值：账号当日额度打满后读数仍是原�
     todayUsed: 1,
     todayUsedDay: localDayKey(Date.now()),
   })
-  assert.equal(await floorOf('auto'), 1_000_000)
+  assert.equal(await floorOf('auto'), 8192)
   assert.equal(await floorOf('wide'), 1_000_000, '另一条路由同理')
 
   sm.updateAccount('small-acct', { dailyLimit: 0, todayUsed: 0 })
