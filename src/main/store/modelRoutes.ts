@@ -22,8 +22,9 @@ import type {
   ModelScope,
   RouteModelRating,
   RouteModelRef,
+  WriteToolTier,
 } from '../../shared/types.ts'
-import { isAutoPoolStrategyId, AUTO_MODEL_TIERS, FAIRNESS_LEAD_MAX, MODEL_SCOPES, ROUTE_RATING_MAX_STARS } from '../../shared/types.ts'
+import { isAutoPoolStrategyId, AUTO_MODEL_TIERS, FAIRNESS_LEAD_MAX, MODEL_SCOPES, ROUTE_RATING_MAX_STARS, WRITE_TOOL_TIERS } from '../../shared/types.ts'
 import { normalizeAutoRoutingConfig } from './autoRoutingConfig.ts'
 import type { ModelRouteError } from '../../shared/modelRouteName.ts'
 import {
@@ -63,6 +64,15 @@ export function isRouteStrategyValue(value: unknown): value is LoadBalanceStrate
  */
 export function isRouteMinTierValue(value: unknown): value is AutoModelTier {
   return typeof value === 'string' && (AUTO_MODEL_TIERS as readonly string[]).includes(value)
+}
+
+/**
+ * 写入型托底的写入侧校验。与 `minTier` 同一条理由：怪值在写入侧必须**拒绝**，
+ * 不能静默落成「没配」—— 用户选了 `strong`、存下来变成出厂默认 `balanced`，
+ * 他没有任何办法从界面看出来。
+ */
+export function isRouteWriteToolTierValue(value: unknown): value is WriteToolTier {
+  return typeof value === 'string' && (WRITE_TOOL_TIERS as readonly string[]).includes(value)
 }
 
 export interface NormalizeRoutesOptions {
@@ -251,6 +261,9 @@ function normalizeRouteFields(name: string, entry: Record<string, unknown>, opti
   // 能力下限：只认三个档位字面量；手写的怪值按「没配」（不设下限）处理，
   // 而不是猜一个档 —— 猜错会把整条路由的候选筛空，那是比不生效严重得多的失败。
   const minTier = isRouteMinTierValue(entry.minTier) ? entry.minTier : undefined
+  // 写入型托底：与 `minTier` 同形，只认三个字面量；缺省键不落 Record（读侧用
+  // `DEFAULT_WRITE_TOOL_TIER`），盘上每条路由才不多出这一格。
+  const writeToolTier = isRouteWriteToolTierValue(entry.writeToolTier) ? entry.writeToolTier : undefined
   // 钉：靠 `normalizeRouteModelRefs` 同一套引用归一，只取第一条（一条路由只钉一个
   // 模型）。providerId 与 displayName 都要在，缺一个就是配了一半，按没配处理。
   const preferredModel = normalizeRouteModelRefs(
@@ -274,6 +287,7 @@ function normalizeRouteFields(name: string, entry: Record<string, unknown>, opti
     pinModels: normalizeRouteModelRefs(entry.pinModels),
     ...(modelScope === undefined ? {} : { modelScope }),
     ...(minTier === undefined ? {} : { minTier }),
+    ...(writeToolTier === undefined ? {} : { writeToolTier }),
     ...(preferredModel === undefined ? {} : { preferredModel }),
     ...(modelRatings.length === 0 ? {} : { modelRatings }),
     // 只在显式关掉时落键：缺省即硬钉（见 `ModelRoute.stickyHardPin`）。把「没配」也归一成

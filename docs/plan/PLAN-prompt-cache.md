@@ -227,7 +227,7 @@
 #### P2-D1 账号/模型亲和窗口与缓存 TTL 对齐
 
 - 复用现有粘性（`src/main/proxy/autoRouter.ts:675-687` / `:909`），新增独立于 `stickyMinutes` 的缓存亲和：
-  - `autoRouting.cacheAffinityMinutes`（新配置，默认 `60`：DeepSeek 官方写"a few hours to a few days"，一小时在文档下界之内，不会比缓存先过期；上限 1440）。
+  - `autoRouting.cacheAffinityMinutes`（新配置，默认 `240`：DeepSeek 官方写"a few hours to a few days"，四小时仍在文档下界之内，不会比缓存先过期；上限 1440）。
   - 仅在 `promptCache.mode !== 'unknown'` 的供应商上生效；只钉**健康、未被池策略/手动增删/契约过滤筛掉**的 `(providerId, accountId, displayName)`。
   - 与 `stickyHardPin` 的关系：亲和是"缓存优先"的硬提示，但冷却/额度/能力闸门永远先于它。`revokeSticky`（降质守卫）不撤销缓存亲和，只撤销打分粘性——两者分开记。
 - **模型钉定**：DeepSeek 的 `deepseek-chat` 与 `deepseek-reasoner` 是不同缓存域；同一会话不得在两个模型之间轮换。路由如有多模型，亲和命中时模型也必须钉住。
@@ -259,7 +259,7 @@
 **风险 / 回退**：关压缩会让长会话更容易撞窗口 ⇒ 保留用户显式开启；若命中率不升，回退为 `enabled: true` 并只保留亲和，不硬推策略。亲和会削弱负载均衡 ⇒ 只对缓存敏感家、只对健康候选、默认跟随粘性。
 
 **拍板项 P2-D-1**：DeepSeek 默认"缓存优先"（压缩关）是否接受（推荐：接受，先按上面三组读数验收；不接受则只做亲和）。
-**拍板项 P2-D-2**：`cacheAffinityMinutes` 的取值（**已按文档下界拍为 60 分钟**；等真机 TTL 读数再调）。
+**拍板项 P2-D-2**：`cacheAffinityMinutes` 的取值（**已按文档下界拍为 240 分钟**；等真机 TTL 读数再调）。
 
 ---
 
@@ -316,7 +316,7 @@ DeepSeek `c ≈ 0.1` ⇒ 需省 ~90%；OpenAI `c ≈ 0.25~0.5` ⇒ 需省 50–7
 **2026-11-14 落地与暂缓（裁定）**
 
 - **已落地归因**：按日桶 `byProvider[*].compression` 记 applied / refused 两臂（上游 prompt、缓存上报数、命中 token、估算节省），`summarizeCompressionCache` 按 `R'(1+w) < cR` 算出实现节省率与 break-even；`GET /v1/management/compression/economics?days=7` 按供应商输出。它不是新通路，而是把已有日志行/日桶的字段做成可读判据。
-- **已落地路由侧**：`cacheAffinityMinutes`（默认 60）按供应商文档 TTL 封顶（`effectiveAffinityMinutes`；Anthropic 5m 档 → 5m，1h 档 → 60m）。钉在一个已经过期的缓存上只是挡住更优候选，不是省钱。
+- **已落地路由侧**：`cacheAffinityMinutes`（默认 240）按供应商文档 TTL 封顶（`effectiveAffinityMinutes`；Anthropic 5m 档 → 5m，1h 档 → 60m）。钉在一个已经过期的缓存上只是挡住更优候选，不是省钱。
 - **暂缓 1：第 4 个断点**。断点上限 4、当前只用 3（tools / system / 上一轮末）。长历史中段断点**每轮位置都在移动**，等于每轮重写一段大前缀；要开它，先要 `/economics` 证明该家缓存确实命中、且省幅过 break-even，否则是"无脑开"。
 - **暂缓 2：TTL 按轮间隔自适应**。1h 档 `writeMultiplier=1`（写价翻倍）。唯一可论证的切换点是"上一轮间隔 > 5m、5m 缓存已经冷了"，但下一次间隔仍未知；在拿到真实轮间隔与命中率之前，不做自动切换。所需读数由上面的 `/economics` 与 `byProvider` 两臂提供。
 
@@ -361,7 +361,7 @@ P0（Anthropic 断点） 与 P1 并行，不阻塞 DeepSeek
 |---|---|---|
 | P0-1 | Anthropic 官方条目默认开启断点 | 是；其余家 `unknown` |
 | P2-D-1 | DeepSeek 默认"缓存优先"（压缩关） | 是；按三组读数验收，不达标回退 |
-| P2-D-2 | `cacheAffinityMinutes` 取值 | **60**（文档下界内），真机 TTL 读数后再调 |
+| P2-D-2 | `cacheAffinityMinutes` 取值 | **240**（文档下界内），真机 TTL 读数后再调 |
 | P3-1 | 压缩路线 A / B | 先测；长期押 B |
 
 ## 8. 交付物清单（按阶段）
@@ -382,7 +382,7 @@ P0（Anthropic 断点） 与 P1 并行，不阻塞 DeepSeek
 - **P0**：`shared/promptCache.ts` 能力类型；`AggregateEntry.promptCache`；Anthropic 适配器 `applyCacheBreakpoints`（tools / system / 上一轮末尾，最多 4 个，文本不动，幂等）；`AppConfig.promptCaching` + 设置页开关与 TTL。
 - **P2-D**：
   - `docs/providers/deepseek.md` 取证：自动缓存、按完整前缀命中、`prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`、"几小时到几天"清退；作用域与最小单位官方页未写，不填。
-  - `autoRouting.cacheAffinityMinutes` 默认 **60**（文档下界内），只对能力表已知的供应商写亲和；降质守卫同时撤销亲和。
+  - `autoRouting.cacheAffinityMinutes` 默认 **240**（文档下界内），只对能力表已知的供应商写亲和；降质守卫同时撤销亲和。
   - `CompressionConfig.cacheFirst` 默认开 + `providerOverrides`；DeepSeek 默认跳过 live-zone 压缩。
 - **P3-A**：`acceptCompression` 增加 `cachePolicy`，门从固定 10% 改为 `1 - c/(1+w)`；只在能力表已知时生效，未知家维持 10%。
 
@@ -716,3 +716,19 @@ prompt_tokens 区间 59,722–175,435（均价 105,133，合计 231 万）
 **残留边界（要修需拍板，非小改）**：真正拿到缓存须把 TRAE 通道切到 `create_agent_task` 代理协议——请求体加密、服务端跑工具、`commit_toolcall_result` 往返、会话/隧道态管理，是一次大改且加密大概率不可复现。未验证的廉价假设仅剩「`llm_utils_chat` 带会话/隧道头能否命中」，再探需花积分，未获授权不做。**积分口径**：9.11 已证 TRAE 耗分几乎全由每轮 prompt 体量决定（~0.5 分/轮），缓存即便拿到也只是省重复前缀的一部分；当前 `channelIds=["trae"]` 裁剪仍是主要止血手段。
 
 **收尾（已做）**：按指纹 `3709048081F9…` 删 CA（Root 70→69）、`ProxyEnable=0` 清 ProxyServer、无代理重启 TRAE、停 `trae-mitm` 单元、删含明文 Authorization 的 flow/WS/计费 dump、删取证 drop-in `trae-usage-dump.conf` 与 dump 文件。
+
+## 9.13 2026-11-19 命中率提升批：缺口分类、工具序归一、亲和 240 + 落盘
+
+**缺口四分类（可核证）**：`proxy/cacheMissLedger.ts` 按会话上一轮 prompt 大小把每次未命中归到
+`cold / rewrite / break / tail`，经 `tokenAccounting` 按 `(provider, model)` 逐日累计；仪表盘
+「缓存命中（按模型）」在命中率下列出四类计数与配色（红=断链、橙=改写、其余中性）。无会话键或
+上游未报缓存 ⇒ 不分类，绝不充成 `cold`。
+
+**工具定义排序**：`sanitizeChatToolDefinitions` 按 `function.name` 稳定排序。百炼明确要求
+「工具顺序一致」才命中；多 MCP server 的客户端轮间抖动顺序会整段废掉 system 前缀。
+
+**亲和 60 → 240（+ 跨重启）**：`DEFAULT_AUTO_ROUTING_CONFIG.cacheAffinityMinutes` 改为 240
+（DeepSeek 文档写"几小时到几天"，四小时仍在下界内），并按 `cacheAffinity` 键落盘（只存选路
+坐标与到期时刻，5s 节流、最多 500 条）。**客户端的压缩/删史网关无法修复**：原文到不了网关；
+DeepSeek 系（`readDiscount 0.02`）上压缩本就被 `isCacheSensitive` 关掉，这条线上网关不改写
+字节——能跨重启掉的只有亲和读数，所以 P4 落成亲和持久化，而不是"改写产物固化"。

@@ -86,7 +86,12 @@
       "expand": "Show all ({{count}})",
       "collapse": "Collapse",
       "note": "Cache read is what the upstream itself reported and is a subset of input. A model without upstream usage shows \"-\", not 0%.",
-      "coverageNote": "The per-model split covers {{covered}} of {{total}} requests in this period; records written before it existed carry no model attribution."
+      "coverageNote": "The per-model split covers {{covered}} of {{total}} requests in this period; records written before it existed carry no model attribution.",
+      "missCold": "cold",
+      "missRewrite": "rewrite",
+      "missBreak": "break",
+      "missTail": "tail",
+      "missClassesHint": "Miss reasons, compared session-by-session against the previous turn: cold = no prior reading or under half hit; rewrite = the client shrank its history; break = the anchor still exists but the prefix broke mid-way; tail = a normal new turn. Only requests whose upstream reported cache read are counted."
     },
     "lastUpdated": "Last Updated",
     "refresh": "Refresh",
@@ -590,6 +595,9 @@
     "routeMinTier_balanced": "At least balanced",
     "routeMinTier_strong": "At least strong",
     "routeMinTierHelp": "Models below this tier are dropped for the whole route, and the floor runs before pool strategies and manual includes - neither can bring one back. Use it when the pool is all free/small models and you want at least a mid tier. The tier comes from capability marks; an unmarked model falls back to a name heuristic, never to unknown.",
+    "routeWriteToolTier": "Write-request tier floor",
+    "routeWriteToolTier_off": "Off",
+    "routeWriteToolTierHelp": "When a request declares write tools (apply_patch, Write, Edit, ...), raise the floor above the capability floor: a broken edit costs more than a slower answer. The signal is the tool name only, no semantic guessing. If the pool has no model at that tier the route falls back instead of failing, and the response header X-ModelPort-Auto-Degraded says write_tool_tier.",
     "routeBasedOn": "Pool source (reference another route)",
     "routeBasedOnNone": "Own pool (no reference)",
     "routeBasedOnHelp": "Pick an existing route and this route takes its candidate pool, strategies, name pin and manual include/exclude verbatim from it. References are one hop only, so 'A borrows B which borrows C' cannot happen. This is how you give one pool a second client-facing name (an Anthropic tier, say) without copying a config that would then drift apart.",

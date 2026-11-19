@@ -23,6 +23,7 @@ import type {
   PromptCachingConfig,
 } from '../../shared/types.ts'
 import type { ChannelLoginKind } from '../../shared/channels.ts'
+import type { CacheAffinityMap } from './cacheAffinity.ts'
 import {
   DEFAULT_AUTO_ROUTING_CONFIG,
   DEFAULT_COMPRESSION_CONFIG,
@@ -856,6 +857,13 @@ export interface StoreSchema {
    * 读时按 TTL 过滤，所以这里不需要"是否有效"的布尔。
    */
   aggregateQuotaExhaustions: AggregateQuotaExhaustions
+  /**
+   * 会话 → 上一次成功的缓存亲和坐标，跨重启保留。
+   *
+   * 缺省 = 这个版本之前没有写过（读取侧按空表处理，不是「所有会话都没有亲和」）。
+   * 只含选路身份与到期时刻，绝不含对话内容。
+   */
+  cacheAffinity?: CacheAffinityMap
 }
 
 /**

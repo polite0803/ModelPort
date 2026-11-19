@@ -42,6 +42,7 @@ import {
 } from './types'
 import type { AggregateCreditSnapshot, AggregateCreditSnapshots } from './types'
 import type { AggregateQuotaExhaustionRecord, AggregateQuotaExhaustions } from './types'
+import { normalizeCacheAffinity, type CacheAffinityMap } from './cacheAffinity.ts'
 import {
   removeExhaustion,
   upsertExhaustion,
@@ -64,6 +65,7 @@ import {
   type DayTokenBucket,
   type DayTokenSummary,
   type CompressionVerdict,
+  type CacheMissClass,
 } from '../../shared/tokenAccounting.ts'
 import { sendRequestLog } from '../ipc/logBroadcast'
 import { RequestLogManager } from '../requestLogs/manager'
@@ -90,6 +92,7 @@ import {
   checkRouteName,
   findModelRoute,
   isRouteMinTierValue,
+  isRouteWriteToolTierValue,
   isRouteStrategyValue,
   LEGACY_AUTO_ROUTE_NAME,
   normalizeModelRoutes,
@@ -1727,6 +1730,17 @@ class StoreManager {
     return this.getConfig()
   }
 
+  /** 跨重启保留的缓存亲和读数；读取时已按到期时刻过滤并校验过形状。 */
+  getCacheAffinity(): CacheAffinityMap {
+    this.ensureInitialized()
+    return normalizeCacheAffinity(this.store!.get('cacheAffinity'), Date.now())
+  }
+
+  setCacheAffinity(entries: CacheAffinityMap): void {
+    this.ensureInitialized()
+    this.store!.set('cacheAffinity', entries)
+  }
+
   // ==================== Model Route Operations ====================
 
   /**
@@ -2014,6 +2028,9 @@ class StoreManager {
     }
     if (input.minTier !== undefined && !isRouteMinTierValue(input.minTier)) {
       return { code: 'invalid_input', message: `Unknown route minTier: ${JSON.stringify(input.minTier)}` }
+    }
+    if (input.writeToolTier !== undefined && !isRouteWriteToolTierValue(input.writeToolTier)) {
+      return { code: 'invalid_input', message: `Unknown route writeToolTier: ${JSON.stringify(input.writeToolTier)}` }
     }
     const includeError = checkRouteModelRefs('includeModels', input.includeModels)
     if (includeError !== undefined) return includeError
@@ -2484,6 +2501,8 @@ class StoreManager {
     costUsd?: number
     /** 这次请求的压缩判决；缺省 = 没经过压缩层，不是"没压缩"。 */
     compression?: CompressionVerdict
+    /** 这一轮缓存缺口的成因；缺省 = 没报缓存字段或调用方没分类。 */
+    cacheMissClass?: CacheMissClass
     nowMs?: number
   }): void {
     this.ensureInitialized()

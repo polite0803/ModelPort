@@ -8,6 +8,7 @@ import {
   isMissingReasoningHistoryError,
   isMissingSessionAffinityError,
   isAccountArrearsError,
+  isRegionRestrictedModelError,
   isToolOverflowError,
 } from './failover.ts'
 
@@ -33,6 +34,7 @@ export function attemptTraceOf(input: {
     || isForcedToolChoiceUnsupported(result.error)
     || isMissingSessionAffinityError(result.error)
     || isAccountArrearsError(result.error)
+    || isRegionRestrictedModelError(result.error)
     || result.status === 404
   const outcome: RequestAttemptTrace['outcome'] = result.success
     ? 'success'
