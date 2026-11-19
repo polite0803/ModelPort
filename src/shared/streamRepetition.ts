@@ -83,7 +83,8 @@ export function normalizeStreamRepetitionGuard(value: unknown): RepetitionGuardS
  * than counted as text, because counting them would let a truncated stream look
  * like a repeated one.
  */
-export function* chatDeltasInSse(sse: string): Generator<Record<string, unknown>> {
+export function extractStreamText(sse: string): string {
+  const parts: string[] = []
   for (const rawLine of sse.split('\n')) {
     const line = rawLine.trimEnd()
     if (!line.startsWith('data:')) continue
@@ -96,13 +97,7 @@ export function* chatDeltasInSse(sse: string): Generator<Record<string, unknown>
       continue
     }
     const delta = (frame as { choices?: Array<{ delta?: Record<string, unknown> }> }).choices?.[0]?.delta
-    if (delta) yield delta
-  }
-}
-
-export function extractStreamText(sse: string): string {
-  const parts: string[] = []
-  for (const delta of chatDeltasInSse(sse)) {
+    if (!delta) continue
     for (const field of DELTA_FIELDS) {
       const value = delta[field]
       if (typeof value === 'string' && value !== '') parts.push(value)
@@ -139,21 +134,9 @@ export function measureStreamRepetition(
   sse: string,
   settings: RepetitionGuardSettings = DEFAULT_REPETITION_GUARD,
 ): StreamRepetitionReading | null {
-  if (!settings.enabled) return null
-  return measureTextRepetition(extractStreamText(sse), settings)
-}
-
-/**
- * 同一把尺子量「已拼好的正文」。非流式响应没有逐块过程，正文是 JSON 里的一个字符串；
- * 衰退判据（下面 {@link judgeRunawayTurn}）要求两条入口共用同一个去重读数，
- * 否则流式与非流式会对同一段文字给出两个结论。
- */
-export function measureTextRepetition(
-  text: string,
-  settings: RepetitionGuardSettings = DEFAULT_REPETITION_GUARD,
-): StreamRepetitionReading | null {
   // 关掉守卫就不产出读数：留一行「没判」比留一行假的健康读数诚实。
   if (!settings.enabled) return null
+  const text = extractStreamText(sse)
   const all = text.split('\n').map((line) => line.trim()).filter((line) => line !== '')
   if (all.length === 0) {
     return { lines: 0, uniqueLines: 0, dedupRatio: 1, runChars: 0, degraded: false, notJudged: 'too_short' }
@@ -214,43 +197,44 @@ export interface StreamEmptyTurnReading {
   announcedStop: boolean
 }
 
-interface AssistantDeltaTally {
-  contentChars: number
-  toolCallDeltas: number
-  lastChar?: string
-}
-
-/**
- * 一个 `delta` 对「助手可见正文 / 工具调用」的贡献。流式探测与整段读数共用这一个
- * 累加器 —— 早判（逐块）与终判（整段）数出两个不同的字符数，就是两把尺子。
- */
-function accumulateAssistantDelta(tally: AssistantDeltaTally, delta: Record<string, unknown>): void {
-  const content = delta.content
-  if (typeof content === 'string') {
-    tally.contentChars += content.length
-    const trimmed = content.trimEnd()
-    if (trimmed !== '') tally.lastChar = trimmed.slice(-1)
-  } else if (Array.isArray(content)) {
-    for (const part of content) {
-      if (typeof part === 'string') {
-        tally.contentChars += part.length
-        const trimmedPart = part.trimEnd()
-        if (trimmedPart !== '') tally.lastChar = trimmedPart.slice(-1)
-      }
-      else if (typeof (part as { text?: unknown })?.text === 'string') {
-        tally.contentChars += (part as { text: string }).text.length
-        const trimmedText = (part as { text: string }).text.trimEnd()
-        if (trimmedText !== '') tally.lastChar = trimmedText.slice(-1)
+export function measureStreamEmptyTurn(sse: string, toolsOffered: boolean): StreamEmptyTurnReading {
+  let contentChars = 0
+  let toolCallDeltas = 0
+  let lastChar: string | undefined
+  for (const rawLine of sse.split('\n')) {
+    const line = rawLine.trimEnd()
+    if (!line.startsWith('data:')) continue
+    const payload = line.slice(5).trim()
+    if (payload === '' || payload === '[DONE]') continue
+    let frame: unknown
+    try {
+      frame = JSON.parse(payload)
+    } catch {
+      continue
+    }
+    const delta = (frame as { choices?: Array<{ delta?: Record<string, unknown> }> }).choices?.[0]?.delta
+    if (!delta) continue
+    const content = delta.content
+    if (typeof content === 'string') {
+      contentChars += content.length
+      const trimmed = content.trimEnd()
+      if (trimmed !== '') lastChar = trimmed.slice(-1)
+    } else if (Array.isArray(content)) {
+      for (const part of content) {
+        if (typeof part === 'string') {
+          contentChars += part.length
+          const trimmedPart = part.trimEnd()
+          if (trimmedPart !== '') lastChar = trimmedPart.slice(-1)
+        }
+        else if (typeof (part as { text?: unknown })?.text === 'string') {
+          contentChars += (part as { text: string }).text.length
+          const trimmedText = (part as { text: string }).text.trimEnd()
+          if (trimmedText !== '') lastChar = trimmedText.slice(-1)
+        }
       }
     }
+    if (Array.isArray(delta.tool_calls)) toolCallDeltas += delta.tool_calls.length
   }
-  if (Array.isArray(delta.tool_calls)) tally.toolCallDeltas += delta.tool_calls.length
-}
-
-export function measureStreamEmptyTurn(sse: string, toolsOffered: boolean): StreamEmptyTurnReading {
-  const tally: AssistantDeltaTally = { contentChars: 0, toolCallDeltas: 0 }
-  for (const delta of chatDeltasInSse(sse)) accumulateAssistantDelta(tally, delta)
-  const { contentChars, toolCallDeltas, lastChar } = tally
   return {
     contentChars,
     toolCallDeltas,
@@ -264,94 +248,4 @@ export function measureStreamEmptyTurn(sse: string, toolsOffered: boolean): Stre
       && contentChars > 0
       && (lastChar === ':' || lastChar === '：'),
   }
-}
-
-/**
- * 逐块累积的同一份读数 —— 给「发到一半就得判」的路径用。
- *
- * 整段读数（{@link measureStreamEmptyTurn}）只能等流结束；而 2026-11-19 那次跑飞
- * （`执行。` 复读到 16384 字才被输出上限截断，客户端等满 5 分钟）如果等到结束才判，
- * 截断已经发到客户端了。这里把同一个累加器搬到增量口：每块喂进来，随时能读。
- * 尾部没换行的残片留在 carry 里，等下一块补全再解析 —— 半个 JSON 不算数。
- */
-export interface ChatStreamProbe {
-  push(chunk: string): void
-  reading(): Pick<StreamEmptyTurnReading, 'contentChars' | 'toolCallDeltas'>
-}
-
-export function createChatStreamProbe(): ChatStreamProbe {
-  let carry = ''
-  const tally: AssistantDeltaTally = { contentChars: 0, toolCallDeltas: 0 }
-  return {
-    push(chunk: string): void {
-      carry += chunk
-      const cut = carry.lastIndexOf('\n')
-      if (cut === -1) return
-      for (const delta of chatDeltasInSse(carry.slice(0, cut + 1))) accumulateAssistantDelta(tally, delta)
-      carry = carry.slice(cut + 1)
-    },
-    reading() {
-      return { contentChars: tally.contentChars, toolCallDeltas: tally.toolCallDeltas }
-    },
-  }
-}
-
-/**
- * 「跑飞」判据：客户端带了工具、模型一个工具调用都没发、正文长到 6000 字以上，
- * 且尾部去重率已经塌到守卫阈值以下。
- *
- * 为什么不是「零工具调用 + 长」就够：Codex 在 goal 循环里每轮就是「说一句计划、
- * 结束本回合」，合法的计划独白可以到几百上千字；把这些都判成跑飞会重发掉一半
- * 正常回合。重复度才是分水岭 —— 2026-11-19 18:54 那一轮尾部 128 行里
- * `执行。/现在。/调用。` 独占，去重率 0.08，健康回合的规划独白则在 0.9 以上。
- *
- * 阈值 6000 取自同一批读数：该轮跑到 6000 字时已进入循环（前 ~2000 字还是
- * 可读的计划），再早判容易误伤「详细解释」这类合法的长正文。
- */
-export const RUNAWAY_MIN_CHARS = 6000
-
-export interface RunawayTurnReading {
-  degenerate: boolean
-  contentChars: number
-  toolCallDeltas: number
-  repetition: StreamRepetitionReading | null
-}
-
-function judgeRunaway(
-  contentChars: number,
-  toolCallDeltas: number,
-  text: string,
-  toolsOffered: boolean,
-  settings: RepetitionGuardSettings,
-): RunawayTurnReading {
-  const repetition = measureTextRepetition(text, settings)
-  return {
-    degenerate: toolsOffered
-      && toolCallDeltas === 0
-      && contentChars >= RUNAWAY_MIN_CHARS
-      && repetition?.degraded === true,
-    contentChars,
-    toolCallDeltas,
-    repetition,
-  }
-}
-
-/** 流式入口：`sse` 是这一发到目前为止收到的全部 chat SSE 原文。 */
-export function judgeRunawayTurn(
-  sse: string,
-  toolsOffered: boolean,
-  settings: RepetitionGuardSettings = DEFAULT_REPETITION_GUARD,
-): RunawayTurnReading {
-  const turn = measureStreamEmptyTurn(sse, toolsOffered)
-  return judgeRunaway(turn.contentChars, turn.toolCallDeltas, extractStreamText(sse), toolsOffered, settings)
-}
-
-/** 非流式入口：正文与工具调用已经在 JSON 里，读数从字段直接来。 */
-export function judgeRunawayText(
-  text: string,
-  toolCallCount: number,
-  toolsOffered: boolean,
-  settings: RepetitionGuardSettings = DEFAULT_REPETITION_GUARD,
-): RunawayTurnReading {
-  return judgeRunaway(text.length, toolCallCount, text, toolsOffered, settings)
 }

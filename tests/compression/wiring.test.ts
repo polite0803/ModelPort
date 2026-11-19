@@ -88,7 +88,7 @@ test('compression is the last thing that rewrites the outbound messages', () => 
   // 2026-11-08 的唯一例外：DeepSeek 聚合线的 reasoning 回灌排在压缩之后、装配之前，
   // 它只补 `reasoning_content` 字段（上游要求逐字回传，因此绝不能过压缩器）。
   const build = positionOf(
-    /const body = this\.buildRequestBody\(outbound, actualModel, account\b/,
+    /const body = this\.buildRequestBody\(outbound, actualModel, account\)/,
     'the outbound body build'
   )
   const echo = positionOf(/const outbound = reasoningEcho/, 'the reasoning echo injection')

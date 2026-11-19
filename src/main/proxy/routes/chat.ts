@@ -34,8 +34,6 @@ import { nextDailyUsage } from '../../../shared/dailyUsage.ts'
 import { startSseHeartbeat, type SseHeartbeat } from '../utils/sseHeartbeat'
 import { findUnsupportedParameter, unsupportedParameterError } from '../parameterPolicy'
 import { createToolViolationTap } from '../utils/toolViolationTap'
-import { createDsmlToolCallTap } from '../utils/dsmlToolCallTap'
-import { createToolNameRestoreTap, restoreToolNamesInBody } from '../utils/toolNameRestoreTap'
 import { createTruncatedToolArgsTap } from '../utils/truncatedToolArgsTap'
 import { pruneTruncatedToolCalls } from '../utils/truncatedToolCalls'
 import {
@@ -2404,34 +2402,6 @@ router.post('/completions', async (ctx: Context) => {
         (typeof request.tool_choice === 'object' && request.tool_choice?.type === 'function')
 
       let outStream: Readable = wrapperStream
-      // 非法工具名在出站被改名（点号/斜杠会让严格上游整条 400）；回来的调用名
-      // 必须先还原成客户端自己那个名字，否则它按名字找不到执行器。这一步排在
-      // 最前：后面的还原与越界审计看到的都是还原后的真名。
-      if (result.toolRenames !== undefined && result.toolRenames.length > 0) {
-        outStream = outStream.pipe(createToolNameRestoreTap(result.toolRenames))
-        storeManager.addLog('warn', '工具名非法，已改名后发送并还原', {
-          requestId,
-          providerId: provider.id,
-          accountId: account.id,
-          model: request.model,
-          data: { actualModel, renames: result.toolRenames.slice(0, 12) },
-        })
-      }
-      // 模型用文本写出的工具调用（DSML 原生标记 / `<tool_call>` JSON）在这里还原成
-      // 真正的 `tool_calls`。判据只看响应形态，普通文本回合逐字节不变。
-      outStream = outStream.pipe(createDsmlToolCallTap({
-        declared: declaredToolNames,
-        onReport: (report) => {
-          if (report.convertedCalls === 0) return
-          storeManager.addLog('warn', '工具调用以文本下发，已还原成 tool_calls', {
-            requestId,
-            providerId: provider.id,
-            accountId: account.id,
-            model: request.model,
-            data: { actualModel, ...report },
-          })
-        },
-      }))
       if (declaredToolNames.size > 0) {
         outStream = outStream.pipe(createUndeclaredToolNameTap({
           declared: declaredToolNames,
@@ -2492,18 +2462,6 @@ router.post('/completions', async (ctx: Context) => {
       }
 
       if (result.body) {
-        // 改名还原必须早于越界审计与截断剪枝：它们都按名字判，看到的是上游那个
-        // 安全名就会得出错误结论（把合法调用报成越界）。
-        if (result.toolRenames !== undefined && result.toolRenames.length > 0) {
-          result.body = restoreToolNamesInBody(result.body, result.toolRenames)
-          storeManager.addLog('warn', '工具名非法，已改名后发送并还原', {
-            requestId,
-            providerId: provider.id,
-            accountId: account.id,
-            model: request.model,
-            data: { actualModel, renames: result.toolRenames.slice(0, 12) },
-          })
-        }
         auditUndeclaredToolNames(
           findUndeclaredToolNames(collectToolCallNames(result.body), declaredToolNames),
         )

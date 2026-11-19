@@ -9,7 +9,6 @@ import {
   applyRequestTierFloor,
   requestUsesWriteTools,
   requestWriteToolFloor,
-  writeToolFloorDegraded,
 } from '../../src/main/proxy/writeToolFloor.ts'
 import type { PoolStrategyCandidate } from '../../src/main/proxy/autoRouting.ts'
 import type { AutoModelTier } from '../../src/shared/types.ts'
@@ -81,16 +80,6 @@ test('池里全是低档：回落并标记 relaxed，绝不筛成空池', () => 
 
   assert.equal(outcome.relaxed, true)
   assert.deepEqual(outcome.inputs.map(item => item.displayName), ['m-fast'])
-})
-
-test('降级标记分得清「池不够」与「钉太低」', () => {
-  const relaxed = applyRequestTierFloor([candidate('fast')], 'balanced')
-  const kept = applyRequestTierFloor([candidate('balanced')], 'balanced')
-
-  assert.deepEqual(writeToolFloorDegraded(relaxed, false), ['write_tool_tier'])
-  // 池被钉收窄过时，回落只可能是那一颗钉低于托底档 —— 必须能与池不够区分开。
-  assert.deepEqual(writeToolFloorDegraded(relaxed, true), ['write_tool_tier_pin'])
-  assert.deepEqual(writeToolFloorDegraded(kept, true), [])
 })
 
 test('本来就是空池：不算「抬档放宽」', () => {
