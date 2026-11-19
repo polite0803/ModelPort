@@ -126,7 +126,7 @@ export interface TokenLimitConfig {
  * 档位定义已经搬到 `shared/types.ts`：模型标注（`ModelCapabilityHint`）也要用它，
  * 而 shared 不能反过来 import main。这里保留同名导出，既有调用点不用改。
  */
-import { CONTEXT_WINDOW_TIERS } from '../../../shared/types.ts'
+import { CONTEXT_WINDOW_TIERS, UNANNOTATED_CONTEXT_FALLBACK } from '../../../shared/types.ts'
 import type { ContextWindowTier } from '../../../shared/types.ts'
 export { CONTEXT_WINDOW_TIERS }
 export type { ContextWindowTier }
@@ -196,7 +196,11 @@ export function resolveTrimBudget(
     return CONTEXT_WINDOW_TIERS[config.contextWindowTier]
   }
   const providerCap = providerId === undefined ? undefined : config.maxTokensByProvider?.[providerId]
-  return providerCap ?? config.maxTokens
+  if (providerCap !== undefined) return providerCap
+  // 与 `/v1/models` 的广告对齐（2026-11-18）：没有模型标注时客户端按 200K 压缩，
+  // 网关不能按 `maxTokens`（默认 65,536）裁 —— 客户端以为历史还在，中间那段却被
+  // 悄悄截掉，模型只能重读（现网实测重复读 66%）。`maxTokens` 更大时用它。
+  return Math.max(config.maxTokens, UNANNOTATED_CONTEXT_FALLBACK)
 }
 
 /**

@@ -136,6 +136,16 @@ export const CONTEXT_WINDOW_TIERS = {
 
 export type ContextWindowTier = keyof typeof CONTEXT_WINDOW_TIERS
 
+/**
+ * 一条路由的候选**全都没有窗口标注**时使用的那个数（广告与裁剪共用）。
+ *
+ * 2026-11-18 用户裁定：广告侧用它兜底，不再省略键（省略会让客户端完全不压，现网
+ * 一次会话的历史涨到 88 万 token）；裁剪侧也必须用同一个数 —— 否则客户端按 200K
+ * 发、网关按 `maxTokens`（默认 65,536）裁，中间那段被悄悄截掉，模型看不到就只能
+ * 重读，现网实测重复读 66%。
+ */
+export const UNANNOTATED_CONTEXT_FALLBACK = 200_000
+
 export interface ModelCapabilityHint {
   tier?: AutoModelTier
   vision?: Exclude<CapabilityState, 'unknown'>

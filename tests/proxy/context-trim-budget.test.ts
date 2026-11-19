@@ -23,6 +23,7 @@ import {
   normalizeContextManagementConfig,
   resolveTrimBudget,
 } from '../../src/main/proxy/services/contextManagementService.ts'
+import { UNANNOTATED_CONTEXT_FALLBACK } from '../../src/shared/types.ts'
 
 const base = { maxTokens: 65_536 }
 
@@ -64,12 +65,17 @@ test('档位优先于按渠道的数：显式选档就是显式覆盖', () => {
   assert.equal(budget, 1_000_000)
 })
 
-test('既没标注也没选档：退回渠道值，再退回全局值（老配置一字不变）', () => {
+test('既没标注也没选档：退回渠道值；连渠道值也没有时用 200K 兜底（与广告同一个数）', () => {
   assert.equal(
     resolveTrimBudget({ ...base, maxTokensByProvider: { trae: 40_000 } }, 'trae'),
     40_000
   )
-  assert.equal(resolveTrimBudget(base, 'trae'), 65_536)
+  // 2026-11-18 改：未标注时客户端按 `/v1/models` 的 200K 压缩，裁剪不能按 maxTokens
+  // （65,536）砍 —— 那会砍掉客户端以为还在的中间段，模型只能重读。
+  assert.equal(
+    resolveTrimBudget(base, 'trae'),
+    Math.max(base.maxTokens, UNANNOTATED_CONTEXT_FALLBACK)
+  )
 })
 
 test('未知档位当作没选，不静默折成某个数', () => {
@@ -78,7 +84,7 @@ test('未知档位当作没选，不静默折成某个数', () => {
     { ...base, contextWindowTier: '512k' as unknown as '1m' },
     'trae'
   )
-  assert.equal(budget, 65_536)
+  assert.equal(budget, Math.max(base.maxTokens, UNANNOTATED_CONTEXT_FALLBACK))
 })
 
 test('非法窗口（0 / 负数 / NaN）算没有证据，不许把预算压成 0', () => {
