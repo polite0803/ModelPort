@@ -321,6 +321,11 @@ export interface ForwardResult {
    * total time measured when the stream ends, not the time to first byte.
    */
   deferred?: boolean
+  /**
+   * 非法工具名被改名后「安全名 → 原名」的映射；响应侧据此把调用名还原成
+   * 客户端自己声明的名字。为空/缺席表示这一发没有任何改名。
+   */
+  toolRenames?: Array<{ sent: string; original: string }>
 }
 
 /**

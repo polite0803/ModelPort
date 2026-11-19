@@ -93,12 +93,15 @@ test('chat 线路原生透传工具（托管提示词层已退役）', () => {
   // （2026-11-01 那次修的缺陷正是白名单缺 `tools`，关掉托管＝把客户端工具静默删掉）。
   // 2026-11-08：出站体可能带 DeepSeek 聚合线的 reasoning 回灌，但那只是字段级补回
   // （`withReplayedReasoning` 只许动 `reasoning_content`），默认分支仍是请求原样装配。
-  assert.match(forwarder, /const body = this\.buildRequestBody\(outbound, actualModel, account\)/)
+  assert.match(forwarder, /const body = this\.buildRequestBody\(outbound, actualModel, account\b/)
   assert.match(
     forwarder,
     /const outbound = reasoningEcho\s*\n\s*\? this\.withReplayedReasoning\(request, provider\)\s*\n\s*: request/
   )
-  assert.match(forwarder, /body\.tools = sanitizedTools/)
+  // 工具三件套必须真的进白名单。2026-11-20 起名字先过 `planToolNameRenames`
+  // （非法字符会让严格上游整条 400），但「tools 被赋进 body」这一条不变。
+  assert.match(forwarder, /body\.tools = plan\.tools/)
+  assert.match(forwarder, /const plan = planToolNameRenames\(sanitizedTools\)/)
   assert.match(forwarder, /body\.tool_choice = request\.tool_choice/)
   assert.match(forwarder, /body\.parallel_tool_calls = request\.parallel_tool_calls/)
   // 反向门：退役掉的引擎符号不得被重新接回来。

@@ -34,6 +34,8 @@ import { nextDailyUsage } from '../../../shared/dailyUsage.ts'
 import { startSseHeartbeat, type SseHeartbeat } from '../utils/sseHeartbeat'
 import { findUnsupportedParameter, unsupportedParameterError } from '../parameterPolicy'
 import { createToolViolationTap } from '../utils/toolViolationTap'
+import { createDsmlToolCallTap } from '../utils/dsmlToolCallTap'
+import { createToolNameRestoreTap, restoreToolNamesInBody } from '../utils/toolNameRestoreTap'
 import { createTruncatedToolArgsTap } from '../utils/truncatedToolArgsTap'
 import { pruneTruncatedToolCalls } from '../utils/truncatedToolCalls'
 import {
@@ -2402,6 +2404,45 @@ router.post('/completions', async (ctx: Context) => {
         (typeof request.tool_choice === 'object' && request.tool_choice?.type === 'function')
 
       let outStream: Readable = wrapperStream
+      // 非法工具名在出站被改名（点号/斜杠会让严格上游整条 400）；回来的调用名
+      // 必须先还原成客户端自己那个名字，否则它按名字找不到执行器。这一步排在
+      // 最前：后面的越界审计看到的是还原后的真名。
+      if (result.toolRenames !== undefined && result.toolRenames.length > 0) {
+        outStream = outStream.pipe(createToolNameRestoreTap(result.toolRenames))
+        storeManager.addLog('warn', '工具名非法，已改名后发送并还原', {
+          requestId,
+          providerId: provider.id,
+          accountId: account.id,
+          model: request.model,
+          data: { actualModel, renames: result.toolRenames.slice(0, 12) },
+        })
+      }
+      // DSML 标记处置对**所有**请求挂载：泄漏的真实成因恰恰是「没声明工具却像 agent 任务」
+      // （2026-11-20 两个上游对照实测：带工具 3/3 正常，不带工具才吐标记）。声明了工具
+      // 就还原成调用，没声明就整块丢弃 —— 那一轮没有执行器，留着只会把标记渲染进对话。
+      // 形态判据在 tap 内部，普通文本回合逐字节不变。
+      let dsmlDroppedSeen = 0
+      outStream = outStream.pipe(createDsmlToolCallTap({
+        declared: declaredToolNames,
+        onReport: (report) => {
+          const converted = report.convertedCalls > 0
+          const dropped = report.droppedCalls > 0
+          if (!converted && !dropped) return
+          if (dropped) {
+            dsmlDroppedSeen = report.droppedCalls
+            ctx.set('X-ModelPort-Dsml-Dropped', String(report.droppedCalls))
+          }
+          storeManager.addLog('warn', converted
+            ? 'DSML 工具调用已从正文还原'
+            : 'DSML 工具调用已从正文丢弃（本轮未声明工具）', {
+            requestId,
+            providerId: provider.id,
+            accountId: account.id,
+            model: request.model,
+            data: { actualModel, ...report },
+          })
+        },
+      }))
       if (declaredToolNames.size > 0) {
         outStream = outStream.pipe(createUndeclaredToolNameTap({
           declared: declaredToolNames,
@@ -2462,6 +2503,18 @@ router.post('/completions', async (ctx: Context) => {
       }
 
       if (result.body) {
+        // 改名还原必须早于越界审计与截断剪枝：它们都按名字判，看到的是上游那个
+        // 安全名就会得出错误结论（把合法调用报成越界）。
+        if (result.toolRenames !== undefined && result.toolRenames.length > 0) {
+          result.body = restoreToolNamesInBody(result.body, result.toolRenames)
+          storeManager.addLog('warn', '工具名非法，已改名后发送并还原', {
+            requestId,
+            providerId: provider.id,
+            accountId: account.id,
+            model: request.model,
+            data: { actualModel, renames: result.toolRenames.slice(0, 12) },
+          })
+        }
         auditUndeclaredToolNames(
           findUndeclaredToolNames(collectToolCallNames(result.body), declaredToolNames),
         )
