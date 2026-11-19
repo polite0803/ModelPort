@@ -2266,6 +2266,10 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
       {
         "id": "glm-4.7-flash",
         "name": "GLM 4.7 Flash"
+      },
+      {
+        "id": "glm-4.6v-flash",
+        "name": "GLM 4.6V Flash (Vision)"
       }
     ],
     "authUrl": "https://z.ai/manage-apikey/apikey-list",

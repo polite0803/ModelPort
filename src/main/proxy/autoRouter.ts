@@ -907,6 +907,45 @@ class AutoRouter {
   }
 
   /**
+   * 读图两段式（visionRelay）的候选采集：与选路同一个 `collectCandidates`，
+   * 不另造一套池判据。扣瞬时可用性（默认口径）——一个正在限流/额度打满的模型
+   * 不该被选去读图；`ignoreTransientAvailability` 留给「链上还有谁」的诊断展示。
+   */
+  relayCandidatePool(): PoolStrategyCandidate[] {
+    const probe = { messages: [] } as unknown as ChatCompletionRequest
+    return this.collectCandidates(probe, Date.now()).rankInputs
+  }
+
+  /**
+   * 具名路径目标的视觉能力：标注层与 `collectCandidates` 同一套
+   * （手工 > 供应商记录 > 聚合官方 > 采用 > probe > 静态/家族 > 兜底 > 第三方）。
+   * 读图两段式用它回答「这一轮要被服务的模型收不收图」，不另造第二份判据。
+   */
+  visionOf(providerId: string, displayName: string, actualModelId: string): 'yes' | 'no' | 'unknown' {
+    const provider = storeManager.getProviderById(providerId)
+    if (provider === undefined) return 'unknown'
+    const hints = capabilityHintsFor(
+      provider,
+      displayName,
+      actualModelId,
+      storeManager.getUserModelMarks(),
+      storeManager.getCatalogAdoptions(),
+      indexProbeRows(getProbeRowsSync()),
+      Date.now(),
+    )
+    return capabilityOfCandidate({
+      providerId,
+      displayName,
+      ...(hints.record === undefined ? {} : { capabilityHint: hints.record }),
+      ...(hints.manual === undefined ? {} : { manualHint: hints.manual }),
+      ...(hints.official === undefined ? {} : { officialHint: hints.official }),
+      ...(hints.catalog === undefined ? {} : { catalogHint: hints.catalog }),
+      ...(hints.probe === undefined ? {} : { probeHint: hints.probe }),
+      ...(hints.thirdParty === undefined ? {} : { thirdPartyHint: hints.thirdParty }),
+    }).vision
+  }
+
+  /**
    * 一条路由在给定池上折叠出的候选：池策略之后、手动增删之后。不传 `route` 时回退
    * legacy 全局池策略（与 `select` 同口径）。广告下界与候选数都从这里折，两处不许
    * 各写一遍折叠（写两遍就会有一遍忘了 `excludeModels`）。

@@ -2617,6 +2617,8 @@ fails if a tagged site is missing from this table or a table row has no tag. Pro
 | `probe-output` | `Write the word "ok" repeated on a single line until you are stopped. Do not stop on your own.` | `2026-11-04` 探测阶梯 | output-cap ladder probe: asks the model to keep going so `max_tokens` is the only stop reason; same `probe: true` isolation. |
 | `probe-capability` | `Reply with the single word ok.` (tools) / `What color is this pixel? One word.` (vision) | `2026-11-04` 探测阶梯 | capability probe for `tools` / image input acceptance; same `probe: true` isolation. A one-pixel PNG rides the vision request, but the only authored text is the two short prompts above. |
 | `freeform-input-schema` | `{type:'object',properties:{input:{type:'string'}},required:['input']}` as a freeform tool's `parameters` | `1775995` 2026-11-18 (previously untagged) | protocol translation, not a prompt: Responses `type:'custom'` tools carry no JSON schema, chat `tools[].function.parameters` requires one, and without a contract the model guessed - 4 of 6 `apply_patch` calls came back as `arguments: {}` with the patch body gone. Carries no authored sentence; `required` + `type` state the contract. Tagged on 2026-11-18 because it reached the model while being invisible to this table. |
+| `vision-relay-prompt` | fixed transcription/description instruction sent with the images to the reader model in the relay hop (`probe: true`, separate lane) | `PLAN-vision-relay` 2026-11-19, 刘小平批准 | vision relay (two-stage): when this turn's served model cannot take images, a free vision model transcribes them first. The instruction only ever enters the hop request — never the user's conversation — and the hop carries `probe: true`, so it stays out of AIMD, Bandit, cooldowns and traffic stats. |
+| `vision-relay-marker` | replaces each image part with `[Image relayed via <reader>: <description>]` in the main request | `PLAN-vision-relay` 2026-11-19, 刘小平批准 | the image is not dropped (1.8.29 rule: never silently lose images) — it is replaced by a self-describing pointer that names its source, same shape as the compression marker. LRU caches descriptions by image hash so an identical image yields byte-identical text on every turn (prompt cache stays stable). |
 
 ### Retired, with the evidence that retired it
 
@@ -2706,6 +2708,35 @@ live `GATEWAY-TEXT:` tags — so the provenance survives without pretending the 
   behaviour (including the invariant that trimming never empties history). `normalizeContextManagementConfig`
   drops a stored `strategies.summary` and filters `summary` out of `executionOrder`, so an upgraded
   `data.json` cannot resurrect it; the gate is `tests/proxy/context-summary-retired.test.ts`.
+
+## Vision Relay
+
+Ruling (2026-11-19, 用户拍板): 当这一轮**真正服务的模型**不能收图时，网关可以先把图片交给
+一个**免费**视觉模型转述成文字，再按原文本目标继续；**已标注 vision=yes 的目标直发、零介入**。
+读图器不锁死单一模型——「池中应该存在其它的免费视觉模型」。默认关闭（`visionRelay.enabled`
+缺省 false），开关关时全链路字节不变。
+
+- **触发判据与派发同源，不许第二份**：路由路径看 `select` 自己的结论
+  （候选为空且 `missing`/`pinBlocked.missing` 含 `vision`，`visionRelay.ts::routeDecisionNeedsVisionRelay`）；
+  具名路径看 `autoRouter.visionOf`（标注层与 `collectCandidates` 同一套）。候选非空 ⇔
+  有能收图的候选（硬过滤保证）⇒ 不介入。
+- **读图器链**：`autoRouter.relayCandidatePool()`（与选路同源采集）∩ vision=yes ∩ 免费
+  （`costClass==='free'` 或渠道 `costBucket==='free'`；**`included` 套餐内不进**）；
+  官方免费证据优先、目录其次、`openrouter/free` 元路由最后；同模型只取一个账号。
+  显式 `visionRelay.reader` 点名时不换家。链为空 = 不介入，绝不静默用付费模型。
+- **图片全部转述、绝不删除**（当轮 + 历史 + 工具结果）：1.8.29 的铁律是「不静默丢图」，
+  替换成自解释标记 `[Image relayed via <reader>: <description>]`（`GATEWAY-TEXT:
+  vision-relay-marker`）是合法形态。转述指令只进 hop 请求（`GATEWAY-TEXT: vision-relay-prompt`）。
+  `file`/`video_url` 等转述不了的部件 → 整条 hop 放弃，绝不半转述。
+- **缓存与稳定**：LRU 按 `sha256(模板版本 + reader + 图片 url)` 存转述文本（64 条），
+  同一张图每轮逐字节相同 ⇒ 历史前缀稳定、prompt cache 不因措辞漂移失效。改转述模板必须
+  递增 `RELAY_TEMPLATE_VERSION`。
+- **隔离**：hop 走 `probe: true`（不占 AIMD、不进 Bandit/冷却、独立 `kind:'probe'` 日志行
+  `url:'/__modelport/vision-relay'`）；429 按 5s/15s 退避最多 3 次/读图器；整条 hop 墙钟
+  60s，客户端断开即中止；主响应带 `X-ModelPort-Vision-Relay`。
+- **配置**：`appConfig.visionRelay {enabled, reader?, maxImageBytes}`（缺省 8MB；超限不静默
+  压缩）。设置页在上下文管理区；读图器下拉来自只读 IPC `visionRelay:readers`。
+  功能手册见 [`features/vision-relay.md`](features/vision-relay.md)。
 
 ## Client attribution
 

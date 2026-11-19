@@ -1636,6 +1636,17 @@
       "costBudget": "Cost target",
       "costBudgetHint": "A smaller token target for named channels only, so prompts are squeezed to that size there (e.g. trae bills by volume and gets no prefix cache). It can only tighten the window, never widen it; if it is too small to fit the system prompt plus the current instruction, the window wins and a warning is logged. Empty = no cost gate.",
       "costBudgetPlaceholder": "channel id: tokens, one per line"
+    },
+    "visionRelay": {
+      "title": "Vision relay",
+      "enable": "Enable vision relay",
+      "enableHint": "When this turn's served model cannot take images, a free vision model transcribes them to text first and the original model continues. Models already marked as vision-capable get images directly; images are never dropped - each is replaced by a self-describing text marker.",
+      "reader": "Reader model",
+      "readerAuto": "Auto (free vision candidates)",
+      "readerHint": "Auto uses only free vision models, official free evidence first. Naming a reader explicitly disables failover to another model.",
+      "maxImageBytes": "Per-image limit (MB)",
+      "maxImageBytesHint": "Images over the limit fail the relay outright (the original error path) - they are never silently compressed.",
+      "saved": "Vision relay settings saved"
     }
   },
   "aggregate": {

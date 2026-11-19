@@ -37,6 +37,7 @@ import type {
   AggregateQuotaExhaustions,
 } from '../../shared/aggregateQuotaExhaustion.ts'
 import type { RepetitionGuardSettings } from '../../shared/streamRepetition.ts'
+import type { VisionRelaySettings } from '../../shared/visionRelayConfig.ts'
 import type { DeclaredQuotaLimit } from '../../shared/declaredQuota.ts'
 
 /**
@@ -328,6 +329,11 @@ export interface AppConfig {
    * `shared/types.ts::AppConfig` 同一字段，缺省即出厂阈值。
    */
   streamRepetitionGuard?: RepetitionGuardSettings
+  /**
+   * 视觉读图两段式（PLAN-vision-relay）。与 `shared/types.ts::AppConfig` 同一字段；
+   * 缺省（键不存在）= 关闭，行为与从前逐字节相同。
+   */
+  visionRelay?: VisionRelaySettings
   /** Model mapping configuration */
   modelMappings: Record<string, ModelMapping>
   /** 标准库（LiteLLM）的自定义镜像地址，仅 https；空/缺省表示不使用。 */

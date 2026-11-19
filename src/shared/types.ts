@@ -5,6 +5,7 @@ import type { DiscountWindow } from './discountWindow.ts'
 import type { AggregateCostClass } from './aggregateCost'
 import type { ClientIdentity } from './clientProfile'
 import { DEFAULT_REPETITION_GUARD, type RepetitionGuardSettings, type StreamRepetitionReading, type StreamEmptyTurnReading } from './streamRepetition.ts'
+import type { VisionRelaySettings } from './visionRelayConfig.ts'
 import type { DeclaredQuotaLimit } from './declaredQuota.ts'
 import type { RouteModelBlock, RouteQuotaSummary } from './routeQuotaView.ts'
 
@@ -12,6 +13,7 @@ export type { AggregateWire }
 export type { PromptCachingConfig }
 export { DEFAULT_PROMPT_CACHING_CONFIG }
 export type { RepetitionGuardSettings, StreamRepetitionReading, StreamEmptyTurnReading }
+export type { VisionRelaySettings }
 export type { DeclaredQuotaLimit }
 export type { RouteModelBlock, RouteQuotaSummary }
 export { DEFAULT_REPETITION_GUARD }
@@ -1177,6 +1179,12 @@ export interface AppConfig {
    * tuned against.
    */
   streamRepetitionGuard?: RepetitionGuardSettings
+  /**
+   * 视觉读图两段式（PLAN-vision-relay，2026-11-19）：这一轮真正服务的模型不能
+   * 收图时，先把当轮新图交给一个免费视觉模型转述成文字，再按原文本目标转发。
+   * 已标注 vision 的目标直发、零介入；缺省（键不存在）= 关闭，行为与从前逐字节相同。
+   */
+  visionRelay?: VisionRelaySettings
   modelMappings: Record<string, ModelMapping>
   /**
    * 标准库（LiteLLM）的自定义镜像地址，仅接受 https；空/缺省表示不使用。

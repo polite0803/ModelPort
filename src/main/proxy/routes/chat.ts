@@ -19,6 +19,8 @@ import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
 import { autoRouter, AUTO_SKIPPED_REPORT_LIMIT, describeTransientCause, summarizeTransientSkips } from '../autoRouter'
 import type { AutoCandidate, AutoRouteDecision } from '../autoRouter'
+import { profileRequest } from '../autoRouting'
+import { applyVisionRelay, routeDecisionNeedsVisionRelay } from '../visionRelay'
 import { resolveRouteRequest, routePoolBreakMessage } from '../../store/modelRoutes'
 import type {
   AutoAttemptFailure,
@@ -758,6 +760,19 @@ router.post('/completions', async (ctx: Context) => {
     ? autoRouter.select(request, config.loadBalanceStrategy, autoPreference, route, clientSession, headerModel)
     : null
 
+  // 视觉读图两段式（PLAN-vision-relay，缺省关）：`select` 自己就是「这一轮服务谁」
+  // 的权威答案 —— 候选非空 ⇔ 有能收图的候选（硬过滤保证），此时零介入；只有
+  // 「缺的正是 vision」才值得一次转述。转述成功后请求已无图，按新画像重选一次
+  // （钉/粘性/策略都在新请求上重新落定，语义不变）。
+  if (autoDecision !== null && routeDecisionNeedsVisionRelay(autoDecision)) {
+    const relayed = await applyVisionRelay(request, config.visionRelay)
+    if (relayed !== null) {
+      request = relayed.request
+      ctx.set('X-ModelPort-Vision-Relay', toHeaderValue(relayed.reader))
+      autoDecision = autoRouter.select(request, config.loadBalanceStrategy, autoPreference, route, clientSession, headerModel)
+    }
+  }
+
   // 请求前预检：worker 的模型级限流与 pack 服务清单（两块合并进
   // `applyChannelPreflights`）。剔空之后必须**带着排除集重选** —— 两道预检都跑在
   // `single` 作用域裁剪之后，剔掉头部而不重选就是整轮零候选。重选发生在任何上游
@@ -896,6 +911,25 @@ router.post('/completions', async (ctx: Context) => {
         },
       }
       return
+    }
+
+    // 视觉读图两段式（具名路径）：目标模型已标注 vision=yes 就直发、零介入；
+    // 收不下图时（含 unknown —— 与硬过滤同一判据 `vision !== 'yes'`）先转述。
+    // 失败保持今天的形态（原请求原样转发，由上游判对错），不发明新错误。
+    // 落成 const 再进闭包：`selection` 是 let，在 .find 回调里会丢失收窄。
+    const namedSelection = selection
+    if (profileRequest(request).needsVision) {
+      const catalogueRow = storeManager
+        .getModelCatalogue(namedSelection.provider.id)
+        .find(model => model.actualModelId === namedSelection.actualModel)
+      const displayName = catalogueRow?.displayName ?? request.model
+      if (autoRouter.visionOf(namedSelection.provider.id, displayName, namedSelection.actualModel) !== 'yes') {
+        const relayed = await applyVisionRelay(request, config.visionRelay)
+        if (relayed !== null) {
+          request = relayed.request
+          ctx.set('X-ModelPort-Vision-Relay', toHeaderValue(relayed.reader))
+        }
+      }
     }
 
     // 服务清单预检（点名/显式选模路径）：与上面 auto 路径的预检同一判据、同一个

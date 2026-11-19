@@ -57,6 +57,7 @@ import {
   type TlsMaterial,
 } from '../proxy/tls'
 import { autoRouter, ROUTE_MENU_MODELS_DEFAULT, ROUTE_MENU_MODELS_MAX } from '../proxy/autoRouter'
+import { relayReaderChainOf } from '../proxy/visionRelay'
 import { syncCodexCatalogs } from '../proxy/catalogSync'
 import type { ChannelAccountCounts, RoutePreviewResult, RoutePreviewSample } from '../proxy/autoRouter'
 import { proxyStatusManager } from '../proxy/status'
@@ -517,6 +518,26 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
         console.error('[AvailabilityBlocks] failed to read exhaustion marks:', error)
       }
       return { ok: true, blocks, generatedAt: Date.now() }
+    },
+  )
+
+  /**
+   * 视觉读图两段式的读图器候选链（只读，设置页下拉用）。
+   *
+   * 判据与 hop 同一份：`relayCandidatePool`（与选路同源采集）＋ `relayReaderChainOf`
+   * （vision=yes 且免费、官方证据优先、元路由最后）。设置页只展示名字，不在这里
+   * 造第二套免费/视觉判断；catalogue 变化后下拉下一次打开即刷新。
+   */
+  registerMainHandler(
+    IpcChannels.VISION_RELAY_READERS,
+    async (): Promise<{ readers: Array<{ displayName: string; providerName: string }> }> => {
+      try {
+        const chain = relayReaderChainOf(autoRouter.relayCandidatePool())
+        return { readers: chain.map(reader => ({ displayName: reader.displayName, providerName: reader.providerName })) }
+      } catch (error) {
+        console.error('[VisionRelay] failed to build reader chain:', error)
+        return { readers: [] }
+      }
     },
   )
 

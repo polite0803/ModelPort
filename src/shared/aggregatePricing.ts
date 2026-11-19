@@ -14,8 +14,8 @@
  * 这个区分必须由 `aggregateCostOf()` 做，不要在界面里自己判价格。
  *
  * 快照：models.dev https://models.dev/api.json
- * 复核日期 2026-10-29；23 家有标价 / 91 条模型，
- * 其中 42 条零价。官方免费清单：16 家 / 46 条
+ * 复核日期 2026-11-19；30 家有标价 / 128 条模型，
+ * 其中 58 条零价。官方免费清单：16 家 / 47 条
  * （回执里另有 0 条不在本目录模型清单内，已丢弃，不给发不出去的模型打标）。
  */
 
@@ -44,7 +44,7 @@ export interface AggregateOfficialFree {
 export const AGGREGATE_PRICE_SOURCE = {
   name: 'models.dev',
   url: 'https://models.dev/api.json',
-  asOf: '2026-10-29',
+  asOf: '2026-11-19',
   currency: 'USD',
   unit: 'per-million-tokens',
 } as const
@@ -55,6 +55,47 @@ export const AGGREGATE_PRICE: Record<string, AggregateEntryPrice> = {
     models: {
       'qwen3-coder-plus': { input: 1, output: 5 },
       'qwen3.5-plus': { input: 0.4, output: 2.4 },
+    },
+  },
+  'bailian': {
+    modelsDevProviderId: 'alibaba-cn',
+    models: {
+      'deepseek-v4-pro': { input: 1.65, output: 3.301 },
+      'glm-5.2': { input: 1.1, output: 3.851, cacheRead: 0.275, cacheWrite: 0 },
+      'glm-5.3': { input: 1.1, output: 3.851, cacheRead: 0.275, cacheWrite: 0 },
+      'kimi-k2.5': { input: 0.574, output: 3.011, cacheRead: 0.1148, cacheWrite: 0.7175 },
+      'MiniMax-M2.5': { input: 0.3, output: 1.2 },
+      'qwen3-coder-plus': { input: 0.574, output: 2.296 },
+      'qwen3.6-flash': { input: 0.165, output: 0.99, cacheRead: 0.0165, cacheWrite: 0.20625 },
+      'qwen3.7-max': { input: 1.65, output: 4.951, cacheRead: 0.33, cacheWrite: 2.0625 },
+      'qwen3.7-plus': { input: 0.276, output: 1.101, cacheRead: 0.0552, cacheWrite: 0.345 },
+      'qwen3.8-flash': { input: 0.11875, output: 0.40073, cacheRead: 0.014844, cacheWrite: 0.185547 },
+      'qwen3.8-max': { input: 1.77744, output: 5.33231, cacheRead: 0.22218, cacheWrite: 2.22179 },
+    },
+  },
+  'bailian_coding_plan': {
+    modelsDevProviderId: 'alibaba-coding-plan-cn',
+    models: {
+      'glm-5': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      'kimi-k2.5': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      'MiniMax-M2.5': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      'qwen3.5-plus': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      'qwen3.6-plus': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      'qwen3.7-plus': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    },
+  },
+  'bailian_token_plan': {
+    modelsDevProviderId: 'alibaba-token-plan-cn',
+    models: {
+      'deepseek-v4-pro': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      'deepseek-v4.1-flash': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      'glm-5.2': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      'glm-5.3': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      'qwen3.6-flash': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      'qwen3.7-max': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      'qwen3.7-plus': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      'qwen3.8-flash': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      'qwen3.8-max': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     },
   },
   'cline_pass': {
@@ -144,6 +185,13 @@ export const AGGREGATE_PRICE: Record<string, AggregateEntryPrice> = {
       'deepseek/deepseek-v4-flash-free': { input: 0, output: 0 },
     },
   },
+  'ovh': {
+    modelsDevProviderId: 'ovhcloud',
+    models: {
+      'gpt-oss-120b': { input: 0.09, output: 0.47 },
+      'gpt-oss-20b': { input: 0.05, output: 0.18 },
+    },
+  },
   'poolside': {
     modelsDevProviderId: 'poolside',
     models: {
@@ -174,18 +222,11 @@ export const AGGREGATE_PRICE: Record<string, AggregateEntryPrice> = {
       'qwen3.5-plus': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     },
   },
-  'sambanova': {
-    modelsDevProviderId: 'sambanova',
-    models: {
-      'Meta-Llama-3.3-70B-Instruct': { input: 0.6, output: 1.2 },
-    },
-  },
   'sensenova': {
     modelsDevProviderId: 'sensenova',
     models: {
       'deepseek-v4-flash': { input: 0, output: 0, cacheRead: 0 },
       'deepseek-v4-pro': { input: 0, output: 0, cacheRead: 0 },
-      'deepseek-v4.1-flash': { input: 0, output: 0, cacheRead: 0 },
       'glm-5.2': { input: 0, output: 0, cacheRead: 0 },
       'kimi-k3': { input: 0, output: 0, cacheRead: 0 },
       'sensenova-6.8-flash-lite': { input: 0, output: 0, cacheRead: 0 },
@@ -213,10 +254,40 @@ export const AGGREGATE_PRICE: Record<string, AggregateEntryPrice> = {
       'zai-org/GLM-5.1': { input: 1.19, output: 3.74, cacheRead: 0.6, cacheWrite: 0 },
     },
   },
+  'siliconflow_cn': {
+    modelsDevProviderId: 'siliconflow-cn',
+    models: {
+      'deepseek-ai/DeepSeek-V3.2': { input: 0.59779, output: 0.896685, cacheRead: 0.059779 },
+      'deepseek-ai/DeepSeek-V4-Flash': { input: 0.448342, output: 1.345027, cacheRead: 0.044834 },
+      'deepseek-ai/DeepSeek-V4-Pro': { input: 1.79337, output: 3.586739, cacheRead: 0.149447 },
+      'Qwen/Qwen3.5-122B-A10B': { input: 0.119558, output: 0.956464 },
+    },
+  },
+  'stepfun': {
+    modelsDevProviderId: 'stepfun',
+    models: {
+      'step-3.5-flash': { input: 0.10461, output: 0.31384, cacheRead: 0.02092 },
+      'step-3.5-flash-2603': { input: 0.10461, output: 0.31384, cacheRead: 0.02092 },
+      'step-3.7-flash': { input: 0.20175, output: 1.21052, cacheRead: 0.04035 },
+      'step-5-preview': { input: 1.04613, output: 2.98895, cacheRead: 0.10461 },
+    },
+  },
+  'tencent_coding_plan': {
+    modelsDevProviderId: 'tencent-coding-plan',
+    models: {
+      'tc-code-latest': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    },
+  },
   'tokenrouter': {
     modelsDevProviderId: 'tokenrouter',
     models: {
       'z-ai/glm-5.3-free': { input: 0, output: 0 },
+    },
+  },
+  'wafer': {
+    modelsDevProviderId: 'wafer.ai',
+    models: {
+      'DeepSeek-V4-Pro': { input: 0.28, output: 3.96, cacheRead: 0.044 },
     },
   },
   'wandb': {
@@ -246,6 +317,7 @@ export const AGGREGATE_PRICE: Record<string, AggregateEntryPrice> = {
     modelsDevProviderId: 'zai',
     models: {
       'glm-4.6v': { input: 0.3, output: 0.9, cacheRead: 0.05, cacheWrite: 0 },
+      'glm-4.6v-flash': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       'glm-4.7': { input: 0.6, output: 2.2, cacheRead: 0.11, cacheWrite: 0 },
       'glm-4.7-flash': { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       'glm-5': { input: 1, output: 3.2, cacheRead: 0.2, cacheWrite: 0 },
@@ -330,7 +402,7 @@ export const AGGREGATE_OFFICIAL_FREE: Record<string, AggregateOfficialFree> = {
     asOf: '2026-10-29',
   },
   'zai_api': {
-    models: ['glm-4.7-flash'],
+    models: ['glm-4.7-flash', 'glm-4.6v-flash'],
     docUrl: 'https://docs.z.ai/guides/llm/glm-5.3.md',
     asOf: '2026-10-29',
   },
