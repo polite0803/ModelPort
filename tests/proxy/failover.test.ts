@@ -60,6 +60,7 @@ import {
   isSameTargetRetryableStatus,
   isContextOverflowError,
   isReasoningEffortUnsupportedError,
+  isRegionRestrictedModelError,
   isToolOverflowError,
   isToolCallOrderingError,
   isUpstreamCatalogMissError,
@@ -211,6 +212,34 @@ test('渠道目录不认模型识别：窄口径，其它 404 与无关文案不
   assert.equal(isChannelModelUnavailableError('The model `gpt-9` does not exist'), false)
   // 额度/排队类走自己的分支
   assert.equal(isChannelModelUnavailableError('insufficient_quota: You exceeded your current quota'), false)
+})
+
+test('区域限制识别：命中 opencode_go 的上游原文，不占换家额度（2026-11-19 报障）', () => {
+  const message = 'This OpenCode Go model is hosted outside Europe and the United States. '
+    + 'Select Global at https://opencode.ai/console/org_01M773A8HEERN1QB386AT20CMZ/settings/privacy#regions to use it.'
+  assert.ok(isRegionRestrictedModelError(message))
+  // 地名顺序反过来也要认（上游措辞可能变），但两个地名缺一不可
+  assert.ok(isRegionRestrictedModelError('This model is hosted outside the United States and Europe.'))
+  assert.equal(isRegionRestrictedModelError(undefined), false)
+  assert.equal(isRegionRestrictedModelError(''), false)
+  // 窄口径：泛化的地区/权限措辞不得误判 —— 403 地区拦截本来按状态码换家，
+  // 400 里的普通请求错误必须继续终止。
+  assert.equal(isRegionRestrictedModelError('region blocked'), false)
+  assert.equal(isRegionRestrictedModelError('hosted in Europe only'), false)
+  assert.equal(isRegionRestrictedModelError('messages: must be a non-empty array'), false)
+
+  // 日志与实际分支一致：kind 必须是 capability（换家、不罚账号），不是 fatal/rejected
+  assert.equal(describeAttemptFailure({
+    candidate: 'opencode_go/deepseek-v4.1-flash',
+    status: 400,
+    error: message,
+    providerType: 'aggregate',
+  }).kind, 'capability')
+
+  // 接线门：capabilityMismatch 与两个 probe 出口都必须显式接上这条判据，
+  // 否则会退回「裸 400 计入 MAX_REJECTED_REQUEST_SWITCHES=2」的老路。
+  const occurrences = forwarderSource.split('isRegionRestrictedModelError').length - 1
+  assert.equal(occurrences, 4, 'import + capabilityMismatch + 两个 probe 出口')
 })
 
 test('firstStreamEvent：建流失败在首块之前到达时，以 error 浮现并带上状态码', () => {
@@ -404,6 +433,7 @@ test('forwarder 的换家判据必须接上：超限 400 参与换家，普通 4
       'isContextOverflowError',
       'isReasoningEffortUnsupportedError',
       'isUpstreamCatalogMissError',
+      'isRegionRestrictedModelError',
     ]) {
       assert.ok(
         block[1].includes(predicate),

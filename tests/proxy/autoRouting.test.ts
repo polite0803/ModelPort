@@ -1067,8 +1067,8 @@ test('explainMissing：只有每个候选都明确标了不推理，才说缺这
   )
 })
 
-test('cacheAffinityMinutes 默认 60，并夹在 0-1440 之间', () => {
-  assert.equal(normalizeAutoRoutingConfig({}).cacheAffinityMinutes, 60)
+test('cacheAffinityMinutes 默认 240，并夹在 0-1440 之间', () => {
+  assert.equal(normalizeAutoRoutingConfig({}).cacheAffinityMinutes, 240)
   assert.equal(normalizeAutoRoutingConfig({ cacheAffinityMinutes: 90 }).cacheAffinityMinutes, 90)
   assert.equal(normalizeAutoRoutingConfig({ cacheAffinityMinutes: 99_999 }).cacheAffinityMinutes, 1440)
   assert.equal(normalizeAutoRoutingConfig({ cacheAffinityMinutes: -5 }).cacheAffinityMinutes, 0)

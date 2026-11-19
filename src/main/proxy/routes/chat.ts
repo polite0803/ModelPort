@@ -18,6 +18,7 @@ import { SSEParser, extractStreamErrorFrame, streamHandler, type StreamErrorFram
 import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
 import { autoRouter, AUTO_SKIPPED_REPORT_LIMIT, describeTransientCause, summarizeTransientSkips } from '../autoRouter'
+import { cacheMissLedger } from '../cacheMissLedger'
 import type { AutoCandidate, AutoRouteDecision } from '../autoRouter'
 import { profileRequest } from '../autoRouting'
 import { applyVisionRelay, routeDecisionNeedsVisionRelay } from '../visionRelay'
@@ -421,13 +422,25 @@ function meterQuota(
    * 这次请求的压缩判决。按日桶要的不是"省了多少"，而是"为什么没省"——
    * 被拒候选的投影只活在这份报告里，请求日志一两天就滚掉了。
    */
-  compression?: CompressionReport
+  compression?: CompressionReport,
+  /**
+   * 这一轮所在会话的键（`AutoRouteDecision.conversationKey`）。只用于把缓存
+   * 缺口归因到四种成因；缺省时账本记不到这一轮，但计数照常累加。
+   */
+  missConversationKey?: string
 ): void {
   try {
     storeManager.getQuotaLedger().record(provider.id, accountId, modelId, reading)
   } catch (error) {
     console.error('[Chat] quota ledger record failed:', error)
   }
+
+  const missReading = cacheMissLedger.classify({
+    key: missConversationKey,
+    promptTokens: reading.promptTokens,
+    cacheReadTokens: reading.cacheReadTokens,
+    cacheReported: reading.cacheReadReported,
+  })
 
   try {
     storeManager.recordTokenUsage({
@@ -442,6 +455,7 @@ function meterQuota(
       modelId,
       costUsd: estimateRequestCost(provider, modelId, reading),
       ...(compression === undefined ? {} : { compression }),
+      ...(missReading === undefined ? {} : { cacheMissClass: missReading.class }),
     })
   } catch (error) {
     console.error('[Chat] token usage record failed:', error)
@@ -871,6 +885,10 @@ router.post('/completions', async (ctx: Context) => {
 
   let selection: AccountSelection | null = null
   let chainCandidates: AccountSelection[] = []
+  // 缓存缺口分类用的会话键。具名模型没有 `AutoRouteDecision`，但分类仍要按会话
+  // 串起上一轮 —— 两段口径不同会让同一段对话在读数里被拆成两段。
+  const missConversationKey = autoDecision?.conversationKey
+    ?? autoRouter.conversationKeyFor(request, clientSession)
   // 用户通过模型映射点名了具体账号时是硬性指定：命中它失败后不再轮换到同供应商其他 Key
   let preferredAccountId: string | undefined = undefined
   if (!autoDecision) {
@@ -1981,7 +1999,8 @@ router.post('/completions', async (ctx: Context) => {
         compressionReport && compressionReport.applied.length > 0
           ? compressionReport.saved
           : 0,
-        compressionReport
+        compressionReport,
+        missConversationKey
       )
     }
 
@@ -2267,7 +2286,8 @@ router.post('/completions', async (ctx: Context) => {
             compressionReport && compressionReport.applied.length > 0
               ? compressionReport.saved
               : 0,
-            compressionReport
+            compressionReport,
+            missConversationKey
           )
           wrapperStream.end()
           if (streamError) {
@@ -2370,7 +2390,8 @@ router.post('/completions', async (ctx: Context) => {
             compressionReport && compressionReport.applied.length > 0
               ? compressionReport.saved
               : 0,
-            compressionReport
+            compressionReport,
+            missConversationKey
           )
           wrapperStream.end()
         })

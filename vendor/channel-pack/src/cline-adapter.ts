@@ -37,6 +37,7 @@ import {
   parseClineRateLimitHint,
   recordsClineRateLimit,
 } from './cline-rate-limit.js'
+import { parseEmbeddedUpstreamRateLimit } from './cline-embedded-rate-limit.js'
 import { RemoteCatalogGate } from './remote-catalog-gate.js'
 import { settingsNamespaceFor } from './settings-compat.js'
 import { isClineExpired, clineHeaders, type ClineCredential } from './cline.js'
@@ -651,6 +652,23 @@ export class ClineAdapter extends LlmAdapter {
           `cline: 上游已停止为该账号服务（${errorDetail(errorText)}）`,
           'AUTH',
           { status: response.status },
+        )
+      }
+      // 上游 429 被 cline.bot 包进 5xx：改判 RATE_LIMIT 并把对客户端的状态码校正为
+      // 429 —— 否则 SERVER/502 会让客户端把「稍后就好」当服务端故障硬撞，宿主也不会
+      // 进恢复轮（见 `parseEmbeddedUpstreamRateLimit` 的现场记录）。不换号：共享算力
+      // 池与账号无关，换号只是把同一份 prefill 再付一遍。
+      const embeddedRateLimit = parseEmbeddedUpstreamRateLimit(errorText)
+      if (embeddedRateLimit !== undefined) {
+        throw new LlmError(
+          `cline: 模型 ${options.model} 的上游共享算力池瞬时打满，稍后重试即可`,
+          'RATE_LIMIT',
+          {
+            status: 429,
+            ...(embeddedRateLimit.retryAfterMs === undefined
+              ? {}
+              : { providerRetryAfterMs: embeddedRateLimit.retryAfterMs }),
+          },
         )
       }
       const shouldRotate = isClineRotatableFailure(response.status, errorText)

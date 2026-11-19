@@ -436,9 +436,12 @@ export const DEFAULT_AUTO_ROUTING_CONFIG: AutoRoutingConfig = {
   maxAttempts: 3,
   stickyMinutes: 30,
   // DeepSeek documents "a few hours to a few days" before its cache clears, so
-  // one hour is inside the documented lower bound and never outlives the cache.
-  // Longer values wait for a measured TTL rather than a guess.
-  cacheAffinityMinutes: 60,
+  // four hours is still inside the documented lower bound and never outlives
+  // the cache. One hour left the affinity dead for any conversation that paused
+  // longer than a coffee break, which is exactly when the upstream cache is
+  // still warm and re-routing costs the whole prefix. Longer values wait for a
+  // measured upper bound rather than a guess.
+  cacheAffinityMinutes: 240,
   prefer: 'balanced',
   poolStrategies: [],
 }

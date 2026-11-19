@@ -692,8 +692,10 @@ cannot route to advertises something that never answers.
   `clearsBreakEven`; `GET /v1/management/compression/economics?days=7` renders it. Absent fields are
   `null`, never 0.
 - **Affinity is capped by the documented TTL** (`effectiveAffinityMinutes`): `cacheAffinityMinutes`
-  (60) may not outlive the cache - Anthropic 5m tier → 5m, 1h tier → 60m; an undocumented TTL keeps
-  the configured value. Rationale: a pin past the cache only blocks a better candidate.
+  (240) may not outlive the cache - Anthropic 5m tier → 5m, 1h tier → 60m; an undocumented TTL keeps
+  the configured value. Rationale: a pin past the cache only blocks a better candidate. The affinity table is
+  persisted (`cacheAffinity` in `data.json`, selection coordinates and expiry only) so a restart
+  does not throw every live conversation back into re-routing.
 - **Cache-first skips live-zone compression for documented, cheap caches**
   (`CompressionConfig.cacheFirst`, default **on** as shipped in `DEFAULT_COMPRESSION_CONFIG`). The
   rule: when a provider documents a prefix cache (`promptCache` known) and the saving from compressing

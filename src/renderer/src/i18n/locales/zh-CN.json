@@ -86,7 +86,12 @@
       "expand": "展开全部（{{count}}）",
       "collapse": "收起",
       "note": "缓存读由上游自己报告，且是输入 token 的子集；没有上游用量的模型显示「-」，不显示 0%。",
-      "coverageNote": "本期分模型明细覆盖 {{covered}} / {{total}} 条请求；早于该功能的记录没有模型拆分，不在这张表里。"
+      "coverageNote": "本期分模型明细覆盖 {{covered}} / {{total}} 条请求；早于该功能的记录没有模型拆分，不在这张表里。",
+      "missCold": "冷启",
+      "missRewrite": "改写",
+      "missBreak": "断链",
+      "missTail": "新增",
+      "missClassesHint": "缺口成因按会话与上一轮对比分类：冷启=没有上轮读数或命中不足一半；改写=客户端把历史改小；断链=锚点仍在却从中途断开；新增=正常的一轮尾部。只统计上游明确报告了缓存读的请求。"
     },
     "lastUpdated": "上次更新",
     "refresh": "刷新",

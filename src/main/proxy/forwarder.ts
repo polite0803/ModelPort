@@ -178,6 +178,7 @@ import {
   isMissingReasoningHistoryError,
   isMissingSessionAffinityError,
   isAccountArrearsError,
+  isRegionRestrictedModelError,
   isReasoningEffortUnsupportedError,
   isOpaqueAggregateBadRequest,
   isRecoverableChainExhaustion,
@@ -1054,6 +1055,11 @@ export class RequestForwarder {
         // 这一家的账号欠费（百炼 `Arrearage` 实测 400）：说的是账务状态，不是客户端
         // 写错了什么。原先 400 终止整条链，一家欠费就把后面所有候选一起打死。
         || isAccountArrearsError(result.error)
+        // 区域限制（OpenCode Go 实测 400「hosted outside Europe and the United
+        // States」）：区域是账号（组织）级设置，换同池另一个账号就能成。若留在
+        // 裸 400 通道，它会计入 MAX_REJECTED_REQUEST_SWITCHES，两把区域没设对的
+        // key 就能把第三个账号挡在链外。
+        || isRegionRestrictedModelError(result.error)
         // 普通 404 同样是「这一家供不了这个模型」（目录漂移/能力差异），不是账号
         // 故障：换下一家，但不给账号记冷却 —— 否则一次模型改名会连坐整个账号。
         || result.status === 404
@@ -1357,6 +1363,7 @@ export class RequestForwarder {
             || isContextOverflowError(probe.message)
             || isReasoningEffortUnsupportedError(probe.message)
             || isUpstreamCatalogMissError(probe.message)
+            || isRegionRestrictedModelError(probe.message)
             ? 400
             : 502),
           error: probe.message,
@@ -1452,7 +1459,8 @@ export class RequestForwarder {
         ?? (isToolOverflowError(message) || isMissingReasoningHistoryError(message)
           || isToolCallOrderingError(message)
           || isContextOverflowError(message) || isReasoningEffortUnsupportedError(message)
-          || isUpstreamCatalogMissError(message) ? 400 : 502)
+          || isUpstreamCatalogMissError(message)
+          || isRegionRestrictedModelError(message) ? 400 : 502)
       const details: UpstreamErrorDetails = probe.details
         ? {
             message,
