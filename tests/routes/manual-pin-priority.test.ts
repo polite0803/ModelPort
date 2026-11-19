@@ -72,6 +72,7 @@ sm.addProvider({
   updatedAt: 2,
   supportedModels: ['Pin-A', 'Pin-B'],
   modelMappings: { 'Pin-A': 'mp-a', 'Pin-B': 'mp-b' },
+  modelCapabilities: { 'Pin-A': { contextTokens: 8192 }, 'Pin-B': { contextTokens: 1_000_000 } },
 } as never)
 sm.addAccount({
   id: 'mp-acct',
@@ -139,6 +140,7 @@ test('换钉清账号故障冷却：pinCooling 拒答 → 释放后立刻按钉�
   const route = pinnedRoute()
   autoRouter.markAccountCooldown('mp-acct', 504)
 
+  autoRouter.markAccountCooldown('mq-acct', 504)
   const before = select(route)
   assert.equal(before.pinCooling?.displayName, 'Pin-A', '前置：冷却票真的挡下了这颗钉')
   assert.deepEqual(before.candidates, [])
@@ -214,6 +216,25 @@ test('换钉只清目标一家：别家账号的冷却票留着', () => {
 
   assert.equal(accountRuntime.isCooling('mq-acct'), true, '别家的退避与这次点名无关')
   autoRouter.clearAccountCooldown('mq-acct')
+})
+
+// ---------------- 1.5 长会话不丢钉 ----------------
+
+test('长会话超过钉的窗口仍命中钉：context 硬过滤不得静默换模型', () => {
+  accountRuntime.reset()
+  const route = pinnedRoute() // 钉在小窗 Pin-A(8K)，池里还有大窗 Pin-B(1M)
+  const bigRequest = {
+    model: 'auto',
+    messages: [{ role: 'user', content: 'x'.repeat(400_000) }],
+  } as ChatCompletionRequest
+
+  const decision = select(route, bigRequest)
+  assert.equal(decision.reason, 'pin')
+  assert.equal(decision.pinMiss, undefined, '裁剪前估算超窗不是失配')
+  assert.equal(decision.pinBlocked, undefined, 'context 不拦钉，交给转发器裁剪收敛')
+  assert.ok(decision.candidates.length > 0)
+  assert.deepEqual([...new Set(decision.candidates.map(c => c.displayName))], ['Pin-A'],
+    '钉是独占：这一轮只派被钉的模型，绝不回落大窗的 Pin-B')
 })
 
 // ---------------- 2. 事实态不让路 ----------------

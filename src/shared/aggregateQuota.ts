@@ -7,7 +7,7 @@
  * 不得当作 0、不得当作无限、也不得参与额度预检。
  * 单位不是 token 的官方上限保留在 officialNote 里，只供面板显示，不参与预检。
  *
- * 生成于 2026-11-17；16 家有数字，
+ * 生成于 2026-11-19；16 家有数字，
  * 82 家官方未公布，98 家带口径备注。
  */
 
@@ -661,8 +661,8 @@ export const AGGREGATE_QUOTA: Record<string, AggregateEntryQuota> = {
     source: 'undocumented',
     docUrl: 'https://docs.z.ai/guides/llm/glm-5.3.md',
     asOf: '2026-10-29',
-    perModel: [{ modelId: 'glm-5.3', contextWindow: 1000000 }, { modelId: 'glm-4.7-flash' }],
-    officialNote: "主体确认：baseUrl https://api.z.ai/api/paas/v4（按量付费通用端点，同属 Z.ai 国际站）。用的是国际站 docs.z.ai 那份：https://docs.z.ai/guides/overview/pricing 只公布单价与免费 Flash SKU（GLM-4.7-Flash Free、GLM-4.5-Flash Free），无 RPM/TPM/上下文数字；本条目 models[] 里只有 glm-4.7-flash 落在免费 SKU，故 freeModelIds 只登记它（glm-4.5-flash 不在本目录）。限速页 docs.z.ai/api-reference/rate-limit.md → 307 跳转 z.ai/manage-apikey/rate-limits（登录态 JS 壳，读不到正文数字），所以 rpm/rpd/tpm/tpd/monthlyTokens 全 null；唯一可登记的是 GLM-5.3 的 1M 上下文。",
+    perModel: [{ modelId: 'glm-5.3', contextWindow: 1000000 }, { modelId: 'glm-4.7-flash' }, { modelId: 'glm-4.6v-flash', contextWindow: 128000 }],
+    officialNote: "主体确认：baseUrl https://api.z.ai/api/paas/v4（按量付费通用端点，同属 Z.ai 国际站）。用的是国际站 docs.z.ai 那份：https://docs.z.ai/guides/overview/pricing 公布单价与免费 SKU——Text Models 表 GLM-4.7-Flash Free、GLM-4.5-Flash Free，Vision Models 表 GLM-4.6V-Flash Free（2026-11-19 复核新增），无 RPM/TPM 数字；本条目 models[] 里 glm-4.7-flash 与 glm-4.6v-flash 落在免费 SKU，故 freeModelIds 登记这两条（glm-4.5-flash 不在本目录）。限速页 docs.z.ai/api-reference/rate-limit.md → 307 跳转 z.ai/manage-apikey/rate-limits（登录态 JS 壳，读不到正文数字），所以 rpm/rpd/tpm/tpd/monthlyTokens 全 null。2026-11-19 现网实测：glm-4.6v-flash 文本 ping 与 64x64 纯色图问色均 200（绿答 green、蓝答 blue），免费可用且真收图；拥塞时 429 code 1305「overloaded」亚秒即拒、无 Retry-After、退避重试可穿。glm-4.6v-flash 上下文 128K 取中文站官方模型页（国际站无该模型独立页），跨站来源已在 perModel evidence 注明。",
   },
   'zenmux': {
     source: 'undocumented',

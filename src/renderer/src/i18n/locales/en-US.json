@@ -1636,6 +1636,17 @@
       "costBudget": "Cost target",
       "costBudgetHint": "A smaller token target for named channels only, so prompts are squeezed to that size there (e.g. trae bills by volume and gets no prefix cache). It can only tighten the window, never widen it; if it is too small to fit the system prompt plus the current instruction, the window wins and a warning is logged. Empty = no cost gate.",
       "costBudgetPlaceholder": "channel id: tokens, one per line"
+    },
+    "visionRelay": {
+      "title": "Vision relay",
+      "enable": "Enable vision relay",
+      "enableHint": "When this turn's served model cannot take images, a free vision model transcribes them to text first and the original model continues. Models already marked as vision-capable get images directly; images are never dropped - each is replaced by a self-describing text marker.",
+      "reader": "Reader model",
+      "readerAuto": "Auto (free vision candidates)",
+      "readerHint": "Auto uses only free vision models, official free evidence first. Naming a reader explicitly disables failover to another model.",
+      "maxImageBytes": "Per-image limit (MB)",
+      "maxImageBytesHint": "Images over the limit fail the relay outright (the original error path) - they are never silently compressed.",
+      "saved": "Vision relay settings saved"
     }
   },
   "aggregate": {
@@ -1692,6 +1703,13 @@
       "paramsApply": "Apply",
       "paramsClear": "Clear",
       "paramsExtra": "Other parameters (JSON)",
+      "paramsWindow": "Context window tier",
+      "paramsWindowInherit": "Use the model's own declaration",
+      "paramsWindowHelp": "This tier decides when the client summarizes its history and what the gateway trims to. It is capped by the model's own declared window — picking 1m cannot exceed it. \"Use the model's own declaration\" means no extra tightening.",
+      "paramsWindowFailed": "Request parameters were saved, but the window tier was not (retry from the annotation dialog)",
+      "paramsWindowTooLarge": "This tier exceeds the model's own declared window ({{declared}} tokens)",
+      "paramsWindowTitle": "Model parameters · {{model}}",
+      "paramsWindowSubtitle": "The window tier decides when the client summarizes history and what the gateway trims to.",
       "paramsInvalid": "Invalid parameters: numeric fields must be numbers and other parameters must be a JSON object",
       "enabled": "Enabled"
     },
@@ -2174,6 +2192,8 @@
     "currentBadgeHint": "The model this route actually served last turn - not necessarily the next one",
     "annotate": "Annotate",
     "annotateHint": "Review what this source declares, complete it field by field from the standard ledgers, or override capabilities (vision / tools / reasoning / context window) by hand; routing follows the saved marks, and image requests require vision = yes.",
+    "params": "Parameters",
+    "paramsHint": "Choose the context window tier this model uses (200K / 400K / 1M)",
     "nextTurn": "Next turn: {{model}}",
     "pinnedBadge": "Pinned",
     "pin": "Pin",

@@ -23,6 +23,8 @@ import {
   type ModelProbeRow,
 } from '../../shared/modelProbe.ts'
 import { getProbeRowsSync } from '../providers/modelProbeStore.ts'
+import { adoptionsForModel, catalogAdoptionHint } from '../../shared/modelCatalog.ts'
+import { aggregateThirdPartyHint } from '../../shared/aggregateCapabilities.ts'
 import { advertisedContextTokens, resolveCapabilityDetail } from './autoRouting'
 import { aggregateContextWindow } from './modelCapabilities'
 
@@ -97,4 +99,51 @@ export function declaredContextWindowOf(
     ...(probe === undefined ? {} : { probe }),
   })
   return advertisedContextTokens(capability)
+}
+
+/**
+ * 这一跳模型的**已知**窗口（任何来源，目录与第三方旁表也算）。
+ *
+ * 与 {@link declaredContextWindowOf} 的唯一差别是出口不过广告闸：那个只认四层
+ * 可信读数，用于对外公布与探测；这个服务的是「这批输入这一家装不装得下」，判据
+ * 必须与 `autoRouting::effectiveContextLimit` 完全一致 —— 否则会出现「适配闸
+ * 说装得下、裁剪器说不该裁」，客户端按大窗攒的历史就原样打到小窗成员上，只能等
+ * 上游 400（2026-11-19 `modelscope/Qwen3.5-35B-A3B` 实测）。
+ *
+ * 层与层之间仍是 manual > record > official > catalog > probe > 第三方（与
+ * `resolveCapabilityDetail` 一致），静态表/家族规则只在以上都缺席时补位。
+ */
+export function knownContextWindowOf(
+  provider: Provider,
+  actualModelId: string,
+): number | undefined {
+  const displayName = displayNameOf(provider, actualModelId)
+  if (displayName === undefined) return undefined
+
+  const record = provider.modelCapabilities?.[displayName]
+  const manual = storeManager.getUserModelMarks()[provider.id]?.[displayName]
+  const aggregateId = provider.type === 'aggregate' ? (provider.aggregateId ?? provider.id) : undefined
+  const officialWindow = aggregateId === undefined
+    ? undefined
+    : aggregateContextWindow(aggregateId, actualModelId)
+  const thirdParty = aggregateId === undefined
+    ? undefined
+    : aggregateThirdPartyHint(aggregateId, actualModelId)
+  const catalog = catalogAdoptionHint(
+    adoptionsForModel(storeManager.getCatalogAdoptions(), provider.id, displayName),
+  )
+  const probeRow = probeIndex().get(probeRowKey({ providerId: provider.id, displayName }))
+  const probe = probeRow === undefined ? undefined : probeRowToLayer(probeRow)?.hint
+
+  const capability = resolveCapabilityDetail(provider.id, displayName, {
+    ...(manual === undefined ? {} : { manual }),
+    ...(record === undefined ? {} : { record }),
+    ...(officialWindow === undefined
+      ? {}
+      : { aggregateOfficial: { contextTokens: officialWindow } }),
+    ...(thirdParty === undefined ? {} : { thirdParty }),
+    ...(catalog === undefined ? {} : { catalog }),
+    ...(probe === undefined ? {} : { probe }),
+  })
+  return capability.contextTokens
 }

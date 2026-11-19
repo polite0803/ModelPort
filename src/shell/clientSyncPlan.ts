@@ -18,7 +18,7 @@
  */
 import path from 'node:path'
 import { KEY_PLACEHOLDER } from '../shared/clientSync.ts'
-import { rewriteCatalogWindows } from '../shared/codexCatalog.ts'
+import { rewriteCatalog, type CatalogAdvertisement } from '../shared/codexCatalog.ts'
 import type { ClientChange, ClientId } from '../shared/clientSync.ts'
 import { detectIndent, parseJsonObject } from './clientFormats.ts'
 import {
@@ -396,18 +396,20 @@ export function planCodexCatalogWindow(
   routes: readonly { name: string; contextWindow: number | null }[]
 ): PlanResult {
   if (routes.length === 0) return { kind: 'unchanged' }
-  const advertised = new Map<string, number | undefined>()
+  const advertised = new Map<string, CatalogAdvertisement>()
   for (const route of routes) {
-    if (route.contextWindow !== null) advertised.set(route.name, route.contextWindow)
+    if (route.contextWindow !== null) {
+      advertised.set(route.name, { contextWindow: route.contextWindow })
+    }
   }
-  const rewrite = rewriteCatalogWindows(raw, advertised)
+  const rewrite = rewriteCatalog(raw, advertised)
   if (rewrite === null) return { kind: 'unchanged' }
   return changed(
     rewrite.content,
     rewrite.changes.map(change => ({
-      label: `${change.slug} 窗口`,
-      before: change.before === null ? '未设置' : String(change.before),
-      after: change.after === null ? '未设置' : String(change.after),
+      label: `${change.slug} ${change.field === 'context_window' ? '窗口' : '输入模态'}`,
+      before: change.before ?? '未设置',
+      after: change.after ?? '未设置',
     }))
   )
 }

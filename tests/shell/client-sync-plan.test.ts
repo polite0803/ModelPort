@@ -13,6 +13,7 @@ import {
   maskSecret,
   planClaudeSettings,
   planCodeBuddySettings,
+  planCodexCatalogWindow,
   planCodexToml,
   planTraeModelList,
   planWorkBuddyModels,
@@ -474,4 +475,55 @@ test('claudeDesktopEndpoint blocks a non-loopback http origin with no stored ent
   // A stored value that is not https cannot satisfy the client either: block, never emit.
   const badValue = claudeDesktopEndpoint('http://192.168.0.235:18080', 'http://192.168.0.235:8443')
   assert.ok('blocked' in badValue)
+})
+/**
+ * catalog 的窗口由  驱动（2026-11-18）：在模型标注里选一档，同步一次就
+ * 落到客户端；网关没公布就清掉那一格，绝不自己猜一个数。
+ */
+test('catalog 窗口：按公布值改写已存在的条目，其它字段一个字节不动', () => {
+  const raw = JSON.stringify(
+    {
+      models: [
+        { slug: 'daily', display_name: 'daily', context_window: 1000000, comp_hash: 'abc' },
+        { slug: 'auto', display_name: 'auto' },
+        { slug: 'official-x', display_name: 'x', context_window: 200000 },
+      ],
+    },
+    null,
+    2,
+  ) + '\n'
+  const result = planCodexCatalogWindow(raw, [
+    { name: 'daily', contextWindow: 400000 },
+    { name: 'auto', contextWindow: 200000 },
+  ])
+  assert.equal(result.kind, 'changed')
+  if (result.kind !== 'changed') return
+  const parsed = JSON.parse(result.content)
+  const bySlug = new Map(parsed.models.map(m => [m.slug, m]))
+  assert.equal(bySlug.get('daily').context_window, 400000, '公布值覆盖旧值')
+  assert.equal(bySlug.get('daily').comp_hash, 'abc', '其它字段不动')
+  assert.equal(bySlug.get('auto').context_window, 200000, '原本没有的格子补上')
+  assert.equal(bySlug.get('official-x').context_window, 200000, '网关不服务的条目不动')
+  assert.ok(result.content.endsWith('\n'), '结尾换行保持')
+})
+
+test('catalog 窗口：网关没公布（空池）时不动那一格，不删除', () => {
+  const raw = JSON.stringify({ models: [{ slug: 'daily', context_window: 1000000 }] }, null, 2) + '\n'
+  const result = planCodexCatalogWindow(raw, [{ name: 'daily', contextWindow: null }])
+  // 空池是临时状态：删掉这一格会让客户端在一次抖动里失去压缩点。
+  // 2026-11-18 起「有候选但没标注」会在服务端补 200K，不会走到这里。
+  assert.equal(result.kind, 'unchanged')
+})
+
+test('catalog 窗口：/v1/models 没取到（空列表）时一个字段都不动', () => {
+  const raw = JSON.stringify({ models: [{ slug: 'daily', context_window: 1000000 }] }, null, 2) + '\n'
+  assert.equal(planCodexCatalogWindow(raw, []).kind, 'unchanged', '网关不可达不等于所有路由都没窗口')
+})
+
+test('catalog 窗口：值没变就是 unchanged，重复同步是空操作', () => {
+  const raw = JSON.stringify({ models: [{ slug: 'daily', context_window: 400000 }] }, null, 2) + '\n'
+  assert.equal(
+    planCodexCatalogWindow(raw, [{ name: 'daily', contextWindow: 400000 }]).kind,
+    'unchanged',
+  )
 })

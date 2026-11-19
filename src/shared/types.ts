@@ -5,6 +5,7 @@ import type { DiscountWindow } from './discountWindow.ts'
 import type { AggregateCostClass } from './aggregateCost'
 import type { ClientIdentity } from './clientProfile'
 import { DEFAULT_REPETITION_GUARD, type RepetitionGuardSettings, type StreamRepetitionReading, type StreamEmptyTurnReading } from './streamRepetition.ts'
+import type { VisionRelaySettings } from './visionRelayConfig.ts'
 import type { DeclaredQuotaLimit } from './declaredQuota.ts'
 import type { RouteModelBlock, RouteQuotaSummary } from './routeQuotaView.ts'
 
@@ -12,6 +13,7 @@ export type { AggregateWire }
 export type { PromptCachingConfig }
 export { DEFAULT_PROMPT_CACHING_CONFIG }
 export type { RepetitionGuardSettings, StreamRepetitionReading, StreamEmptyTurnReading }
+export type { VisionRelaySettings }
 export type { DeclaredQuotaLimit }
 export type { RouteModelBlock, RouteQuotaSummary }
 export { DEFAULT_REPETITION_GUARD }
@@ -135,6 +137,16 @@ export const CONTEXT_WINDOW_TIERS = {
 } as const
 
 export type ContextWindowTier = keyof typeof CONTEXT_WINDOW_TIERS
+
+/**
+ * 一条路由的候选**全都没有窗口标注**时使用的那个数（广告与裁剪共用）。
+ *
+ * 2026-11-18 用户裁定：广告侧用它兜底，不再省略键（省略会让客户端完全不压，现网
+ * 一次会话的历史涨到 88 万 token）；裁剪侧也必须用同一个数 —— 否则客户端按 200K
+ * 发、网关按 `maxTokens`（默认 65,536）裁，中间那段被悄悄截掉，模型看不到就只能
+ * 重读，现网实测重复读 66%。
+ */
+export const UNANNOTATED_CONTEXT_FALLBACK = 200_000
 
 export interface ModelCapabilityHint {
   tier?: AutoModelTier
@@ -1167,6 +1179,12 @@ export interface AppConfig {
    * tuned against.
    */
   streamRepetitionGuard?: RepetitionGuardSettings
+  /**
+   * 视觉读图两段式（PLAN-vision-relay，2026-11-19）：这一轮真正服务的模型不能
+   * 收图时，先把当轮新图交给一个免费视觉模型转述成文字，再按原文本目标转发。
+   * 已标注 vision 的目标直发、零介入；缺省（键不存在）= 关闭，行为与从前逐字节相同。
+   */
+  visionRelay?: VisionRelaySettings
   modelMappings: Record<string, ModelMapping>
   /**
    * 标准库（LiteLLM）的自定义镜像地址，仅接受 https；空/缺省表示不使用。

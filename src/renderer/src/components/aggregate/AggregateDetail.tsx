@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { CONTEXT_WINDOW_TIERS, type ContextWindowTier } from '@shared/types'
 import {
   BarChart3,
   ChevronDown,
@@ -1270,6 +1271,27 @@ function ModelsCard(props: {
   const [testResults, setTestResults] = useState<Record<string, AggregateModelTestResult>>({})
   const [paramModel, setParamModel] = useState<string | null>(null)
   const [paramDraft, setParamDraft] = useState<ParamDraft | null>(null)
+  /**
+   * 这个模型选用哪个窗口档（`null` = 用它的真实声明）。
+   *
+   * 和 temperature 那几个放在同一个对话框里：用户眼里它们都是「这个模型的设置」。
+   * 存储仍在手工标注（`userModelMarks`），因为网关裁剪与 `/v1/models` 都从那里读。
+   */
+  const [paramWindowTier, setParamWindowTier] = useState<ContextWindowTier | null>(null)
+  /**
+   * 这个模型自己声明的窗口（事实层，`null` = 取不到）。
+   *
+   * 用来拦「选了比它能装的更大的档」：解析层会用 min 兜住，但静默取小会让界面显示
+   * 「选了 1M」而实际只有 128K —— 用户看到的设定和生效值必须是同一个数。
+   */
+  const [paramDeclaredWindow, setParamDeclaredWindow] = useState<number | null>(null)
+  /**
+   * 该模型在**目录里的完整名**（`<entryId>/<id>`），标注/窗口档都按它建键。
+   *
+   * `paramModel` 是纯 id，那是聚合请求参数的键；`setModelMark` 那边只认目录名，
+   * 拿纯 id 去写会被「模型不在目录里」拒掉（现网实测）。
+   */
+  const [paramDisplayName, setParamDisplayName] = useState<string | null>(null)
   /** 逐模型标注对话框的目标行（providerId 就是 `entry.id`，聚合供应商记录与目录条目同名）。 */
   const [annotateModel, setAnnotateModel] = useState<AggregateModelInfo | null>(null)
   const [addOpen, setAddOpen] = useState(false)
@@ -1499,14 +1521,47 @@ function ModelsCard(props: {
     await onRefresh()
   }
 
-  const openParams = (model: AggregateModelInfo) => {
+  const openParams = async (model: AggregateModelInfo) => {
     setParamModel(model.id)
+    setParamDisplayName(model.displayName)
     setParamDraft(draftOfParams(model.params))
+    const api = window.electronAPI?.providers
+    const marks = api?.getModelMarks ? await api.getModelMarks() : undefined
+    setParamWindowTier(marks?.[entry.id]?.[model.displayName]?.contextWindowTier ?? null)
+    const meta = api?.getModelMetadataOne ? await api.getModelMetadataOne(entry.id, model.displayName) : undefined
+    const fact = meta?.success ? meta.metadata?.contextTokens : undefined
+    const declared = fact !== undefined && fact.state === 'known' ? fact.value : undefined
+    setParamDeclaredWindow(typeof declared === 'number' && declared > 0 ? declared : null)
   }
 
   const closeParams = () => {
     setParamModel(null)
+    setParamDisplayName(null)
     setParamDraft(null)
+    setParamWindowTier(null)
+    setParamDeclaredWindow(null)
+  }
+
+  /** 这个档是不是撑过了模型的真实窗口（撑过就不让选，而不是悄悄取小）。 */
+  const windowTierTooLarge = (tier: ContextWindowTier): boolean =>
+    paramDeclaredWindow !== null && CONTEXT_WINDOW_TIERS[tier] > paramDeclaredWindow
+
+  /**
+   * 把窗口档写进（或从）手工标注里。
+   *
+   * `setModelMark` 是整表覆盖，所以先读现有标注再合并 —— 否则一次「设窗口」会把
+   * 用户在别处标注的 vision / modalities 一起抹掉。
+   */
+  const writeWindowTier = async (providerId: string, displayName: string, tier: ContextWindowTier | null): Promise<boolean> => {
+    const api = window.electronAPI?.providers
+    if (!api?.setModelMark || !api.getModelMarks) return true
+    const marks = await api.getModelMarks()
+    const current = marks?.[providerId]?.[displayName] ?? {}
+    const next: Record<string, unknown> = { ...current }
+    if (tier === null) delete next.contextWindowTier
+    else next.contextWindowTier = tier
+    const result = await api.setModelMark(providerId, displayName, Object.keys(next).length > 0 ? (next as never) : null)
+    return result.success
   }
 
   const applyParams = async () => {
@@ -1518,6 +1573,22 @@ function ModelsCard(props: {
     }
     const result = await window.electronAPI.aggregate.setModelParams(entry.id, paramModel, parsed)
     if (!(await settle(result, t('aggregate.manage.toast.saved')))) return
+    // 窗口档不能选得比模型自己声明的还大：静默取小会让界面显示 1M、实际只有 128K。
+    if (paramWindowTier !== null && windowTierTooLarge(paramWindowTier)) {
+      toast({
+        title: t('common.error'),
+        description: t('aggregate.dialog.paramsWindowTooLarge', {
+          declared: String(paramDeclaredWindow ?? ''),
+        }),
+        variant: 'destructive',
+      })
+      return
+    }
+    // 窗口档与请求参数一起保存：用户在这个对话框里看到的是「这个模型的全部设置」。
+    if (paramDisplayName !== null
+      && !(await writeWindowTier(entry.id, paramDisplayName, paramWindowTier))) {
+      toast({ title: t('aggregate.manage.toast.saved'), description: t('aggregate.dialog.paramsWindowFailed'), variant: 'destructive' })
+    }
     await onRefresh()
     closeParams()
   }
@@ -1526,6 +1597,7 @@ function ModelsCard(props: {
     if (!paramModel) return
     const result = await window.electronAPI.aggregate.setModelParams(entry.id, paramModel, {})
     if (!(await settle(result, t('aggregate.manage.toast.saved')))) return
+    if (paramDisplayName !== null) await writeWindowTier(entry.id, paramDisplayName, null)
     await onRefresh()
     closeParams()
   }
@@ -1831,6 +1903,40 @@ function ModelsCard(props: {
                   value={paramDraft.extraJson}
                   onChange={event => setParamDraft({ ...paramDraft, extraJson: event.target.value })}
                 />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-[11px]">{t('aggregate.dialog.paramsWindow')}</Label>
+                <div className="flex flex-wrap gap-2">
+                  {(['200k', '400k', '1m'] as ContextWindowTier[]).map(tier => {
+                    const tooLarge = windowTierTooLarge(tier)
+                    return (
+                      <Button
+                        key={tier}
+                        type="button"
+                        size="sm"
+                        variant={paramWindowTier === tier ? 'default' : 'outline'}
+                        disabled={tooLarge}
+                        title={tooLarge
+                          ? t('aggregate.dialog.paramsWindowTooLarge', { declared: String(paramDeclaredWindow ?? '') })
+                          : undefined}
+                        onClick={() => setParamWindowTier(tier)}
+                      >
+                        {tier.toUpperCase()}
+                      </Button>
+                    )
+                  })}
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={paramWindowTier === null ? 'default' : 'outline'}
+                    onClick={() => setParamWindowTier(null)}
+                  >
+                    {t('aggregate.dialog.paramsWindowInherit')}
+                  </Button>
+                </div>
+                <p className="text-[10px] text-muted-foreground">
+                  {t('aggregate.dialog.paramsWindowHelp')}
+                </p>
               </div>
             </div>
           )}
