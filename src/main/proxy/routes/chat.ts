@@ -2133,6 +2133,12 @@ router.post('/completions', async (ctx: Context) => {
           collectedContent,
           Array.isArray(request.tools) && request.tools.length > 0,
         ),
+        // 结束原因要进 trace：退化判据靠它区分「正常写完」与「撞满上限的残文」。
+        // 与下面结算路径读同一份 SSE，不另起一遍读数口径。
+        ...(() => {
+          const seen = readStreamOutcome(collectedContent).finishReason
+          return seen === undefined ? {} : { finishReason: seen }
+        })(),
       })
 
       /**
@@ -2153,7 +2159,13 @@ router.post('/completions', async (ctx: Context) => {
         // 一张**模型级**熔断票。这是「回合之间换模型」的唯一通路 —— 一轮之内不换
         // 模型，所以「这家干不了活」必须在回合边界变成「下一轮从别家开始」。账号级
         // AIMD 管的是账号能不能接，两者不合并（同模型三家账号全限流不代表模型该换）。
-        const quality = modelQualityDegradation(trace, autoAttempts > 1, errorCode)
+        const quality = modelQualityDegradation(
+          trace,
+          autoAttempts > 1,
+          errorCode,
+          // 客户端点了上限就当它预期被截断，不再把 length 算成退化。
+          requestedMaxTokens !== undefined,
+        )
         if (quality !== undefined) {
           autoRouter.tripModelCircuit(autoDecision.routeName, chosenCandidate.displayName, quality)
         }

@@ -75,17 +75,44 @@ export const INCOMPLETE_STEP_CODE = 'incomplete_step'
  * 返回原因就是为了让日志能回答「这个模型为什么被跳过」，而不是只留一个布尔值。
  */
 export function modelQualityDegradation(
-  trace: Pick<RequestStreamTrace, 'endReason' | 'repetition' | 'emptyTurn'>,
+  trace: Pick<RequestStreamTrace, 'endReason' | 'repetition' | 'emptyTurn' | 'finishReason'>,
   servedByFallback = false,
   /** 流内错误帧的 `code`（直通路径扫出来的那一个）。 */
   errorCode?: string | null,
-): 'repetition' | 'empty-turn' | 'announced-stop' | 'prose-only-stop' | 'incomplete-step' | undefined {
+  /** 客户端这一轮是否指定了输出上限；指定了就不把 `length` 当异常。 */
+  outputCapRequested = false,
+): 'repetition' | 'empty-turn' | 'announced-stop' | 'prose-only-stop' | 'incomplete-step' | 'output-cap-cutoff' | undefined {
   if (errorCode === INCOMPLETE_STEP_CODE) return 'incomplete-step'
   if (trace.repetition?.degraded === true) return 'repetition'
   if (isEmptyTurnAfterStream(trace)) return 'empty-turn'
   if (isAnnouncedStopAfterStream(trace)) return 'announced-stop'
+  if (isTruncatedAgentTurn(trace, outputCapRequested)) return 'output-cap-cutoff'
   if (servedByFallback && isProseOnlyStopAfterStream(trace)) return 'prose-only-stop'
   return undefined
+}
+
+/**
+ * 第八类（2026-11-20 09:54:44 现网 `chatcmpl-mwobthji-kpo7nq`）：**撞满输出上限的
+ * 残文**。
+ *
+ * 那一轮：83,358 字、65,536 token 撞满 `max_tokens`、`finish_reason=length`、
+ * 零工具调用，客户端拿到一整轮车轱辘话。它与「模型正常写完一篇长文档」只有两点
+ * 区别，判据就只认这两点：
+ *
+ * 1. 客户端**没有**指定输出上限（`outputCapRequested === false`）——自己点了上限
+ *    就说明预期就是被截断；
+ * 2. 这一轮**带了工具却零调用**——agent 回合里没有动作就什么也没做完，正常写长文
+ *    的回合不会同时具备这两个条件。
+ */
+export function isTruncatedAgentTurn(
+  trace: Pick<RequestStreamTrace, 'finishReason' | 'emptyTurn'>,
+  outputCapRequested: boolean,
+): boolean {
+  if (outputCapRequested) return false
+  if (trace.finishReason !== 'length') return false
+  const reading = trace.emptyTurn
+  if (reading === undefined) return false
+  return reading.toolsOffered === true && reading.toolCallDeltas === 0
 }
 
 /**

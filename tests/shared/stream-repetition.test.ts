@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   DEFAULT_REPETITION_GUARD,
+  REPETITION_RUN_CHARS_LIMIT,
   REPETITION_TAIL_LINES,
   RUNAWAY_MIN_CHARS,
   createChatStreamProbe,
@@ -47,7 +48,8 @@ test('a collapsed tail is judged, and reasoning-only text counts', () => {
   assert.ok(reading)
   assert.equal(reading.degraded, true, JSON.stringify(reading))
   assert.ok(reading.dedupRatio <= DEFAULT_REPETITION_GUARD.maxDedupRatio)
-  // runChars 只是证据读数，不参与判定（标定显示长连续重复多出现在健康段）。
+  // runChars 自 2026-11-20 起参与判定（单行内部滚到 6000 字即算复读），
+  // 这里只确认它在真实复读上确实被算出来。
   assert.ok(reading.runChars > 0)
 
   const viaReasoning = measureStreamRepetition(reasoningSse(LOOPING))
@@ -304,4 +306,33 @@ test('逐块探测器：帧被切在中间也算得准，半个帧不算数', ()
   assert.equal(partial.reading().contentChars, 0)
   partial.push('的帧"}}]}\n\n')
   assert.equal(partial.reading().contentChars, 5)
+})
+
+test('单行内部滚到 6000 字即判复读，不等行数凑够 minLines', () => {
+  // 2026-11-20 09:54:44 现网 `chatcmpl-mwobthji-kpo7nq` 的形态：83,358 字正文被挤进
+  // 8 行（模型在一行里反复输出同一段），runChars 81,892。旧判据在 `too_short` 就返回，
+  // 而去重率 0.875 又高于 0.8 —— 两道门同时放过它。
+  const longRun = '现在开始执行。/'.repeat(2500) // 单行 17,500 字
+  const text = [longRun, '', longRun, '', longRun, '', longRun, '', longRun].join('\n')
+  const reading = measureTextRepetition(text)
+  assert.ok(reading)
+  assert.ok(reading.runChars >= REPETITION_RUN_CHARS_LIMIT, `runChars=${reading.runChars}`)
+  assert.equal(reading.degraded, true, '单行超长重复必须判退化')
+  assert.equal(reading.notJudged, undefined)
+})
+
+test('行数足够、runChars 未超限时仍按原去重率判：长文不受影响', () => {
+  // 40 行各不相同的正文：行数够、runChars 只有单行长度，不应被判复读。
+  const distinct = Array.from({ length: 40 }, (_, i) => `第 ${i + 1} 段：${'内容'.repeat(50)}`)
+  const reading = measureTextRepetition(distinct.join('\n'))
+  assert.ok(reading)
+  assert.ok(reading.runChars < REPETITION_RUN_CHARS_LIMIT)
+  assert.equal(reading.degraded, false)
+})
+
+test('短文本里的成对括号仍不判（runChars 门槛不误伤代码块）', () => {
+  const reading = measureTextRepetition(['function a() {', '}', '}', '}', 'return', '}'].join('\n'))
+  assert.ok(reading)
+  assert.equal(reading.degraded, false)
+  assert.equal(reading.notJudged, 'too_short')
 })

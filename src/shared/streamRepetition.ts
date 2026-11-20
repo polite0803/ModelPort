@@ -37,6 +37,19 @@ export const DEFAULT_REPETITION_GUARD: RepetitionGuardSettings = {
 /** How many trailing lines the verdict is computed over. */
 export const REPETITION_TAIL_LINES = 128
 
+/**
+ * 单行内部重复的字符下限：一旦尾窗里有一行连续滚了这么长，就被判为复读。
+ *
+ * 依据（2026-11-20 09:54:44 `chatcmpl-mwobthji-kpo7nq`，实测）：一轮 83,358 字、
+ * 65,536 token 撞满输出上限、零工具调用，`runChars` 81,892 —— 模型在一行里把
+ * 同一段话反复输出了整轮。当时判据给出的结论是 `notJudged: too_short`（只有 8 行，
+ * 不到 `minLines: 40`），而去重率 0.875 又高于 `maxDedupRatio: 0.8`：两道门同时
+ * 放过它，客户端收到的是一整轮车轱辘话。
+ *
+ * 阈值与跑飞判据同源（`RUNAWAY_MIN_CHARS`），避免同一形态出现两把尺。
+ */
+export const REPETITION_RUN_CHARS_LIMIT = 6_000
+
 export interface StreamRepetitionReading {
   /** Lines actually inspected (≤ {@link REPETITION_TAIL_LINES}). */
   lines: number
@@ -162,6 +175,13 @@ export function measureTextRepetition(
   const uniqueLines = new Set(tail).size
   const dedupRatio = Number((uniqueLines / tail.length).toFixed(3))
   const runChars = longestRepeatedRunChars(tail)
+
+  // 字符量判据必须排在行数门槛**之前**：2026-11-20 09:54 那一轮把 8.19 万字挤进
+  // 8 行（模型在一行内反复输出同一句），行数不足 40 就直接 `too_short` 放行，
+  // 而它的去重率 0.875 本来也高于 0.8 —— 两道判据同时失明。
+  if (runChars >= REPETITION_RUN_CHARS_LIMIT) {
+    return { lines: tail.length, uniqueLines, dedupRatio, runChars, degraded: true }
+  }
 
   if (tail.length < settings.minLines) {
     return { lines: tail.length, uniqueLines, dedupRatio, runChars, degraded: false, notJudged: 'too_short' }

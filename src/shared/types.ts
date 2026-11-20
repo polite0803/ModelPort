@@ -1696,6 +1696,13 @@ export interface RequestStreamTrace {
    * 那一格只会得到 `notJudged: too_short`，看着像健康。
    */
   emptyTurn?: StreamEmptyTurnReading
+  /**
+   * 上游给的结束原因（`stop` / `length` / `tool_calls` …）。
+   *
+   * 退化判据要区分「模型正常写完」与「撞满输出上限被截断」：后者在
+   * `finish_reason=length` 且客户端没指定上限时，交付的是一段残文。
+   */
+  finishReason?: string
 }
 
 /**
