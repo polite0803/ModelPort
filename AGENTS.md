@@ -152,7 +152,10 @@ scheduler/）、`src/preload/`、`src/renderer/`（React）、`src/shared/`。�
   是 `routes:switch`。
 - **配额上限与定价是生成的附属数据**（`shared/aggregate*.ts`）：改 `docs/data/**` 下的回执，重跑构建器，绝不手
   改产物。`undocumented` 永不拦截；非 token 类上限永不换算；重置时间靠推导。**缓存优先压缩**（`cacheFirst`，默
-  认开）在省下的量超过盈亏点时跳过在线压缩。`LoadBalanceStrategy` 有意声明两遍外加 UI 映射与两份语言包。
+  认开）在省下的量超过盈亏点时跳过在线压缩。**压缩后预热**（`promptCaching.warmAfterCompaction`，默认开）：
+  客户端压缩把历史换成摘要后，新前缀在随后几轮里逐轮重读（实测 15.5% → 65.3% → 91.3%），网关用逐字相同的
+  前缀多发一次 `max_tokens: 1` 的请求把它写进缓存；判据只看「本轮 prompt 比上一轮少一半以上」、5 分钟冷却、
+  缓存能力未知时不做，走 `probe` 通道不影响路由统计。`LoadBalanceStrategy` 有意声明两遍外加 UI 映射与两份语言包。
   §Aggregate Provider Catalogue、§Prompt Cache。
 
 ## 数据与存储

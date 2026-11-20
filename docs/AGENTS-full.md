@@ -709,6 +709,27 @@ cannot route to advertises something that never answers.
   rewrites a large prefix each time) and adaptive 5m/1h TTL (the 1h tier doubles the write price and
   the next turn's gap is unknown). Both wait for `/economics` to show a warm cache and a saving
   above break-even; see `docs/plan/PLAN-prompt-cache.md` P3 (2026-11-14 ruling).
+- **Compaction is followed by a prefix warm-up** (`src/main/proxy/cacheWarm.ts`,
+  `promptCaching.warmAfterCompaction`, default on, 2026-11-20). Measured on
+  `opencode_go/deepseek-v4.1-flash`, one session, consecutive turns: 99.9 % hit, then a turn whose
+  prompt grew to 185 789 tokens with **zero cache read** (the client shipped the whole history to
+  produce a summary), then the next turn at 28 910 tokens and 15.5 %, climbing 65.3 % → 91.3 % over
+  the following turns. The compaction request itself can never hit - its prefix differs from the
+  previous turn - but the *new* prefix was being re-read every turn afterwards, and that part is
+  removable. The trigger is one structural fact: **this turn's prompt is less than half of the
+  previous turn's, and the previous turn was at least 8 000 tokens**. On a hit the gateway re-sends
+  the *same* request body (byte-identical prefix, `tools`/`tool_choice` stripped because the warm-up
+  needs no tool contract) with `max_tokens: 1` and `stream: false`, through `probe: true` so the
+  extra call never touches the dispatch ledger, AIMD, Bandit or cooldowns. Guard rails, all
+  measured rather than assumed: a 5-minute cooldown per request path so repeated compactions cannot
+  multiply requests, no warm-up when the provider's `promptCache.mode` is `unknown` (sending a
+  request proves nothing about what got written), and the operator switch
+  `promptCaching.warmAfterCompaction` in the cache settings card. Cost accounting is honest: the
+  warm-up itself is a full-price prompt read of the new prefix (~30 k tokens in the reference
+  session) and buys back roughly the same amount on each of the next few turns; on a session that
+  compacts and then ends immediately it is a net loss. Tests: `tests/proxy/cache-warm.test.ts` (the
+  real turn numbers, the growth/small-drop negatives, capability and cooldown gates, and the
+  byte-identical-prefix guarantee).
 - **`LoadBalanceStrategy` is declared twice on purpose**: `shared/types.ts` (the renderer's copy) and
   `main/store/types.ts` (the store schema's copy), plus UI label maps and both locales. Adding a
   strategy means five edits; missing the store copy type-checks and then fails at load, missing a
