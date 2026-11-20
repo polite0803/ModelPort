@@ -67,6 +67,10 @@ scheduler/）、`src/preload/`、`src/renderer/`（React）、`src/shared/`。�
   **不按钉/供应商归因**——同一钉两点会话一个跑飞一个健康时，分水岭是单轮塌进复读。流式在 responses 入口
   压到首个工具调用或流结束再交付；重发打不通才交第一发。非流式同判据（`judgeRunawayText`）。§Degenerate
   Stream Detection。
+- **复读判据必须先看字符量再看行数。** 单行内部滚到 `REPETITION_RUN_CHARS_LIMIT`（6000 字）即判复读，不等
+  `minLines` 凑够——2026-11-20 09:54 那一轮把 8.19 万字挤进 8 行，行数门槛让它拿到 `too_short`，而去重率 0.875
+  又高于 0.8，两道门同时放行。另补第八类退化 `output-cap-cutoff`：`finish_reason=length` + 客户端**没**点上限 +
+  带工具却零调用 ⇒ 交付的是被截断的残文。§Degenerate Stream Detection。
 - **模型用文本写出的工具调用必须还原成 `tool_calls`，不得进客户端正文。** 两种已知格式：DSML 原生标记
   （`<｜DSML｜ calls>` / `invoke` / `parameter`，`｜` 为 U+FF5C 全角竖线，`DSML｜` 后可带空格，关键字有
   `calls` 与 `tool_calls` 两种）与 `<tool_call>{"name":…,"arguments":…}</tool_call>` JSON（另认

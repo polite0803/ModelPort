@@ -1480,6 +1480,28 @@ re-anchoring the conversation to it.
   and the body only exists when body logging is on; claiming coverage there would be a fabricated
   reading. (The `/v1/responses` entry's runaway retry below is the one exception, and it is not a
   reading: it decides delivery from the response body itself and stores nothing.)
+* **The repetition guard checks characters before it checks lines (2026-11-20).** Measured turn
+  `chatcmpl-mwobthji-kpo7nq` (09:54:44, `codex` → `opencode_go/deepseek-v4.1-flash`): 83 358
+  characters and 65 536 output tokens, `finish_reason=length`, **zero tool calls**, and the model had
+  repeated the same passage inside a *single* line — `runChars` 81 892 but only **8 lines**. The old
+  verdict required 40 tail lines before judging, so it returned `notJudged: 'too_short'`; the dedup
+  ratio of 0.875 was also above the 0.8 threshold, so even without the line gate it would have passed.
+  Both doors failed at once, and the client received a whole turn of the same paragraph. `runChars`
+  is therefore now a judgement, not just evidence: a single repeated run of
+  `REPETITION_RUN_CHARS_LIMIT` (6 000, same number as `RUNAWAY_MIN_CHARS`) marks the turn degraded
+  before the `minLines` gate is consulted. Code blocks and other legitimately short repeats stay under
+  that line, so the existing short-answer exemption is intact.
+* **Eighth degradation class: `output-cap-cutoff` (`isTruncatedAgentTurn`).** Same turn family, judged
+  without looking at repetition at all: `finish_reason === 'length'`, the client did **not** set an
+  output cap, and the turn offered tools but produced zero tool-call deltas. Those two conditions
+  together mean the model burned the whole budget on prose in an agent turn — a truncated fragment,
+  not an answer. A client that sets its own `max_tokens` asked for truncation and is never judged; a
+  turn that did emit tool calls is work, not a collapse; a client that offered no tools is writing
+  prose, where length is legitimate. `outputCapRequested` is threaded from `requestedMaxTokens` in
+  `routes/chat.ts`, and the trace now carries `finishReason` so the judgement reads the same SSE the
+  settlement path does. Tests: `tests/proxy/output-cap-cutoff.test.ts` (the live turn plus every
+  negative: client-set cap, tool calls present, no tools offered, `stop` instead of `length`, missing
+  reading, and the existing repetition verdict taking precedence).
 * **Responses-lane runaway turns are re-issued instead of delivered (2026-11-19).** That evening's
   Codex goal loop produced a turn with **zero tool calls and 16 384 characters of `执行。` repetition**
   (`routes/responses.ts`), cut by the output cap after five minutes; the client recorded
