@@ -19,6 +19,8 @@ import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
 import { autoRouter, AUTO_SKIPPED_REPORT_LIMIT, describeTransientCause, summarizeTransientSkips } from '../autoRouter'
 import { cacheMissLedger } from '../cacheMissLedger'
+import { shouldWarmAfterCompaction, warmRequestOf } from '../cacheWarm'
+import { promptCacheOf } from '../../../shared/promptCache'
 import type { AutoCandidate, AutoRouteDecision } from '../autoRouter'
 import { profileRequest } from '../autoRouting'
 import { applyVisionRelay, routeDecisionNeedsVisionRelay } from '../visionRelay'
@@ -429,7 +431,12 @@ function meterQuota(
    * 这一轮所在会话的键（`AutoRouteDecision.conversationKey`）。只用于把缓存
    * 缺口归因到四种成因；缺省时账本记不到这一轮，但计数照常累加。
    */
-  missConversationKey?: string
+  missConversationKey?: string,
+  /**
+   * 压缩后预热：只在拿到真实读数、且会话键可用时才可能触发。
+   * `warm` 是执行动作的回调（由调用方持有 forwarder），这里只负责判定。
+   */
+  warm?: (previousPromptTokens: number, currentPromptTokens: number) => void
 ): void {
   try {
     storeManager.getQuotaLedger().record(provider.id, accountId, modelId, reading)
@@ -461,6 +468,13 @@ function meterQuota(
     })
   } catch (error) {
     console.error('[Chat] token usage record failed:', error)
+  }
+
+  // 压缩后预热：账本刚记下这一轮的 prompt 量，`missReading.prevPromptTokens`
+  // 就是上一轮的大小。压缩把历史换成了摘要，新前缀在接下来几轮里每轮重读一遍，
+  // 提前写进缓存能把那几轮省下来。
+  if (warm !== undefined && missReading !== undefined && missReading.prevPromptTokens !== undefined) {
+    warm(missReading.prevPromptTokens, reading.promptTokens)
   }
 }
 
@@ -1991,6 +2005,49 @@ router.post('/completions', async (ctx: Context) => {
       })
     }
 
+    // 压缩后预热：客户端把历史换成摘要之后，新前缀在接下来几轮里每轮都要重读
+    // 一遍（实测 15.5% → 65.3% → 91.3%）。这里用**同一份请求体**（逐字相同的前缀）
+    // 多发一次 `max_tokens: 1` 的请求，把前缀写进上游缓存。
+    // 走 `probe` 通道：不进派发账本、不动 AIMD/Bandit/冷却 —— 它是一次维护性的
+    // 附带请求，不能影响路由判断。
+    let lastWarmAt: number | undefined
+    const warmAfterCompaction = (previousPromptTokens: number, currentPromptTokens: number): void => {
+      const cacheMode = provider.type === 'aggregate' && provider.aggregateId
+        ? promptCacheOf(getAggregateEntry(provider.aggregateId)).mode
+        : 'unknown'
+      const decision = shouldWarmAfterCompaction(
+        { previousPromptTokens, currentPromptTokens },
+        {
+          cacheMode,
+          enabled: config.promptCaching.warmAfterCompaction === true,
+          ...(lastWarmAt === undefined ? {} : { lastWarmAt }),
+        },
+      )
+      if (!decision.warm) return
+      lastWarmAt = Date.now()
+      const body = warmRequestOf({ ...request, model: actualModel } as Record<string, unknown>)
+      void requestForwarder
+        .forwardChatCompletion(body as never, account, provider, actualModel, context, { probe: true })
+        .then((warmResult) => {
+          storeManager.addLog('info', '压缩后已预热新前缀', {
+            requestId,
+            providerId: provider.id,
+            accountId: account.id,
+            model: request.model,
+            data: {
+              actualModel,
+              success: warmResult.success,
+              status: warmResult.status,
+              promptTokens: currentPromptTokens,
+              previousPromptTokens,
+            },
+          })
+        })
+        .catch((error) => {
+          console.error('[Chat] cache warm failed:', error)
+        })
+    }
+
     if (nonStreamReading !== undefined) {
       meterQuota(
         provider,
@@ -2002,7 +2059,8 @@ router.post('/completions', async (ctx: Context) => {
           ? compressionReport.saved
           : 0,
         compressionReport,
-        missConversationKey
+        missConversationKey,
+        warmAfterCompaction
       )
     }
 
@@ -2289,7 +2347,8 @@ router.post('/completions', async (ctx: Context) => {
               ? compressionReport.saved
               : 0,
             compressionReport,
-            missConversationKey
+            missConversationKey,
+            warmAfterCompaction
           )
           wrapperStream.end()
           if (streamError) {
@@ -2393,7 +2452,8 @@ router.post('/completions', async (ctx: Context) => {
               ? compressionReport.saved
               : 0,
             compressionReport,
-            missConversationKey
+            missConversationKey,
+            warmAfterCompaction
           )
           wrapperStream.end()
         })

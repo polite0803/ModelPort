@@ -112,11 +112,21 @@ export function effectiveAffinityMinutes(
 export interface PromptCachingConfig {
   enabled: boolean
   anthropicTtl: '5m' | '1h'
+  /**
+   * 压缩后给新前缀做一次预热。
+   *
+   * 客户端压缩（compaction）之后，整段历史换成了摘要：上游缓存里那份前缀
+   * 已经对不上，接下来几轮要每轮重读一遍（实测 15.5% → 65.3% → 91.3%）。
+   * 打开时，压缩后的第一轮会用同一份前缀多发一次最小请求，把新前缀写进缓存；
+   * 这是**额外一次上游请求**，所以留了开关与冷却窗口。
+   */
+  warmAfterCompaction: boolean
 }
 
 export const DEFAULT_PROMPT_CACHING_CONFIG: PromptCachingConfig = {
   enabled: true,
   anthropicTtl: '5m',
+  warmAfterCompaction: true,
 }
 
 /**
@@ -134,5 +144,8 @@ export function normalizePromptCachingConfig(
       ? DEFAULT_PROMPT_CACHING_CONFIG.enabled
       : input.enabled === true,
     anthropicTtl: input.anthropicTtl === '1h' ? '1h' : '5m',
+    warmAfterCompaction: input.warmAfterCompaction === undefined
+      ? DEFAULT_PROMPT_CACHING_CONFIG.warmAfterCompaction
+      : input.warmAfterCompaction === true,
   }
 }

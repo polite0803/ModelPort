@@ -86,25 +86,39 @@ export function PromptCacheSettings() {
             </div>
 
             {config.enabled && (
-              <div className="space-y-3 pt-4 border-t">
-                <div className="space-y-0.5">
-                  <Label>{t('promptCaching.ttl')}</Label>
-                  <p className="text-sm text-muted-foreground">{t('promptCaching.ttlHint')}</p>
+              <>
+                <div className="space-y-3 pt-4 border-t">
+                  <div className="space-y-0.5">
+                    <Label>{t('promptCaching.ttl')}</Label>
+                    <p className="text-sm text-muted-foreground">{t('promptCaching.ttlHint')}</p>
+                  </div>
+                  <div className="flex gap-2">
+                    {(['5m', '1h'] as const).map(ttl => (
+                      <Button
+                        key={ttl}
+                        type="button"
+                        variant={config.anthropicTtl === ttl ? 'default' : 'outline'}
+                        size="sm"
+                        onClick={() => handleChange({ anthropicTtl: ttl })}
+                      >
+                        {t(`promptCaching.ttlOption.${ttl}`)}
+                      </Button>
+                    ))}
+                  </div>
                 </div>
-                <div className="flex gap-2">
-                  {(['5m', '1h'] as const).map(ttl => (
-                    <Button
-                      key={ttl}
-                      type="button"
-                      variant={config.anthropicTtl === ttl ? 'default' : 'outline'}
-                      size="sm"
-                      onClick={() => handleChange({ anthropicTtl: ttl })}
-                    >
-                      {t(`promptCaching.ttlOption.${ttl}`)}
-                    </Button>
-                  ))}
+
+                <div className="flex items-center justify-between p-4 bg-muted/30 rounded-lg">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="prompt-cache-warm">{t('promptCaching.warmAfterCompaction')}</Label>
+                    <p className="text-sm text-muted-foreground">{t('promptCaching.warmAfterCompactionHint')}</p>
+                  </div>
+                  <Switch
+                    id="prompt-cache-warm"
+                    checked={config.warmAfterCompaction}
+                    onCheckedChange={checked => handleChange({ warmAfterCompaction: checked })}
+                  />
                 </div>
-              </div>
+              </>
             )}
 
             <p className="text-caption text-[var(--text-dim)]">{t('promptCaching.note')}</p>

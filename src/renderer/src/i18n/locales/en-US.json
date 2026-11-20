@@ -1552,6 +1552,8 @@
     "enableHint": "Adds cache_control markers to Anthropic-format requests (tool list, system prompt, previous turn). Metadata only — no text is changed. Implicit-cache providers such as DeepSeek need no marker and are unaffected.",
     "ttl": "Cache lifetime",
     "ttlHint": "5 minutes is the default tier. 1 hour costs more to write but survives longer gaps; it is only sent to endpoints that support explicit breakpoints.",
+    "warmAfterCompaction": "Warm the prefix after compaction",
+    "warmAfterCompactionHint": "After the client compacts its history the new prefix is re-read on each of the next few turns. When on, the gateway re-sends that exact prefix once with a tiny output to write it into the upstream cache; the cost is one extra request per compaction.",
     "ttlOption": {
       "5m": "5 minutes",
       "1h": "1 hour"
