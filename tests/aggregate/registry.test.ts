@@ -10,7 +10,6 @@ import {
 } from '../../src/main/providers/aggregate/registry.ts'
 
 test('the catalogue carries the entries that can actually be wired', () => {
-  assert.equal(AGGREGATE_REGISTRY.length, 102)
   // 473 transcribed, minus 7 retired upstream on 2026-10-29 (3 anthropic + 4 xai),
   // minus the withdrawn mistral_codestral entry (its single model went with it),
   // plus the Agnes CN switch (agnes-2.0-flash -> agnes-3.0-flash + agnes-2.5-flash),
@@ -42,7 +41,11 @@ test('the catalogue carries the entries that can actually be wired', () => {
   // plus 1 on 2026-11-19: zai_api +glm-4.6v-flash — official free vision SKU
   // (docs.z.ai pricing Vision Models table), live-verified 200 with image input
   // (green/blue color probes); upstream /models omits it, same as glm-4.7-flash.
-  assert.equal(AGGREGATE_REGISTRY.reduce((sum, entry) => sum + entry.models.length, 0), 626)
+  // plus 1 entry / 15 models on 2026-11-21: atlascloud — the vendor advertises
+  // free promotional credits, and its public /v1/models answered 200 without a
+  // key (153 live ids; only 15 transcribed into the baseline).
+  assert.equal(AGGREGATE_REGISTRY.length, 103)
+  assert.equal(AGGREGATE_REGISTRY.reduce((sum, entry) => sum + entry.models.length, 0), 641)
 
   // Browser-login account channels are retired; the responses-only relay is not wired.
   for (const excluded of ['openai', 'github_copilot', 'fleetrelay_t1']) {

@@ -95,9 +95,46 @@ import type { AggregateEntry } from '../../../shared/aggregate'
  * model", so that list cannot be used as a callable baseline. Slugs therefore
  * arrive through `modelsUrl` only once a real key is saved.
  *
- * The array now carries 93 entries / 580 models.
+ * `atlascloud` was added on 2026-11-21: the vendor's own home page advertises
+ * "free credits to start" and "No credit card required to start", and its FAQ
+ * confirms promotional `bonus credits` (no fixed sign-up amount, so the entry
+ * stays `apikey` rather than `free`). Its public `/v1/models` answered 200
+ * without a key; the baseline carries 15 ids from that live list, the rest
+ * arrive through `modelsUrl` after the user saves a key.
+ *
+ * The array now carries 94 entries / 641 models.
  */
 export const AGGREGATE_REGISTRY: AggregateEntry[] = [
+  {
+    "id": "atlascloud",
+    "name": "Atlas Cloud",
+    "category": "apikey",
+    "authKind": "apiKey",
+    "baseUrl": "https://api.atlascloud.ai/v1",
+    "wire": "openai-chat",
+    "models": [
+      { "id": "deepseek-ai/deepseek-v4-flash", "name": "DeepSeek V4 Flash" },
+      { "id": "google/gemini-2.5-flash", "name": "Gemini 2.5 Flash" },
+      { "id": "google/gemini-3-flash-preview", "name": "Gemini 3 Flash Preview" },
+      { "id": "anthropic/claude-haiku-4.5-20251001", "name": "Claude Haiku 4.5" },
+      { "id": "anthropic/claude-sonnet-4.5-20250929", "name": "Claude Sonnet 4.5" },
+      { "id": "zai-org/glm-5.3", "name": "GLM 5.3" },
+      { "id": "zai-org/glm-5.3-flash", "name": "GLM 5.3 Flash" },
+      { "id": "minimaxai/minimax-m2.5", "name": "MiniMax M2.5" },
+      { "id": "moonshotai/kimi-k2.6", "name": "Kimi K2.6" },
+      { "id": "moonshotai/kimi-k3", "name": "Kimi K3" },
+      { "id": "qwen/qwen3.5-plus", "name": "Qwen3.5 Plus" },
+      { "id": "qwen/qwen3.6-plus", "name": "Qwen3.6 Plus" },
+      { "id": "qwen/qwen3.8-27b", "name": "Qwen3.8 27B" },
+      { "id": "openai/gpt-5.5", "name": "GPT 5.5" },
+      { "id": "xai/grok-4.5", "name": "Grok 4.5" }
+    ],
+    "authUrl": "https://console.atlascloud.ai/api-keys",
+    "envVar": "ATLASCLOUD_API_KEY",
+    "modelsUrl": "https://api.atlascloud.ai/v1/models",
+    "notes": "厂商官网写明注册送免费额度、无需信用卡；官方 FAQ 说明赠送额度属促销 bonus credits，金额不固定，普通 API 调用与按量余额共用账户。OpenAI 兼容 Chat Completions 端点；基线取自免 key 可读的 /v1/models，其余模型由页面发现补齐。",
+    "website": "https://www.atlascloud.ai/"
+  },
   {
     "id": "agnes",
     "name": "Agnes CN",

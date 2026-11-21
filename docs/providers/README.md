@@ -1,6 +1,6 @@
 # Provider Adaptation Guides
 
-> 适用版本：v1.7.3 ｜ 最后核对：2026-11-04 ｜ 状态：现行
+> 适用版本：v1.7.3 ｜ 最后核对：2026-11-21 ｜ 状态：现行
 
 这些文档记录内置供应商的认证方式、模型来源、适配状态和配置入口。更新模型或新增供应商能力时，
 优先同步对应供应商文档。
@@ -9,7 +9,7 @@
 
 | 类别 | 数量 | 凭据 | 文档 / 数据源 |
 | --- | --- | --- | --- |
-| 聚合目录 | 92 条渠道 / 580 个模型 | API Key、免密，或标记为不支持（Google ADC） | 数据源为 `src/main/providers/aggregate/registry.ts`，无独立文档 |
+| 聚合目录 | 103 条渠道 / 641 个模型 | API Key、免密，或标记为不支持（Google ADC） | 数据源为 `src/main/providers/aggregate/registry.ts`，无独立文档 |
 | 账号渠道 | 15 个渠道 | 浏览器 / 设备码 / OAuth，`opencode` 为 API Key | [`opencode.md`](opencode.md)（单渠道说明）；整体机制见 [`../AGENTS-full.md`](../AGENTS-full.md) §Account Channels |
 | 自定义供应商 | 用户自建 | 自行配置 | 在应用内的供应商页面直接添加 |
 
