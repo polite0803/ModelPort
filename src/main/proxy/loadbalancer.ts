@@ -74,12 +74,16 @@ export class LoadBalancer {
    * @param strategy Load balance strategy
    * @param preferredProviderId Preferred provider ID
    * @param preferredAccountId Preferred account ID
+   * @param affinityAccountId 会话亲和的账号（具名车道的缓存域粘性）。与
+   *   `preferredAccountId` 分开：后者是用户点名，语义上还要压掉跨家链；前者只是
+   *   「上一轮跑通的这一家」，不可用就照常走策略，链路不受影响。
    */
   selectAccount(
     model: string,
     strategy: LoadBalanceStrategy = 'round-robin',
     preferredProviderId?: string,
-    preferredAccountId?: string
+    preferredAccountId?: string,
+    affinityAccountId?: string
   ): AccountSelection | null {
     const candidates = this.getAvailableAccounts(model, preferredProviderId, strategy === 'failover')
 
@@ -91,6 +95,16 @@ export class LoadBalancer {
       const preferred = candidates.find(c => c.account.id === preferredAccountId)
       if (preferred && !this.isAccountInFailure(preferredAccountId)) {
         return preferred
+      }
+    }
+
+    // 会话亲和排在策略之前、用户点名之后：缓存域跟着账号走，换号就是全冷一次。
+    // `getAvailableAccounts` 只在 failover 策略下剔除失败账号，其余策略仍会把它
+    // 放进候选 —— 所以这里必须自己判一次，否则亲和会把一个刚失败的号硬塞回来。
+    if (affinityAccountId) {
+      const familiar = candidates.find(c => c.account.id === affinityAccountId)
+      if (familiar && !this.isAccountInFailure(affinityAccountId)) {
+        return familiar
       }
     }
 

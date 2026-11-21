@@ -331,6 +331,11 @@ export interface AppConfig {
    */
   streamRepetitionGuard?: RepetitionGuardSettings
   /**
+   * 具名车道的会话级账号亲和。与 `shared/types.ts::AppConfig` 同一字段；
+   * 缺省（键不存在）= 开。
+   */
+  sessionAffinity?: boolean
+  /**
    * 视觉读图两段式（PLAN-vision-relay）。与 `shared/types.ts::AppConfig` 同一字段；
    * 缺省（键不存在）= 关闭，行为与从前逐字节相同。
    */

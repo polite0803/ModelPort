@@ -240,6 +240,14 @@ export interface StrategyResult {
    * this: a truncation keeps every message and changes one.
    */
   rewrote?: boolean
+  /**
+   * 这一轮保留窗口的起点（**非 system 输入数组**里的下标）与那条消息的指纹。
+   *
+   * 下一轮把同一对值当作 `cutHint` 传回来，裁剪点就不再每轮重算 —— 只要它仍装得下，
+   * 前缀与上一轮逐字节相同，上游缓存才能读到。指纹用于识别「客户端改写/压缩了历史」：
+   * 下标还在、内容换了，就不许沿用。
+   */
+  cut?: { start: number; fingerprint: string }
 }
 
 /**
@@ -250,6 +258,8 @@ export interface ContextProcessResult {
   originalCount: number
   finalCount: number
   strategyResults: StrategyResult[]
+  /** 保留窗口的起点与指纹，供下一轮作为 `cutHint` 复用。 */
+  trimCut?: { start: number; fingerprint: string }
   /**
    * True when any strategy returned **different bytes**, not merely fewer
    * messages.
@@ -742,6 +752,32 @@ export class SlidingWindowStrategy {
 }
 
 /**
+ * 裁剪点前移时额外让出的预算比例（L2）。
+ *
+ * 作用是把「每轮增长一点就每轮断一次前缀」摊成「每 K 轮断一次」：前移时多丢这么
+ * 一份，接下来几轮的增长都在余量里走完。取值小 ⇒ 模型看到的历史更多、断裂更频繁；
+ * 大 ⇒ 历史更少、缓存更连续。5% 是拍板值。
+ */
+const TRIM_CUT_HEADROOM_RATIO = 0.05
+
+/**
+ * 一条消息的「同一性」指纹：只取角色 + 内容开头一小段 + 长度。
+ *
+ * 用途单一：验证上一轮记住的裁剪起点在这一轮**还是同一条消息**。客户端压缩、
+ * 删改历史后下标可能仍然有效但内容已换，沿用就会发出一份自相矛盾的前缀。
+ * 不哈希全文：裁剪点通常落在一条长 tool 结果上，全文哈希是白付 CPU。
+ */
+function cutFingerprintOf(message: ChatMessage | undefined): string {
+  if (message === undefined) return ''
+  const content = message.content
+  const head = typeof content === 'string'
+    ? content.slice(0, 256)
+    : JSON.stringify(content ?? '').slice(0, 256)
+  const length = typeof content === 'string' ? content.length : (content?.length ?? 0)
+  return `${message.role}:${length}:${head}`
+}
+
+/**
  * Token Limit Strategy
  * Truncates history by token count, always preserving system messages
  *
@@ -878,7 +914,10 @@ export class TokenLimitStrategy {
     return { ...message, content: kept + marker }
   }
 
-  execute(messages: ChatMessage[]): StrategyResult {
+  execute(
+    messages: ChatMessage[],
+    cutHint?: { start: number; fingerprint: string },
+  ): StrategyResult {
     const originalCount = messages.length
 
     if (!this.config.enabled) {
@@ -999,6 +1038,46 @@ export class TokenLimitStrategy {
       windowStart = newestIndex
     }
 
+    // 前缀契约（L2）：上一轮记住的裁剪起点若仍然装得下，就沿用它 —— 头部不动，
+    // 这一轮的序列化才是上一轮的「追加」，上游前缀缓存才读得到。
+    // 指纹比对挡的是「客户端压缩/删改历史」：下标还在、内容已换，绝不沿用。
+    let reusedCut = false
+    // 注意：`cutHint.start` 通常**晚于**这一轮「最多能装多少」算出的 tight 起点 ——
+    // 上一轮为了让出余量，本来就多丢了几条。沿用它是目的（前缀连上），不是回退。
+    if (
+      cutHint !== undefined &&
+      cutHint.start >= 0 &&
+      cutHint.start < work.length &&
+      cutFingerprintOf(work[cutHint.start]) === cutHint.fingerprint
+    ) {
+      let spendFromHint = 0
+      for (let index = cutHint.start; index < work.length; index += 1) {
+        spendFromHint += estimateTokens(work[index])
+      }
+      if (spendFromHint <= availableTokens) {
+        windowStart = cutHint.start
+        reusedCut = true
+      }
+    }
+
+    // 必须前移时**一次移到位、多让出一份余量**：只挪最短距离的话，历史每轮长一点
+    // 就每轮再断一次 —— 与改动前逐轮重算没有区别。留出余量后，接下来几轮的增长都
+    // 落在余量里，前缀连续；断裂从「每轮一次」摊成「每 K 轮一次」。
+    // 代价是窗口少用几个百分点（模型看到的历史略少），换取的是缓存能真的续上。
+    // 只有**本来就要裁**（tight 起点已经 > 0）时才让余量：整段装得下的请求一条都不许丢，
+// 哪怕它刚好贴着成本目标 —— 那是预算，不是要求我们再裁一刀。
+    if (!reusedCut && availableTokens > 0 && windowStart > 0) {
+      const headroomTarget = availableTokens * (1 - TRIM_CUT_HEADROOM_RATIO)
+      let spendFromStart = 0
+      for (let index = windowStart; index < work.length; index += 1) {
+        spendFromStart += estimateTokens(work[index])
+      }
+      while (windowStart < newestIndex && spendFromStart > headroomTarget) {
+        spendFromStart -= estimateTokens(work[windowStart])
+        windowStart += 1
+      }
+    }
+
     // Widen to keep the tool group whole, then pull the task statements back in
     // front — both against `work`, so a truncation above is never undone.
     const kept = work.slice(windowStart)
@@ -1036,7 +1115,15 @@ export class TokenLimitStrategy {
         `${rewrote && result.length === originalCount ? ', content truncated' : ''})`
     )
 
-    return this.resultOf(result, originalCount, originalTokens)
+    // 记住这一轮真正的窗口起点（组内首条，不是 `piece` 之前那条），下一轮带回来复用。
+    // 指纹取**输入**里的那条原文：下一轮客户端还会把原文送来，两者才可比。
+    const cut = groupStart < work.length
+      ? { start: groupStart, fingerprint: cutFingerprintOf(work[groupStart]) }
+      : undefined
+    return {
+      ...this.resultOf(result, originalCount, originalTokens),
+      ...(cut === undefined ? {} : { cut }),
+    }
   }
 
   /**
@@ -1252,9 +1339,13 @@ export class ContextManagementService {
   /**
    * Process messages through all enabled strategies
    */
-  async process(messages: ChatMessage[]): Promise<ContextProcessResult> {
+  async process(
+    messages: ChatMessage[],
+    cutHint?: { start: number; fingerprint: string },
+  ): Promise<ContextProcessResult> {
     const originalCount = messages.length
     const strategyResults: StrategyResult[] = []
+    let trimCut: { start: number; fingerprint: string } | undefined
 
     if (!this.config.enabled) {
       return {
@@ -1282,7 +1373,8 @@ export class ContextManagementService {
           break
 
         case 'tokenLimit':
-          result = this.tokenLimitStrategy.execute(currentMessages)
+          result = this.tokenLimitStrategy.execute(currentMessages, cutHint)
+          if (result.cut !== undefined) trimCut = result.cut
           break
 
         default:
@@ -1325,6 +1417,7 @@ export class ContextManagementService {
       finalCount: currentMessages.length,
       strategyResults,
       changed: changed || changedByRewrite,
+      ...(trimCut === undefined ? {} : { trimCut }),
     }
   }
 

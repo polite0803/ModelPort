@@ -3,6 +3,7 @@
  * Defines core data structures for proxy service
  */
 
+import type { ClientSessionKey } from '../../shared/clientSessionKey'
 import type { RequestAttemptTrace } from '../../shared/types'
 
 /**
@@ -270,6 +271,17 @@ export interface ProxyContext {
   clientIP?: string
   /** 入站客户端的 User-Agent 原值：聚合线出站转发它，让形状与客户端直连一致（见 utils/clientShape.ts）。 */
   clientUserAgent?: string
+  /**
+   * 本赛季话键（与路由粘性/缓存缺口分类同一口径）。转发层用它记住「上一轮的
+   * 裁剪起点」，使同一会话的前缀逐轮可续；缺失时裁剪照旧每轮重算。
+   */
+  sessionKey?: string
+  /**
+   * 客户端会话标识的**原值**（与 `clientSessionKey()` 同型）。`sessionKey` 是本网关
+   * 哈希后的分类/粘性键，不能拿它派生 OpenCode 上游要求的会话亲和头 —— 两条腿
+   * 必须用同一个原值口径，否则回环头带来的会话在出站时退化成按账号派生。
+   */
+  clientSession?: ClientSessionKey
 }
 
 /**

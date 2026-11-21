@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
+import { clientSessionKey } from '../../src/shared/clientSessionKey.ts'
 import {
   isOpencodeUpstream,
   opencodeAffinityHeaders,
@@ -112,6 +113,38 @@ test('会话标识按 prompt_cache_key → user → metadata.user_id 的优先�
   assert.match(opencodeAffinityValue({ request: 'not-an-object' }), /^mp-[0-9a-f]{24}$/)
 })
 
+test('回环头解析出的会话优先于 body，换账号也不改亲和值', () => {
+  const clientSession = clientSessionKey({
+    body: {},
+    headers: { 'x-modelport-session-id': 'from-messages-metadata', 'x-modelport-session-source': 'metadata_user_id' },
+  })
+  assert.deepEqual(clientSession, { value: 'from-messages-metadata', source: 'metadata_user_id' })
+
+  const first = opencodeAffinityHeaders({ baseUrl: GO, accountId: 'acct-1', request: {}, clientSession })
+  const second = opencodeAffinityHeaders({ baseUrl: GO, accountId: 'acct-2', request: {}, clientSession })
+  assert.ok(first && second)
+  assert.equal(first['x-opencode-session'], second['x-opencode-session'], '同一会话换账号不该换亲和值')
+  assert.notEqual(
+    opencodeAffinityValue({ request: {}, accountId: 'acct-1' }),
+    opencodeAffinityValue({ request: {}, accountId: 'acct-2' }),
+    '对照：没有会话原值时仍按账号派生',
+  )
+
+  const derived = opencodeAffinityValue({ request: { prompt_cache_key: 'A' }, accountId: 'acct-1' })
+  assert.equal(
+    opencodeAffinityValue({
+      request: { prompt_cache_key: 'A' },
+      accountId: 'acct-1',
+      clientSession: { value: 'B', source: 'prompt_cache_key' },
+    }),
+    opencodeAffinityValue({ request: { prompt_cache_key: 'B' }, accountId: 'acct-1' }),
+    'clientSession 是已归一的上游口径，必须赢过 body 原值',
+  )
+  assert.notEqual(derived, opencodeAffinityValue({
+    request: { prompt_cache_key: 'A' }, accountId: 'acct-1', clientSession: { value: 'B', source: 'prompt_cache_key' },
+  }))
+})
+
 test('接线门：buildHeaders 的两个调用点都把 request 传进去', () => {
   const source = readSource('src/main/proxy/forwarder.ts')
   // 调用点里现在嵌着 `clientShapeHeaders(...)`，`[^)]*` 会停在第一个右括号，
@@ -137,6 +170,7 @@ test('接线门：buildHeaders 的两个调用点都把 request 传进去', () =
     assert.match(call, /\brequest\b/, `${call} must pass the request so the session id stays per-conversation`)
     // 客户端形状头（转发入站 UA）也要接上（2026-11-13 起）。
     assert.match(call, /clientShapeHeaders\(context\.clientUserAgent\)/, `${call} must forward the client shape`)
+    assert.match(call, /context\.clientSession/, `${call} must pass the resolved client session for affinity`)
   }
-  assert.match(source, /opencodeAffinityHeaders\(\{/)
+  assert.match(source, /opencodeAffinityHeaders\(\{[\s\S]*?clientSession,/)
 })

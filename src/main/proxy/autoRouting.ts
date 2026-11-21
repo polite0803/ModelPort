@@ -863,6 +863,43 @@ export function conversationKey(request: ChatCompletionRequest): string | undefi
 }
 
 /**
+ * 会话内的任务锚点：2026-11-21 现网同一个客户端 session 同时承载 CLAUDE.md 重建、
+ * 环境更新、工具回执复述等不同前缀，纯会话键会把它们串成一条账。取首条 user 的前
+ * 若干字符做锚点，让同一对话的后续轮次仍同键；客户端压缩/摘要把首条 user 换掉时
+ * 返回 undefined，让会话标识保底，既有粘性语义不变。
+ */
+export function taskAnchorOf(messages: ChatMessage[] | undefined): string | undefined {
+  if (!Array.isArray(messages)) return undefined
+  const firstUser = messages.find(message => message.role === 'user')
+  if (firstUser === undefined) return undefined
+  const text = messageText(firstUser).trim()
+  if (text === '') return undefined
+  // 这类首条 user 是系统/客户端注入的上下文广播，任务边界在后面的真实 user 消息。
+  // 用它们做锚点会把多个不相关任务继续串在同一条会话账里。
+  const broadcast = /^(the following is the user's claude\.md configuration|# environment update\b|<system-reminder\b|the user sent a new message while you were working:|note: .+ changed on disk since you last read it)/i
+  let anchorUser = firstUser
+  if (broadcast.test(text)) {
+    const realUser = messages.find(message =>
+      message.role === 'user'
+      && !broadcast.test(messageText(message).trim())
+      && messageText(message).trim() !== ''
+    )
+    if (realUser === undefined) return undefined
+    anchorUser = realUser
+  }
+  const anchorText = messageText(anchorUser).trim()
+  if (anchorText === '') return undefined
+  // 客户端压缩后首条 user 被换成摘要，这不是新任务，而是旧任务的继续。识别这些
+  // 改写时返回 undefined，让会话键退回纯 session 指纹（历史粘性语义不变）。
+  if (SUMMARY_REWRITE.test(anchorText)) return undefined
+  return hashString(anchorText.slice(0, TASK_ANCHOR_CHARS)).toString(36)
+}
+
+const TASK_ANCHOR_CHARS = 512
+/** 与 cacheWarm 的压缩回合标记同口径，另收中文「交接摘要」（既有粘性测试用到）。 */
+const SUMMARY_REWRITE = /交接摘要|context checkpoint compaction|compaction request|handoff summary|another language model started|produced a summary of its thinking process/i
+
+/**
  * 一个模型的标注层。字段名直接对应 {@link CapabilitySource}，顺序就是优先级：
  * `manual > record > aggregate-official > catalog > static > provider-default > third-party`，
  * 名字启发式排在最后（只对 `tier` 生效），再没有就是 `unknown`。

@@ -12,6 +12,8 @@ import { streamHandler } from '../stream'
 import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
 import { autoRouter, AUTO_SKIPPED_REPORT_LIMIT, describeTransientCause, summarizeTransientSkips } from '../autoRouter'
+import { accountAffinityKey } from '../accountAffinity'
+import { clientSessionKey } from '../../../shared/clientSessionKey'
 import type { AutoCandidate } from '../autoRouter'
 import type { AccountSelection, ForwardResult } from '../types'
 import { storeManager } from '../../store/store'
@@ -198,29 +200,36 @@ router.post('/completions', async (ctx: Context) => {
   // `503 no_available_account`。曾经的 `404 code:'route_not_found'` 与 URL 层未挂载
   // 共用一个 code 装两种语义，已删（见 `resolveRouteRequest` 注释）。
   const route = routeOutcome.kind === 'routable' ? routeOutcome.route : undefined
+  // 会话键与 chat 路由同一口径：客户端给了会话标识就用它，否则退回内容指纹。
+  // 必须先解析：`select()` 的粘性键与下面的分类/亲和键必须来自同一份解析结果。
+  const clientSession = clientSessionKey({ body: request, headers: ctx.headers })
+  const routingRequest = {
+    ...request,
+    messages: promptMessages,
+  } as Parameters<typeof autoRouter.select>[0]
   const autoDecision = route !== undefined
-    ? autoRouter.select(
-        {
-          model: request.model,
-          messages: promptMessages,
-          stream: request.stream,
-        },
-        config.loadBalanceStrategy,
-        undefined,
-        route
-      )
+    ? autoRouter.select(routingRequest, config.loadBalanceStrategy, undefined, route, clientSession)
     : null
+
+  // 缓存缺口分类与账号亲和共用这个键，两处口径分叉会让同一段对话在读数里裂成两段。
+  const missConversationKey = autoDecision?.conversationKey
+    ?? autoRouter.conversationKeyFor(routingRequest, clientSession)
 
   let selection: AccountSelection | null = null
   if (!autoDecision) {
     const preferredProviderId = modelMapper.getPreferredProvider(request.model)
     const preferredAccountId = modelMapper.getPreferredAccount(request.model)
+    // 与 chat 的具名车道同一条规则：用户静态点名 > 会话亲和 > 策略。
+    const affinityAccountId = autoRouter.namedAccountAffinity(
+      accountAffinityKey(missConversationKey, request.model)
+    )
 
     selection = loadBalancer.selectAccount(
       request.model,
       config.loadBalanceStrategy,
       preferredProviderId,
-      preferredAccountId
+      preferredAccountId,
+      affinityAccountId
     )
 
     if (!selection) {
@@ -538,6 +547,7 @@ router.post('/completions', async (ctx: Context) => {
           startTime,
           isStream: request.stream || false,
           clientUserAgent: ctx.headers['user-agent'],
+          ...(missConversationKey === undefined ? {} : { sessionKey: missConversationKey }),
         },
         // 换家预算随 decision 走（与 chat 路由同因）
         { baseCap: autoDecision.baseCap, ...(autoDecision.wallClockBudgetMs === undefined ? {} : { wallClockBudgetMs: autoDecision.wallClockBudgetMs }) }
@@ -596,6 +606,7 @@ router.post('/completions', async (ctx: Context) => {
             startTime,
             isStream: request.stream || false,
             clientUserAgent: ctx.headers['user-agent'],
+            ...(missConversationKey === undefined ? {} : { sessionKey: missConversationKey }),
           }
         )
       }
@@ -692,6 +703,13 @@ router.post('/completions', async (ctx: Context) => {
       if (chosenCandidate) {
         autoRouter.rememberRoute(autoDecision.conversationKey, chosenCandidate, autoDecision.route)
       }
+    } else {
+      // 具名车道：只由成功一轮写入，能力未知的供应商在方法内部被挡掉。
+      autoRouter.rememberNamedAccountAffinity(
+        accountAffinityKey(missConversationKey, request.model),
+        provider,
+        account.id
+      )
     }
 
     storeManager.updateAccount(account.id, {

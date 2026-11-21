@@ -1,6 +1,6 @@
 # 方案：Prompt 缓存命中的实现与强化（P0–P3）
 
-> 成文版本：v1.7.9 ｜ 最后核对：2026-11-08 ｜ 状态：**P0/P1/P2-D/P3-A 已落地；DeepSeek 三组真机读数已取（见 §9.1）；Anthropic 真机读数待补**
+> 成文版本：v1.7.9 ｜ 最后核对：2026-11-21 ｜ 状态：**P0/P1/P2-D/P3-A 已落地；DeepSeek 三组真机读数已取（见 §9.1）；一小时续轮丢锚归因见 §9.14；Anthropic 真机读数待补**
 > 优先级：**DeepSeek 缓存命中率优先**；**按模型的缓存命中统计是硬交付项**。
 > 关联：[`docs/design/PLAN-token-compression.md`](../design/PLAN-token-compression.md)（缓存经济性、live-zone 硬约束）
 > 结论先行：DeepSeek 走自动前缀缓存，**不需要断点**，它的问题是"前缀被我们自己改动"和"账号/模型轮换把缓存丢在半路"；Anthropic 才需要 P0 的显式断点。两者共用 P1 的读数与仪表盘。
@@ -732,3 +732,116 @@ prompt_tokens 区间 59,722–175,435（均价 105,133，合计 231 万）
 坐标与到期时刻，5s 节流、最多 500 条）。**客户端的压缩/删史网关无法修复**：原文到不了网关；
 DeepSeek 系（`readDiscount 0.02`）上压缩本就被 `isCacheSensitive` 关掉，这条线上网关不改写
 字节——能跨重启掉的只有亲和读数，所以 P4 落成亲和持久化，而不是"改写产物固化"。
+
+## 9.14 2026-11-20 22:14→23:14 一小时试跑：短空档丢锚与预热 400
+
+**取证口径**：Qoder 22:14:20 部署完成后于 22:14:35 拍基线
+`/root/modelport-cache-baseline-2026-11-20T14-14-35-797Z.json`，23:14:08 取当前数据，用
+`/root/mpdelta.mjs` 对同一天 `(provider, model)` 计数做差。下表全部是**区间差值**而非累计值；
+三份快照里的配置一致：`loadBalanceStrategy=round-robin`、`cacheAffinityMinutes=240`、
+`sessionAffinity=true`、`promptCaching.enabled=true`、`warmAfterCompaction=true`、
+`contextManagement.channelIds=['trae','loomy']`。
+
+| 车道 | req 增量 | 区间命中 | 未命中 token | 四类计数 | append:diverged | 四类 token 占比 | resumed | 续轮间隔档（计数 / token 占比） |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `bailian_token_plan/deepseek-v4.1-flash` | +571 | 83.7% | 10,410,844 | cold 49 / rewrite 71 / break 272 / tail 176 | 264:8 | cold 56.1% / rewrite 1.0% / break 40.8% / tail 2.1% | 56.1% | `<5m` 49 / 100%；`5–30m` 0；`>30m` 0 |
+| `opencode_go/deepseek-v4.1-flash` | +176 | 77.6% | 3,648,543 | cold 24 / rewrite 6 / break 94 / tail 50 | 82:12 | cold 70.1% / rewrite 0.8% / break 28.0% / tail 1.0% | 69.4% | `<5m` 22 / 100%；`5–30m` 0；`>30m` 0 |
+| `opencode_go/hy4-flash-free` | +63 | 97.6% | — | — | — | — | — | 无 resumed gap |
+
+**结论**：两家 DeepSeek 的 `coldResumed` 全数落在 `<5m`，`5–30m` 与 `>30m` 两档为 0；按
+[`PLAN-session-scoped-routing.md`](PLAN-session-scoped-routing.md) §4.5/§4.6 的判据（间隔超过上游缓存寿命
+才算 TTL 过期；短间隔整段丢锚指向上游提前清缓存或聚合器换后端），本次排除 TTL 过期。该文档
+11.5 分钟窗口的「断链 95.6% 是新增、`breakDiverged` 仅 2.1%、`coldResumed` 百炼 56%/OpenCode
+94%」在一小时窗口上复核结论一致：`break` 以 `append` 为主（新增内容的结构上限，不是故障），
+真正分叉的 `diverged` 只占少数；`rewrite` 条数不少但 token 占比很小。网关 `NRestarts=0`、
+journal 无 `error/failed`、health 返回 `{"ok":true,"status":"running"}`，累计命中曲线基本持平。
+**缺口大头是上游/聚合器侧的缓存域变化，网关修不了**；网关能修的只有自己的键口径分叉与无效预热。
+
+**预热 400（异常但未定因）**：应用日志中「压缩后已预热新前缀」共 67 条，其中 47 条 400、20 条
+200；按供应商分为百炼 38×400/2×200、OpenCode 9×400/18×200。当前
+`cacheWarm.ts::warmRequestOf()` 已逐字保留 `tools` / `tool_choice` 等前缀字段，只把
+`max_tokens` 压到 1、`stream` 关掉（此前剥掉工具声明会被严格上游整条 400，且缓存前缀对不上）；
+但现网版本的 400 错误体未取到，**不能据此断言 400 的根因**。本批处置是失败冷却 + 只记状态码与
+错误摘要的结构化日志，不剥字段、不改请求体形状；`warmAfterCompaction` 默认值保持开。
+`PLAN-session-scoped-routing.md` L2 的「裁剪推进时预热一次」仍未实现，不属本批交付。
+
+**口径切换**：缺口间隔自本批修复起改按**请求入站时刻**计算（此前是响应结束时刻），历史账本
+不回算；上线后首轮可能重选账号，需再看一个一小时窗口判断收益。上述网关侧修复（OpenCode 亲和、completions 会话键、入站时刻缺口分类、预热失败冷却与日志、裁剪回写字段收口）已完成，`npm run gate` 全绿（3267/3267）。
+
+**部署后复测（2026-11-21）**：02:15:41 CST 以 `/root/mpd.bak-20261121-021532` 备份覆盖部署，
+`modelport.service` 重启后 health 200、NRestarts=0，部署件含新符号
+`shouldPauseWarmAfterFailures`×2 / `context.clientSession`×2 / `requestStartedAt`×9。基线
+`/root/modelport-cache-baseline-2026-11-21T02-15-42.json`，一小时窗口结果见
+`/root/modelport-replay-2026-11-21-1h.txt`；采集完成后回填本节。
+
+**预热 400 根因（部署后拿到错误体）**：首笔新日志明确报
+`stream_options should be set along with stream = true`。真实请求是流式的，`anthropicWire` /
+`responsesInbound` 会注入 `stream_options`；预热把 `stream` 改成 `false` 却把这个流式字段
+留在请求里，上游直接拒收整条，前缀一个 token 都没写进去 —— 这解释了 2026-11-20 的 47×400。
+修复是 `warmRequestOf()` 关流时同步删 `stream_options`，其余字段不动；这属于根因修复，不是
+止血猜测。
+
+**一小时复测（2026-11-21 02:23:28 → 03:23:54 CST）**：完整窗口报告
+`/root/modelport-replay-2026-11-21-1h.txt`。服务 active、`NRestarts=0`、health 200；
+预热 **59/59 全部 200**（窗口内 0 条 400、0 条拒绝日志），确认根因修复生效。区间差值：
+
+| 车道 | req 增量 | 区间命中 | 未命中 token | 四类计数 | append:diverged | resumed | 续轮间隔档（计数 / token 占比） |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `bailian_token_plan/deepseek-v4.1-flash` | +1436 | 92.3% | 12,726,014 | cold 64 / rewrite 214 / break 436 / tail 720 | 428:8 | 51.4% | `<5m` 63；`5–30m` 0；`>30m` 0 |
+| `opencode_go/deepseek-v4.1-flash` | +437 | 91.0% | 4,820,741 | cold 27 / rewrite 10 / break 152 / tail 247 | 124:28 | 58.3% | `<5m` 27；`5–30m` 0；`>30m` 0 |
+| `opencode_go/hy4-flash-free` | +19 | 99.6% | 8,432 | tail 19 | — | — | 无 resumed gap |
+
+对照 11-20 的 83.7% / 77.6%，本窗口提升到 92.3% / 91.0%；`coldResumed` 仍 100% 落在
+`<5m`，上游短间隔丢锚现象没有消失（63 / 27 条），但 `breakDiverged` 占比降到 0.8% / 10.9%，
+`break` 仍以 `append` 为主。单窗口数据不足以证明长期趋势，后续沿用同一对拍口径持续观察。
+
+**未命中 token 的具体来源（同窗口抽读）**：窗口内 200 条 200 响应中 176 条是两家 DeepSeek，
+命中约 91.65%。其中成对出现的客户端压缩回合贡献未命中 1,646,124 tok（85.6%）：
+写摘要那轮 prompt 约 175k / cacheRead 约 11.5k，摘要重建那轮 prompt 约 43k / cacheRead
+约 18k。这两轮的前缀与上轮物理上必然断裂，预热救不了；续轮丢锚未命中仅 31,610 tok
+（1.6%），正常尾部 245,073 tok（12.7%）。假设这对回合完全不产生未命中，窗口理论命中
+约 **99.35%** —— 这是理论上限，不是已实测值；网关不能替客户端改写压缩请求，也不能
+向用户对话写提示词。
+
+据此新增第一项收窄：`compactionTurnOf()` 只从本轮 user 消息识别客户端自己发出的
+`CONTEXT CHECKPOINT COMPACTION` / `handoff summary` 与摘要重建文本，把这两类回合排除在
+压缩后预热触发之外。它们的未命中照常落账（开销是真的，不能靠不记账把命中率「算」上去）；
+网关既不改写这些请求，也不生成任何提示词。本批已通过 `npm run gate`（3269/3269），
+**尚未部署**；是否真的接近 99% 只能在部署后的下一个完整窗口用同一差值口径实测。
+
+## 9.15 2026-11-21 06:15 复测：压缩归因被推翻，会话键按任务切分
+
+**部署与窗口**：06:13:28 CST 备份 `/root/mpd.bak-20261121-061320` 后部署压缩回合识别改动，
+health 200、`NRestarts=0`。基线 `/root/modelport-cache-baseline-2026-11-21T06-15-23.json`。
+原定一小时后台脚本 `/root/mp-replay-compaction.sh` 因 WSL 于 06:19 重启、06:29 新 boot 中断，
+报告 `/root/modelport-replay-2026-11-21-compaction-1h.txt` 未生成；本节用 06:15:24 → 07:00:06
+的实时快照差值（约 45 分钟，不是一小时完整窗口）：百炼 `deepseek-v4.1-flash` req+504、
+命中 97.1%、未命中 1,074,772 tok；`cold 6 / rewrite 114 / break 65 / tail 308`，
+`append:diverged=56:9`；OpenCode `hy4-flash-free` req+99、命中 96.4%，OpenCode DeepSeek
+新请求 0。
+
+**压缩归因不成立**：本窗口请求日志里三个压缩标记均出现 0 次，先前把 02:23 窗口 85.6%
+未命中归给压缩回合的结论不能外推到这一窗口。按 `userInput` 前缀分组（同一
+`sessionKeySource=client-session`）：`CLAUDE.md 配置注入` 39 条 / 命中 96.9%、
+`Read tool 回执` 73 条 / 97.7%、`真正解决` 39 条 / 99.5%、`# Environment update` 8 条 /
+98.4%。同一客户端会话键承载多段互不相关的任务前缀，缺口账把它们串成同一条会话，
+前一轮的 prompt 大小成了后一轮的「上一轮」，因此低命中被持续放大。
+
+**修复判据**：`autoRouter.conversationKeyFor()` 不再只用客户端会话标识。有 session 时，
+键改为 `session:<hash>-<task>`：
+
+- `taskAnchorOf()` 取首条 user 的前 512 字符哈希，忽略大小写；`CLAUDE.md 配置注入`、
+  `# Environment update`、`<system-reminder>`、`The user sent a new message...`、
+  `Note: ... changed on disk...` 这五类广播不是任务边界，跳过它们找后面的真实 user。
+- 压缩/摘要改写（交接摘要、`context checkpoint compaction`、`handoff summary`、
+  `another language model started`）不产生新锚点：进程内按会话保存上一轮有效锚点，
+  让这类回合沿用同一任务键，保住既有「自动压缩不换家」的粘性语义。
+- 没有 user 文本时退回纯会话键；无 session 时 `conversationKey(request)` 行为不变。
+- 同一把尺同时用于选路粘性、会话级 pin、缓存缺口分类与具名车道账号亲和；
+  重启后锚点记忆清空，压缩回合退回纯会话键，不会凭空恢复旧任务。
+
+**测试与门禁**：`tests/proxy/autoRouting.test.ts` 钉住广播跳过、摘要不切键、不同任务不同
+锚点；`tests/proxy/completions-session-stickiness.test.ts` 钉住同一 session 下任务切分、
+后续轮次与压缩改写仍同键；既有 `tests/routes/routes-pool-and-sticky.test.ts` 的压缩粘性
+用例保持原样通过。完整 `npm run gate` 3288/3288 通过。**尚未部署**；部署后的同口径
+一小时差值才能判断命中率能否达到 99%。

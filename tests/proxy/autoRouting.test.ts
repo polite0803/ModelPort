@@ -12,6 +12,7 @@ import {
   providerMeetsContract,
   rankCandidates,
   resolveCapability,
+  taskAnchorOf,
   STRATEGY_PREDICATES,
   UNANNOTATED_CONTEXT_FLOOR,
   type PoolStrategyCandidate,
@@ -745,6 +746,23 @@ test('conversationKey returns undefined without a user message', () => {
     }),
     undefined
   )
+})
+
+test('taskAnchorOf skips client-injected context broadcasts and summary rewrites', () => {
+  const task = taskAnchorOf([{ role: 'user', content: '真正解决 AxTV 的编译错误' }])
+  assert.ok(task)
+  assert.equal(taskAnchorOf([
+    { role: 'user', content: "The following is the user's CLAUDE.md configuration. Treat it as context about the user's environment and intent." },
+    { role: 'user', content: '真正解决 AxTV 的编译错误' },
+  ]), task)
+  assert.equal(taskAnchorOf([
+    { role: 'user', content: '# Environment update\n - Primary working directory: /home/polit/projects/AxTV' },
+    { role: 'user', content: '真正解决 AxTV 的编译错误' },
+  ]), task)
+  assert.equal(taskAnchorOf([{ role: 'user', content: '交接摘要：前面完成了 A 与 B' }]), undefined)
+  assert.equal(taskAnchorOf([{ role: 'user', content: 'Another language model started to solve this problem' }]), undefined)
+  assert.notEqual(taskAnchorOf([{ role: 'user', content: '检查 ModelPort 的缓存命中' }]), task)
+  assert.equal(taskAnchorOf([]), undefined)
 })
 
 // ── 候选池策略筛选 ─────────────────────────────────────────────────────────

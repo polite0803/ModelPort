@@ -87,6 +87,63 @@ export interface CacheMissClassCounts {
 }
 
 /**
+ * 四类成因的再切分（只读归因）。
+ *
+ * `break` 本身分不出两件性质完全不同的事：**本轮新追加的内容**（工具输出、
+ * 文件内容 —— 它本来就不在缓存里，属于结构上限）与**中段真的断了**（网关/客户端
+ * 把已有前缀改写掉，这才是要修的）。`cold` 同理：会话首轮冷启无法避免，续轮丢锚
+ * 才是异常。两者混在一个数字里，命中率就只能当"感觉"用。
+ *
+ * 区分依据只有两轮的 prompt 差：未命中 ≈ 本轮新增 ⇒ 追加；未命中 > 新增 ⇒ 断点。
+ * 这是一个下界判断（新增内容本身也可能被上游裁掉一部分），所以宁可把边界判成
+ * `append`，不把结构性上限算成故障。
+ */
+export interface CacheMissDetail {
+  /** cold 且此前没有本会话读数：真·首轮。 */
+  coldFirst: number
+  /** cold 但会话有上一轮读数：>50% 未命中＝锚点丢了，这才是异常。 */
+  coldResumed: number
+  /** break 的未命中不超过本轮新增（含一点测量余量）：结构性上限。 */
+  breakAppend: number
+  /** break 的未命中明显大于本轮新增：前缀中段被改写。 */
+  breakDiverged: number
+  /** 进程启动后不久、本会话又没有上轮读数：疑似被重启清掉账本（不是新会话）。 */
+  afterRestart: number
+}
+
+/**
+ * 与 {@link CacheMissClassCounts} 同键的**未命中 token** 合计。
+ *
+ * 条数回答「多少轮」，token 回答「损失多大」——两者会给出不同结论：一轮冷启
+ * 可能丢 30 万 token，四十轮断链新增可能只丢 2 万。只报条数会让排障修错地方。
+ * 口径：`未命中 = prompt − cacheRead`，只算上报了缓存字段的上游请求。
+ */
+export type CacheMissTokenCounts = Record<CacheMissClass, number>
+
+/**
+ * 「续轮丢锚」距上一轮的间隔档（`coldResumed` 的再切分）。
+ *
+ * 这是区分两种成因的唯一客观依据：间隔超过上游缓存寿命 ⇒ 过期是事实，不用修；
+ * 间隔很短却整段没命中 ⇒ 上游提前清了缓存或换了后端，要找供应商。
+ * 上限受账本读数保留窗（6 小时）约束：更久的会话被当作新会话（首轮），
+ * 所以 `over30m` 实际覆盖 30 分钟到 6 小时。
+ */
+export type CacheMissIdleGap = 'under5m' | 'from5mTo30m' | 'over30m'
+
+export type CacheMissIdleGapCounts = Record<CacheMissIdleGap, number>
+export type CacheMissIdleGapTokens = Record<CacheMissIdleGap, number>
+
+/** 与 {@link CacheMissDetail} 同键的未命中 token 合计。 */
+export interface CacheMissTokenDetail {
+  coldFirst: number
+  coldResumed: number
+  breakAppend: number
+  breakDiverged: number
+  /** `afterRestart` 是子集标记：同一笔未命中会在它和 `coldFirst` 各记一次。 */
+  afterRestart: number
+}
+
+/**
  * One local day's counters for one `(provider, model)` pair.
  *
  * The pair is the key on purpose: a model served by two endpoints has two cache
@@ -117,6 +174,16 @@ export interface ModelDayUsage {
    * 缓存字段），不是「四类都是 0」。
    */
   cacheMissClasses?: CacheMissClassCounts
+  /** 四类的再切分；缺省与 `cacheMissClasses` 同一条判据（没分类就没有它）。 */
+  cacheMissDetail?: CacheMissDetail
+  /** 四类各自的未命中 token 合计；缺省原因同上。 */
+  cacheMissTokens?: CacheMissTokenCounts
+  /** 再切分各自的未命中 token 合计；缺省原因同上。 */
+  cacheMissTokenDetail?: CacheMissTokenDetail
+  /** 续轮丢锚按间隔分档的请求计数；缺省同上。 */
+  cacheMissIdleGap?: CacheMissIdleGapCounts
+  /** 续轮丢锚按间隔分档的未命中 token；缺省同上。 */
+  cacheMissIdleGapTokens?: CacheMissIdleGapTokens
 }
 
 export type ModelDayUsageMap = Record<string, ModelDayUsage>
@@ -569,6 +636,149 @@ function addCacheMissClass(
   return { ...counts, [cls]: counts[cls] + 1 }
 }
 
+export function emptyCacheMissDetail(): CacheMissDetail {
+  return { coldFirst: 0, coldResumed: 0, breakAppend: 0, breakDiverged: 0, afterRestart: 0 }
+}
+
+export function normalizeCacheMissDetail(input: unknown): CacheMissDetail | undefined {
+  if (input === null || input === undefined || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const raw = input as Record<string, unknown>
+  let seen = false
+  const detail = emptyCacheMissDetail()
+  for (const key of Object.keys(detail) as (keyof CacheMissDetail)[]) {
+    detail[key] = nonNegative(raw[key] as number)
+    if (raw[key] !== undefined) seen = true
+  }
+  return seen ? detail : undefined
+}
+
+export function addCacheMissDetail(
+  base: CacheMissDetail | undefined,
+  delta: CacheMissDetail
+): CacheMissDetail {
+  const counts = base ?? emptyCacheMissDetail()
+  return {
+    coldFirst: counts.coldFirst + delta.coldFirst,
+    coldResumed: counts.coldResumed + delta.coldResumed,
+    breakAppend: counts.breakAppend + delta.breakAppend,
+    breakDiverged: counts.breakDiverged + delta.breakDiverged,
+    afterRestart: counts.afterRestart + delta.afterRestart,
+  }
+}
+
+export function emptyCacheMissTokens(): CacheMissTokenCounts {
+  return { cold: 0, rewrite: 0, break: 0, tail: 0 }
+}
+
+export function normalizeCacheMissTokens(input: unknown): CacheMissTokenCounts | undefined {
+  if (input === null || input === undefined || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const raw = input as Record<string, unknown>
+  let seen = false
+  const tokens = emptyCacheMissTokens()
+  for (const key of Object.keys(tokens) as CacheMissClass[]) {
+    tokens[key] = nonNegative(raw[key] as number)
+    if (raw[key] !== undefined) seen = true
+  }
+  return seen ? tokens : undefined
+}
+
+export function normalizeCacheMissTokenDetail(input: unknown): CacheMissTokenDetail | undefined {
+  if (input === null || input === undefined || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const raw = input as Record<string, unknown>
+  let seen = false
+  const tokens: CacheMissTokenDetail = {
+    coldFirst: 0,
+    coldResumed: 0,
+    breakAppend: 0,
+    breakDiverged: 0,
+    afterRestart: 0,
+  }
+  for (const key of Object.keys(tokens) as (keyof CacheMissTokenDetail)[]) {
+    tokens[key] = nonNegative(raw[key] as number)
+    if (raw[key] !== undefined) seen = true
+  }
+  return seen ? tokens : undefined
+}
+
+function addCacheMissTokens(
+  base: CacheMissTokenCounts | undefined,
+  cls: CacheMissClass,
+  missTokens: number
+): CacheMissTokenCounts {
+  const tokens = base ?? emptyCacheMissTokens()
+  return { ...tokens, [cls]: tokens[cls] + missTokens }
+}
+
+function addCacheMissTokenDetail(
+  base: CacheMissTokenDetail | undefined,
+  delta: CacheMissTokenDetail
+): CacheMissTokenDetail {
+  const tokens = base ?? { coldFirst: 0, coldResumed: 0, breakAppend: 0, breakDiverged: 0, afterRestart: 0 }
+  return {
+    coldFirst: tokens.coldFirst + delta.coldFirst,
+    coldResumed: tokens.coldResumed + delta.coldResumed,
+    breakAppend: tokens.breakAppend + delta.breakAppend,
+    breakDiverged: tokens.breakDiverged + delta.breakDiverged,
+    afterRestart: tokens.afterRestart + delta.afterRestart,
+  }
+}
+
+export function emptyCacheMissIdleGap(): CacheMissIdleGapCounts {
+  return { under5m: 0, from5mTo30m: 0, over30m: 0 }
+}
+
+export function normalizeCacheMissIdleGap(input: unknown): CacheMissIdleGapCounts | undefined {
+  if (input === null || input === undefined || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const raw = input as Record<string, unknown>
+  let seen = false
+  const gaps = emptyCacheMissIdleGap()
+  for (const key of Object.keys(gaps) as CacheMissIdleGap[]) {
+    gaps[key] = nonNegative(raw[key] as number)
+    if (raw[key] !== undefined) seen = true
+  }
+  return seen ? gaps : undefined
+}
+
+export function normalizeCacheMissIdleGapTokens(input: unknown): CacheMissIdleGapTokens | undefined {
+  if (input === null || input === undefined || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const raw = input as Record<string, unknown>
+  let seen = false
+  const gaps = emptyCacheMissIdleGap()
+  for (const key of Object.keys(gaps) as CacheMissIdleGap[]) {
+    gaps[key] = nonNegative(raw[key] as number)
+    if (raw[key] !== undefined) seen = true
+  }
+  return seen ? gaps : undefined
+}
+
+function addCacheMissIdleGap(
+  base: CacheMissIdleGapCounts | undefined,
+  gap: CacheMissIdleGap
+): CacheMissIdleGapCounts {
+  const gaps = base ?? emptyCacheMissIdleGap()
+  return { ...gaps, [gap]: gaps[gap] + 1 }
+}
+
+function addCacheMissIdleGapTokens(
+  base: CacheMissIdleGapTokens | undefined,
+  gap: CacheMissIdleGap,
+  missTokens: number
+): CacheMissIdleGapTokens {
+  const gaps = base ?? emptyCacheMissIdleGap()
+  return { ...gaps, [gap]: gaps[gap] + missTokens }
+}
+
+/** 把一笔未命中按「哪个再切分计数是 1」记到对应的 token 桶里。 */
+function missTokenDetailOf(detail: CacheMissDetail, missTokens: number): CacheMissTokenDetail {
+  return {
+    coldFirst: detail.coldFirst > 0 ? missTokens : 0,
+    coldResumed: detail.coldResumed > 0 ? missTokens : 0,
+    breakAppend: detail.breakAppend > 0 ? missTokens : 0,
+    breakDiverged: detail.breakDiverged > 0 ? missTokens : 0,
+    afterRestart: detail.afterRestart > 0 ? missTokens : 0,
+  }
+}
+
 function emptyModelUsage(providerId: string, model: string): ModelDayUsage {
   return {
     providerId,
@@ -592,6 +802,11 @@ export function normalizeModelUsage(input: unknown): ModelDayUsageMap | undefine
     const model = typeof raw.model === 'string' ? raw.model.trim() : ''
     if (providerId.length === 0 || model.length === 0) continue
     const missClasses = normalizeCacheMissClasses(raw.cacheMissClasses)
+    const missDetail = normalizeCacheMissDetail(raw.cacheMissDetail)
+    const missTokens = normalizeCacheMissTokens(raw.cacheMissTokens)
+    const missTokenDetail = normalizeCacheMissTokenDetail(raw.cacheMissTokenDetail)
+    const idleGap = normalizeCacheMissIdleGap(raw.cacheMissIdleGap)
+    const idleGapTokens = normalizeCacheMissIdleGapTokens(raw.cacheMissIdleGapTokens)
     next[key] = {
       providerId,
       model,
@@ -602,6 +817,11 @@ export function normalizeModelUsage(input: unknown): ModelDayUsageMap | undefine
       cacheReportedRequests: nonNegative(raw.cacheReportedRequests as number),
       upstreamPromptWithCache: nonNegative(raw.upstreamPromptWithCache as number),
       ...(missClasses === undefined ? {} : { cacheMissClasses: missClasses }),
+      ...(missDetail === undefined ? {} : { cacheMissDetail: missDetail }),
+      ...(missTokens === undefined ? {} : { cacheMissTokens: missTokens }),
+      ...(missTokenDetail === undefined ? {} : { cacheMissTokenDetail: missTokenDetail }),
+      ...(idleGap === undefined ? {} : { cacheMissIdleGap: idleGap }),
+      ...(idleGapTokens === undefined ? {} : { cacheMissIdleGapTokens: idleGapTokens }),
     }
   }
   return Object.keys(next).length > 0 ? next : undefined
@@ -615,7 +835,7 @@ function accumulateModelUsage(
   prompt: number,
   cacheRead: number,
   cacheReported: boolean,
-  missClass?: CacheMissClass
+  miss?: { class: CacheMissClass; detail?: CacheMissDetail; idleGap?: CacheMissIdleGap; missTokens: number }
 ): ModelDayUsageMap {
   const known = base ?? {}
   const key = modelBucketKey(providerId, model)
@@ -640,9 +860,31 @@ function accumulateModelUsage(
       upstreamCacheRead: previous.upstreamCacheRead + (isUpstream ? cacheRead : 0),
       cacheReportedRequests: previous.cacheReportedRequests + (cacheReported ? 1 : 0),
       upstreamPromptWithCache: previous.upstreamPromptWithCache + (cacheReported ? prompt : 0),
-      ...(missClass === undefined
+      ...(miss === undefined
         ? {}
-        : { cacheMissClasses: addCacheMissClass(previous.cacheMissClasses, missClass) }),
+        : {
+            cacheMissClasses: addCacheMissClass(previous.cacheMissClasses, miss.class),
+            cacheMissTokens: addCacheMissTokens(previous.cacheMissTokens, miss.class, miss.missTokens),
+            ...(miss.idleGap === undefined
+              ? {}
+              : {
+                  cacheMissIdleGap: addCacheMissIdleGap(previous.cacheMissIdleGap, miss.idleGap),
+                  cacheMissIdleGapTokens: addCacheMissIdleGapTokens(
+                    previous.cacheMissIdleGapTokens,
+                    miss.idleGap,
+                    miss.missTokens
+                  ),
+                }),
+          }),
+      ...(miss?.detail === undefined
+        ? {}
+        : {
+            cacheMissDetail: addCacheMissDetail(previous.cacheMissDetail, miss.detail),
+            cacheMissTokenDetail: addCacheMissTokenDetail(
+              previous.cacheMissTokenDetail,
+              missTokenDetailOf(miss.detail, miss.missTokens)
+            ),
+          }),
     },
   }
 }
@@ -724,6 +966,12 @@ export function accumulateDayBucket(
      * 缺省 = 没有可归因的上报（本轮没报缓存字段、或调用方没分类）。
      */
     cacheMissClass?: CacheMissClass
+    /** 四类成因的再切分；与 `cacheMissClass` 同一条判据才入账。 */
+    cacheMissDetail?: CacheMissDetail
+    /** 这一轮的未命中 token（`prompt − cacheRead`）；与分类同批入账。 */
+    cacheMissTokens?: number
+    /** 续轮丢锚距上一轮的间隔档；只有 `coldResumed` 才有。 */
+    cacheMissIdleGap?: CacheMissIdleGap
   }
 ): DayTokenBucket {
   // ⚠️ 走 `normalizeDayBucket` 而不是直接信任入参：调用方喂的是**磁盘上读出来**
@@ -792,6 +1040,15 @@ export function accumulateDayBucket(
 
   const modelId = (input.modelId ?? '').trim()
   if (modelId.length > 0) {
+    // 未上报缓存的请求没有可归因的缺口：分类只能落在"报了缓存"的那些行上。
+    const miss = isUpstream && cacheReported && input.cacheMissClass !== undefined
+      ? {
+          class: input.cacheMissClass,
+          ...(input.cacheMissDetail === undefined ? {} : { detail: input.cacheMissDetail }),
+          ...(input.cacheMissIdleGap === undefined ? {} : { idleGap: input.cacheMissIdleGap }),
+          missTokens: nonNegative(input.cacheMissTokens),
+        }
+      : undefined
     next.byModel = accumulateModelUsage(
       base.byModel,
       providerId,
@@ -800,8 +1057,7 @@ export function accumulateDayBucket(
       prompt,
       cacheRead,
       cacheReported,
-      // 未上报缓存的请求没有可归因的缺口：分类只能落在"报了缓存"的那些行上。
-      isUpstream && cacheReported ? input.cacheMissClass : undefined
+      miss
     )
   }
 

@@ -15,6 +15,7 @@ import {
   type UpstreamErrorDetails,
 } from './types'
 import { storeManager } from '../store/store'
+import type { ClientSessionKey } from '../../shared/clientSessionKey'
 import {
   DEFAULT_AUTO_ROUTING_CONFIG,
   type AutoAttemptFailure,
@@ -132,6 +133,7 @@ import {
   trimBudgetForPayload,
 } from './services/contextManagementService'
 import { declaredContextWindowOf, knownContextWindowOf } from './modelTrimWindow'
+import { trimCutKey, trimCutLedger } from './trimCutLedger.ts'
 import { measuredContextLimitOf, recordMeasuredContextLimitFromError } from './contextOverflowLimits.ts'
 import { accountChannelManager } from '../providers/accountChannels/manager'
 import { getChannelDefinition } from '../providers/accountChannels/catalogue'
@@ -560,7 +562,12 @@ export class RequestForwarder {
             timestamp: Date.now(),
           }))
 
-          const processResult = await contextService.process(contextMessages)
+          // 前缀契约（L2）：同一会话沿用上一轮的裁剪起点，头部不动，这一轮才是上一轮的
+          // 追加。指纹在策略内部比对 —— 客户端压缩/删改历史后下标还在、内容已换，
+          // 那时它会自动放弃沿用。
+          const cutKey = trimCutKey(context.sessionKey, provider.id, actualModel)
+          const processResult = await contextService.process(contextMessages, trimCutLedger.get(cutKey))
+          if (processResult.trimCut !== undefined) trimCutLedger.remember(cutKey, processResult.trimCut)
 
           // 记录裁剪结果到请求日志（即使没变也记，统计口径完整——否则「该渠道
           // 开了裁剪但这一轮没裁」与「根本没跑裁剪」在日志里无法区分）。
@@ -600,9 +607,17 @@ export class RequestForwarder {
               }
             })
 
+            // 只回写协议字段：contextMessages 为裁剪服务临时加的 `timestamp`
+            // 每轮都变，跟着消息进上游 body 会破坏字节级前缀缓存。
             modifiedRequest = {
               ...modifiedRequest,
-              messages: processResult.messages.map(msg => ({ ...msg })),
+              messages: processResult.messages.map(msg => ({
+                role: msg.role,
+                content: msg.content,
+                ...(msg.name === undefined ? {} : { name: msg.name }),
+                ...(msg.tool_call_id === undefined ? {} : { tool_call_id: msg.tool_call_id }),
+                ...(msg.tool_calls === undefined ? {} : { tool_calls: msg.tool_calls }),
+              })),
             }
           }
         } catch (error) {
@@ -1554,7 +1569,7 @@ export class RequestForwarder {
     try {
       const chatPath = provider.chatPath || '/chat/completions'
       const url = this.buildUrl(provider, chatPath, account)
-      const headers = this.buildHeaders(provider, account, request, clientShapeHeaders(context.clientUserAgent))
+      const headers = this.buildHeaders(provider, account, request, clientShapeHeaders(context.clientUserAgent), context.clientSession)
       // 工具三件套原生透传，`buildRequestBody` 自己按 `request.tools` 组装。
       // 托管层（把工具描述写进 system、再把回复文本解析回 tool_calls）已于 2026-11-03
       // 退役：网关不写提示词，不支持工具的模型由能力路由（`autoRouting::hardFilterFailure`
@@ -1695,7 +1710,7 @@ export class RequestForwarder {
   ): Promise<ForwardResult> {
     try {
       const url = this.buildUrl(provider, provider.chatPath || '/responses', account)
-      const headers = this.buildHeaders(provider, account, request, clientShapeHeaders(context.clientUserAgent))
+      const headers = this.buildHeaders(provider, account, request, clientShapeHeaders(context.clientUserAgent), context.clientSession)
       const body = chatToResponsesRequest(request, actualModel)
 
       const modelParams = provider.modelParameters?.[actualModel]
@@ -1892,7 +1907,8 @@ export class RequestForwarder {
     provider: Provider,
     account: Account,
     request?: unknown,
-    clientShape?: Record<string, string>
+    clientShape?: Record<string, string>,
+    clientSession?: ClientSessionKey
   ): Record<string, string> {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     // 客户端形状头（转发入站 UA）在 provider 配置头**之前**合并：registry 里显式
@@ -1932,6 +1948,7 @@ export class RequestForwarder {
       baseUrl: provider.apiEndpoint,
       request,
       accountId: account.id,
+      clientSession,
     })
     if (affinity !== undefined) Object.assign(headers, affinity)
 

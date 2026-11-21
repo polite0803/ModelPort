@@ -1390,6 +1390,13 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     "authUrl": "https://opencode.ai/auth",
     "envVar": "OPENCODE_API_KEY",
     "notes": "OpenCode Go subscription ($5/mo per the 9router notice).",
+    // 隐式前缀缓存：2026-11-20 实测同一请求连发三次，第 2/3 次命中 94%；
+    // 59k token 的稳定前缀命中 99.92%（59008/59058）。上游按最长匹配前缀自动缓存。
+    // 只声明 mode、不写 readDiscount —— 让压缩后预热对新前缀生効，同时不改变
+    // 压缩的缓存经济学（cacheEconomicsOf 在无价格时仍返回 undefined）。
+    "promptCache": {
+      "mode": "implicit-prefix"
+    },
     "website": "https://opencode.ai/go"
   },
   {

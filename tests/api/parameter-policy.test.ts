@@ -82,8 +82,11 @@ test('request correlation id is returned and context trimming keeps tool fields'
 
   assert.match(chat, /ctx\.set\('X-Request-Id', requestId\)/)
   assert.match(completions, /ctx\.set\('X-Request-Id', requestId\)/)
-  assert.match(forwarder, /messages: processResult\.messages\.map\(msg => \(\{ \.\.\.msg \}\)\)/)
-  assert.match(forwarder, /\.\.\.msg,\s*\n\s*role: msg\.role/)
+  assert.match(forwarder, /messages: processResult\.messages\.map\(msg => \(\{/)
+  // 2026-11-20：裁剪回写只保留协议字段。`timestamp` 是网关内部簿记，
+  // 逐轮变化会破坏字节级前缀，不能跟着消息一起发给上游。
+  assert.match(forwarder, /messages: processResult\.messages\.map\(msg => \(\{[\s\S]{0,1000}tool_calls: msg\.tool_calls/)
+  assert.doesNotMatch(forwarder, /messages: processResult\.messages\.map\(msg => \(\{ \.\.\.msg \}\)\)/)
 })
 
 test('chat 线路原生透传工具（托管提示词层已退役）', () => {

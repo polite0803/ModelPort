@@ -18,8 +18,16 @@ import { SSEParser, extractStreamErrorFrame, streamHandler, type StreamErrorFram
 import { proxyStatusManager } from '../status'
 import { modelMapper } from '../modelMapper'
 import { autoRouter, AUTO_SKIPPED_REPORT_LIMIT, describeTransientCause, summarizeTransientSkips } from '../autoRouter'
+import { accountAffinityKey } from '../accountAffinity'
 import { cacheMissLedger } from '../cacheMissLedger'
-import { shouldWarmAfterCompaction, warmRequestOf } from '../cacheWarm'
+import {
+  compactionTurnOf,
+  type CompactionTurn,
+  shouldPauseWarmAfterFailures,
+  shouldWarmAfterCompaction,
+  warmErrorSummaryOf,
+  warmRequestOf,
+} from '../cacheWarm'
 import { promptCacheOf } from '../../../shared/promptCache'
 import type { AutoCandidate, AutoRouteDecision } from '../autoRouter'
 import { profileRequest } from '../autoRouting'
@@ -421,6 +429,11 @@ function meterQuota(
   accountId: string,
   modelId: string,
   reading: UsageReading,
+  /**
+   * 本轮请求入站时刻。`idleGap` 衡量「上一轮入站 → 本轮入站」的空档；不能用落账时的
+   * `Date.now()`（流读完才执行），长流式会把空档系统性记小，扭曲 5m/30m 分档。
+   */
+  requestStartedAt: number,
   savedTokens?: number,
   /**
    * 这次请求的压缩判决。按日桶要的不是"省了多少"，而是"为什么没省"——
@@ -433,10 +446,19 @@ function meterQuota(
    */
   missConversationKey?: string,
   /**
+   * 客户端压缩回合：`summarize` / `resume` 的前缀与上一轮物理上不同，预热救不了它们。
+   * 这些回合照常落账（开销是真的），只是不触发预热。
+   */
+  compactionTurn?: CompactionTurn,
+  /**
    * 压缩后预热：只在拿到真实读数、且会话键可用时才可能触发。
    * `warm` 是执行动作的回调（由调用方持有 forwarder），这里只负责判定。
    */
-  warm?: (previousPromptTokens: number, currentPromptTokens: number) => void
+  warm?: (
+    previousPromptTokens: number,
+    currentPromptTokens: number,
+    continuation?: { at: number; turns: number },
+  ) => void
 ): void {
   try {
     storeManager.getQuotaLedger().record(provider.id, accountId, modelId, reading)
@@ -444,11 +466,18 @@ function meterQuota(
     console.error('[Chat] quota ledger record failed:', error)
   }
 
+  // 必须在 classify 之前读：classify 会把这一轮写进账本，之后拿到的就是本轮自己。
+  const continuation = warm === undefined
+    ? undefined
+    : cacheMissLedger.snapshot(missConversationKey, requestStartedAt)
+  // 压缩回合的未命中是真实开销，照常落账、照常在面板上可见；不能靠不记它把命中率
+  // 「算」上去。它只是不能作为可预热的新前缀：写摘要那轮的前缀与上轮断裂，预热救不了。
   const missReading = cacheMissLedger.classify({
     key: missConversationKey,
     promptTokens: reading.promptTokens,
     cacheReadTokens: reading.cacheReadTokens,
     cacheReported: reading.cacheReadReported,
+    now: requestStartedAt,
   })
 
   try {
@@ -464,7 +493,15 @@ function meterQuota(
       modelId,
       costUsd: estimateRequestCost(provider, modelId, reading),
       ...(compression === undefined ? {} : { compression }),
-      ...(missReading === undefined ? {} : { cacheMissClass: missReading.class }),
+      ...(missReading === undefined
+        ? {}
+        : {
+            cacheMissClass: missReading.class,
+            // 这一轮丢了多少 token：条数回答「多少轮」，它回答「损失多大」。
+            cacheMissTokens: Math.max(0, reading.promptTokens - (reading.cacheReadTokens ?? 0)),
+          }),
+      ...(missReading?.detail === undefined ? {} : { cacheMissDetail: missReading.detail }),
+      ...(missReading?.idleGap === undefined ? {} : { cacheMissIdleGap: missReading.idleGap }),
     })
   } catch (error) {
     console.error('[Chat] token usage record failed:', error)
@@ -473,8 +510,13 @@ function meterQuota(
   // 压缩后预热：账本刚记下这一轮的 prompt 量，`missReading.prevPromptTokens`
   // 就是上一轮的大小。压缩把历史换成了摘要，新前缀在接下来几轮里每轮重读一遍，
   // 提前写进缓存能把那几轮省下来。
-  if (warm !== undefined && missReading !== undefined && missReading.prevPromptTokens !== undefined) {
-    warm(missReading.prevPromptTokens, reading.promptTokens)
+  if (
+    warm !== undefined
+    && missReading !== undefined
+    && missReading.prevPromptTokens !== undefined
+    && (compactionTurn === undefined || compactionTurn === 'none')
+  ) {
+    warm(missReading.prevPromptTokens, reading.promptTokens, continuation)
   }
 }
 
@@ -905,17 +947,28 @@ router.post('/completions', async (ctx: Context) => {
   // 串起上一轮 —— 两段口径不同会让同一段对话在读数里被拆成两段。
   const missConversationKey = autoDecision?.conversationKey
     ?? autoRouter.conversationKeyFor(request, clientSession)
+  // 压缩回合的前缀与上一轮物理上不同，预热救不了它。识别的是客户端自己发来的文本：
+  // 网关既不据此写提示词，也不改请求内容；这些回合的开销照常记进缺口账本。
+  const compactionTurn = compactionTurnOf(request.messages)
   // 用户通过模型映射点名了具体账号时是硬性指定：命中它失败后不再轮换到同供应商其他 Key
   let preferredAccountId: string | undefined = undefined
   if (!autoDecision) {
     const preferredProviderId = modelMapper.getPreferredProvider(request.model)
     preferredAccountId = modelMapper.getPreferredAccount(request.model)
 
+    // 会话级账号亲和（L1）：具名车道原先每请求重跑策略，多账号池里同一段会话
+    // 会一轮落 A、下一轮落 B —— 上游缓存按 org/key 隔离，换号就是全冷一次。
+    // 用户静态点名仍然最高：`preferredAccountId` 命中时策略分支根本不会用到它。
+    const affinityAccountId = autoRouter.namedAccountAffinity(
+      accountAffinityKey(missConversationKey, request.model)
+    )
+
     selection = loadBalancer.selectAccount(
       request.model,
       config.loadBalanceStrategy,
       preferredProviderId,
-      preferredAccountId
+      preferredAccountId,
+      affinityAccountId
     )
 
     // 裸名被哪家聚合条目接住，写进响应头；带前缀的名字本来就是点名，不打这个头。
@@ -1411,6 +1464,8 @@ router.post('/completions', async (ctx: Context) => {
     isStream: request.stream || false,
     clientIP,
     clientUserAgent: ctx.headers['user-agent'],
+    ...(missConversationKey === undefined ? {} : { sessionKey: missConversationKey }),
+    ...(clientSession === undefined ? {} : { clientSession }),
   }
 
   proxyStatusManager.recordRequestStart(request.model, provider.id, account.id)
@@ -1863,6 +1918,14 @@ router.post('/completions', async (ctx: Context) => {
 
     if (autoDecision && chosenCandidate) {
       autoRouter.rememberRoute(autoDecision.conversationKey, chosenCandidate, autoDecision.route)
+    } else if (!autoDecision) {
+      // 只由成功一轮写入：没跑通的目标不该被钉住。能力未知的供应商在这里被
+      // `rememberNamedAccountAffinity` 内部挡掉，调用方不需要再判一次。
+      autoRouter.rememberNamedAccountAffinity(
+        accountAffinityKey(missConversationKey, request.model),
+        provider,
+        account.id
+      )
     }
 
     proxyStatusManager.recordRequestSuccess(latency)
@@ -2011,7 +2074,13 @@ router.post('/completions', async (ctx: Context) => {
     // 走 `probe` 通道：不进派发账本、不动 AIMD/Bandit/冷却 —— 它是一次维护性的
     // 附带请求，不能影响路由判断。
     let lastWarmAt: number | undefined
-    const warmAfterCompaction = (previousPromptTokens: number, currentPromptTokens: number): void => {
+    let warmFailures = 0
+    let lastWarmFailureAt: number | undefined
+    const warmAfterCompaction = (
+      previousPromptTokens: number,
+      currentPromptTokens: number,
+      continuation?: { at: number; turns: number },
+    ): void => {
       const cacheMode = provider.type === 'aggregate' && provider.aggregateId
         ? promptCacheOf(getAggregateEntry(provider.aggregateId)).mode
         : 'unknown'
@@ -2021,29 +2090,69 @@ router.post('/completions', async (ctx: Context) => {
           cacheMode,
           enabled: config.promptCaching.warmAfterCompaction === true,
           ...(lastWarmAt === undefined ? {} : { lastWarmAt }),
+          ...(continuation === undefined
+            ? {}
+            : { lastTurnAt: continuation.at, previousTurns: continuation.turns }),
         },
       )
       if (!decision.warm) return
-      lastWarmAt = Date.now()
+      // 失败后短暂停发：现网预热 400 比例很高，每笔失败仍按全价买了整份前缀。
+      // 错误体没拿到之前不猜根因，也不剥请求字段，只把失败事实记进日志。
+      if (shouldPauseWarmAfterFailures({
+        consecutiveFailures: warmFailures,
+        ...(lastWarmFailureAt === undefined ? {} : { lastFailureAt: lastWarmFailureAt }),
+      })) return
       const body = warmRequestOf({ ...request, model: actualModel } as Record<string, unknown>)
       void requestForwarder
         .forwardChatCompletion(body as never, account, provider, actualModel, context, { probe: true })
         .then((warmResult) => {
-          storeManager.addLog('info', '压缩后已预热新前缀', {
+          if (warmResult.success) {
+            // 只有成功才刷新冷却：失败不能让下一轮继续白买前缀。
+            lastWarmAt = Date.now()
+            warmFailures = 0
+            lastWarmFailureAt = undefined
+            storeManager.addLog('info', '压缩后已预热新前缀', {
+              requestId,
+              providerId: provider.id,
+              accountId: account.id,
+              model: request.model,
+              data: {
+                actualModel,
+                success: true,
+                status: warmResult.status,
+                promptTokens: currentPromptTokens,
+                previousPromptTokens,
+              },
+            })
+            return
+          }
+          warmFailures += 1
+          lastWarmFailureAt = Date.now()
+          storeManager.addLog('warn', '压缩后预热新前缀被上游拒绝', {
             requestId,
             providerId: provider.id,
             accountId: account.id,
             model: request.model,
             data: {
               actualModel,
-              success: warmResult.success,
               status: warmResult.status,
+              errorCode: warmErrorSummaryOf(warmResult.errorDetails?.code),
+              error: warmErrorSummaryOf(warmResult.error),
               promptTokens: currentPromptTokens,
               previousPromptTokens,
             },
           })
         })
         .catch((error) => {
+          warmFailures += 1
+          lastWarmFailureAt = Date.now()
+          storeManager.addLog('warn', '压缩后预热新前缀失败', {
+            requestId,
+            providerId: provider.id,
+            accountId: account.id,
+            model: request.model,
+            data: { actualModel, error: warmErrorSummaryOf(error instanceof Error ? error.message : String(error)) },
+          })
           console.error('[Chat] cache warm failed:', error)
         })
     }
@@ -2054,12 +2163,14 @@ router.post('/completions', async (ctx: Context) => {
         account.id,
         actualModel,
         nonStreamReading,
+        startTime,
         // 只计真正生效的压缩节省；跳过的请求不计入（那是反事实）。
         compressionReport && compressionReport.applied.length > 0
           ? compressionReport.saved
           : 0,
         compressionReport,
         missConversationKey,
+        compactionTurn,
         warmAfterCompaction
       )
     }
@@ -2139,6 +2250,8 @@ router.post('/completions', async (ctx: Context) => {
           const seen = readStreamOutcome(collectedContent).finishReason
           return seen === undefined ? {} : { finishReason: seen }
         })(),
+        // tap 在流尾剥掉过残缺的调用标记：这一轮模型想调工具但调用没送到，按退化记。
+        ...(danglingStripped ? { danglingCallMarkup: true } : {}),
       })
 
       /**
@@ -2355,11 +2468,13 @@ router.post('/completions', async (ctx: Context) => {
             account.id,
             actualModel,
             streamReading,
+            startTime,
             compressionReport && compressionReport.applied.length > 0
               ? compressionReport.saved
               : 0,
             compressionReport,
             missConversationKey,
+            compactionTurn,
             warmAfterCompaction
           )
           wrapperStream.end()
@@ -2460,11 +2575,13 @@ router.post('/completions', async (ctx: Context) => {
             account.id,
             actualModel,
             streamReading,
+            startTime,
             compressionReport && compressionReport.applied.length > 0
               ? compressionReport.saved
               : 0,
             compressionReport,
             missConversationKey,
+            compactionTurn,
             warmAfterCompaction
           )
           wrapperStream.end()
@@ -2491,9 +2608,22 @@ router.post('/completions', async (ctx: Context) => {
       }
       // 模型用文本写出的工具调用（DSML 原生标记 / `<tool_call>` JSON）在这里还原成
       // 真正的 `tool_calls`。判据只看响应形态，普通文本回合逐字节不变。
+      // 另一种形态是**残缺的闭合标签**（只有 `parameter`/`invoke`/`calls` 三个闭合
+      // 符号、没有开标签）：那里没有任何可执行信息，剥掉但保留正文，并整轮记退化。
+      let danglingStripped = false
       outStream = outStream.pipe(createDsmlToolCallTap({
         declared: declaredToolNames,
         onReport: (report) => {
+          if (report.danglingStripped === true) {
+            danglingStripped = true
+            storeManager.addLog('warn', '正文尾部挂着残缺的调用标记，已剥离', {
+              requestId,
+              providerId: provider.id,
+              accountId: account.id,
+              model: request.model,
+              data: { actualModel },
+            })
+          }
           if (report.convertedCalls === 0) return
           storeManager.addLog('warn', '工具调用以文本下发，已还原成 tool_calls', {
             requestId,

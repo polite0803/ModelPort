@@ -1207,6 +1207,14 @@ export interface AppConfig {
    */
   streamRepetitionGuard?: RepetitionGuardSettings
   /**
+   * 具名车道的会话级账号亲和（缓存域粘性）。缺省（键不存在）= 开。
+   *
+   * auto 车道早把会话钉在 `(provider, account, model)` 上；具名模型车道原先每个
+   * 请求都重跑选号，多账号池里同一段会话会一轮落 A、下一轮落 B —— 上游前缀缓存
+   * 按 org/key 隔离，换号就是全冷一次。只对缓存能力已知的供应商生效。
+   */
+  sessionAffinity?: boolean
+  /**
    * 视觉读图两段式（PLAN-vision-relay，2026-11-19）：这一轮真正服务的模型不能
    * 收图时，先把当轮新图交给一个免费视觉模型转述成文字，再按原文本目标转发。
    * 已标注 vision 的目标直发、零介入；缺省（键不存在）= 关闭，行为与从前逐字节相同。

@@ -1,5 +1,13 @@
 import { currentLocalDay, recentLocalDays } from './localDay.ts'
-import type { CacheMissClassCounts, DayTokenBucket } from './tokenAccounting.ts'
+import type {
+  CacheMissClassCounts,
+  CacheMissDetail,
+  CacheMissIdleGapCounts,
+  CacheMissIdleGapTokens,
+  CacheMissTokenCounts,
+  CacheMissTokenDetail,
+  DayTokenBucket,
+} from './tokenAccounting.ts'
 
 /**
  * One local day of per-provider counters, in the shape `dailyStats` is stored
@@ -285,6 +293,16 @@ export interface ModelWindowTokenUsage {
    * 全部请求都没报缓存字段），不是「四类都是 0」。
    */
   cacheMissClasses?: CacheMissClassCounts
+  /** 四类的再切分（窗口内求和）；缺省与 `cacheMissClasses` 同一条判据。 */
+  cacheMissDetail?: CacheMissDetail
+  /** 四类各自的未命中 token 合计；缺省原因同上。 */
+  cacheMissTokens?: CacheMissTokenCounts
+  /** 再切分各自的未命中 token 合计；缺省原因同上。 */
+  cacheMissTokenDetail?: CacheMissTokenDetail
+  /** 续轮丢锚按间隔分档的计数；缺省原因同上。 */
+  cacheMissIdleGap?: CacheMissIdleGapCounts
+  /** 续轮丢锚按间隔分档的未命中 token；缺省原因同上。 */
+  cacheMissIdleGapTokens?: CacheMissIdleGapTokens
   /** Earliest day in the window carrying this model's split. */
   coveredFrom?: string
 }
@@ -325,6 +343,63 @@ export function aggregateModelTokenUsage(
           rewrite: merged.rewrite + usage.cacheMissClasses.rewrite,
           break: merged.break + usage.cacheMissClasses.break,
           tail: merged.tail + usage.cacheMissClasses.tail,
+        }
+      }
+      if (usage.cacheMissDetail !== undefined) {
+        const merged = total.cacheMissDetail ?? {
+          coldFirst: 0,
+          coldResumed: 0,
+          breakAppend: 0,
+          breakDiverged: 0,
+          afterRestart: 0,
+        }
+        total.cacheMissDetail = {
+          coldFirst: merged.coldFirst + usage.cacheMissDetail.coldFirst,
+          coldResumed: merged.coldResumed + usage.cacheMissDetail.coldResumed,
+          breakAppend: merged.breakAppend + usage.cacheMissDetail.breakAppend,
+          breakDiverged: merged.breakDiverged + usage.cacheMissDetail.breakDiverged,
+          afterRestart: merged.afterRestart + usage.cacheMissDetail.afterRestart,
+        }
+      }
+      if (usage.cacheMissTokens !== undefined) {
+        const merged = total.cacheMissTokens ?? { cold: 0, rewrite: 0, break: 0, tail: 0 }
+        total.cacheMissTokens = {
+          cold: merged.cold + usage.cacheMissTokens.cold,
+          rewrite: merged.rewrite + usage.cacheMissTokens.rewrite,
+          break: merged.break + usage.cacheMissTokens.break,
+          tail: merged.tail + usage.cacheMissTokens.tail,
+        }
+      }
+      if (usage.cacheMissTokenDetail !== undefined) {
+        const merged = total.cacheMissTokenDetail ?? {
+          coldFirst: 0,
+          coldResumed: 0,
+          breakAppend: 0,
+          breakDiverged: 0,
+          afterRestart: 0,
+        }
+        total.cacheMissTokenDetail = {
+          coldFirst: merged.coldFirst + usage.cacheMissTokenDetail.coldFirst,
+          coldResumed: merged.coldResumed + usage.cacheMissTokenDetail.coldResumed,
+          breakAppend: merged.breakAppend + usage.cacheMissTokenDetail.breakAppend,
+          breakDiverged: merged.breakDiverged + usage.cacheMissTokenDetail.breakDiverged,
+          afterRestart: merged.afterRestart + usage.cacheMissTokenDetail.afterRestart,
+        }
+      }
+      if (usage.cacheMissIdleGap !== undefined) {
+        const merged = total.cacheMissIdleGap ?? { under5m: 0, from5mTo30m: 0, over30m: 0 }
+        total.cacheMissIdleGap = {
+          under5m: merged.under5m + usage.cacheMissIdleGap.under5m,
+          from5mTo30m: merged.from5mTo30m + usage.cacheMissIdleGap.from5mTo30m,
+          over30m: merged.over30m + usage.cacheMissIdleGap.over30m,
+        }
+      }
+      if (usage.cacheMissIdleGapTokens !== undefined) {
+        const merged = total.cacheMissIdleGapTokens ?? { under5m: 0, from5mTo30m: 0, over30m: 0 }
+        total.cacheMissIdleGapTokens = {
+          under5m: merged.under5m + usage.cacheMissIdleGapTokens.under5m,
+          from5mTo30m: merged.from5mTo30m + usage.cacheMissIdleGapTokens.from5mTo30m,
+          over30m: merged.over30m + usage.cacheMissIdleGapTokens.over30m,
         }
       }
       if (total.coveredFrom === undefined || compareDayKeys(key, total.coveredFrom) < 0) {

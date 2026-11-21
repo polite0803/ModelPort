@@ -18,7 +18,14 @@ import { useTranslation } from 'react-i18next'
 import { Database } from 'lucide-react'
 import { Card } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
-import type { CacheMissClassCounts } from '@shared/tokenAccounting'
+import type {
+  CacheMissClassCounts,
+  CacheMissDetail,
+  CacheMissIdleGapCounts,
+  CacheMissIdleGapTokens,
+  CacheMissTokenCounts,
+  CacheMissTokenDetail,
+} from '@shared/tokenAccounting'
 import type { ModelWindowCoverage, ModelWindowTokenUsage, ProviderStatsWindow } from '@shared/providerUsage'
 import { formatTokens } from './TokenUsageCard'
 import { StatsWindowPresets, StatsWindowRangeInputs } from './StatsWindowPicker'
@@ -53,7 +60,84 @@ const MISS_REASONS: ReadonlyArray<{
   { key: 'tail', tone: 'var(--text-dim)', labelKey: 'dashboard.modelCache.missTail' },
 ]
 
-function MissBreakdown({ counts }: { counts?: CacheMissClassCounts }) {
+/**
+ * 四类的再切分。与上面四颗点的关系：这里是**同一批请求**的细分，不是新增计数。
+ * 「新增」是结构上限（这一轮本来就要新读），「断裂」才是可修的；「续轮」是锚点
+ * 丢了，「重启后」是疑似值（进程启动 10 分钟内的首轮）。
+ */
+function MissDetail({
+  detail,
+  detailTokens,
+  tokens,
+}: {
+  detail?: CacheMissDetail
+  detailTokens?: CacheMissTokenDetail
+  tokens?: CacheMissTokenCounts
+}) {
+  const { t } = useTranslation()
+  if (detail === undefined) return null
+  // 占比的分母是**全部未命中 token**（四类求和）：这样每一格都能回答
+  // 「这份损失里它占多少」，而不是四个互不相干的绝对数。
+  const total = tokens === undefined
+    ? 0
+    : tokens.cold + tokens.rewrite + tokens.break + tokens.tail
+  const pct = (value: number | undefined): string => {
+    if (total <= 0 || value === undefined) return '-'
+    return `${Math.round((value / total) * 100)}%`
+  }
+  const shares = (a: number | undefined, b: number | undefined): string =>
+    total > 0 ? ` (${pct(a)} / ${pct(b)})` : ''
+  const parts: string[] = []
+  if (detail.coldFirst + detail.coldResumed > 0) {
+    parts.push(`${t('dashboard.modelCache.missDetailCold', {
+      first: detail.coldFirst,
+      resumed: detail.coldResumed,
+    })}${shares(detailTokens?.coldFirst, detailTokens?.coldResumed)}`)
+  }
+  if (detail.breakAppend + detail.breakDiverged > 0) {
+    parts.push(`${t('dashboard.modelCache.missDetailBreak', {
+      append: detail.breakAppend,
+      diverged: detail.breakDiverged,
+    })}${shares(detailTokens?.breakAppend, detailTokens?.breakDiverged)}`)
+  }
+  if (detail.afterRestart > 0) {
+    const share = total > 0 ? ` (${pct(detailTokens?.afterRestart)})` : ''
+    parts.push(`${t('dashboard.modelCache.missDetailRestart', { count: detail.afterRestart })}${share}`)
+  }
+  if (parts.length === 0) return null
+  return (
+    <div className="mt-0.5 text-caption text-[var(--text-dim)]" title={t('dashboard.modelCache.missDetailHint')}>
+      {parts.join(' · ')}
+    </div>
+  )
+}
+
+/**
+ * 「续轮丢锚」按距上一轮的间隔分档。这是区分两种成因的唯一客观依据：
+ * 间隔长 ⇒ 上游缓存过期（事实）；间隔短却整段没命中 ⇒ 上游提前清了缓存。
+ */
+function MissIdleGap({ gaps, tokens }: { gaps?: CacheMissIdleGapCounts; tokens?: CacheMissIdleGapTokens }) {
+  const { t } = useTranslation()
+  if (gaps === undefined) return null
+  if (gaps.under5m + gaps.from5mTo30m + gaps.over30m === 0) return null
+  const total = (tokens?.under5m ?? 0) + (tokens?.from5mTo30m ?? 0) + (tokens?.over30m ?? 0)
+  const share = (value: number | undefined): string =>
+    total > 0 && value !== undefined ? ` (${Math.round((value / total) * 100)}%)` : ''
+  return (
+    <div className="mt-0.5 text-caption text-[var(--text-muted)]" title={t('dashboard.modelCache.missIdleGapHint')}>
+      {t('dashboard.modelCache.missIdleGap', {
+        under: gaps.under5m,
+        underShare: share(tokens?.under5m),
+        middle: gaps.from5mTo30m,
+        middleShare: share(tokens?.from5mTo30m),
+        over: gaps.over30m,
+        overShare: share(tokens?.over30m),
+      })}
+    </div>
+  )
+}
+
+function MissBreakdown({ counts, tokens }: { counts?: CacheMissClassCounts; tokens?: CacheMissTokenCounts }) {
   const { t } = useTranslation()
   // 缺省 = 这个模型还没被分类过（旧桶或全部请求都不报缓存），与「四类都是 0」不同。
   if (counts === undefined) return null
@@ -77,6 +161,9 @@ function MissBreakdown({ counts }: { counts?: CacheMissClassCounts }) {
             style={{ backgroundColor: reason.tone }}
           />
           {t(reason.labelKey)} {counts[reason.key]}
+          {tokens !== undefined && tokens[reason.key] > 0
+            ? ` · ${formatTokens(tokens[reason.key])}`
+            : ''}
         </span>
       ))}
     </div>
@@ -186,7 +273,13 @@ export function ModelCacheCard({
                         {hitRate === null
                           ? <span className="text-[var(--text-dim)]">-</span>
                           : <span className="text-[var(--text-primary)]">{hitRate}</span>}
-                        <MissBreakdown counts={row.cacheMissClasses} />
+                        <MissBreakdown counts={row.cacheMissClasses} tokens={row.cacheMissTokens} />
+                        <MissDetail
+                          detail={row.cacheMissDetail}
+                          detailTokens={row.cacheMissTokenDetail}
+                          tokens={row.cacheMissTokens}
+                        />
+                        <MissIdleGap gaps={row.cacheMissIdleGap} tokens={row.cacheMissIdleGapTokens} />
                       </td>
                     </tr>
                   )

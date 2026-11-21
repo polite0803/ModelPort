@@ -66,6 +66,8 @@ import {
   type DayTokenSummary,
   type CompressionVerdict,
   type CacheMissClass,
+  type CacheMissDetail,
+  type CacheMissIdleGap,
 } from '../../shared/tokenAccounting.ts'
 import { sendRequestLog } from '../ipc/logBroadcast'
 import { RequestLogManager } from '../requestLogs/manager'
@@ -790,6 +792,8 @@ class StoreManager {
       httpsSanHosts: normalizeSanHostList(rawConfig.httpsSanHosts),
       autoRouting: normalizeAutoRoutingConfig(rawConfig.autoRouting),
       streamRepetitionGuard: normalizeStreamRepetitionGuard(rawConfig.streamRepetitionGuard),
+      // 缺省（含键不存在）＝开：升级来的配置不该悄悄丢掉会话级缓存域粘性。
+      sessionAffinity: rawConfig.sessionAffinity !== false,
       visionRelay: normalizeVisionRelay(rawConfig.visionRelay),
       routes: this.normalizeRoutes(config, rawConfig),
       compression: normalizeCompressionConfig(rawConfig.compression),
@@ -2503,6 +2507,12 @@ class StoreManager {
     compression?: CompressionVerdict
     /** 这一轮缓存缺口的成因；缺省 = 没报缓存字段或调用方没分类。 */
     cacheMissClass?: CacheMissClass
+    /** 四类成因的再切分；与 `cacheMissClass` 同批写入。 */
+    cacheMissDetail?: CacheMissDetail
+    /** 这一轮的未命中 token（`prompt − cacheRead`）。 */
+    cacheMissTokens?: number
+    /** 续轮丢锚距上一轮的间隔档。 */
+    cacheMissIdleGap?: CacheMissIdleGap
     nowMs?: number
   }): void {
     this.ensureInitialized()

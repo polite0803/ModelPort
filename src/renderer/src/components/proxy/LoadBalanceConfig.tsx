@@ -122,6 +122,13 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
     setGuard(appConfig.streamRepetitionGuard ?? DEFAULT_REPETITION_GUARD)
   }, [isLoading, appConfig])
 
+  // 具名车道的会话级账号亲和。失败开放：读到配置之前不渲染成一个「关」的样子。
+  const [sessionAffinity, setSessionAffinity] = useState<boolean | null>(null)
+  useEffect(() => {
+    if (isLoading || !appConfig) return
+    setSessionAffinity(appConfig.sessionAffinity !== false)
+  }, [isLoading, appConfig])
+
   const handleGuardPatch = (patch: Partial<RepetitionGuardSettings>) => {
     setGuard((prev) => (prev ? { ...prev, ...patch } : prev))
     setHasChanges(true)
@@ -387,6 +394,7 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
     const success = await saveAppConfig({
       loadBalanceStrategy: selectedStrategy,
       ...(guard ? { streamRepetitionGuard: guard } : {}),
+      ...(sessionAffinity === null ? {} : { sessionAffinity }),
     })
 
     if (success) {
@@ -407,7 +415,10 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
   const handleReset = () => {
     setSelectedStrategy(initialStrategyRef.current)
     setWeights(initialWeightsRef.current)
-    if (appConfig) setGuard(appConfig.streamRepetitionGuard ?? DEFAULT_REPETITION_GUARD)
+    if (appConfig) {
+      setGuard(appConfig.streamRepetitionGuard ?? DEFAULT_REPETITION_GUARD)
+      setSessionAffinity(appConfig.sessionAffinity !== false)
+    }
     setHasChanges(false)
   }
 
@@ -484,6 +495,26 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
           </div>
         </div>
 
+        {sessionAffinity !== null && (
+          <div className="space-y-3 pt-4 border-t">
+            <div className="flex items-center justify-between gap-4">
+              <div className="space-y-1">
+                <Label htmlFor="session-affinity">{t('proxy.sessionAffinityTitle')}</Label>
+                <p className="text-xs text-muted-foreground">{t('proxy.sessionAffinityDesc')}</p>
+              </div>
+              <Switch
+                id="session-affinity"
+                checked={sessionAffinity}
+                onCheckedChange={(checked) => {
+                  setSessionAffinity(checked)
+                  setHasChanges(true)
+                  onConfigChange?.()
+                }}
+              />
+            </div>
+          </div>
+        )}
+
         {guard && (
           <div className="space-y-3 pt-4 border-t">
             <div className="flex items-center justify-between gap-4">
@@ -528,6 +559,34 @@ export function LoadBalanceConfig({ onConfigChange }: LoadBalanceConfigProps) {
                   }}
                 />
                 <p className="text-xs text-muted-foreground">{t('proxy.repetitionGuardMaxRatioHelp')}</p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="repetition-guard-early-release">{t('proxy.repetitionGuardEarlyRelease')}</Label>
+                <Input
+                  id="repetition-guard-early-release"
+                  type="number"
+                  min={0}
+                  max={6000}
+                  step={100}
+                  disabled={!guard.enabled}
+                  value={guard.earlyReleaseMinChars}
+                  onChange={(e) => handleGuardPatch({ earlyReleaseMinChars: Math.max(0, Number(e.target.value) || 0) })}
+                />
+                <p className="text-xs text-muted-foreground">{t('proxy.repetitionGuardEarlyReleaseHelp')}</p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="repetition-guard-hold-timeout">{t('proxy.repetitionGuardHoldTimeout')}</Label>
+                <Input
+                  id="repetition-guard-hold-timeout"
+                  type="number"
+                  min={0}
+                  max={600}
+                  step={5}
+                  disabled={!guard.enabled}
+                  value={Math.round(guard.holdTimeoutMs / 1000)}
+                  onChange={(e) => handleGuardPatch({ holdTimeoutMs: Math.max(0, Number(e.target.value) || 0) * 1000 })}
+                />
+                <p className="text-xs text-muted-foreground">{t('proxy.repetitionGuardHoldTimeoutHelp')}</p>
               </div>
             </div>
 

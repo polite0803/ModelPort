@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import type { ClientSessionKey } from '../../../shared/clientSessionKey'
 
 /**
  * OpenCode 上游要求的**会话亲和头**。
@@ -33,9 +34,11 @@ import { createHash } from 'node:crypto'
  *
  * 这句报错说的是「routed efficiently」：上游拿它把同一会话钉在同一后端。每次现造
  * 等于把同一会话看成 N 个会话，亲和性反向失效（渠道包 `deriveSessionId` 的注释里
- * 写过同一件事）。所以取值优先用**客户端自己的会话标识**（`prompt_cache_key` /
- * `user` / `metadata.user_id`，与 `clientSessionKey` 同一口径），拿不到才回落到
- * 账号级稳定值。两者都是哈希派生、可重复计算，本模块**不持有任何跨请求状态**。
+ * 写过同一件事）。所以取值优先用**客户端自己的会话标识**，与 `shared/clientSessionKey.ts`
+ * 同一口径：入站协议的解析结果经回环头交给 chat 路由（`ProxyContext.clientSession`），
+ * 优先级最高；只有直连 `/v1/chat/completions` 才回落到 body 的 `prompt_cache_key` /
+ * `user` / `metadata.user_id`。不把 `metadata.user_id` 塞回 body（会让 OVH 400），出站
+ * 仍只发本模块哈希派生的四同值头。两者可重复计算，本模块**不持有任何跨请求状态**。
  *
  * ## 这个修复不能让它可用
  *
@@ -70,7 +73,7 @@ export function isOpencodeUpstream(baseUrl: string | undefined): boolean {
   }
 }
 
-/** 客户端自己声明的会话标识（与 `clientSessionKey` 的 body 侧优先级一致）。 */
+/** 直连 `/v1/chat/completions` 时，从 body 里找客户端声明的会话标识。 */
 function clientConversationValue(request: unknown): string {
   if (request === null || typeof request !== 'object') return ''
   const body = request as Record<string, unknown>
@@ -99,8 +102,10 @@ function hash128(text: string): string {
 export function opencodeAffinityValue(input: {
   request?: unknown
   accountId?: string
+  clientSession?: ClientSessionKey
 }): string {
-  const conversation = clientConversationValue(input.request)
+  const sessionValue = input.clientSession?.value.trim() ?? ''
+  const conversation = sessionValue !== '' ? sessionValue : clientConversationValue(input.request)
   const seed = conversation !== ''
     ? `conversation:${conversation}`
     : `account:${input.accountId ?? ''}`
@@ -114,6 +119,7 @@ export function opencodeAffinityHeaders(input: {
   baseUrl?: string
   request?: unknown
   accountId?: string
+  clientSession?: ClientSessionKey
 }): Record<string, string> | undefined {
   if (!isOpencodeUpstream(input.baseUrl)) return undefined
   const value = opencodeAffinityValue(input)

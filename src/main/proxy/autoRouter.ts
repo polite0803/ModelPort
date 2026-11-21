@@ -54,6 +54,7 @@ import { applyRequestTierFloor, requestWriteToolFloor, writeToolFloorDegraded } 
 import { getChannelDefinition } from '../providers/accountChannels/catalogue'
 import { getAggregateEntry } from '../providers/aggregate/registry.ts'
 import { promptCacheOf, effectiveAffinityMinutes, type PromptCacheCapability } from '../../shared/promptCache.ts'
+import { accountAffinity } from './accountAffinity.ts'
 import {
   advertisedContextFloorOf,
   advertisedContextTokens,
@@ -68,6 +69,7 @@ import {
   explainMissing,
   conversationKey,
   hashString,
+  taskAnchorOf,
   hardFilterFailure,
   mergedHintOf,
   poolLatencyGateMs,
@@ -120,6 +122,8 @@ const AUTO_MAX_ATTEMPTS = 3
 
 /** 会话粘性表容量上限，超出后按插入顺序淘汰最旧的条目 */
 const STICKY_CAPACITY = 500
+/** 会话任务锚点的进程内记忆上限；只为压缩改写后的归属恢复，不落盘 */
+const SESSION_TASK_ANCHOR_CAPACITY = 2048
 /** 缓存亲和落盘的合并窗：同一段会话连发时只写一次盘。 */
 const AFFINITY_PERSIST_DEBOUNCE_MS = 5_000
 
@@ -167,6 +171,7 @@ function promptCacheCapabilityOf(provider: Provider): PromptCacheCapability | un
   }
   return undefined
 }
+
 
 export interface AutoCandidate {
   account: Account
@@ -803,6 +808,15 @@ class AutoRouter {
   private cacheAffinity = new Map<string, StickyRoute>()
 
   /**
+   * 客户端会话 -> 该会话最近一次的有效任务锚点。
+   *
+   * 压缩/摘要改写把首条 user 换掉后，单靠请求本身认不出属于哪个任务；这里只记
+   * 哈希后的锚点，让摘要回合沿用上一轮的任务键，避免「切分任务」把既有粘性打散。
+   * 进程内、有界，重启后退回纯会话键即可 —— 这只是从不完整请求里恢复归属的提示。
+   */
+  private sessionTaskAnchors = new Map<string, string>()
+
+  /**
    * 磁盘上的亲和读数只载入一次（第一次真正用它时）。进程重启会清掉这个 Map，
    * 而「重启后仍回同一缓存域」正是它落盘的全部理由；一次载入失败不能让选路变红，
    * 所以只记一行警告然后按空表继续。
@@ -1345,15 +1359,37 @@ class AutoRouter {
   }
 
   /**
+   * 会话内任务锚点：只存哈希后的短键，进程内、有界。
+   *
+   * 压缩/摘要把首条 user 换成摘要后，请求本身不再带任务边界；这里用同一会话
+   * 上一轮的有效锚点补回，优先保证既有粘性不丢。
+   */
+  private taskAnchorFor(sessionId: string, request: ChatCompletionRequest): string | undefined {
+    const id = String(hashString(sessionId))
+    let task = taskAnchorOf(request.messages)
+    if (task === undefined && conversationKey(request) !== undefined) task = this.sessionTaskAnchors.get(id)
+    if (task === undefined) return undefined
+    if (this.sessionTaskAnchors.size >= SESSION_TASK_ANCHOR_CAPACITY) {
+      const oldest = this.sessionTaskAnchors.keys().next()
+      if (!oldest.done) this.sessionTaskAnchors.delete(oldest.value)
+    }
+    this.sessionTaskAnchors.set(id, task)
+    return task
+  }
+
+  /**
    * 一条请求的会话键，与 `select()` 内部同一个口径。
    *
    * 具名模型（不走路由）的请求没有 `AutoRouteDecision`，但缓存缺口分类仍要按会话
    * 串起上一轮 —— 口径分叉会让同一段对话在读数里变成两段。
    */
   conversationKeyFor(request: ChatCompletionRequest, sessionKey?: ClientSessionKey): string | undefined {
-    return sessionKey !== undefined
-      ? `session:${hashString(sessionKey.value)}`
-      : conversationKey(request)
+    const contentKey = conversationKey(request)
+    if (sessionKey === undefined) return contentKey
+    const id = String(hashString(sessionKey.value))
+    const sessionFingerprint = `session:${id}`
+    const task = this.taskAnchorFor(sessionKey.value, request)
+    return task === undefined ? sessionFingerprint : `${sessionFingerprint}-${task}`
   }
 
   /**
@@ -2609,6 +2645,34 @@ class AutoRouter {
   }
 
   /**
+   * 具名车道的账号亲和：这一轮成功后记住会话落在哪个账号。
+   *
+   * 与 auto 车道的 `rememberRoute` 分开：那条路径的键带路由名，具名模型没有路由。
+   * TTL 与 auto 车道的 `cacheAffinityMinutes` 同源（并按文档 TTL 收口）；能力未知
+   * 的供应商不写 —— 名字不像证据。
+   */
+  rememberNamedAccountAffinity(key: string | undefined, provider: Provider, accountId: string): void {
+    if (key === undefined) return
+    const config = storeManager.getConfig()
+    if (config.sessionAffinity === false) return
+    const capability = promptCacheCapabilityOf(provider)
+    if (capability === undefined || capability.mode === 'unknown') return
+    const minutes = effectiveAffinityMinutes(
+      config.autoRouting?.cacheAffinityMinutes ?? 0,
+      capability,
+      config.promptCaching?.anthropicTtl,
+    )
+    accountAffinity.remember(key, accountId, minutes)
+  }
+
+  /** 具名车道的账号亲和：发请求前读会话记忆。关闭时不参与选号。 */
+  namedAccountAffinity(key: string | undefined): string | undefined {
+    if (key === undefined) return undefined
+    if (storeManager.getConfig().sessionAffinity === false) return undefined
+    return accountAffinity.get(key)
+  }
+
+  /**
    * 撤掉一条会话的粘性锚点。
    *
    * 用于「协议成功但内容退化」的轮次：锚点是在响应头阶段写的，而退化要到流结束
@@ -2774,6 +2838,8 @@ class AutoRouter {
     // 份额账本与运行时指标同生命周期：重启后不该继续背着上一轮的派发欠债
     dispatchLedger.reset()
     this.sticky.clear()
+    // 任务锚点只用于从压缩改写里恢复归属，重启后没有上一轮的上下文可恢复。
+    this.sessionTaskAnchors.clear()
     // 内存钉/熔断/「当前服务者」都是进程内瞬时状态：重启后回到配置本身
     this.modelPins.clear()
     this.modelCircuit.clear()

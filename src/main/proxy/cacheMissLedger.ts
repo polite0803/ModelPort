@@ -14,13 +14,44 @@
  * 只对**上报了缓存字段**的请求分类：没报就没有可归因的缺口，写 0 会把
  * 「没测到」伪装成「测到了」。
  */
-import type { CacheMissClass } from '../../shared/tokenAccounting.ts'
+import {
+  emptyCacheMissDetail,
+  type CacheMissClass,
+  type CacheMissDetail,
+  type CacheMissIdleGap,
+} from '../../shared/tokenAccounting.ts'
 
 export interface CacheMissReading {
   class: CacheMissClass
   /** 上一轮同一会话的 prompt token；首次出现时缺省。 */
   prevPromptTokens?: number
+  /** 四类的再切分（cold/break 才有）。只读归因，不参与任何处置。 */
+  detail?: CacheMissDetail
+  /** 续轮丢锚距上一轮的间隔档（只有 `coldResumed` 才有）。 */
+  idleGap?: CacheMissIdleGap
 }
+
+/** 「续轮丢锚」的间隔分档边界：5 分钟 / 30 分钟。 */
+const IDLE_GAP_5M_MS = 5 * 60 * 1000
+const IDLE_GAP_30M_MS = 30 * 60 * 1000
+
+function idleGapOf(gapMs: number): CacheMissIdleGap {
+  if (gapMs <= IDLE_GAP_5M_MS) return 'under5m'
+  if (gapMs <= IDLE_GAP_30M_MS) return 'from5mTo30m'
+  return 'over30m'
+}
+
+/** 进程启动时刻：用来标「重启后不久的首轮」，与真·新会话分开。 */
+const PROCESS_STARTED_AT = Date.now()
+/** 重启后的这段窗口内、本会话又没有上轮读数 ⇒ 疑似账本被重启清掉。 */
+const RESTART_GRACE_MS = 10 * 60 * 1000
+
+/**
+ * 「未命中 ≈ 本轮新增」的测量余量：上游的 prompt/cache 读数是整数，估算与真实
+ * 分词之间有误差；余量给足一点，宁可把边界判成 `append`（结构性上限），
+ * 不把正常追加算成前缀断裂。
+ */
+const APPEND_SLACK_MIN = 1024
 
 /** 6 小时的会话读数保留窗：超过它的一轮视为新会话，不拿旧大小比。 */
 const READING_TTL_MS = 6 * 60 * 60 * 1000
@@ -35,6 +66,8 @@ const TAIL_RATIO = 0.02
 interface Reading {
   prompt: number
   at: number
+  /** 本会话已记录到的轮数（含这一轮）。只给「会话是否还在继续」这类判据读。 */
+  turns: number
 }
 
 class CacheMissLedger {
@@ -46,6 +79,8 @@ class CacheMissLedger {
     cacheReadTokens: number | undefined
     cacheReported: boolean | undefined
     now?: number
+    /** 仅供测试：把进程启动时刻钉到某个时间点。 */
+    processStartedAt?: number
   }): CacheMissReading | undefined {
     if (input.cacheReported !== true || input.cacheReadTokens === undefined) return undefined
     // 没有会话键就没有「上一轮」可比，判成 cold 会把「无从归因」伪装成「冷启动」。
@@ -60,15 +95,37 @@ class CacheMissLedger {
     const read = Math.max(0, Math.min(prompt, Math.floor(input.cacheReadTokens)))
     const ratio = (prompt - read) / prompt
 
+    // 未命中量 = 本轮 prompt 里没读到缓存的那部分。与「本轮新增」比，才能把
+    // 「新内容本来就没缓存」和「已有前缀被改写」分开。
+    const missTokens = Math.max(0, prompt - read)
     let reading: CacheMissReading
     if (previous !== undefined && prompt < previous.prompt * REWRITE_RATIO) {
       reading = { class: 'rewrite', prevPromptTokens: previous.prompt }
     } else if (previous === undefined || ratio > COLD_RATIO) {
-      reading = previous === undefined
-        ? { class: 'cold' }
-        : { class: 'cold', prevPromptTokens: previous.prompt }
+      const detail = emptyCacheMissDetail()
+      if (previous === undefined) {
+        detail.coldFirst = 1
+        if (now - (input.processStartedAt ?? PROCESS_STARTED_AT) <= RESTART_GRACE_MS) {
+          detail.afterRestart = 1
+        }
+        reading = { class: 'cold', detail }
+      } else {
+        detail.coldResumed = 1
+        // 间隔是区分「上游过期」与「上游提前清缓存」的唯一客观依据。
+        reading = {
+          class: 'cold',
+          prevPromptTokens: previous.prompt,
+          detail,
+          idleGap: idleGapOf(now - previous.at),
+        }
+      }
     } else if (ratio > TAIL_RATIO) {
-      reading = { class: 'break', prevPromptTokens: previous.prompt }
+      const delta = Math.max(0, prompt - previous.prompt)
+      const slack = Math.max(APPEND_SLACK_MIN, Math.ceil(delta * 0.1))
+      const detail = emptyCacheMissDetail()
+      if (missTokens <= delta + slack) detail.breakAppend = 1
+      else detail.breakDiverged = 1
+      reading = { class: 'break', prevPromptTokens: previous.prompt, detail }
     } else {
       reading = { class: 'tail', prevPromptTokens: previous.prompt }
     }
@@ -77,10 +134,28 @@ class CacheMissLedger {
     return reading
   }
 
+  /**
+   * 这一轮之前的读数（只返回还活着的）。调用点必须在 `classify` **之前**读，
+   * 否则拿到的就是本轮自己。给「压缩后预热是否值得发」用：会话已经放了很久、
+   * 或者只有一两轮，预热写进去的缓存没人接着读，那是净亏。
+   */
+  snapshot(key: string | undefined, now: number = Date.now()): { at: number; prompt: number; turns: number } | undefined {
+    if (key === undefined) return undefined
+    const stored = this.last.get(key)
+    if (stored === undefined) return undefined
+    if (now - stored.at > READING_TTL_MS) {
+      this.last.delete(key)
+      return undefined
+    }
+    return { at: stored.at, prompt: stored.prompt, turns: stored.turns }
+  }
+
   private remember(key: string, prompt: number, now: number): void {
+    const stored = this.last.get(key)
+    const live = stored !== undefined && now - stored.at <= READING_TTL_MS
     // delete + set：Map 保留首次插入位，不重排的话常驻会话会被当成"最旧"淘汰。
     this.last.delete(key)
-    this.last.set(key, { prompt, at: now })
+    this.last.set(key, { prompt, at: now, turns: live ? stored.turns + 1 : 1 })
     while (this.last.size > CAPACITY) {
       const oldest = this.last.keys().next()
       if (oldest.done === true) break
