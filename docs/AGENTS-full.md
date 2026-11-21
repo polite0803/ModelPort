@@ -376,6 +376,81 @@ Tests split by layer: `tests/shared/anthropic-wire.test.ts` and
 and `tests/routes/responses-inbound.test.ts` for the entries end to end (real `ProxyServer` looping
 back into real `routes/chat.ts`, with a `node:http` stand-in upstream).
 
+### Anthropic server-side safeguards (`safeguards`) passthrough (2026-11-21)
+
+**The symptom.** Claude Desktop running against a third-party gateway showed a card: *"Auto mode
+switched to its built-in safety check for this session"*, with a link to
+`https://claude.com/docs/third-party/claude-desktop/gateway#auto-mode-checks`. Auto mode's action
+review had been delegated to the gateway and the verdict never came back, so every reviewed action
+cost an extra request billed like the rest of the work.
+
+**Why the card appears.** Read out of the `claude.exe` shipped with the local Claude Desktop
+install, not guessed from the page: `gatewayHost` is taken from `ANTHROPIC_BASE_URL`'s host whenever
+the provider is `firstParty` and the host is not `api.anthropic.com`, and `desktopTurnedCheckOn`
+requires `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST=1`. Both present ⇒ the client expects the gateway to
+run the review and renders the card when no verdict arrives. Pointing at ModelPort satisfies both
+by construction, so for a gateway client the card is not a warning to dismiss - it is a statement
+that the gateway is dropping the protocol.
+
+**The protocol is a pair.** On the wire (Anthropic Messages):
+
+- request: `anthropic-beta: dangerous-tool-use-2026-09-03` header **and** a top-level body field
+  `safeguards` (the session's review context: rules, folders, user name, git state). The upstream
+  runs the review inside the same `/v1/messages` call - *"The session sends no separate request for
+  an action that gets a verdict"* - so there is no second endpoint to forward to.
+- response, streaming: `message_delta.delta.safeguard_results`. The client's own test is
+  `"safeguard_results" in delta`, so an explicit `null` reads as "a verdict was given" rather than
+  "none came".
+- response, non-streaming: top-level `message.safeguard_results`.
+- payload: an array of objects; the one type the client acts on is `dangerous_tool_use`, whose
+  `status` is `{type:'available', tool_uses: Record<tool_use_id, string>}`, `{type:'unsupported'}`
+  or `{type:'unavailable', reason}`.
+
+**Why this bridge dropped it.** `/v1/messages` is translate → loopback → translate back. The inbound
+codec's whitelist dropped `safeguards` (it landed in `dropped` as `body:safeguards` and was reported
+in `X-ModelPort-Anthropic-Dropped`), the outbound adapter never sent the beta header, and the
+stream re-encode had no place to put the verdict even if the upstream had sent one. Three separate
+gaps, each silent on its own.
+
+**Where the gate lives, and why there.** The `/v1/messages` route cannot know which upstream will
+serve the request (routing, failover and the account pool resolve later), so it always carries the
+field into the chat request (`forwardsSafeguards: true`) and the *real* decision is made in
+`AnthropicAdapter` at forward time. `shared/anthropicSafeguards.ts::anthropicSafeguardsCapable` is
+the single judgement point: `type === 'aggregate'` **and** `wire === 'anthropic-messages'` **and**
+the catalogue entry declares `serverSideSafeguards: true`. Today exactly one entry does -
+`providers/aggregate/registry.ts`'s `anthropic` (`baseUrl: https://api.anthropic.com/v1`; its model
+list is empty by design because the transcribed ids were retired upstream). z.ai's
+`/api/anthropic` and minimax-cn speak the same wire and would accept the field without performing
+the review, and `safeguards` describes the operator's session (paths, user name, git state) - so
+forwarding it there would hand real context to a party that can never answer, for a verdict that can
+never arrive. Strict third-party endpoints would also 400 on the unknown top-level field. The
+OpenAI-wire `buildRequestBody` whitelist never carries `safeguards` at all, so a chat-wire fallback
+cannot leak it either.
+
+**The pair is enforced literally.** `buildHeaders(promptCache, forwardsSafeguards)` adds the beta
+value only when `body.safeguards !== undefined` - i.e. the same call really carries the field - and
+`withSafeguardsBeta` appends to any existing `anthropic-beta` list instead of replacing it (z.ai
+cache-TTL values and the file's own `extended-cache-ttl-2025-04-11` must survive). The response
+side uses the *same* per-call flag, not "this provider could do it": a verdict appearing in a
+response to a request that never asked for a review is cross-talk or a mis-pairing, and delivering
+it would let an unrequested verdict clear (or block) an action.
+
+**Not solved by passthrough alone.** No configured upstream in this deployment performs the review
+today (`/v1/models` exposes six routes; `/stats` shows bailian / qodercn / opencode_go traffic and no
+Anthropic account), so the card will not disappear until an Anthropic-native entry with a key is
+wired. The code is the precondition; the verdict requires an upstream that can produce one. The
+`CLAUDE_CODE_AUTO_MODE_SERVER=0` environment variable suppresses the card by turning the delegated
+review off entirely - that is disabling Auto mode's server-side check, not fixing it.
+
+Tests: `tests/shared/anthropic-safeguards.test.ts` (the predicates plus
+`anthropicToChatRequest` / `chatResponseToAnthropicMessage` / `createAnthropicStreamTranslator` in
+both directions, with the "no verdict ⇒ no key, not `null`" negative) and
+`tests/routes/anthropic-safeguards-http.test.ts` (real `ProxyServer` → loopback chat → real
+`AnthropicAdapter` → `node:http` stand-in: a capable entry receives header **and** field together and
+the verdict returns in `message_delta.delta` with `tool_use` ids untouched; an `anthropic-messages`
+entry without the flag receives neither and its (hypothetical) verdict is not forwarded; a request
+without `safeguards` gets no beta header even on a capable entry).
+
 ### Load Balance Strategies
 
 `LoadBalanceStrategy` is `round-robin | fill-first | failover | smart | pace`. The first three use
@@ -718,18 +793,49 @@ cannot route to advertises something that never answers.
   previous turn - but the *new* prefix was being re-read every turn afterwards, and that part is
   removable. The trigger is one structural fact: **this turn's prompt is less than half of the
   previous turn's, and the previous turn was at least 8 000 tokens**. On a hit the gateway re-sends
-  the *same* request body (byte-identical prefix, `tools`/`tool_choice` stripped because the warm-up
-  needs no tool contract) with `max_tokens: 1` and `stream: false`, through `probe: true` so the
+  the *same* request body (byte-identical prefix, `tools`/`tool_choice` retained as part of the
+  prompt prefix) with `max_tokens: 1` and `stream: false`, through `probe: true` so the
   extra call never touches the dispatch ledger, AIMD, Bandit or cooldowns. Guard rails, all
   measured rather than assumed: a 5-minute cooldown per request path so repeated compactions cannot
-  multiply requests, no warm-up when the provider's `promptCache.mode` is `unknown` (sending a
-  request proves nothing about what got written), and the operator switch
-  `promptCaching.warmAfterCompaction` in the cache settings card. Cost accounting is honest: the
+  multiply requests, a short backoff after consecutive upstream rejections (47 of 67 warm-ups on
+  2026-11-20 returned 400; the error bodies were not captured, so no field-stripping guess is made),
+  no warm-up when the provider's `promptCache.mode` is `unknown` (sending a request proves nothing
+  about what got written), and the operator switch
+  `promptCaching.warmAfterCompaction` in the cache settings card. On 2026-11-21 the rejected warm-up's
+  error body was captured: `stream_options should be set along with stream = true`. The gateway
+  injected `stream_options` for the real streamed request; `warmRequestOf()` turned `stream` off but
+  kept the field, so the strict upstream rejected the whole call. It now deletes `stream_options`
+  whenever it disables streaming. After redeploy, all 59 warm-ups in the one-hour replay window
+  returned 200. Cost accounting is honest: the
   warm-up itself is a full-price prompt read of the new prefix (~30 k tokens in the reference
   session) and buys back roughly the same amount on each of the next few turns; on a session that
-  compacts and then ends immediately it is a net loss. Tests: `tests/proxy/cache-warm.test.ts` (the
-  real turn numbers, the growth/small-drop negatives, capability and cooldown gates, and the
-  byte-identical-prefix guarantee).
+  compacts and then ends immediately it is a net loss. The two *client* compaction turns themselves
+  (`compactionTurnOf()` recognizes `CONTEXT CHECKPOINT COMPACTION` / `handoff summary` and the
+  summary-rebuild request from the user messages) can never reuse the previous prefix, so they are
+  excluded from the warm-up trigger only. Their misses are *still* classified and recorded - the
+  spend is real and must not be hidden by skipping the ledger. The gateway never writes those
+  strings into the conversation.
+- **Session keys are split by task, not just by client session id** (2026-11-21). One
+  `prompt_cache_key` in the live 06:15 replay carried `CLAUDE.md` config injections, `Read tool`
+  results, the real task, and `# Environment update` messages; the cache-miss ledger treated them
+  as consecutive turns of one conversation and read each prompt as the previous prompt, which
+  amplified the miss figures. With a client session, `autoRouter.conversationKeyFor()` now returns
+  `session:<hash>-<task>`, where `taskAnchorOf()` hashes the first 512 chars of the first user
+  message. Client-injected broadcasts (`CLAUDE.md` config, environment updates,
+  `<system-reminder>`, "new message while you were working", on-disk-change notices) are skipped
+  to find the real user message. Compaction/summary rewrites do not mint a new task: the last
+  effective anchor for that session is kept in a bounded, in-memory map, preserving stickiness
+  through summary rewrites. Requests without a usable user message fall back to the plain session
+  key, and requests without a client session keep `conversationKey(request)` unchanged. The same
+  key drives route stickiness, session pins, cache-miss classification, and named-lane account
+  affinity. Tests: `tests/proxy/autoRouting.test.ts` (broadcast skipping, summary rewrites,
+  different tasks), `tests/proxy/completions-session-stickiness.test.ts` (task split plus
+  continuation/compaction stability), and the unchanged compaction-stickiness case in
+  `tests/routes/routes-pool-and-sticky.test.ts`.
+  Tests: `tests/proxy/cache-warm.test.ts` (the
+  real turn numbers, the growth/small-drop negatives, capability and cooldown gates, the
+  byte-identical-prefix guarantee, and compaction-turn recognition) plus wiring gates in
+  `tests/proxy/cache-miss-wiring.test.ts` and `tests/proxy/cache-warm-wiring.test.ts`.
 - **`LoadBalanceStrategy` is declared twice on purpose**: `shared/types.ts` (the renderer's copy) and
   `main/store/types.ts` (the store schema's copy), plus UI label maps and both locales. Adding a
   strategy means five edits; missing the store copy type-checks and then fails at load, missing a
@@ -1519,6 +1625,31 @@ re-anchoring the conversation to it.
   tool-offering turns that end with prose only show their text at turn end (~4-11 s in the
   reference session). Evidence: `tests/routes/responses-inbound.test.ts` (runaway mode: stream and
   non-stream re-issue, and no re-issue when the client offered no tools).
+* **Releasing the buffer is not a verdict — the judge keeps running after delivery (2026-11-20 20:00
+  incident).** Early release (`earlyReleaseMinChars`, two healthy non-decreasing windows) and the
+  `holdTimeoutMs` backstop only mean *the opening does not look like a repetition loop*; neither says
+  anything about the rest of the turn. Codex session
+  `rollout-2026-11-20T20-50-21-01a1f902…` (relayed through this gateway at 04:05 CST) released at
+  ~2 400 healthy characters, collapsed into a six-line loop (`Let's.` / `Go.` / `Tool.` / `Now.` /
+  `I'll call.` / `Okay.`) from character 15 405, ran to **183 901 characters / 65 536 output tokens**
+  in 256 s and was stopped by the upstream cap; the client got
+  `Incomplete response returned, reason: max_output_tokens` and the whole loop entered its history.
+  `judgeRunawayTurn` was never consulted again after `holding` dropped. Now, once the buffer is
+  released, each read that grows the visible body past `nextWatchAt` re-judges the turn; on a
+  degenerate verdict the upstream is `cancel()`ed, a `warn` log records `contentChars` / `lines` /
+  `dedupRatio`, and a `response.failed` frame is written with
+  `RUNAWAY_ABORT_MESSAGE`. Re-issuing is **not** an option at that point (the text is already on the
+  client, a second copy would follow) and `response.completed` must not be appended either (that
+  would read as a short but valid answer) — the client has to see a failure and retry. `nextWatchAt`
+  grows geometrically (`RUNAWAY_WATCH_CHARS` = 2 000, or an eighth of what has been received,
+  whichever is larger) because `judgeRunawayTurn` rescans the whole body each time: a fixed step
+  would make a long turn quadratic. `watching` turns itself off as soon as a tool-call delta shows up
+  — a turn doing work is not a turn collapsing. Evidence:
+  `tests/routes/responses-inbound.test.ts` (`late-collapse` mode: ~3 800 characters of healthy plan
+  emitted in 15 ms batches so the early release fires *before* the collapse, then the six-line cycle;
+  the test asserts the healthy prefix is still delivered, fewer than 600 cycle markers reach the
+  client, `response.failed` is present, `response.completed` is absent, and only one upstream request
+  was made).
 * Tests: `tests/shared/stream-repetition.test.ts` (verdict, tail window, short-answer exemption,
   threshold-is-a-real-knob), `tests/proxy/bandit-repetition.test.ts` (streak + no regression on the
   length rule), `tests/renderer/repetition-guard-wiring.test.mjs` (wiring, with six in-memory
@@ -1554,6 +1685,24 @@ re-anchoring the conversation to it.
   stream. Evidence: `tests/proxy/dsml-tool-call-tap.test.ts`, `tests/shared/dsml-tool-calls.test.ts`,
   `tests/routes/chat-dsml-tool-calls.test.ts` (end-to-end: with tools / without tools / upstream
   missing finish).
+* **A dangling tail of closing tags is stripped, and the turn is marked degraded (2026-11-20).** Six
+  assistant messages in the live 2026-11-19 18:55–19:02 session (258–430 characters each) end with
+  three closing tags in a row - `</｜DSML｜ parameter>`, `</｜DSML｜ invoke>`, `</｜DSML｜ calls>` - and
+  **not one of them contains an opening tag or a single `parameter name="…"`**. The model started a
+  call and the opening tag plus every argument never arrived; all that reached the client was the
+  punctuation at the end. There is nothing to restore from such a fragment (no tool name, no
+  arguments), so the disposition differs from the rest of this section: keep the prose byte-for-byte,
+  strip the fragment, and record the turn as degraded (`RequestStreamTrace.danglingCallMarkup`, warn
+  log "正文尾部挂着残缺的调用标记，已剥离"). The predicate is deliberately narrow - it needs all
+  three closers in sequence at the very end of the body, so a message that merely mentions `parameter`
+  or `invoke` in prose is untouched. Implementation detail worth knowing: the content filter latches
+  text mode as soon as it sees prose, so the strip cannot live inside it; the tap holds back up to
+  ~120 characters of the trailing text that could be the start of `</｜DSML｜` and decides at `finish`,
+  `[DONE]` or stream end. Held text that turns out not to be a fragment is re-emitted **before** the
+  finish frame, because strict clients reject content that arrives after `finish_reason`.
+  Tests: `tests/proxy/dsml-tool-call-tap.test.ts` (whole fragment, fragment split across 7-character
+  chunks, and the negative where prose mentions the words) plus the end-to-end case in
+  `tests/routes/chat-dsml-tool-calls.test.ts`.
 
 ### Pool failover, and latency as a gate (2026-11-12)
 
@@ -2784,6 +2933,7 @@ fails if a tagged site is missing from this table or a table row has no tag. Pro
 | `freeform-input-schema` | `{type:'object',properties:{input:{type:'string'}},required:['input']}` as a freeform tool's `parameters` | `1775995` 2026-11-18 (previously untagged) | protocol translation, not a prompt: Responses `type:'custom'` tools carry no JSON schema, chat `tools[].function.parameters` requires one, and without a contract the model guessed - 4 of 6 `apply_patch` calls came back as `arguments: {}` with the patch body gone. Carries no authored sentence; `required` + `type` state the contract. Tagged on 2026-11-18 because it reached the model while being invisible to this table. |
 | `vision-relay-prompt` | fixed transcription/description instruction sent with the images to the reader model in the relay hop (`probe: true`, separate lane) | `PLAN-vision-relay` 2026-11-19, 刘小平批准 | vision relay (two-stage): when this turn's served model cannot take images, a free vision model transcribes them first. The instruction only ever enters the hop request — never the user's conversation — and the hop carries `probe: true`, so it stays out of AIMD, Bandit, cooldowns and traffic stats. |
 | `vision-relay-marker` | replaces each image part with `[Image relayed via <reader>: <description>]` in the main request | `PLAN-vision-relay` 2026-11-19, 刘小平批准 | the image is not dropped (1.8.29 rule: never silently lose images) — it is replaced by a self-describing pointer that names its source, same shape as the compression marker. LRU caches descriptions by image hash so an identical image yields byte-identical text on every turn (prompt cache stays stable). |
+| `runaway-abort-frame` | `response.failed` error text when a released stream is later judged degenerate | `2026-11-21` 放行后复读掐断 | failure notice, not a prompt: the text is written **only** to the client-facing `response.failed` error field, never into an outbound request or model context. Tagged because the gateway-authored-text gate scans all of `src/main`/`src/shared`, and a client-visible sentence without provenance is exactly what the ledger exists to catch. |
 
 ### Retired, with the evidence that retired it
 

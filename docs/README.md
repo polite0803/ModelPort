@@ -75,11 +75,13 @@
 | [`plan/PLAN-channel-identity-alignment.md`](plan/PLAN-channel-identity-alignment.md) | 13 个账号渠道的客户端身份头与实际发包对齐、版本号自动更新机制 | v1.6.2 | 实施中 | 2026-11-05 |
 | [`plan/PLAN-wsl-headless-daemon-and-shell.md`](plan/PLAN-wsl-headless-daemon-and-shell.md) | WSL 无头守护进程、管理面走网络与 Windows 原生壳的四阶段改造 | v1.8.0 | 实施中 | 2026-11-05 |
 | [`plan/PLAN-shell-three-modes.md`](plan/PLAN-shell-three-modes.md) | 控制台三形态（本地 / WSL / 远程）与网关按需安装；取消主应用发布形态 | v1.8.0 | 实施中 | 2026-11-07 |
-| [`plan/PLAN-prompt-cache.md`](plan/PLAN-prompt-cache.md) | Prompt 缓存命中：DeepSeek 优先（亲和 + 缓存优先压缩）、Anthropic 显式断点、按模型缓存仪表盘与压缩净收益门 | v1.7.9 | 实施中 | 2026-11-08 |
+| [`plan/PLAN-prompt-cache.md`](plan/PLAN-prompt-cache.md) | Prompt 缓存命中：DeepSeek 优先（亲和 + 缓存优先压缩）、Anthropic 显式断点、按模型缓存仪表盘、压缩净收益门与 11-20 短空档丢锚归因 | v1.7.9 | 实施中 | 2026-11-21 |
 | [`plan/PLAN-docker-release-and-235-deploy.md`](plan/PLAN-docker-release-and-235-deploy.md) | Docker 发布形态（镜像 tar.gz 资产 + CI + 部署指南）与 192.168.0.235 容器部署 | v1.8.12 | 实施中 | 2026-11-14 |
 | [`plan/PLAN-client-config-switch.md`](plan/PLAN-client-config-switch.md) | 客户端自定义模型代写（CCSwitch 式）：六家客户端一次配好，切网关不再手改 baseURL / key | v1.9.0（待定） | 实施中 | 2026-11-14 |
 | [`plan/PLAN-fault-injection-failover.md`](plan/PLAN-fault-injection-failover.md) | 故障注入集成测试：钉住换家链、首块前才能切换、流中断不重播三条边界 | v1.8.23 | 已实施 | 2026-11-16 |
 | [`plan/PLAN-vision-relay.md`](plan/PLAN-vision-relay.md) | 视觉读图两段式：vision 模型直发豁免；文本目标 + 图片时经免费读图器转述后转发（默认关） | v1.8.31+ | 已实施 | 2026-11-19 |
+| [`plan/PLAN-subscription-quota-usage.md`](plan/PLAN-subscription-quota-usage.md) | 订阅套餐用量可见性：第五层声明窗口接到聚合详情、用户模板库（不硬编码套餐数字）、周月窗 UTC 口径交代 | v1.8.37+ | 已实施 | 2026-11-21 |
+| [`plan/PLAN-session-scoped-routing.md`](plan/PLAN-session-scoped-routing.md) | 会话级路由与前缀契约：具名车道补账号亲和、裁剪点单调、responses 交付窗口收窄与预热/重发自适应 | v1.8.38+（待定） | 待批 | 2026-11-21 |
 | [`plan/2026-05-26-in-app-update.md`](plan/2026-05-26-in-app-update.md) | 应用内更新的任务拆解与测试计划 | v1.3.0 | 历史记录 | 2026-05-26 |
 | [`plan/2026-05-27-modelport-tool-testing-skills.md`](plan/2026-05-27-modelport-tool-testing-skills.md) | 工具调用测试技能集的目录、脚本与验收计划 | v1.3.0 | 历史记录 | 2026-05-27 |
 
