@@ -80,8 +80,8 @@
 | [`plan/PLAN-client-config-switch.md`](plan/PLAN-client-config-switch.md) | 客户端自定义模型代写（CCSwitch 式）：六家客户端一次配好，切网关不再手改 baseURL / key | v1.9.0（待定） | 实施中 | 2026-11-14 |
 | [`plan/PLAN-fault-injection-failover.md`](plan/PLAN-fault-injection-failover.md) | 故障注入集成测试：钉住换家链、首块前才能切换、流中断不重播三条边界 | v1.8.23 | 已实施 | 2026-11-16 |
 | [`plan/PLAN-vision-relay.md`](plan/PLAN-vision-relay.md) | 视觉读图两段式：vision 模型直发豁免；文本目标 + 图片时经免费读图器转述后转发（默认关） | v1.8.31+ | 已实施 | 2026-11-19 |
-| [`plan/PLAN-subscription-quota-usage.md`](plan/PLAN-subscription-quota-usage.md) | 订阅套餐用量可见性：第五层声明窗口接到聚合详情、用户模板库（不硬编码套餐数字）、周月窗 UTC 口径交代 | v1.8.37+ | 已实施 | 2026-11-21 |
-| [`plan/PLAN-session-scoped-routing.md`](plan/PLAN-session-scoped-routing.md) | 会话级路由与前缀契约：具名车道补账号亲和、裁剪点单调、responses 交付窗口收窄与预热/重发自适应 | v1.8.38+（待定） | 待批 | 2026-11-21 |
+| [`plan/PLAN-subscription-quota-usage.md`](plan/PLAN-subscription-quota-usage.md) | 订阅套餐用量可见性：第五层声明窗口接到聚合详情、用户模板库（不硬编码套餐数字）、周月窗 UTC 口径交代 | v1.8.38 | 已实施 | 2026-11-21 |
+| [`plan/PLAN-session-scoped-routing.md`](plan/PLAN-session-scoped-routing.md) | 会话级路由与前缀契约：具名车道补账号亲和、裁剪点单调、responses 交付窗口收窄与预热/重发自适应 | v1.8.38 | 已实施 | 2026-11-21 |
 | [`plan/2026-05-26-in-app-update.md`](plan/2026-05-26-in-app-update.md) | 应用内更新的任务拆解与测试计划 | v1.3.0 | 历史记录 | 2026-05-26 |
 | [`plan/2026-05-27-modelport-tool-testing-skills.md`](plan/2026-05-27-modelport-tool-testing-skills.md) | 工具调用测试技能集的目录、脚本与验收计划 | v1.3.0 | 历史记录 | 2026-05-27 |
 
