@@ -44,6 +44,35 @@ export const DECLARED_QUOTA_MAX_WINDOWS = 4
 /** 单个上限的合法上界：这个数已经远超任何套餐。 */
 export const DECLARED_QUOTA_MAX_LIMIT = 1_000_000_000_000
 
+/**
+ * 用户自定义的声明额度模板（2026-11-20 拍板）。
+ *
+ * 为什么模板由用户建、而不是产品内置档位：套餐数字随订阅变化、各家口径不同，
+ * 把某一刻官方页上的 `6000 / 45000 / 90000` 写进代码，等于把第三方文档的某一版
+ * 变成产品承诺 —— 平台改口径时产品得跟着发版，而用户其实只需要抄一次。
+ *
+ * 模板**只是填表助手**：它不参与任何判定。选中模板只是把 `limits` 填进当前表单，
+ * 用户仍可改；真正挡发车的永远只有落盘在账号上的 `declaredQuota`。
+ * 删除模板也不碰任何账号已有的声明。
+ */
+export interface DeclaredQuotaTemplate {
+  /** 稳定 id（归一器生成，用户不可见；用于下拉的键与删除定位）。 */
+  id: string
+  /** 用户起的名字（如「百炼 Coding Pro」）；同一份库里按名字去重。 */
+  name: string
+  limits: DeclaredQuotaLimit[]
+}
+
+/** 模板库条数上限：够覆盖常见的几档订阅，又不让配置无限膨胀。 */
+export const DECLARED_QUOTA_MAX_TEMPLATES = 20
+/** 模板名长度上限：界面上是一行下拉，再长也没法读。 */
+export const DECLARED_QUOTA_MAX_TEMPLATE_NAME = 40
+
+/** 模板的 id 规则：名字前缀哈希不够稳，直接用序号 + 名字，重名时归一器去重。 */
+function templateIdOf(name: string, index: number): string {
+  return `tpl-${index}-${name.slice(0, 16)}`
+}
+
 const HOUR_MS = 3_600_000
 const DAY_MS = 24 * HOUR_MS
 const WEEK_MS = 7 * DAY_MS
@@ -94,6 +123,39 @@ export function normalizeDeclaredQuota(value: unknown): DeclaredQuotaLimit[] {
       DECLARED_QUOTA_WINDOWS.indexOf(a.window) - DECLARED_QUOTA_WINDOWS.indexOf(b.window)
       || DECLARED_QUOTA_UNITS.indexOf(a.unit) - DECLARED_QUOTA_UNITS.indexOf(b.unit))
     .slice(0, DECLARED_QUOTA_MAX_WINDOWS)
+}
+
+/**
+ * 模板库的边界校验。
+ *
+ * 三条：名字规范化（去空白、截断、空名字丢弃）、`limits` 走 `normalizeDeclaredQuota`
+ * （同一个归一器，不另立一套白名单）、同一名字只留**第一条**（后面的丢弃而不是合并：
+ * 合并两份模板等于替用户决定「哪几个窗口该合并」，而下拉里同名两项用户无法分辨）。
+ *
+ * id 在这里重新生成而不是信任入参：id 只是下拉的键与删除定位，但它一旦重复，
+ * React 的键与「删哪一条」都会同时错位。重名去重之后 id 自然唯一。
+ */
+export function normalizeDeclaredQuotaTemplates(value: unknown): DeclaredQuotaTemplate[] {
+  if (!Array.isArray(value)) return []
+
+  const seen = new Set<string>()
+  const out: DeclaredQuotaTemplate[] = []
+  for (const raw of value) {
+    if (out.length >= DECLARED_QUOTA_MAX_TEMPLATES) break
+    if (raw === null || typeof raw !== 'object') continue
+    const entry = raw as Partial<DeclaredQuotaTemplate>
+    const name = typeof entry.name === 'string'
+      ? entry.name.trim().slice(0, DECLARED_QUOTA_MAX_TEMPLATE_NAME)
+      : ''
+    if (name.length === 0) continue
+    if (seen.has(name)) continue
+    const limits = normalizeDeclaredQuota(entry.limits)
+    // 没有任何合法窗口的模板填进表单等于什么都不做，直接丢弃而不是留一个空壳。
+    if (limits.length === 0) continue
+    seen.add(name)
+    out.push({ id: templateIdOf(name, out.length), name, limits })
+  }
+  return out
 }
 
 /** 一个窗口的用量读数：请求数与 token 数各一份，调用方按 `unit` 取用。 */

@@ -1680,6 +1680,19 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
     }
   })
 
+  registerMainHandler(IpcChannels.AGGREGATE_SET_KEY_QUOTA, async (_, accountId: string, declaredQuota: unknown) => {
+    try {
+      // 归一在 `AccountManager.update` 里做（与账号弹窗同一写入口）；这里只挡非数组，
+      // 让「传了个脏东西」报可读错误，而不是静默清空一把 Key 的声明。
+      if (!Array.isArray(declaredQuota)) {
+        return { success: false, reason: 'bad_request', message: 'declaredQuota must be an array' }
+      }
+      return aggregateProviderManager.setKeyQuota(accountId, declaredQuota)
+    } catch (error) {
+      return { success: false, reason: 'save_failed', message: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
   registerMainHandler(IpcChannels.AGGREGATE_ADD_MODEL, async (_, id: string, modelId: string) => {
     try {
       return aggregateProviderManager.addModel(id, modelId)

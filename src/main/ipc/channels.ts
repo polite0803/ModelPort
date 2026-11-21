@@ -140,6 +140,8 @@ export const IpcChannels = {
   AGGREGATE_ADD_KEY: 'aggregate:addKey',
   AGGREGATE_REMOVE_KEY: 'aggregate:removeKey',
   AGGREGATE_SET_KEY_ENABLED: 'aggregate:setKeyEnabled',
+  // 写一把 Key 的声明额度（第五层证据）：聚合详情页就地编辑，不跳供应商页。
+  AGGREGATE_SET_KEY_QUOTA: 'aggregate:setKeyQuota',
   AGGREGATE_VALIDATE_KEY: 'aggregate:validateKey',
   AGGREGATE_ADD_MODEL: 'aggregate:addModel',
   AGGREGATE_REMOVE_MODEL: 'aggregate:removeModel',

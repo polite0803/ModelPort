@@ -7,6 +7,7 @@ import {
   ChevronRight,
   CircleAlert,
   Coins,
+  Gauge,
   KeyRound,
   Loader2,
   Plus,
@@ -48,6 +49,8 @@ import type {
 } from '../../../../shared/aggregateCost'
 import { aggregateCostCounts, aggregateCostOf } from '../../../../shared/aggregateCost'
 import { getTermsWarning } from '../../../../shared/aggregateTerms'
+import type { DeclaredQuotaLimit } from '../../../../shared/declaredQuota'
+import { DeclaredQuotaEditor, DeclaredQuotaRows, useDeclaredQuotaTemplates } from '../providers'
 import { quotaRows, quotaViewOf, WINDOW_OF_METRIC } from '../../../../shared/aggregateQuotaView'
 import type { ModelCapabilityHint } from '../../../../shared/types'
 import type { CatalogAdoption } from '../../../../shared/modelCatalog'
@@ -588,6 +591,10 @@ function KeysCard(props: {
   const [newVars, setNewVars] = useState<Record<string, string>>({})
   const [adding, setAdding] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
+  /** 正在就地编辑声明额度的那把 Key（一次只编辑一把：同一时间只有一份草稿）。 */
+  const [editingQuotaId, setEditingQuotaId] = useState<string | null>(null)
+  const [quotaDraft, setQuotaDraft] = useState<DeclaredQuotaLimit[]>([])
+  const templateApi = useDeclaredQuotaTemplates()
 
   if (entry.authKind !== 'apiKey') {
     return (
@@ -662,6 +669,18 @@ function KeysCard(props: {
     await onRefresh()
   }
 
+  const handleSaveQuota = async (key: AggregateKeyInfo) => {
+    setBusyId(key.id)
+    const result = await window.electronAPI.aggregate.setKeyQuota(key.id, quotaDraft)
+    setBusyId(null)
+    const ok = await settle(result, t('aggregate.manage.toast.saved'))
+    if (ok) {
+      setEditingQuotaId(null)
+      setQuotaDraft([])
+    }
+    await onRefresh()
+  }
+
   return (
     <Card>
       <CardHeader className="flex-row items-center justify-between pb-2">
@@ -680,63 +699,109 @@ function KeysCard(props: {
 
         <div className="space-y-1.5">
           {keys.map(key => (
-            <div key={key.id} className="flex flex-wrap items-center gap-2 rounded-md border px-3 py-2">
-              <KeyRound className="h-4 w-4 shrink-0 text-muted-foreground" />
-              <span className="font-mono text-xs">{key.maskedKey}</span>
-              {pathVars.map(variable => {
-                const value = key.pathVars?.[variable.name]
-                return value ? (
-                  <span key={variable.name} className="font-mono text-[11px] text-muted-foreground">
-                    {variable.label}: {value}
+            <div key={key.id} className="rounded-md border px-3 py-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <KeyRound className="h-4 w-4 shrink-0 text-muted-foreground" />
+                <span className="font-mono text-xs">{key.maskedKey}</span>
+                {pathVars.map(variable => {
+                  const value = key.pathVars?.[variable.name]
+                  return value ? (
+                    <span key={variable.name} className="font-mono text-[11px] text-muted-foreground">
+                      {variable.label}: {value}
+                    </span>
+                  ) : (
+                    <span key={variable.name} className="text-[11px] text-destructive">
+                      {t('aggregate.manage.keys.missingVar', { label: variable.label })}
+                    </span>
+                  )
+                })}
+                <Badge variant={key.status === 'active' ? 'default' : key.status === 'error' ? 'destructive' : 'outline'}>
+                  {key.status === 'active'
+                    ? t('common.enabled')
+                    : key.status === 'error'
+                      ? t('aggregate.manage.keys.statusError')
+                      : t('common.disabled')}
+                </Badge>
+                {key.errorMessage && (
+                  <span className="max-w-[16rem] truncate text-[11px] text-destructive" title={key.errorMessage}>
+                    {key.errorMessage}
                   </span>
-                ) : (
-                  <span key={variable.name} className="text-[11px] text-destructive">
-                    {t('aggregate.manage.keys.missingVar', { label: variable.label })}
-                  </span>
-                )
-              })}
-              <Badge variant={key.status === 'active' ? 'default' : key.status === 'error' ? 'destructive' : 'outline'}>
-                {key.status === 'active'
-                  ? t('common.enabled')
-                  : key.status === 'error'
-                    ? t('aggregate.manage.keys.statusError')
-                    : t('common.disabled')}
-              </Badge>
-              {key.errorMessage && (
-                <span className="max-w-[16rem] truncate text-[11px] text-destructive" title={key.errorMessage}>
-                  {key.errorMessage}
+                )}
+                <span className="ml-auto text-[11px] text-muted-foreground">
+                  {key.lastUsed
+                    ? t('aggregate.manage.keys.lastUsed', { time: new Date(key.lastUsed).toLocaleString() })
+                    : new Date(key.createdAt).toLocaleDateString()}
                 </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2"
+                  title={t('aggregate.manage.keys.validate')}
+                  disabled={busyId === key.id}
+                  onClick={() => void handleValidate(key)}
+                >
+                  {busyId === key.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
+                </Button>
+                <Switch
+                  checked={key.status === 'active'}
+                  disabled={busyId === key.id}
+                  onCheckedChange={enabled => void handleToggle(key, enabled)}
+                />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2"
+                  title={t('aggregate.manage.keys.quota')}
+                  aria-label={t('aggregate.manage.keys.quota')}
+                  disabled={busyId === key.id}
+                  onClick={() => {
+                    if (editingQuotaId === key.id) {
+                      setEditingQuotaId(null)
+                      return
+                    }
+                    setQuotaDraft(key.declaredQuota ?? [])
+                    setEditingQuotaId(key.id)
+                  }}
+                >
+                  <Gauge className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-destructive"
+                  title={t('aggregate.manage.keys.delete')}
+                  disabled={busyId === key.id}
+                  onClick={() => void handleDelete(key)}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+              {/* 第五层额度证据：只读行与账号列表同源；没有声明时整块不渲染。 */}
+              <DeclaredQuotaRows quota={key.declaredQuota} now={Date.now()} />
+              {editingQuotaId === key.id && (
+                <div className="mt-2 space-y-2 border-t pt-2">
+                  <DeclaredQuotaEditor
+                    value={quotaDraft}
+                    onChange={setQuotaDraft}
+                    templates={templateApi.templates}
+                    onSaveTemplate={(name, limits) => { void templateApi.saveTemplate(name, limits) }}
+                    onDeleteTemplate={id => { void templateApi.deleteTemplate(id) }}
+                    t={t}
+                  />
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => { setEditingQuotaId(null); setQuotaDraft([]) }}
+                    >
+                      {t('common.cancel')}
+                    </Button>
+                    <Button size="sm" disabled={busyId === key.id} onClick={() => void handleSaveQuota(key)}>
+                      {t('common.save')}
+                    </Button>
+                  </div>
+                </div>
               )}
-              <span className="ml-auto text-[11px] text-muted-foreground">
-                {key.lastUsed
-                  ? t('aggregate.manage.keys.lastUsed', { time: new Date(key.lastUsed).toLocaleString() })
-                  : new Date(key.createdAt).toLocaleDateString()}
-              </span>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 px-2"
-                title={t('aggregate.manage.keys.validate')}
-                disabled={busyId === key.id}
-                onClick={() => void handleValidate(key)}
-              >
-                {busyId === key.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
-              </Button>
-              <Switch
-                checked={key.status === 'active'}
-                disabled={busyId === key.id}
-                onCheckedChange={enabled => void handleToggle(key, enabled)}
-              />
-              <Button
-                variant="ghost"
-                size="sm"
-                className="h-7 px-2 text-destructive"
-                title={t('aggregate.manage.keys.delete')}
-                disabled={busyId === key.id}
-                onClick={() => void handleDelete(key)}
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </Button>
             </div>
           ))}
         </div>

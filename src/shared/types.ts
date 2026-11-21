@@ -6,7 +6,7 @@ import type { AggregateCostClass } from './aggregateCost'
 import type { ClientIdentity } from './clientProfile'
 import { DEFAULT_REPETITION_GUARD, type RepetitionGuardSettings, type StreamRepetitionReading, type StreamEmptyTurnReading } from './streamRepetition.ts'
 import type { VisionRelaySettings } from './visionRelayConfig.ts'
-import type { DeclaredQuotaLimit } from './declaredQuota.ts'
+import type { DeclaredQuotaLimit, DeclaredQuotaTemplate } from './declaredQuota.ts'
 import type { RouteModelBlock, RouteQuotaSummary } from './routeQuotaView.ts'
 
 export type { AggregateWire }
@@ -1295,6 +1295,16 @@ export interface AppConfig {
    * 声明两次（此处与 `main/store/types.ts`），两处都要写。
    */
   channelSystemProxy?: Record<string, boolean>
+  /**
+   * 用户自定义的声明额度模板库（`shared/declaredQuota.ts::DeclaredQuotaTemplate`）。
+   *
+   * 只是**填表助手**：选中模板把窗口填进账号表单，判定永远只看落盘的 `Account.declaredQuota`。
+   * 刻意不内置任何套餐档位 —— 官方数字随订阅变化，写进代码就是把某一刻的文档变成产品承诺。
+   * 缺省（含键不存在）读成空库，老配置零迁移。
+   *
+   * 声明两次（此处与 `main/store/types.ts`），两处都要写。
+   */
+  declaredQuotaTemplates?: DeclaredQuotaTemplate[]
 }
 
 /**

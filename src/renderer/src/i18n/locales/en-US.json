@@ -264,6 +264,12 @@
     "declaredWindow_month": "Per month",
     "declaredUnit_requests": "requests",
     "declaredUnit_tokens": "tokens",
+    "declaredTemplate": "Quota templates",
+    "declaredTemplatePick": "Pick a template to fill in",
+    "declaredTemplateName": "Template name (e.g. Bailian Coding Pro)",
+    "declaredTemplateSave": "Save as template",
+    "declaredTemplateDelete": "Delete this template",
+    "declaredTemplateHint": "A template only fills this form; it changes no saved declaration, and deleting one never touches an account. No plan figures ship in the product — adjust them yourself when a tier changes.",
     "credentialsKeepHint": "Saved credentials are never shown; leave a field empty to keep it, or type a new value to replace it.",
     "validationSuccess": "Validation Successful",
     "noCredentialsRequired": "This provider needs no credentials — add it directly; requests run through the local runtime.",
@@ -1803,7 +1809,8 @@
         "delete": "Delete",
         "statusError": "Check failed",
         "missingVar": "{{label}} missing (re-add the same key to fill it)",
-        "lastUsed": "Last used {{time}}"
+        "lastUsed": "Last used {{time}}",
+        "quota": "Declared quota (layer 5: the plan windows you wrote down)"
       },
       "endpoint": {
         "title": "Endpoint",
@@ -2294,6 +2301,8 @@
     "quotaResetApprox": "resets in about {{when}}",
     "quotaResetExact": "resets in {{when}}",
     "quotaResetUnknown": "reset time unknown",
+    "quotaResetUtcNote": "Weeks/months follow UTC boundaries (a vendor using local time or a billing anniversary may differ by hours)",
+    "quotaUtcShort": "UTC boundary",
     "quotaUnit_requests": "req",
     "quotaUnit_tokens": "tokens",
     "quotaSource_documented": "documented",

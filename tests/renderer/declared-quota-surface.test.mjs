@@ -37,7 +37,7 @@ test('both account surfaces mount the read-only declared-quota row', () => {
 test('natural windows use the shared pure function; rolling windows do not guess', () => {
   assert.match(rows, /from '@shared\/declaredQuota'/, 'only the shared pure functions are available in renderer')
   assert.doesNotMatch(rows, /proxy\/quota\/gate/, 'renderer must not reach into main-process quota logic')
-  assert.match(rows, /anchoredWindow\(row\.window, now\)\.resetAt/, 'week/month get the exact UTC boundary')
+  assert.match(rows, /anchoredWindow\(row\.window as 'week' \| 'month', now\)\.resetAt/, 'week/month get the exact UTC boundary')
   assert.match(rows, /t\('routes\.quotaResetExact'/, 'and it is labelled as an exact reset')
   assert.match(rows, /t\('routes\.quotaResetUnknown'/, 'fiveHour/day say the reset is unknown')
   assert.doesNotMatch(rows, /quotaResetApprox/, 'no guessed "about" without the ledger input')

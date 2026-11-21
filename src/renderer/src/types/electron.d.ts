@@ -56,6 +56,7 @@ import type {
   AggregateSaveInput,
 } from '../../../shared/aggregate'
 import type { AggregateCreditQueryResult } from '../../../shared/aggregateCredit'
+import type { DeclaredQuotaLimit } from '../../../shared/declaredQuota'
 import type { DockerUpdateCheck, DockerUpdateStatus } from '../../../shared/dockerUpdate'
 import type {
   BackupApplyResult,
@@ -369,6 +370,7 @@ interface AggregateAPI {
   addKey: (id: string, apiKey: string, vars?: Record<string, string>) => Promise<AggregateMutationResult>
   removeKey: (accountId: string) => Promise<AggregateMutationResult>
   setKeyEnabled: (accountId: string, enabled: boolean) => Promise<AggregateMutationResult>
+  setKeyQuota: (accountId: string, declaredQuota: DeclaredQuotaLimit[]) => Promise<AggregateMutationResult>
   validateKey: (id: string, accountId: string) => Promise<AggregateMutationResult>
   addModel: (id: string, modelId: string) => Promise<AggregateMutationResult>
   removeModel: (id: string, modelId: string) => Promise<AggregateMutationResult>

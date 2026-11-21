@@ -56,6 +56,7 @@ import { localDayKey, recentLocalDays } from '../../shared/localDay'
 import { normalizeSanHostList } from '../../shared/httpsConfig'
 import { normalizeStreamRepetitionGuard } from '../../shared/streamRepetition'
 import { normalizeVisionRelay } from '../../shared/visionRelayConfig.ts'
+import { normalizeDeclaredQuotaTemplates } from '../../shared/declaredQuota.ts'
 import {
   accumulateDayBucket,
   normalizeDayBucket,
@@ -805,6 +806,9 @@ class StoreManager {
       // 读取侧只丢弃坏条目：缺省（含键不存在）读成「走系统代理」，与升级前的
       // 行为一致（见 `shared/channelProxy.ts` 的模块头）。
       channelSystemProxy: sanitizeChannelSystemProxyMap(rawConfig.channelSystemProxy),
+      // 模板库是用户自建的填表助手：坏条目丢弃、重名取第一条、空模板丢弃。
+      // 归一在这里而不是只在写入侧，因为通用 `STORE_SET` 与旧备份都绕过写门。
+      declaredQuotaTemplates: normalizeDeclaredQuotaTemplates(rawConfig.declaredQuotaTemplates),
     }
 
     // 退役掉的注入层在老 `data.json` 里留下的键。上面是 spread，死键会原样活到

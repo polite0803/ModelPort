@@ -15,6 +15,7 @@ import type {
   AggregateQuotaExhaustionSummary,
 } from './aggregateQuotaExhaustion.ts'
 import type { PromptCacheCapability } from './promptCache.ts'
+import type { DeclaredQuotaLimit } from './declaredQuota.ts'
 
 export type AggregateCategory = 'apikey' | 'free-tier' | 'local'
 
@@ -228,6 +229,14 @@ export interface AggregateKeyInfo {
    * 谁的账号，所以在 Key 行上如实显示：只有占位符、看不到值的界面没法让人核对。
    */
   pathVars?: Record<string, string>
+  /**
+   * 用户为这把 Key 声明的额度窗口（第五层证据）。
+   *
+   * 聚合条目的 Key 就是普通 Account 记录，声明额度本来就落在这里；本字段只是让
+   * **聚合详情页**能就地显示与编辑，不必跳到供应商页的账号管理。
+   * 缺省 = 没有任何声明（不渲染那几行，也不挡发车）。
+   */
+  declaredQuota?: DeclaredQuotaLimit[]
 }
 
 /**

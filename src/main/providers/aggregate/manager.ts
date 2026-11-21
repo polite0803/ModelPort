@@ -54,6 +54,7 @@ import type {
 } from '../../../shared/aggregateCredit'
 import { CREDIT_QUERY_KEY_CAP } from '../../../shared/aggregateCredit'
 import { exhaustionSummaries, liveExhaustions } from '../../../shared/aggregateQuotaExhaustion.ts'
+import type { DeclaredQuotaLimit } from '../../../shared/declaredQuota.ts'
 import { buildCreditSnapshot, creditUnitOfReader, parseQuotaProbe } from './quotaProbe'
 
 const PROBE_TIMEOUT_MS = 20000
@@ -691,6 +692,26 @@ class AggregateProviderManager {
     return { success: true, detail: this.detail(account.providerId) ?? undefined }
   }
 
+  /**
+   * 写一把 Key 的声明额度（第五层证据）。
+   *
+   * 只调 `AccountManager.update` —— 与供应商页账号弹窗同一写入口，归一与「空数组成
+   * `undefined`」都在那里做，这里不另立一份。**不复制任何凭据**：`declaredQuota`
+   * 与凭据是账号上的两个独立字段，改额度不该碰 Key（`store.updateAccount` 的
+   * 「留空 = 不修改」只对 `credentials` 生效，这里根本不传它）。
+   *
+   * 只接受聚合条的账号：这条通路由聚合详情页发起，调用方给错 id 时报「未知账号」
+   * 而不是悄悄改掉一个别的供应商的账号。
+   */
+  setKeyQuota(accountId: string, declaredQuota: DeclaredQuotaLimit[]): AggregateMutationResult {
+    const account = AccountManager.getById(accountId, false)
+    if (!account) return { success: false, reason: 'unknown_account' }
+    const provider = storeManager.getProviderById(account.providerId)
+    if (!provider || provider.type !== 'aggregate') return { success: false, reason: 'not_configured' }
+    AccountManager.update(accountId, { declaredQuota })
+    return { success: true, detail: this.detail(account.providerId) ?? undefined }
+  }
+
   /** 用真实请求复查一把已存 Key，并把结果写回账号状态。 */
   async validateKey(id: string, accountId: string): Promise<AggregateMutationResult> {
     const entry = getAggregateEntry(id)
@@ -1127,6 +1148,10 @@ class AggregateProviderManager {
           ...(account.lastUsed ? { lastUsed: account.lastUsed } : {}),
           ...(account.errorMessage ? { errorMessage: account.errorMessage } : {}),
           ...(Object.keys(pathVars).length > 0 ? { pathVars } : {}),
+          // 声明额度已经过主进程归一并落在账号上，这里只透传，不再归一一次。
+          ...(account.declaredQuota && account.declaredQuota.length > 0
+            ? { declaredQuota: account.declaredQuota }
+            : {}),
         }
       })
   }

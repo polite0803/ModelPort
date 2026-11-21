@@ -69,6 +69,7 @@ import type {
   AnthropicRouteApplyResult,
 } from './anthropicDiscovery'
 import type { AggregateCreditQueryResult } from './aggregateCredit'
+import type { DeclaredQuotaLimit } from './declaredQuota.ts'
 import type { ModelMetadata, ModelMetadataReport } from './modelMetadata'
 import type {
   ModelProbeRunResult,
@@ -1043,6 +1044,10 @@ const aggregateAPI = {
 
   setKeyEnabled: (accountId: string, enabled: boolean): Promise<AggregateMutationResult> =>
     wire.invoke(IpcChannels.AGGREGATE_SET_KEY_ENABLED, accountId, enabled),
+
+  // 写一把 Key 的声明额度（第五层证据）：聚合详情页就地编辑，写入口与账号弹窗同源。
+  setKeyQuota: (accountId: string, declaredQuota: DeclaredQuotaLimit[]): Promise<AggregateMutationResult> =>
+    wire.invoke(IpcChannels.AGGREGATE_SET_KEY_QUOTA, accountId, declaredQuota),
 
   validateKey: (id: string, accountId: string): Promise<AggregateMutationResult> =>
     wire.invoke(IpcChannels.AGGREGATE_VALIDATE_KEY, id, accountId),

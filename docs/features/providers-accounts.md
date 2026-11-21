@@ -1,12 +1,12 @@
 # 渠道与账号（聚合目录 / 账号渠道 / 自定义）
 
-> 适用版本：v1.7.3 ｜ 最后核对：2026-11-13 ｜ 状态：现行
+> 适用版本：v1.7.3 ｜ 最后核对：2026-11-21 ｜ 状态：现行
 
 ## 这个功能点是什么
 
 ModelPort 把上游分成三类，界面也对应三块：聚合目录、账号渠道、自定义供应商。三类最终都被写成同一种供应商记录（`Provider`），再由 `loadbalancer` 选账号、`modelMapper` 解析模型名、`forwarder` 转发请求；区别在于记录怎么来、凭据怎么拿、模型清单谁说了算。
 
-聚合目录是数据表：`src/main/providers/aggregate/registry.ts` 里有 92 条渠道、580 个模型，覆盖带 Key 的 HTTP 端点、免密端点，以及标记为“本应用无法提供凭据”的 Google ADC 条目（`vertex` / `vertex-partner`）。用户在聚合页面选中一条、填 Key（若需要）后保存，才会生成 `type: 'aggregate'` 的供应商记录，因此供应商列表不会预先塞进几十条不可用行。
+聚合目录是数据表：`src/main/providers/aggregate/registry.ts` 里有 103 条渠道、641 个模型，覆盖带 Key 的 HTTP 端点、免密端点，以及标记为“本应用无法提供凭据”的 Google ADC 条目（`vertex` / `vertex-partner`）。用户在聚合页面选中一条、填 Key（若需要）后保存，才会生成 `type: 'aggregate'` 的供应商记录，因此供应商列表不会预先塞进几十条不可用行。
 
 账号渠道是登录型端点：15 个渠道（`lobsterai`、`qoder`、`qodercn`、`trae`、`cline`、`loomy`、`raccoon`、`minimax`、`zcode`、`gemini`、`workbuddy`、`buddy`、`opencode`、`codearts`、`comate`）由内置的“渠道包”托管登录、账号池、每日积分与模型目录。十四个走浏览器/设备码/OAuth，`opencode` 是唯一 `loginKind: 'api-key'` 的例外：不打开浏览器，加一条匿名槽或粘贴 `sk-` Key 即可。`comate` 的 agent 工具调用由桥接层翻译成 Codex/Claude Code/Cline 类客户端自己的工具，在客户端工作区执行；网关不执行 shell/文件操作（`capabilities.tools: true`）。
 
@@ -42,6 +42,8 @@ ModelPort 把上游分成三类，界面也对应三块：聚合目录、账号�
 - 聚合额度旁车（`shared/aggregateQuota.ts`、`aggregatePricing.ts`、`aggregateCapabilities.ts`）只能由 `docs/data/**` 的回执重新生成，禁止手改产物；`undocumented` 是“没有公开上限”，不是“没有额度”，不参与候选淘汰。
 - 重置时间一律派生，不落库；`smart` / `pace` 算不出重置时退回 `fill-first` 顺序，耗尽额度的候选只作最后手段，不会被强选。
 - 账号渠道的余额门控是 fail-open：探测超时（60 秒）或失败（5 秒 TTL）都放行，只有确认余额为 0 的账号才被跳过；`DSH_ACCOUNT_BALANCE_GATE` 可整体关闭。〔v1.4.4 起〕
+- **订阅套餐的余量只能由用户声明，产品不带任何档位数字。** 带 Key 的聚合条目（OpenCode Go、阿里云百炼 Coding Plan 等）没有可查询的用量接口：OpenCode Zen 侧 `balance`/`credits`/`usage`/`billing`/`quota`/`limits`/`subscription`/`workspace` 等候选路径实测全部 404；百炼 Coding Plan 官方按请求次数计量、只在控制台展示。因此「5 小时 / 周 / 月用掉多少」由用户在**声明额度**（第五层证据，`shared/declaredQuota.ts`）里写下，账本按 UTC 精确计数，用到上限即跳过该 Key。声明写在 Account 上，聚合详情页的 Key 行与供应商页的账号管理是同一个写入口（`AccountManager.update`）。模板库（`AppConfig.declaredQuotaTemplates`）只做填表助手：选中把窗口填进表单、不改任何已保存的声明，删模板也不碰账号；代码里不预置任何套餐数字，出厂是空库。〔2026-11-20 起〕
+- **周/月声明窗口按 UTC 自然边界计**（`shared/declaredQuota.ts::anchoredWindow`），而厂商多用本地时区或订阅日起算，两者可能差几小时。界面在周/月行上显式标注「UTC 边界」，不假装精确；`fiveHour` / `day` 是滚动窗口，按账本里最老一笔滑出推算。〔2026-11-20 起〕
 - 账号渠道的账号 `weight` 缺失表示“无偏好”，不是 0（界面显示 0 即“不限”）；免费标记 `isFree` 优先于倍率标签；死模型 30 天 TTL 到期才自动清理，期间保留可恢复入口。
 - `channels:*` 的账号增删改后都要广播「渠道池已变化」事件，让冷却与余额门控失效；只改 `data.json` 而不通知，会让旧冷却继续挡着已经换好的账号。
 - 渠道 worker 崩溃或退出时，下一次请求会重新拉起进程；进程死亡本身不计入账号故障，只有请求链上的失败才影响评分。
@@ -63,6 +65,7 @@ ModelPort 把上游分成三类，界面也对应三块：聚合目录、账号�
 | `modelListRefresh.accountIntervalMs` | 1 周 | 渠道包本地 `model.list` 周期 |
 | `modelListRefresh.aggregateIntervalMs` | 2 周 | 聚合/内置的真实 HTTP 周期 |
 | `dismissedAutoProviders` | `[]` | 用户删除过的免密自动开通条目 |
+| `declaredQuotaTemplates` | `[]`（出厂空库） | 用户自建的声明额度模板；只做填表助手，产品不内置任何套餐数字 |
 
 模型发现结果写入 `userModelOverrides[providerId].fetchedModels` 与 `fetchedAt`，不写 `provider.supportedModels`；手工能力标注单独放在 `userModelMarks`，避免同步覆盖用户纠正。
 
@@ -87,6 +90,9 @@ ModelPort 把上游分成三类，界面也对应三块：聚合目录、账号�
 - `src/main/scheduler/modelListRefresh.ts` — 三类来源统一调度
 - `src/main/oauth/manager.ts` — OAuth 登录会话
 - `src/shared/aggregate.ts` / `aggregateCredit.ts` / `channels.ts` — 目录、余额、渠道类型
+- `src/shared/declaredQuota.ts` — 第五层证据：声明窗口归一、模板库归一、UTC 自然边界
+- `src/renderer/src/components/providers/DeclaredQuotaEditor.tsx` — 声明额度表单与模板选择（账号弹窗与聚合 Key 行共用）
+- `src/renderer/src/components/providers/DeclaredQuotaRows.tsx` — 只读声明行（含周/月 UTC 口径标注）
 - `docs/providers/README.md` / `docs/providers/opencode.md` — 分类与单渠道说明
 
 ## 版本沿革

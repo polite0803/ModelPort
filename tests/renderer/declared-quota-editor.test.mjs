@@ -4,7 +4,11 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
- * 声明额度编辑器（`AddAccountDialog` 里的 `DeclaredQuotaEditor`）的接线。
+ * 声明额度编辑器（`components/providers/DeclaredQuotaEditor.tsx`）的接线。
+ *
+ * 2026-11-20 从 `AddAccountDialog` 里提成独立组件：账号弹窗与聚合详情页的 Key 行
+ * 共用同一份表单，两处各写一份就会在窗口白名单与「无换算字段」上分叉。测试跟着
+ * 指向组件本体（而不是它的某个挂载点），谁挂它都不影响这一层判据。
  *
  * 这里钉的是**会静默坏掉**的那一类：`t('providers.declaredQuota')` 打错或漏翻译时，
  * 界面不会报错，只会把键名原样印出来 —— 类型系统看不见，locale-parity 也看不见
@@ -17,7 +21,7 @@ import { join } from 'node:path'
 
 const root = process.cwd()
 const source = readFileSync(
-  join(root, 'src/renderer/src/components/providers/AddAccountDialog.tsx'),
+  join(root, 'src/renderer/src/components/providers/DeclaredQuotaEditor.tsx'),
   'utf8',
 )
 

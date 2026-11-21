@@ -39,7 +39,7 @@ import type {
 } from '../../shared/aggregateQuotaExhaustion.ts'
 import type { RepetitionGuardSettings } from '../../shared/streamRepetition.ts'
 import type { VisionRelaySettings } from '../../shared/visionRelayConfig.ts'
-import type { DeclaredQuotaLimit } from '../../shared/declaredQuota.ts'
+import type { DeclaredQuotaLimit, DeclaredQuotaTemplate } from '../../shared/declaredQuota.ts'
 
 /**
  * 实时额度快照的落盘键。类型只在 `shared/aggregateCredit.ts` 声明一次，这里同步
@@ -433,6 +433,12 @@ export interface AppConfig {
    * 升级前所有渠道都走自动出口，缺省读成「关」等于静默改掉出网路径。
    */
   channelSystemProxy?: Record<string, boolean>
+  /**
+   * 用户自定义的声明额度模板库（`shared/types.ts` 同一字段，两处都要写）。
+   *
+   * 只是填表助手，不参与判定；缺省读成空库。刻意不内置套餐档位（理由见 shared 声明处）。
+   */
+  declaredQuotaTemplates?: DeclaredQuotaTemplate[]
   /**
    * 免验证（keyless）聚合条目的自动开通黑名单：用户显式删除过的条目 id 记在这里，
    * 启动期自动开通不再复活它们。
@@ -1012,6 +1018,8 @@ export const DEFAULT_CONFIG: AppConfig = {
   compression: DEFAULT_COMPRESSION_CONFIG,
   promptCaching: DEFAULT_PROMPT_CACHING_CONFIG,
   dismissedAutoProviders: [],
+  // 模板库出厂为空：代码里不放任何套餐档位数字（2026-11-20 拍板）。
+  declaredQuotaTemplates: [],
 }
 
 /**

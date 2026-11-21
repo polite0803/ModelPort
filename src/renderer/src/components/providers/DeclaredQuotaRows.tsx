@@ -35,9 +35,10 @@ export function DeclaredQuotaRows(props: {
       {quota.map((row, index) => {
         const windowLabel = t(`providers.declaredWindow_${row.window}`)
         const unitLabel = t(`providers.declaredUnit_${row.unit}`)
-        const reset = row.window === 'week' || row.window === 'month'
+        const isNatural = row.window === 'week' || row.window === 'month'
+        const reset = isNatural
           ? t('routes.quotaResetExact', {
-              when: delayLabel(anchoredWindow(row.window, now).resetAt, now, t),
+              when: delayLabel(anchoredWindow(row.window as 'week' | 'month', now).resetAt, now, t),
             })
           : t('routes.quotaResetUnknown')
         return (
@@ -49,6 +50,10 @@ export function DeclaredQuotaRows(props: {
             })}
             {' · '}
             {reset}
+            {/* 自然窗口按 UTC 算，而厂商可能用本地时区或订阅日：把口径写出来而不是假装精确。 */}
+            {isNatural && (
+              <span title={t('routes.quotaResetUtcNote')}>{' · '}{t('routes.quotaUtcShort')}</span>
+            )}
           </div>
         )
       })}
