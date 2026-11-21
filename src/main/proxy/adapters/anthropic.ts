@@ -22,6 +22,12 @@ import {
   readUpstreamErrorData,
   summarizeUpstreamErrorBody,
 } from '../upstreamErrorBody.ts'
+import {
+  anthropicSafeguardsCapable,
+  hasSafeguardResults,
+  withSafeguardsBeta,
+} from '../../../shared/anthropicSafeguards.ts'
+import { getAggregateEntry } from '../../providers/aggregate/registry.ts'
 import type {
   ChatCompletionMessageToolCall,
   ChatCompletionRequest,
@@ -75,6 +81,13 @@ interface AnthropicRequest {
     | { type: 'auto'; disable_parallel_tool_use?: boolean }
     | { type: 'any'; disable_parallel_tool_use?: boolean }
     | { type: 'tool'; name: string; disable_parallel_tool_use?: boolean }
+  /**
+   * Auto mode 的服务端审核现场，原样搬运、不解释结构（见 `shared/anthropicSafeguards.ts`）。
+   *
+   * 与 `anthropic-beta: dangerous-tool-use-2026-09-03` 成对出现：只发一个，上游不认，
+   * 客户端也永远等不到判决表。
+   */
+  safeguards?: unknown
 }
 
 export interface AnthropicPromptCacheOptions {
@@ -93,6 +106,19 @@ export class AnthropicAdapter {
     this.account = account
   }
 
+  /**
+   * 这条链路能不能把 Auto mode 的审核送到真正执行审核的一方。
+   *
+   * 判据只在 `shared/anthropicSafeguards.ts` 实现一份，这里只是把 provider 与
+   * 它对应的目录条目配好递进去 —— 两处各判一次就会在下一个条目上分叉。
+   */
+  private forwardsSafeguards(): boolean {
+    const entry = this.provider.aggregateId
+      ? getAggregateEntry(this.provider.aggregateId)
+      : undefined
+    return anthropicSafeguardsCapable(this.provider, entry)
+  }
+
   static isAnthropicProvider(provider: Provider): boolean {
     return provider.type === 'aggregate' && provider.wire === 'anthropic-messages'
   }
@@ -106,12 +132,21 @@ export class AnthropicAdapter {
     return `${base}${path.startsWith('/') ? '' : '/'}${path}`
   }
 
-  private buildHeaders(promptCache?: AnthropicPromptCacheOptions): Record<string, string> {
+  private buildHeaders(
+    promptCache?: AnthropicPromptCacheOptions,
+    forwardsSafeguards = false
+  ): Record<string, string> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'anthropic-version': ANTHROPIC_VERSION,
       ...promptCache?.clientShape,
       ...this.provider.headers,
+    }
+
+    // 审核的 beta 值必须与 body 里的 `safeguards` 成对发出，所以由同一个判据
+    // （`forwardsSafeguards`）控制，绝不各判各的 —— 半对发送是上游最不认的形状。
+    if (forwardsSafeguards) {
+      headers['anthropic-beta'] = withSafeguardsBeta(headers['anthropic-beta'])
     }
     const credentials = this.account.credentials
     const key = credentials.apiKey || credentials.token
@@ -144,13 +179,16 @@ export class AnthropicAdapter {
     promptCache?: AnthropicPromptCacheOptions
   ): Promise<ForwardResult> {
     const startTime = Date.now()
-    const body = buildAnthropicRequest(request, actualModel, promptCache)
+    // 「成对」在这里落地：只有这一发真的带上了 `safeguards`，才把 beta 值写进请求头。
+    // 反过来（头带了、body 没有）在原生上游是非法形状，而 chat 线根本没有这一格。
+    const body = buildAnthropicRequest(request, actualModel, promptCache, this.forwardsSafeguards())
+    const forwardsSafeguards = body.safeguards !== undefined
 
     try {
       const response = await axios.request({
         method: 'POST',
         url: this.buildUrl(),
-        headers: this.buildHeaders(promptCache),
+        headers: this.buildHeaders(promptCache, forwardsSafeguards),
         data: body,
         timeout: 120000,
         responseType: request.stream ? 'stream' : 'json',
@@ -182,7 +220,8 @@ export class AnthropicAdapter {
           stream: convertAnthropicStream(
             response.data as NodeJS.ReadableStream,
             request.model,
-            response.headers as Record<string, string>
+            response.headers as Record<string, string>,
+            forwardsSafeguards
           ) as never,
           skipTransform: true,
           latency: Date.now() - startTime,
@@ -192,7 +231,7 @@ export class AnthropicAdapter {
       return {
         success: true,
         status: response.status,
-        body: convertAnthropicResponse(response.data, request.model),
+        body: convertAnthropicResponse(response.data, request.model, forwardsSafeguards),
         upstreamRequestId: upstreamRequestIdOf(response.headers),
         latency: Date.now() - startTime,
       }
@@ -262,7 +301,9 @@ function toolUseBlock(call: ChatCompletionMessageToolCall): AnthropicBlock {
 export function buildAnthropicRequest(
   request: ChatCompletionRequest,
   actualModel: string,
-  promptCache?: { capability?: PromptCacheCapability; config?: PromptCachingConfig }
+  promptCache?: { capability?: PromptCacheCapability; config?: PromptCachingConfig },
+  /** 这条链路能不能搬 `safeguards`；判据由调用方按 `anthropicSafeguardsCapable` 给出。 */
+  forwardsSafeguards = false
 ): AnthropicRequest {
   const messages: AnthropicMessage[] = []
   const systemParts: string[] = []
@@ -311,6 +352,14 @@ export function buildAnthropicRequest(
     model: actualModel,
     max_tokens: request.max_tokens && request.max_tokens > 0 ? request.max_tokens : DEFAULT_MAX_TOKENS,
     messages,
+  }
+
+  // 审核现场原样搬到 anthropic 的原生位置。读的是 `ChatCompletionRequest` 的未声明
+  // 字段（与 `stream_options`/`response_format` 同一种承载方式）：翻译层把它搬进 chat
+  // 请求后，只有这里会再把它送回上游。
+  const safeguards = (request as ChatCompletionRequest & { safeguards?: unknown }).safeguards
+  if (forwardsSafeguards && safeguards !== undefined && safeguards !== null) {
+    body.safeguards = safeguards
   }
 
   if (systemParts.length > 0) body.system = systemParts.join('\n\n')
@@ -477,7 +526,12 @@ function openAiUsage(usage: {
   }
 }
 
-export function convertAnthropicResponse(payload: any, displayModel: string): Record<string, unknown> {
+export function convertAnthropicResponse(
+  payload: any,
+  displayModel: string,
+  /** 这条链路能不能搬判决；与出站的 `forwardsSafeguards` 同一个判据。 */
+  carriesSafeguards = false
+): Record<string, unknown> {
   const blocks: AnthropicBlock[] = Array.isArray(payload?.content) ? payload.content : []
   const text = toText(blocks)
   const toolCalls = blocks
@@ -507,6 +561,10 @@ export function convertAnthropicResponse(payload: any, displayModel: string): Re
       finish_reason: toolCalls.length > 0 ? 'tool_calls' : mapStopReason(payload?.stop_reason),
     }],
     ...(usage ? { usage } : {}),
+    // 非流式响应里判决在顶层（与 usage 同层），原样搬运。
+    ...(carriesSafeguards && hasSafeguardResults(payload?.safeguard_results)
+      ? { safeguard_results: payload.safeguard_results }
+      : {}),
   }
 }
 
@@ -525,11 +583,17 @@ function isCompleteJson(args: string): boolean {
 /**
  * Turns the Anthropic SSE stream into OpenAI chat.completion.chunk frames and
  * terminates with exactly one `[DONE]`.
+ *
+ * `carriesSafeguards` 为真时，上游 `message_delta` 里的 `delta.safeguard_results`
+ * 会被原样搬到 chat chunk 顶层的 `safeguard_results` 上（见 `shared/anthropicSafeguards.ts`）。
+ * 那个位置是本网关与 `/v1/messages` 入站翻译层之间的约定，客户端看不到它：
+ * 入站层收到后再放回 `message_delta.delta`，形状与 Anthropic 原生一致。
  */
 export function convertAnthropicStream(
   source: NodeJS.ReadableStream,
   displayModel: string,
-  responseHeaders?: Record<string, string>
+  responseHeaders?: Record<string, string>,
+  carriesSafeguards = false
 ): NodeJS.ReadableStream {
   const output = new PassThrough()
   const id = `chatcmpl-${Date.now().toString(36)}`
@@ -552,7 +616,12 @@ export function convertAnthropicStream(
   const stagedToolFrames: string[] = []
   const toolArgs = new Map<number, string>()
 
-  const write = (delta: Record<string, unknown>, finish: string | null = null, includeUsage = false) => {
+  const write = (
+    delta: Record<string, unknown>,
+    finish: string | null = null,
+    includeUsage = false,
+    safeguards?: unknown
+  ) => {
     if (finishSent) return
     const payload: Record<string, unknown> = {
       id,
@@ -562,6 +631,9 @@ export function convertAnthropicStream(
       choices: [{ index: 0, delta, finish_reason: finish }],
     }
     if (includeUsage && usage) payload.usage = usage
+    // 判决表挂在 chunk 顶层，与 `usage` 同一层：chat 的 `delta` 是给模型输出的
+    // 位置，塞进去会被客户端当成内容。入站层认得这个键，其它客户端看不到它。
+    if (safeguards !== undefined) payload.safeguard_results = safeguards
     output.write(`data: ${JSON.stringify(payload)}\n\n`)
   }
 
@@ -638,6 +710,15 @@ export function convertAnthropicStream(
       }
       if (parsed?.usage) startedUsage = { ...startedUsage, ...parsed.usage }
       usage = openAiUsage(startedUsage)
+      // 判决表带外传回：`message_delta` 之后还要等 `content_block_stop`/`message_stop`
+      // 才收尾，所以这里当场发一帧——拖到 finish 会和收尾帧抢同一个位置，而那一帧
+      // 已经带着 `finish_reason` 与 usage，混在一起会让「判决」看起来像模型输出。
+      if (
+        carriesSafeguards
+        && hasSafeguardResults(parsed?.delta?.safeguard_results)
+      ) {
+        write({}, null, false, parsed.delta.safeguard_results)
+      }
       return
     }
 

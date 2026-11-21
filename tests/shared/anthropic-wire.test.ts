@@ -10,7 +10,8 @@
  * 1. 上游没报 usage 就不发 usage（非流）／估算值必须能被认出来（流）；
  * 2. 一条流恰好一套骨架，块start/stop 配对、索引单调；
  * 3. 失败是 `error` 事件，不是正文，且发过 error 就不再补 message_stop；
- * 4. 只做一一对应的字段搬运，不认识的块丢掉而不是猜。
+ * 4. 只做一一对应的字段搬运（请求级 thinking/output_config 有专用的 reasoning_effort 映射），
+ *    不认识的块丢掉而不是猜。
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -290,6 +291,60 @@ test('thinking 映射为 reasoning_content；仍翻不出去的 document 留下�
   assert.deepEqual(dropped, ['document'])
 })
 
+test('请求级 thinking 与 output_config 映射到 reasoning_effort，预算等子字段逐个报名', () => {
+  const base = { model: 'claude-x', messages: [{ role: 'user', content: 'go' }] }
+
+  const adaptive = anthropicToChatRequest(
+    { ...base, thinking: { type: 'adaptive' } },
+    { model: 'auto', stream: false },
+  )
+  assert.equal(adaptive.request.reasoning_effort, 'high')
+  assert.deepEqual(adaptive.dropped, [])
+
+  const enabledWithBudget = anthropicToChatRequest(
+    { ...base, thinking: { type: 'enabled', budget_tokens: 1024 } },
+    { model: 'auto', stream: false },
+  )
+  assert.equal(enabledWithBudget.request.reasoning_effort, 'high')
+  assert.deepEqual(enabledWithBudget.dropped, ['body:thinking.budget_tokens'])
+
+  const effort = anthropicToChatRequest(
+    {
+      ...base,
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'low', task_budget: 1000, format: 'text' },
+    },
+    { model: 'auto', stream: false },
+  )
+  assert.equal(effort.request.reasoning_effort, 'low', '更具体的 effort 应覆盖 thinking.type')
+  assert.deepEqual(effort.dropped, ['body:output_config.task_budget', 'body:output_config.format'])
+
+  const disabled = anthropicToChatRequest(
+    {
+      ...base,
+      thinking: { type: 'enabled' },
+      output_config: { effort: 'none' },
+    },
+    { model: 'auto', stream: false },
+  )
+  assert.equal(disabled.request.reasoning_effort, undefined, '显式关闭优先于开启')
+  assert.deepEqual(disabled.dropped, [])
+
+  const malformed = anthropicToChatRequest(
+    { ...base, thinking: { type: 'weird' }, output_config: { effort: 'extreme' } },
+    { model: 'auto', stream: false },
+  )
+  assert.equal(malformed.request.reasoning_effort, undefined)
+  assert.deepEqual(malformed.dropped, ['body:thinking.type', 'body:output_config.effort'])
+
+  const nonObject = anthropicToChatRequest(
+    { ...base, thinking: 'yes', output_config: null },
+    { model: 'auto', stream: false },
+  )
+  assert.equal(nonObject.request.reasoning_effort, undefined)
+  assert.deepEqual(nonObject.dropped, ['body:thinking', 'body:output_config'])
+})
+
 test('请求体里没搬运的键逐个报名，搬运了的键一个都不报', () => {
   const { dropped } = anthropicToChatRequest(
     {
@@ -305,7 +360,7 @@ test('请求体里没搬运的键逐个报名，搬运了的键一个都不报',
     },
     { model: 'auto', stream: false },
   )
-  assert.deepEqual(dropped, ['body:thinking', 'body:top_k', 'body:service_tier', 'body:mcp_servers', 'body:container', 'body:metadata'])
+  assert.deepEqual(dropped, ['body:top_k', 'body:service_tier', 'body:mcp_servers', 'body:container', 'body:metadata', 'body:thinking.budget_tokens'])
 })
 
 test('一条全认识的请求 dropped 是空数组（证明上面几条不是恒真）', () => {
@@ -468,6 +523,36 @@ test('chat 响应体翻成 anthropic message：文本块在前、tool_use 在后
   assert.deepEqual(message.usage, { input_tokens: 11, output_tokens: 5 })
 })
 
+test('非流式 reasoning_content 翻成无签名 thinking 块，位于正文与工具调用之前', () => {
+  const message = chatResponseToAnthropicMessage(
+    {
+      choices: [{
+        message: {
+          content: '先看',
+          reasoning_content: '私密推理',
+          tool_calls: [{ id: 'c1', function: { name: 'f', arguments: '{"a":1}' } }],
+        },
+        finish_reason: 'tool_calls',
+      }],
+    },
+    { model: 'm' },
+  )
+  assert.deepEqual(message.content, [
+    { type: 'thinking', thinking: '私密推理' },
+    { type: 'text', text: '先看' },
+    { type: 'tool_use', id: 'c1', name: 'f', input: { a: 1 } },
+  ])
+  assert.equal('signature' in message.content[0], false, 'chat 侧没有签名，绝不能编一个')
+})
+
+test('stream.ts 把推理回填成正文时只发 thinking 块，不重复成文本', () => {
+  const message = chatResponseToAnthropicMessage(
+    { choices: [{ message: { content: '  私密推理  ', reasoning_content: '私密推理' }, finish_reason: 'stop' }] },
+    { model: 'm' },
+  )
+  assert.deepEqual(message.content, [{ type: 'thinking', thinking: '私密推理' }])
+})
+
 test('上游没报 usage 就整格省略，绝不填 0', () => {
   const message = chatResponseToAnthropicMessage(
     { choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }] },
@@ -541,6 +626,58 @@ test('一条流恰好一套骨架，块 start/stop 配对且索引单调递增',
   assert.deepEqual(list.slice(1, 5).map((e) => e.data.index), [0, 0, 0, 0])
   assert.equal(list.filter((e) => e.event === 'message_stop').length, 1)
   assert.equal(list[list.length - 2].data.delta.stop_reason, 'end_turn')
+})
+
+test('流式 reasoning_content 翻成 thinking_delta，块索引与骨架保持配对', () => {
+  const translator = createAnthropicStreamTranslator({ model: 'm', fallbackId: 'r' })
+  const text = translator.push(chatSse(
+    '{"choices":[{"delta":{"reasoning_content":"先想"}}]}',
+    '{"choices":[{"delta":{"reasoning_content":"再想"}}]}',
+    '{"choices":[{"delta":{"content":"答案"}}]}',
+    '{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"f","arguments":"{}"}}]}}]}',
+    '{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+    '[DONE]',
+  )) + translator.end()
+
+  const list = eventsOf(text)
+  assert.deepEqual(list.map((e) => e.event), [
+    'message_start',
+    'content_block_start', // thinking
+    'content_block_delta', // thinking_delta
+    'content_block_delta', // thinking_delta
+    'content_block_stop',
+    'content_block_start', // text
+    'content_block_delta',
+    'content_block_stop',
+    'content_block_start', // tool_use
+    'content_block_delta',
+    'content_block_stop',
+    'message_delta',
+    'message_stop',
+  ])
+  assert.deepEqual(list[1].data.content_block, { type: 'thinking', thinking: '' })
+  assert.deepEqual(list[2].data.delta, { type: 'thinking_delta', thinking: '先想' })
+  assert.deepEqual(list[5].data.content_block, { type: 'text', text: '' })
+  assert.deepEqual(list[8].data.content_block, { type: 'tool_use', id: 'c1', name: 'f', input: {} })
+  assert.deepEqual(list.filter((e) => e.event === 'content_block_stop').map((e) => e.data.index), [0, 1, 2])
+})
+
+test('流式顶层 reasoning_content 与 fallback 回填不会重复出正文', () => {
+  const translator = createAnthropicStreamTranslator({ model: 'm', fallbackId: 'r' })
+  const text = translator.push(chatSse(
+    '{"reasoning_content":"推理","choices":[{"delta":{"reasoning_content":"推理"}}]}',
+    '{"choices":[{"delta":{"content":"推理"}}]}',
+    '{"choices":[{"delta":{"content":"真实正文"}}]}',
+    '{"choices":[{"delta":{},"finish_reason":"stop"}]}',
+    '[DONE]',
+  )) + translator.end()
+
+  const list = eventsOf(text)
+  const deltas = list.filter((e) => e.event === 'content_block_delta')
+  assert.deepEqual(deltas.map((e) => e.data.delta), [
+    { type: 'thinking_delta', thinking: '推理' },
+    { type: 'text_delta', text: '真实正文' },
+  ])
 })
 
 test('文本之后转工具调用要关旧块再开新块，并行工具各占一个索引', () => {

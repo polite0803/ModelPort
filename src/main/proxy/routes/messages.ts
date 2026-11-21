@@ -272,10 +272,15 @@ router.post('/messages', async (ctx: Context) => {
     // 显式 `false` 才关：默认把附件真的送出去，让「上游不吃 file 块」以报错的形式
     // 暴露，而不是以「模型答非所问」的形式。
     documentsAsFileParts: config.anthropicInbound?.documentPassThrough !== false,
+    // 这一层**总是**把 `safeguards` 搬进 chat 请求：具体落到哪家上游要等选路才知道，
+    // 在这里判等于拿一个还不存在的答案做决定。真正的闸在出站适配器
+    // （`anthropicSafeguardsCapable`）：只有 Anthropic 原生条目才会把它写上线，
+    // chat 线（OpenAI 形状）的白名单本来就不收这一格，所以对第三方没有任何外泄。
+    forwardsSafeguards: true,
   })
 
   if (dropped.length > 0) {
-    // 客户端发来了本网关翻不出去的东西（`document` 附件块、`thinking`、`top_k`…）。
+    // 客户端发来了本网关翻不出去的东西（`document` 附件块、思考预算子字段、`top_k`…）。
     // 请求照发 —— 拒掉整个请求对客户端更糟 —— 但这一格缺席必须留痕：日志一条 + 响应头
     // 一条，与 `X-ModelPort-Usage-Estimated` 同一套做法。少了这两条，用户附件传不上去时
     // 看到的就是一次「模型答非所问」，而现场什么都查不到。

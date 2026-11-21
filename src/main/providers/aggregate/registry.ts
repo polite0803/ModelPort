@@ -211,6 +211,7 @@ export const AGGREGATE_REGISTRY: AggregateEntry[] = [
     "authUrl": "https://platform.claude.com/settings/keys",
     "envVar": "ANTHROPIC_API_KEY",
     "notes": "Native Anthropic Messages passthrough (FCC marks it native_messages_passthrough). Its three transcribed models were retired upstream (the API answers them with an error), so the list is empty by design - add the current ids by hand or via discovery.",
+    "serverSideSafeguards": true,
     "promptCache": {
       "mode": "explicit-breakpoints",
       "maxBreakpoints": 4,

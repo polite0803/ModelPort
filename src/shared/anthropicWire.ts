@@ -14,12 +14,15 @@
  * 3. **失败不是正文。** 上游 `{"error": …}` 帧必须翻成 anthropic 的 `error` 事件，
  *    绝不能变成 assistant 文本（客户端会把报错当回答读）。
  * 4. **只搬运能一一对应的字段。** 不同名的（`tool_choice` 三种形态、`stop_sequences`）
- *    显式映射；不认识的（`thinking`、`container`、`mcp_servers`）不猜语义，但**必须
- *    进 `dropped` 清单**（见 `AnthropicToChatResult`）—— 静默丢掉会让客户端把
- *    「附件/思考没生效」当成正常结果读，本仓的既有裁定是「拿不到可以说，不许装成正常」。
+ *    显式映射；有 chat 侧对应位置的请求级 `thinking` / `output_config` 翻成
+ *    `reasoning_effort`（见 `reasoningEffortOf`）；其余不认识的（`container`、
+ *    `mcp_servers`）与翻不出去的子字段**必须进 `dropped` 清单**
+ *    （见 `AnthropicToChatResult`）—— 静默丢掉会让客户端把「附件/思考没生效」
+ *    当成正常结果读，本仓的既有裁定是「拿不到可以说，不许装成正常」。
  */
 
 import { ANTHROPIC_FAMILY_TIERS, type AnthropicFamilyTier } from './types.ts'
+import { hasSafeguardResults, hasSafeguardsField } from './anthropicSafeguards.ts'
 
 type Payload = Record<string, unknown>
 
@@ -121,6 +124,14 @@ export interface AnthropicToChatOptions {
    * 模型读了这份 PDF、实际拿到的是空白」诚实。关掉它就回到旧行为：丢掉但记进 `dropped`。
    */
   documentsAsFileParts?: boolean
+  /**
+   * 请求体顶层的 `safeguards` 要不要原样搬进 chat 请求（`safeguards` 字段本身）。
+   *
+   * 缺省 `false`：这条链路的目标上游不做服务端审核时，搬它毫无用处 —— 拿不到判决，
+   * 还把会话现场（目录路径、用户名、git 状态、权限规则）白送给对端。判据由调用方
+   * 按 `anthropicSafeguardsCapable` 给出。
+   */
+  forwardsSafeguards?: boolean
 }
 
 /**
@@ -175,8 +186,9 @@ export interface AnthropicToChatResult {
 }
 
 /**
- * 请求体里被翻译层读取的键。其余键（`thinking`、`top_k`、`service_tier`、
- * `mcp_servers`、`container`、`metadata` 这些）一律进 `dropped`，不猜语义、也不静默吞掉。
+ * 请求体里被翻译层读取的键。`thinking` 与 `output_config` 中的思考开关另有专用
+ * 映射（见 `reasoningEffortOf`）；其余键（`top_k`、`service_tier`、`mcp_servers`、
+ * `container`、`metadata` 这些）一律进 `dropped`，不猜语义、也不静默吞掉。
  *
  * `metadata` 整格不搬是实测逼出来的：客户端把会话身份塞在 `metadata.user_id`，
  * 照 chat 的形状写成 `user` 透传出去，OVH 那家直接 400
@@ -195,6 +207,64 @@ const TRANSLATED_BODY_KEYS: ReadonlySet<string> = new Set([
   'tools',
   'tool_choice',
 ])
+
+/** Chat 侧唯一现成的思考开关（见 `ChatCompletionRequest.reasoning_effort`）。 */
+type ReasoningEffort = 'low' | 'medium' | 'high'
+
+interface ReasoningEffortTranslation {
+  effort: ReasoningEffort | null
+  dropped: string[]
+}
+
+/**
+ * Anthropic 请求级思考参数 → chat 的 `reasoning_effort`。
+ *
+ * `thinking` 是 Anthropic 的开关，`output_config.effort` 是更新的 effort 旋钮；
+ * 二者同时出现时以更具体的 effort 为准，显式关闭则优先于任何开启。
+ * 只能映射开关本身：`budget_tokens`、`task_budget` 等预算语义在 chat 侧没有
+ * 可靠的对应位置，逐个报名而不是整格吞掉。
+ */
+function reasoningEffortOf(source: Payload): ReasoningEffortTranslation {
+  const dropped: string[] = []
+  const thinking = asRecord(source.thinking)
+  const outputConfig = asRecord(source.output_config)
+  let thinkingEffort: ReasoningEffort | null = null
+  let outputEffort: ReasoningEffort | null = null
+  let explicitlyDisabled = false
+
+  if (source.thinking !== undefined) {
+    if (thinking === null) {
+      dropped.push('body:thinking')
+    } else {
+      const type = thinking.type
+      if (type === 'adaptive' || type === 'enabled') thinkingEffort = 'high'
+      else if (type === 'disabled') explicitlyDisabled = true
+      else dropped.push('body:thinking.type')
+
+      for (const key of Object.keys(thinking)) {
+        if (key !== 'type') dropped.push(`body:thinking.${key}`)
+      }
+    }
+  }
+
+  if (source.output_config !== undefined) {
+    if (outputConfig === null) {
+      dropped.push('body:output_config')
+    } else {
+      const effort = outputConfig.effort
+      if (effort === 'low' || effort === 'medium' || effort === 'high') outputEffort = effort
+      else if (effort === 'none') explicitlyDisabled = true
+      else dropped.push('body:output_config.effort')
+
+      for (const key of Object.keys(outputConfig)) {
+        if (key !== 'effort') dropped.push(`body:output_config.${key}`)
+      }
+    }
+  }
+
+  const effort = explicitlyDisabled ? null : outputEffort ?? thinkingEffort
+  return { effort, dropped }
+}
 
 /**
  * 把连续的 `user` 消息并成一条。
@@ -250,8 +320,16 @@ export function anthropicToChatRequest(body: unknown, options: AnthropicToChatOp
   const droppedToolUseIds = new Set<string>()
 
   for (const key of Object.keys(source)) {
+    // `safeguards` 只在链路能把它送到执行审核的上游时才搬；不搬的时候照旧进 `dropped`
+    // —— 静默丢掉这一格会让客户端永远等不到判决，而它自己看不出是网关吃掉的。
+    if (key === 'safeguards' && options.forwardsSafeguards === true) continue
+    // 思考开关走专用映射；它自己负责按子字段精确报名，不能在这里整格记一次。
+    if (key === 'thinking' || key === 'output_config') continue
     if (!TRANSLATED_BODY_KEYS.has(key)) dropped.push(`body:${key}`)
   }
+
+  const reasoning = reasoningEffortOf(source)
+  dropped.push(...reasoning.dropped)
 
   const systemText = systemTextOf(source.system)
   if (systemText.trim() !== '') {
@@ -439,6 +517,15 @@ export function anthropicToChatRequest(body: unknown, options: AnthropicToChatOp
     model: options.model,
     messages: mergeConsecutiveUserTurns(messages),
   }
+  // 客户端一旦点了思考（Anthropic 的 `thinking` 或 `output_config.effort`），下游必须
+  // 拿到 chat 侧已有的开关：选路要据此筛出支持推理的账号，上游也才知道别把推理
+  // 写进可见正文。显式关闭与无法映射的形态都不设这一格。
+  if (reasoning.effort !== null) request.reasoning_effort = reasoning.effort
+  // 审核现场原样搬过去，一个键都不解释：它的 schema 归上游，网关在这里理解它就
+  // 会在下一个字段上丢一次（与 `safeguards` 当初被白名单丢掉同一个病根）。
+  if (options.forwardsSafeguards === true && hasSafeguardsField(source)) {
+    request.safeguards = source.safeguards
+  }
   if (options.stream) {
     request.stream = true
     // 流式必须主动要 usage：OpenAI 形状的上游默认**不发**最后一个 usage 块，
@@ -551,8 +638,10 @@ export interface ChatToAnthropicOptions {
 /**
  * chat 响应体 → anthropic `message`。
  *
- * `content` 里文本在前、`tool_use` 在后：anthropic 对块顺序敏感（客户端按顺序渲染），
- * 而 chat 的 `message.content` 与 `tool_calls` 本就是两个字段，没有交叉顺序可保留。
+ * `content` 里思考在前、文本居中、`tool_use` 在后：anthropic 对块顺序敏感（客户端
+ * 按顺序渲染），而 chat 的 `reasoning_content`、`content` 与 `tool_calls` 本就是三个
+ * 字段，没有交叉顺序可保留。思考块不带 `signature`：chat 侧没有这个数，编一个出来
+ * 会让客户端把不可信的签名回传给上游。
  */
 export function chatResponseToAnthropicMessage(
   body: unknown,
@@ -563,8 +652,13 @@ export function chatResponseToAnthropicMessage(
   const message = asRecord(choice.message) ?? {}
   const content: Payload[] = []
 
+  const reasoning = stringOf(message.reasoning_content).trim()
+  if (reasoning !== '') content.push({ type: 'thinking', thinking: reasoning })
+
   const text = textOfContent(message.content)
-  if (text !== '') content.push({ type: 'text', text })
+  // `streamToResponse()` 在正文为空时把累计思考原样回填进 `message.content`；那是
+  // 给纯 chat 客户端的兼容，anthropic 侧已经有 thinking 块，不能再发一遍正文。
+  if (text !== '' && text.trim() !== reasoning) content.push({ type: 'text', text })
 
   const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : []
   const toolUses: Payload[] = []
@@ -599,6 +693,11 @@ export function chatResponseToAnthropicMessage(
         ? 'end_turn'
         : stopReasonOf(choice.finish_reason),
     stop_sequence: null,
+  }
+  // 服务端审核判决表：出站适配器把它挂在 chat 响应顶层，这里挪回 anthropic 的顶层
+  // 位置（与原生非流式响应同形）。缺了就什么都不加 —— 客户端自己会判「没等到判决」。
+  if (hasSafeguardResults(response.safeguard_results)) {
+    result.safeguard_results = response.safeguard_results
   }
   // usage 只在真有数时出现：anthropic 客户端用它算上下文余量，编 0 会让它以为没消耗。
   if (usage) {
@@ -678,13 +777,21 @@ export function createAnthropicStreamTranslator(options: ChatToAnthropicOptions)
   let started = false
   let stopped = false
   let blockIndex = -1
-  let openKind: 'text' | 'tool' | null = null
+  let openKind: 'thinking' | 'text' | 'tool' | null = null
   let openToolIndex: number | null = null
   let finishReason: string | null = null
+  /** 累计的原生思考文本，用来吸收 `stream.ts` 在正文为空时回填的那一份。 */
+  let reasoningText = ''
+  let reasoningFallbackEmitted = false
   let inputTokens = 0
   let outputTokens = 0
   let cachedTokens = 0
   let cacheCreationTokens = 0
+  /**
+   * 上游给的服务端审核判决表（Auto mode）。原样存放、绝不解构：它的 schema 归
+   * Anthropic，网关在这里逐字段理解它就会在下一个版本上丢一次。
+   */
+  let safeguardResults: unknown
   /**
    * 还没开块的工具调用：chat 的分片允许「id 先到、name 后到」，在名字到齐之前
    * 不能写 `content_block_start` —— 那个快照一旦把 name 写成空串，客户端会把它
@@ -721,20 +828,28 @@ export function createAnthropicStreamTranslator(options: ChatToAnthropicOptions)
     return closing
   }
 
-  function openText(): string {
-    if (openKind === 'text') return ''
+  function openBlock(kind: 'thinking' | 'text', contentBlock: Payload): string {
+    if (openKind === kind) return ''
     const out: string[] = []
     out.push(closeBlock())
     blockIndex += 1
-    openKind = 'text'
+    openKind = kind
     out.push(
       sseEvent('content_block_start', {
         type: 'content_block_start',
         index: blockIndex,
-        content_block: { type: 'text', text: '' },
+        content_block: contentBlock,
       })
     )
     return out.join('')
+  }
+
+  function openThinking(): string {
+    return openBlock('thinking', { type: 'thinking', thinking: '' })
+  }
+
+  function openText(): string {
+    return openBlock('text', { type: 'text', text: '' })
   }
 
   function openTool(toolIndex: number, id: string, name: string): string {
@@ -765,6 +880,13 @@ export function createAnthropicStreamTranslator(options: ChatToAnthropicOptions)
   function handleChunk(payload: Payload): string {
     const out: string[] = []
     const choice = Array.isArray(payload.choices) ? asRecord(payload.choices[0]) ?? {} : {}
+
+    // 判决表由出站适配器挂在 chunk 顶层（`convertAnthropicStream`），这里收下，
+    // 收尾时放回 `message_delta.delta`。它不是模型输出，所以不影响块骨架。
+    if (hasSafeguardResults(payload.safeguard_results)) {
+      safeguardResults = payload.safeguard_results
+    }
+
     const delta = asRecord(choice.delta) ?? {}
 
     const usage = usageOf(payload.usage)
@@ -776,7 +898,32 @@ export function createAnthropicStreamTranslator(options: ChatToAnthropicOptions)
       cacheCreationTokens = cache.created || cacheCreationTokens
     }
 
-    const text = textOfContent(delta.content)
+    // 同时兼容 delta 与 chunk 顶层两种 reasoning_content 形状；同一帧里两处都有
+    // 时只发一份，避免把思考写出两遍。
+    const deltaReasoning = stringOf(delta.reasoning_content)
+    const reasoning = deltaReasoning !== '' ? deltaReasoning : stringOf(payload.reasoning_content)
+    if (reasoning !== '') {
+      reasoningText += reasoning
+      out.push(startMessage())
+      out.push(openThinking())
+      out.push(
+        sseEvent('content_block_delta', {
+          type: 'content_block_delta',
+          index: blockIndex,
+          delta: { type: 'thinking_delta', thinking: reasoning },
+        })
+      )
+    }
+
+    let text = textOfContent(delta.content)
+    // `stream.ts` 在没有可见正文时把累计思考回填成 `delta.content`；那一帧与已经
+    // 发过的 `thinking_delta` 是同一份内容，不能落到客户端正文里。
+    if (text !== '' && reasoningFallbackEmitted === false && reasoningText.trim() !== '') {
+      if (text.trim() === reasoningText.trim()) {
+        reasoningFallbackEmitted = true
+        text = ''
+      }
+    }
     if (text !== '') {
       out.push(startMessage())
       out.push(openText())
@@ -859,7 +1006,14 @@ export function createAnthropicStreamTranslator(options: ChatToAnthropicOptions)
     out.push(
       sseEvent('message_delta', {
         type: 'message_delta',
-        delta: { stop_reason: stopReasonOf(finishReason), stop_sequence: null },
+        delta: {
+          stop_reason: stopReasonOf(finishReason),
+          stop_sequence: null,
+          // 上游的判决表原样放回 `message_delta.delta`，与 Anthropic 原生位置一致。
+          // 它必须写进**这一条** `message_delta`：客户端只认这一处（判据取自其清单
+          // 解析代码：`"safeguard_results" in delta`），另发一帧没有读的人。
+          ...(safeguardResults !== undefined ? { safeguard_results: safeguardResults } : {}),
+        },
         // 真数一旦到达就在这里覆盖 `message_start` 的那格估算（anthropic 自己也用
         // `message_delta.usage` 增量更新用量，多带一个 `input_tokens` 是合规的）。
         usage: {

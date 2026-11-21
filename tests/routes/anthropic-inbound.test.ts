@@ -16,8 +16,9 @@
  * 5. 带 `anthropic-version` 来列模型时返回 anthropic 形状；不带时保持 OpenAI 形状；
  *    单条检索 `/v1/models/:model` 同一分派（含 `modelMap` 键必须答话、档位沿用列表同一
  *    判据、单查那一行与列表那一行逐字段同源 —— 两处共用一个构造处）；
- * 6. 未翻译的入向块（`document` 附件、`thinking`）在响应头与 warn 日志里各留一条，且
- *    「丢」确实发生在翻译层（上游报文里查不到那个词）；
+ * 6. 未翻译的入向块（`document` 附件）与翻不出去的思考子字段在响应头与 warn 日志里
+ *    各留一条，且「丢」确实发生在翻译层（上游报文里查不到那个词）；请求级思考开关
+ *    则必须作为 `reasoning_effort` 真的到达上游；
  * 7. anthropic 形状的清单把申报过的 claude 面向名排在最前、窗口取映射目标的池下界、
  *    映射目标不认识就不广告 —— 客户端逐行筛名的判据取自本机那份 Claude Desktop 4.4212
  *    安装里的 `/v1/models` 解析代码（纯网关内部名会被筛成「0 usable models」），不是照
@@ -41,6 +42,7 @@ const UPSTREAM_PORT = 18952
 
 let seenBodies: Array<Payload> = []
 let upstreamMode: 'ok' | 'error' = 'ok'
+let reasoningMode: 'none' | 'nonstream' | 'stream' = 'none'
 type Payload = Record<string, any>
 
 const upstream = createServer((req, res) => {
@@ -58,14 +60,22 @@ const upstream = createServer((req, res) => {
 
     if (body.stream === true) {
       res.writeHead(200, { 'Content-Type': 'text/event-stream' })
-      res.write('data: {"id":"chatcmpl-s","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"你好"}}]}\n\n')
-      res.write('data: {"id":"chatcmpl-s","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"，世界"}}]}\n\n')
+      if (reasoningMode === 'stream') {
+        res.write('data: {"id":"chatcmpl-s","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"先想"}}]}\n\n')
+        res.write('data: {"id":"chatcmpl-s","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"reasoning_content":"再想"}}]}\n\n')
+        res.write('data: {"id":"chatcmpl-s","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"答案"}}]}\n\n')
+      } else {
+        res.write('data: {"id":"chatcmpl-s","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"你好"}}]}\n\n')
+        res.write('data: {"id":"chatcmpl-s","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"，世界"}}]}\n\n')
+      }
       res.write('data: {"id":"chatcmpl-s","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":900,"completion_tokens":17}}\n\n')
       res.write('data: [DONE]\n\n')
       res.end()
       return
     }
 
+    const message: Payload = { role: 'assistant', content: 'hello from upstream' }
+    if (reasoningMode === 'nonstream') message.reasoning_content = '私密推理'
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({
       id: 'chatcmpl-fake',
@@ -74,7 +84,7 @@ const upstream = createServer((req, res) => {
       model: body.model ?? '',
       choices: [{
         index: 0,
-        message: { role: 'assistant', content: 'hello from upstream' },
+        message,
         finish_reason: 'stop',
       }],
       usage: { prompt_tokens: 21, completion_tokens: 7, total_tokens: 28 },
@@ -141,6 +151,7 @@ const messagesBody = (model: string, extra: Payload = {}): Payload => ({
 beforeEach(() => {
   seenBodies = []
   upstreamMode = 'ok'
+  reasoningMode = 'none'
 })
 
 after(async () => {
@@ -353,6 +364,42 @@ test('modelMap 经设置写入后真的影响路由', async () => {
   assert.match(response.headers['x-modelport-anthropic-resolved'] ?? '', /Test-Model \(model-map\)/)
 
   sm.updateConfig({ anthropicInbound: undefined })
+})
+
+test('请求级 thinking 与 output_config 端到端变成 reasoning_effort', async () => {
+  const response = await proxy.request('POST', '/v1/messages', {
+    body: messagesBody('auto', {
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'high' },
+    }),
+  })
+
+  assert.equal(response.status, 200)
+  assert.equal(seenBodies[0].reasoning_effort, 'high')
+  assert.doesNotMatch(response.headers['x-modelport-anthropic-dropped'] ?? '', /body:thinking|body:output_config/)
+})
+
+test('非流式：上游 reasoning_content 以 thinking 块回给客户端，不混进正文', async () => {
+  reasoningMode = 'nonstream'
+  const response = await proxy.request('POST', '/v1/messages', { body: messagesBody('auto') })
+
+  assert.equal(response.status, 200)
+  assert.deepEqual(response.json.content[0], { type: 'thinking', thinking: '私密推理' })
+  assert.equal(response.json.content[1].type, 'text')
+  assert.equal(JSON.stringify(response.json.content[1]).includes('私密推理'), false)
+})
+
+test('流式：上游 reasoning 分片变成 thinking_delta，骨架仍恰好一套', async () => {
+  reasoningMode = 'stream'
+  const response = await proxy.request('POST', '/v1/messages', {
+    body: messagesBody('auto', { stream: true }),
+  })
+
+  assert.equal(response.status, 200)
+  assert.match(response.text, /event: content_block_start\ndata: \{"type":"content_block_start","index":0,"content_block":\{"type":"thinking"/)
+  assert.ok(response.text.includes('"type":"thinking_delta","thinking":"先想"'))
+  assert.ok(response.text.includes('"type":"text_delta","text":"答案"'))
+  assert.equal(response.text.split('event: message_stop').length - 1, 1)
 })
 
 test('流式：端到端恰好一套块骨架，正文完整，上游 usage 真的到达', async () => {
@@ -686,12 +733,13 @@ test('附件默认真的发出去；显式关掉才回到「丢掉但响应头�
   // 而那个 503 是「转发而非丢弃」的真实选路后果，不是测试写坏了。
   sm.updateProvider('antp', { modelCapabilities: { 'Test-Model': { vision: 'yes' } } } as never)
 
-  // 默认开：附件进上游报文，缺席清单里不该出现 document（`thinking` 仍然没搬运，照旧要报）。
+  // 默认开：附件进上游报文，缺席清单里不该出现 document；`thinking.type` 已翻成
+  // reasoning_effort，只有预算子字段翻不出去，仍须照旧报名。
   const forwarded = await proxy.request('POST', '/v1/messages', { body: attachmentBody() })
   assert.equal(forwarded.status, 200)
   const forwardedHeader = forwarded.headers['x-modelport-anthropic-dropped'] ?? ''
   assert.ok(!forwardedHeader.includes('document'), `附件已转发，缺席清单里不该有它：${forwardedHeader}`)
-  assert.match(forwardedHeader, /body:thinking/)
+  assert.match(forwardedHeader, /body:thinking\.budget_tokens/)
   const withFile = JSON.stringify(seenBodies[0])
   assert.ok(withFile.includes('"type":"file"'), `上游报文里应当带 file 块：${withFile}`)
   assert.match(withFile, /读这份 PDF/, '文本那半照旧要到上游')

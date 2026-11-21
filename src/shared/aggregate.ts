@@ -182,6 +182,16 @@ export interface AggregateEntry {
    * apply a cache-first compression policy for this entry.
    */
   promptCache?: PromptCacheCapability
+  /**
+   * 这个端点自己执行 Anthropic 的服务端 Auto mode 审核（`safeguards`）。
+   *
+   * 只有声明了它的条目，`/v1/messages` 才会把 `safeguards` 字段与
+   * `anthropic-beta: dangerous-tool-use-2026-09-03` 搬上出站请求，并把判决表
+   * `safeguard_results` 原样回给客户端。缺席 = **不搬**：审核要由上游真的执行，
+   * 送到不做审核的第三方既拿不到判决，也把会话现场（路径、用户名、git 状态）
+   * 白送了出去。判据与搬运点见 `shared/anthropicSafeguards.ts`。
+   */
+  serverSideSafeguards?: boolean
 }
 
 /** Per-entry state merged from the stored provider record, for the catalogue UI. */
