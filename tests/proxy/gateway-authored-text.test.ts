@@ -101,6 +101,7 @@ test('only the ruled exceptions still write gateway text', () => {
     'probe-capability',
     'probe-context',
     'probe-output',
+    'runaway-abort-frame',
     'vision-relay-marker',
     'vision-relay-prompt',
   ]

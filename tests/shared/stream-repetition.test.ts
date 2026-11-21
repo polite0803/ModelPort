@@ -108,10 +108,34 @@ test('a hand-edited or legacy config value cannot disable the guard by accident'
     enabled: false,
     minLines: DEFAULT_REPETITION_GUARD.minLines,
     maxDedupRatio: DEFAULT_REPETITION_GUARD.maxDedupRatio,
+    earlyReleaseMinChars: DEFAULT_REPETITION_GUARD.earlyReleaseMinChars,
+    holdTimeoutMs: DEFAULT_REPETITION_GUARD.holdTimeoutMs,
   })
   assert.deepEqual(
     normalizeStreamRepetitionGuard({ enabled: true, minLines: 60, maxDedupRatio: 0.5 }),
-    { enabled: true, minLines: 60, maxDedupRatio: 0.5 },
+    {
+      enabled: true,
+      minLines: 60,
+      maxDedupRatio: 0.5,
+      earlyReleaseMinChars: DEFAULT_REPETITION_GUARD.earlyReleaseMinChars,
+      holdTimeoutMs: DEFAULT_REPETITION_GUARD.holdTimeoutMs,
+    },
+  )
+})
+
+test('早放行字数不超过跑飞判据，押住上限有上界；0 是显式关闭', () => {
+  assert.equal(normalizeStreamRepetitionGuard({ earlyReleaseMinChars: 99_999 }).earlyReleaseMinChars, 6_000)
+  assert.equal(normalizeStreamRepetitionGuard({ earlyReleaseMinChars: 0 }).earlyReleaseMinChars, 0)
+  assert.equal(
+    normalizeStreamRepetitionGuard({ earlyReleaseMinChars: -5 }).earlyReleaseMinChars,
+    DEFAULT_REPETITION_GUARD.earlyReleaseMinChars,
+    '负数不是「关」，脏值要回落默认而不是把闸门关掉',
+  )
+  assert.equal(normalizeStreamRepetitionGuard({ holdTimeoutMs: 99_999_999 }).holdTimeoutMs, 600_000)
+  assert.equal(normalizeStreamRepetitionGuard({ holdTimeoutMs: 0 }).holdTimeoutMs, 0)
+  assert.equal(
+    normalizeStreamRepetitionGuard({ holdTimeoutMs: -1 }).holdTimeoutMs,
+    DEFAULT_REPETITION_GUARD.holdTimeoutMs,
   )
 })
 

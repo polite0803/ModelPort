@@ -169,3 +169,58 @@ test('上游已给结构化 tool_calls 时，正文里的 DSML 被丢弃而不�
   assert.equal(frames.length, 1, '只保留上游那一份结构化调用')
   assert.equal(frames[0].id, 'call_x')
 })
+
+/**
+ * 残缺闭合标签：只有 `parameter`/`invoke`/`calls` 三个闭合符号，没有开标签、
+ * 没有 invoke、没有参数名。2026-11-19 18:55–19:02 现网 6 条 assistant 正文都是
+ * 这个形态（258–430 字），含开标签的 0 条。处置是剥掉残片、保留正文。
+ */
+const DANGLING = '\n</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>'
+
+test('残缺闭合标签被剥掉，正文保留', async () => {
+  const reports: DsmlTapReport[] = []
+  const tap = createDsmlToolCallTap({ declared: new Set(), onReport: report => reports.push(report) })
+  const done = collect(tap)
+
+  tap.write(frame({ content: '现在补两张硬证据：构建是否干净，以及用户开了哪些页面。' }))
+  tap.write(frame({ content: DANGLING }))
+  tap.write(frame({}, 'stop'))
+  tap.write('data: [DONE]\n\n')
+  tap.end()
+
+  const text = await done
+  assert.equal(text.includes('｜DSML｜'), false, '残片不能进客户端')
+  const content = dataFrames(text).map(entry => entry.choices[0].delta.content ?? '').join('')
+  assert.equal(content, '现在补两张硬证据：构建是否干净，以及用户开了哪些页面。')
+  assert.equal(reports.some(r => r.danglingStripped === true), true, '要按退化记')
+})
+
+test('残缺标签被逐帧拆开也能识别（真实流式分片）', async () => {
+  const tap = createDsmlToolCallTap({ declared: new Set() })
+  const done = collect(tap)
+  const full = `正文一段。${DANGLING}`
+  for (let i = 0; i < full.length; i += 7) {
+    tap.write(frame({ content: full.slice(i, i + 7) }))
+  }
+  tap.write(frame({}, 'stop'))
+  tap.write('data: [DONE]\n\n')
+  tap.end()
+
+  const text = await done
+  assert.equal(text.includes('｜DSML｜'), false)
+  const content = dataFrames(text).map(entry => entry.choices[0].delta.content ?? '').join('')
+  assert.equal(content, '正文一段。')
+})
+
+test('正文里出现不完整的单个闭合词不算残片，不被剥', async () => {
+  const tap = createDsmlToolCallTap({ declared: new Set() })
+  const done = collect(tap)
+  tap.write(frame({ content: '文档里提到 parameter 与 invoke 这两个词。' }))
+  tap.write(frame({}, 'stop'))
+  tap.write('data: [DONE]\n\n')
+  tap.end()
+
+  const text = await done
+  const content = dataFrames(text).map(entry => entry.choices[0].delta.content ?? '').join('')
+  assert.equal(content, '文档里提到 parameter 与 invoke 这两个词。', '普通文本逐字保留')
+})

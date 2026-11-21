@@ -345,3 +345,40 @@ export const DSML_OPEN_AT_START = OPEN_AT_START
 export const DSML_BAR = BAR
 /** JSON 形态的开/闭标签，供测试与调用方引用。 */
 export const TOOL_CALL_TAGS = { open: TOOL_CALL_OPEN, close: TOOL_CALL_CLOSE }
+
+/**
+ * 残缺的调用标记：**只有闭合标签、没有开标签**。
+ *
+ * 实测形态（2026-11-19 18:55–19:02，Codex 会话 `rollout-2026-11-20T02-49-26…` 里
+ * 6 条 assistant 消息，258–430 字）：
+ *
+ *   ...现在补两张硬证据：当前 1.5.2 构建/测试是否干净…
+ *   </｜DSML｜ parameter>
+ *   </｜DSML｜ invoke>
+ *   </｜DSML｜ calls>
+ *
+ * 6 条里含开标签的是 **0 条**，也没有任何 `parameter name="…"`：模型想调用工具，
+ * 但生成的开标签与全部参数都没送到客户端，只剩三个闭合符号。正文里那段说明是
+ * 有效内容，因此处置是**剥掉残片、保留正文**，而不是整发丢弃 —— 这些标签不含任何
+ * 可执行信息，任何解析器都无法从中还原「调哪个工具、传什么参数」。
+ *
+ * 判据刻意窄：必须同时出现 `parameter`、`invoke`、`calls` 三个闭合标签才算，
+ * 避免误伤正文里偶尔提到的单个词。
+ */
+const DANGLING_CLOSERS = new RegExp(
+  `(?:\\s*</${BAR}DSML${BAR}\\s*parameter>\\s*</${BAR}DSML${BAR}\\s*invoke>\\s*</${BAR}DSML${BAR}\\s*${CALLS_KEYWORD}>)+\\s*$`,
+)
+
+/** 尾部是否挂着残缺的闭合标签组。 */
+export function hasDanglingCallClosers(text: string): boolean {
+  return DANGLING_CLOSERS.test(text)
+}
+
+/**
+ * 从正文尾部剥掉残缺的闭合标签组；返回新字符串，正文其余部分逐字保留。
+ * 没有残片时原样返回同一个字符串（调用方可用引用相等判断是否改动）。
+ */
+export function stripDanglingCallClosers(text: string): string {
+  if (!hasDanglingCallClosers(text)) return text
+  return text.replace(DANGLING_CLOSERS, '').replace(/\s+$/, '')
+}

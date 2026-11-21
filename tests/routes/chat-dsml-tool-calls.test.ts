@@ -44,6 +44,12 @@ const upstream = createServer((req, res) => {
       // 按 11 个字符切帧，模拟真实 SSE 分片。
       for (let i = 0; i < DSML.length; i += 11) res.write(frame({ content: DSML.slice(i, i + 11) }))
       res.write(frame({}, 'stop'))
+    } else if (body.model === 'dangling-turn') {
+      // 2026-11-19 18:55 现网形态：一段正常正文 + 三个闭合标签，没有开标签。
+      res.write(frame({ role: 'assistant' }))
+      res.write(frame({ content: '现在补两张硬证据：构建是否干净。' }))
+      res.write(frame({ content: '\n</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>' }))
+      res.write(frame({}, 'stop'))
     } else {
       // 上游给了 [DONE]，整条流却没有 finish_reason。
       res.write(frame({ role: 'assistant' }))
@@ -85,8 +91,8 @@ sm.addProvider({
   enabled: true,
   createdAt: 1,
   updatedAt: 2,
-  supportedModels: ['Dsml-Turn', 'NoFinish-Turn'],
-  modelMappings: { 'Dsml-Turn': 'dsml-turn', 'NoFinish-Turn': 'nofinish-turn' },
+  supportedModels: ['Dsml-Turn', 'NoFinish-Turn', 'Dangling-Turn'],
+  modelMappings: { 'Dsml-Turn': 'dsml-turn', 'NoFinish-Turn': 'nofinish-turn', 'Dangling-Turn': 'dangling-turn' },
 } as never)
 sm.addAccount({
   id: 'dsml-acct',
@@ -170,5 +176,21 @@ test('上游缺 finish_reason：客户端仍收到一个结束帧', async () => 
   const finish = dataFrames(res.text).find(entry => entry.choices[0].finish_reason != null)
   assert.ok(finish, '缺结束帧的流必须被补齐')
   assert.equal(finish!.choices[0].finish_reason, 'stop')
+  assert.equal(res.text.match(/data: \[DONE\]/g)?.length, 1)
+})
+
+test('残缺闭合标签：剥掉标记、正文保留，客户端看到的仍是完整一句话', async () => {
+  const res = await proxy.request('POST', '/v1/chat/completions', {
+    body: {
+      model: 'Dangling-Turn',
+      messages: [{ role: 'user', content: '继续' }],
+      tools: TOOLS,
+      stream: true,
+    },
+  })
+  assert.equal(res.status, 200)
+  assert.equal(res.text.includes('｜DSML｜'), false, '残片不能进客户端')
+  const content = dataFrames(res.text).map(entry => entry.choices[0].delta.content ?? '').join('')
+  assert.equal(content, '现在补两张硬证据：构建是否干净。')
   assert.equal(res.text.match(/data: \[DONE\]/g)?.length, 1)
 })

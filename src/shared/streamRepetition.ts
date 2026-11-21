@@ -20,6 +20,21 @@ export interface RepetitionGuardSettings {
   minLines: number
   /** Unique lines / total lines at or below this counts as degenerate. */
   maxDedupRatio: number
+  /**
+   * 早放行字数：正文到这个量之后，连续两窗去重率不下降就交付，不再等回合结束。
+   *
+   * responses 入口必须押着正文才能「整发丢弃重发」，代价是带工具却纯正文的回合
+   * 要等到最后一刻。1200 字时模型早已越过「前 ~2000 字还是可读计划」的塌陷前区，
+   * 两窗稳定就说明它不是在复读。0 = 关，退回「压到工具调用或流结束」。
+   */
+  earlyReleaseMinChars: number
+  /**
+   * hold 的硬上限（毫秒）：到点无论判据如何都交付。
+   *
+   * 宁可晚交付也不无限压着 —— 上游慢预热 + 长正文的回合不该被这个防复读闸门
+   * 变成无限等待。0 = 关。
+   */
+  holdTimeoutMs: number
 }
 
 /**
@@ -32,6 +47,8 @@ export const DEFAULT_REPETITION_GUARD: RepetitionGuardSettings = {
   enabled: true,
   minLines: 40,
   maxDedupRatio: 0.8,
+  earlyReleaseMinChars: 1_200,
+  holdTimeoutMs: 45_000,
 }
 
 /** How many trailing lines the verdict is computed over. */
@@ -78,6 +95,8 @@ export function normalizeStreamRepetitionGuard(value: unknown): RepetitionGuardS
   const raw = (value ?? {}) as Partial<RepetitionGuardSettings>
   const minLines = Number(raw.minLines)
   const maxDedupRatio = Number(raw.maxDedupRatio)
+  const early = Number(raw.earlyReleaseMinChars)
+  const holdTimeout = Number(raw.holdTimeoutMs)
   return {
     enabled: raw.enabled !== false,
     minLines: Number.isFinite(minLines) && minLines >= 1 ? Math.round(minLines) : DEFAULT_REPETITION_GUARD.minLines,
@@ -85,6 +104,13 @@ export function normalizeStreamRepetitionGuard(value: unknown): RepetitionGuardS
       Number.isFinite(maxDedupRatio) && maxDedupRatio >= 0 && maxDedupRatio <= 1
         ? maxDedupRatio
         : DEFAULT_REPETITION_GUARD.maxDedupRatio,
+    // 早放行不得超过跑飞判据的字数：超过就等于「永远等满判据再放」，配置失去意义。
+    earlyReleaseMinChars: Number.isFinite(early) && early >= 0
+      ? Math.min(RUNAWAY_MIN_CHARS, Math.round(early))
+      : DEFAULT_REPETITION_GUARD.earlyReleaseMinChars,
+    holdTimeoutMs: Number.isFinite(holdTimeout) && holdTimeout >= 0
+      ? Math.min(600_000, Math.round(holdTimeout))
+      : DEFAULT_REPETITION_GUARD.holdTimeoutMs,
   }
 }
 

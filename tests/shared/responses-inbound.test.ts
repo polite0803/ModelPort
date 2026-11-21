@@ -371,6 +371,23 @@ test('namespace 子工具能逐项取出来，展开名与分组名一致', () =
   assert.equal(namespacedToolName('codex_app', 'list_projects'), 'mcp__codex_app__list_projects')
 })
 
+test('子工具名已经是完整三段时不再拼前缀（否则客户端 unsupported call）', () => {
+  // 2026-11-20 现网：Codex 0.169.0-alpha.11.1 把子工具声明成
+  // `mcp__codex_app__read_thread`，网关又拼了一次前缀，模型准确复现了
+  // `mcp__codex_app__mcp__codex_app__read_thread`，客户端回
+  // `unsupported call: mcp__mcp__codex_app__read_thread`。
+  assert.equal(
+    namespacedToolName('codex_app', 'mcp__codex_app__read_thread'),
+    'mcp__codex_app__read_thread',
+  )
+  assert.equal(
+    namespacedToolName('codex_app', 'mcp__codex_app__list_artifacts'),
+    'mcp__codex_app__list_artifacts',
+  )
+  // 裸名照常拼。
+  assert.equal(namespacedToolName('multi_agent_v1', 'spawn_agent'), 'mcp__multi_agent_v1__spawn_agent')
+})
+
 test('参数改名与直通：max_output_tokens、text.format、reasoning.effort', () => {
   const request = responsesToChatRequest(
     {

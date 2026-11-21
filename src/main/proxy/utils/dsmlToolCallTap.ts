@@ -1,9 +1,31 @@
 import { Transform } from 'stream'
 import {
   createDsmlContentFilter,
+  stripDanglingCallClosers,
   type DsmlContentFilter,
   type DsmlToolCall,
 } from '../../../shared/dsmlToolCalls.ts'
+
+/** 尾部暂留上限：够覆盖一组残缺闭合标签（三个标签约 60–80 字），再多就发。 */
+const TAIL_HOLD_LIMIT = 120
+
+/** 残缺闭合标签的开头；只有出现它的前缀才值得暂留，避免暂留正常正文里的 `<`。 */
+const CLOSER_ANCHOR = '</\uFF5CDSML\uFF5C'
+/** 开标签开头：正文里若正在形成完整调用块，同样要暂留（那一支由过滤器处理）。 */
+const OPENER_ANCHOR = '<\uFF5CDSML\uFF5C'
+
+/** 文本尾部可能是标记开头的最长长度；0 表示不需要暂留。 */
+function holdPointOf(text: string): number {
+  const max = Math.min(Math.max(CLOSER_ANCHOR.length, OPENER_ANCHOR.length) + 60, text.length)
+  for (let length = max; length >= 1; length -= 1) {
+    // 尾巴里的空白算在标记前面：残片真实形态是 `\n</｜DSML｜ parameter>`。
+    const tail = text.slice(text.length - length).replace(/^\s+/, '')
+    if (tail === '') continue
+    if (CLOSER_ANCHOR.startsWith(tail) || OPENER_ANCHOR.startsWith(tail)) return length
+    if (tail.startsWith(CLOSER_ANCHOR)) return Math.min(length, TAIL_HOLD_LIMIT)
+  }
+  return 0
+}
 
 export interface DsmlTapReport {
   /** 从正文还原成 tool_calls 的条数。 */
@@ -11,6 +33,8 @@ export interface DsmlTapReport {
   convertedNames: string[]
   /** 收尾帧是补出来的（上游给了 [DONE] 却没有 finish_reason）。 */
   synthesizedFinish?: 'stop' | 'tool_calls'
+  /** 正文尾部挂着残缺的闭合标签，已剥掉（这一轮按退化记）。 */
+  danglingStripped?: boolean
 }
 
 export interface DsmlToolCallTapOptions {
@@ -57,6 +81,52 @@ export function createDsmlToolCallTap(options: DsmlToolCallTapOptions): Transfor
   const convertedNames: string[] = []
   let synthesizedFinish: 'stop' | 'tool_calls' | undefined
   let reported = false
+  /** 尾部暂留的正文：可能是残缺闭合标签的开头，攒到能判为止。 */
+  let tailHold = ''
+  /** 这一轮剥掉了残缺闭合标签 —— 要按退化记。 */
+  let danglingStripped = false
+
+  /**
+   * 正文要发了，但尾部可能正在形成残缺的闭合标签组（`</｜DSML｜ parameter>` …）。
+   *
+   * 实测形态是「一段正常正文 + 三个闭合标签，没有开标签、没有 invoke」：那些标签
+   * 不含任何可执行信息，交付给客户端只会像标记泄漏一样污染对话。所以把可能是
+   * 标签开头的尾巴（最多 120 字）暂留，攒够或流结束再决定发不发。
+   *
+   * 返回该发出去的文本（可能比入参短，也可能为空）。
+   */
+  const emitContentText = (incoming: string): string => {
+    let text = incoming
+    if (tailHold !== '') {
+      text = tailHold + text
+      tailHold = ''
+    }
+    const cut = holdPointOf(text)
+    if (cut > 0) {
+      tailHold = text.slice(text.length - cut)
+      text = text.slice(0, text.length - cut)
+    }
+    if (text !== '') contentDelivered = true
+    return text
+  }
+
+  /**
+   * 收尾：把暂留的尾巴决定掉 —— 是残片就剥，不是就补发。
+   *
+   * 返回**纯文本**（不再包帧）：调用方要在同一个事件里把它并回正文，
+   * 或在自己那一帧里下发；单独成一帧会让「正文还在流」的客户端读成两段。
+   */
+  const flushTailText = (): string => {
+    if (tailHold === '') return ''
+    const held = tailHold
+    tailHold = ''
+    const stripped = stripDanglingCallClosers(held)
+    if (stripped !== held) {
+      danglingStripped = true
+      return stripped
+    }
+    return held
+  }
 
   const filterFor = (index: number): DsmlContentFilter => {
     let filter = filters.get(index)
@@ -81,11 +151,12 @@ export function createDsmlToolCallTap(options: DsmlToolCallTapOptions): Transfor
   const report = (): void => {
     if (reported) return
     reported = true
-    if (convertedCalls === 0 && synthesizedFinish === undefined) return
+    if (convertedCalls === 0 && synthesizedFinish === undefined && !danglingStripped) return
     options.onReport?.({
       convertedCalls,
       convertedNames: [...new Set(convertedNames)],
       ...(synthesizedFinish === undefined ? {} : { synthesizedFinish }),
+      ...(danglingStripped ? { danglingStripped: true } : {}),
     })
   }
 
@@ -138,7 +209,10 @@ export function createDsmlToolCallTap(options: DsmlToolCallTapOptions): Transfor
 
     const payload = line.slice(5).trim()
     if (payload === '[DONE]') {
-      const out = `${drainFilters()}${takePending()}${synthesizeFinish()}`
+      const tail = flushTailText()
+      const tailFrame = tail === '' ? '' : frame(0, { content: tail })
+      if (tailFrame !== '') contentDelivered = true
+      const out = `${drainFilters()}${tailFrame}${takePending()}${synthesizeFinish()}`
       doneSeen = true
       report()
       return `${out}${event}\n\n`
@@ -163,19 +237,29 @@ export function createDsmlToolCallTap(options: DsmlToolCallTapOptions): Transfor
       const delta = choice?.delta
       if (delta && typeof delta === 'object' && typeof delta.content === 'string' && delta.content !== '') {
         if (conversionDisabled) {
-          contentDelivered = true
+          // 结构化调用已出现过：正文照发，但尾部仍要防残缺闭合标签。
+          const piece = emitContentText(delta.content)
+          if (piece === '') {
+            delete delta.content
+          } else {
+            if (piece !== delta.content) delta.content = piece
+            contentDelivered = true
+          }
+          mutated = true
         } else {
           const event = filterFor(index).push(delta.content)
           if (event.calls.length > 0) {
             holdCalls(index, event.calls)
             mutated = true
           }
-          if (event.text === '') {
+          // 过滤器放行的正文同样要过尾巴暂留：它可能是 `</｜DSML｜ …>` 的开头。
+          const piece = event.text === '' ? '' : emitContentText(event.text)
+          if (piece === '') {
             delete delta.content
             mutated = true
           } else {
-            if (event.text !== delta.content) {
-              delta.content = event.text
+            if (piece !== delta.content) {
+              delta.content = piece
               mutated = true
             }
             contentDelivered = true
@@ -196,6 +280,13 @@ export function createDsmlToolCallTap(options: DsmlToolCallTapOptions): Transfor
       }
       if (typeof choice?.finish_reason === 'string' && choice.finish_reason !== '') {
         finishSeen = true
+        // 暂留的尾巴要么是残片（剥掉）、要么是正文：正文必须在结束帧**之前**补发，
+        // strict 客户端会把「finish 之后再来正文」判成 content_after_finish 整轮拒绝。
+        const tail = flushTailText()
+        if (tail !== '') {
+          out += frame(index, { content: tail })
+          contentDelivered = true
+        }
         out += takePending()
         if (convertedCalls > 0 && choice.finish_reason === 'stop') {
           choice.finish_reason = 'tool_calls'
@@ -227,6 +318,11 @@ export function createDsmlToolCallTap(options: DsmlToolCallTapOptions): Transfor
         buffer = ''
       }
       out += drainFilters()
+      const tail = flushTailText()
+      if (tail !== '') {
+        out += frame(0, { content: tail })
+        contentDelivered = true
+      }
       out += takePending()
       out += synthesizeFinish()
       if (out !== '') this.push(out)

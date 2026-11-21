@@ -250,8 +250,19 @@ export function namespaceChildrenOf(body: unknown): NamespaceChild[] {
   return children
 }
 
-/** 展开后的调用名：`mcp__<namespace>__<child>`。 */
+/**
+ * 分组子工具的对外调用名。
+ *
+ * 客户端有两种声明形态，**两种都不能再拼前缀**：
+ * - 子工具是裸名（`read_thread`）⇒ 拼成 `mcp__<ns>__read_thread`；
+ * - 子工具已经写成完整三段（`mcp__codex_app__read_thread`）⇒ 原样使用。
+ *
+ * 2026-11-20 现网实测（Codex 0.169.0-alpha.11.1）：第二种形态被拼成了
+ * `mcp__codex_app__mcp__codex_app__read_thread`，模型准确复现了这个名字，
+ * 客户端回 `unsupported call: mcp__mcp__codex_app__read_thread`（4 次）。
+ */
 export function namespacedToolName(namespace: string, child: string): string {
+  if (child.startsWith('mcp__')) return child
   return `mcp__${namespace}__${child}`
 }
 

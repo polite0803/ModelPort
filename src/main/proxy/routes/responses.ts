@@ -54,8 +54,10 @@ import {
   DEFAULT_REPETITION_GUARD,
   RUNAWAY_MIN_CHARS,
   createChatStreamProbe,
+  extractStreamText,
   judgeRunawayText,
   judgeRunawayTurn,
+  measureTextRepetition,
   type RunawayTurnReading,
 } from '../../../shared/streamRepetition'
 
@@ -128,6 +130,51 @@ function logRunawayRetry(
     },
   })
 }
+
+/**
+ * 交付之后再判一次跑飞，是**掐断**而不是重发：字节已经在客户端那边了，没有
+ * 「还没被看到」这个前提，重发只会让同一段正文出现两次。
+ */
+function logRunawayAbort(requestId: string, model: string, verdict: RunawayTurnReading): void {
+  storeManager.addLog('warn', 'Responses runaway turn aborted after release', {
+    requestId,
+    data: {
+      model,
+      contentChars: verdict.contentChars,
+      lines: verdict.repetition?.lines,
+      dedupRatio: verdict.repetition?.dedupRatio,
+    },
+  })
+}
+
+/**
+ * 交付后监测的最小探测步长（可见正文字符）。
+ *
+ * 早放行与 `holdTimeoutMs` 都只能回答「**此刻**在不在复读」：2026-11-20 20:00 的
+ * Codex 会话里，前 2400 字是一段干净的中文计划（去重率 1.000），两窗不下降即放行，
+ * 之后模型从第 15405 字起滚进 `Let's./Go./Tool./Now./I'll call./Okay.` 六行循环，
+ * 一直滚到 183901 字撞满 65536 输出 token —— 从放行那一刻起判据一次都没再跑，
+ * 客户端历史里落进整整 18 万字。放行之后必须继续盯。
+ *
+ * 2000 字只是**探测粒度**，不是安全边界：`judgeRunawayTurn` 本身要 6000 字才可能
+ * 成立，所以第一次探测从 `RUNAWAY_MIN_CHARS` 开始；之后的间隔按已收正文的 1/8
+ * 几何增长（下限仍是这个数）。单次判据是 O(已收字节) 的全量扫描，固定步长会让
+ * 整轮开销变成二次方 —— 这段 18 万字的正文用几何间隔只要 8 次判据、3 ms。
+ */
+const RUNAWAY_WATCH_CHARS = 2_000
+
+/**
+ * 交付后掐断时写给客户端的那一句话。
+ *
+ * 它必须是失败而不是「正常结束」：这一轮确实没做完，客户端要按失败重试，而不是
+ * 把半截复读当成完整回答写进历史。措辞只描述事实（这一轮退化成循环、被上游截断），
+ * 不带任何提示词 —— 网关不向用户对话说话（AGENTS 铁律）。
+ */
+// GATEWAY-TEXT: runaway-abort-frame
+// 这一句只走 response.failed 的 error 字段，不进请求、不进模型上下文。
+const RUNAWAY_ABORT_MESSAGE =
+  'Upstream turn degenerated into a repetition loop and was aborted by the gateway; '
+  + 'the text above is incomplete and should be retried.'
 
 router.post('/responses', async (ctx: Context) => {
   const requestId = randomUUID()
@@ -367,6 +414,14 @@ router.post('/responses', async (ctx: Context) => {
     | { kind: 'delivered' }
     | { kind: 'end'; held: Held }
     | { kind: 'retry'; held: Held; verdict: RunawayTurnReading }
+    /**
+     * 正文已经交付过了，随后才判出跑飞：错误帧已写进 `out`，不重发、不再收尾。
+     *
+     * 与 `delivered` 分开是因为**日志行与账号结算的口径不同**：`delivered` 记成功，
+     * 这里要么不改判据（正文确实到了客户端）、要么由调用方决定记什么；混成一个
+     * 值会让「交付后掐断」在排障时看起来和正常完成一模一样。
+     */
+    | { kind: 'aborted'; verdict: RunawayTurnReading }
 
   /**
    * 跑一发回环流，并决定「交出去」还是「整发丢掉重发」。
@@ -377,6 +432,12 @@ router.post('/responses', async (ctx: Context) => {
    * 判中就整发丢弃；或 (c) 中途已经攒到 6000 字还没调用且尾部塌了 —— 不必等模型
    * 把输出上限撞满（2026-11-19 那一轮跑了 5 分钟），当场掐掉这一发上游再重发。
    *
+   * **放行之后继续监判**：早放行与 `holdTimeoutMs` 兜底都是「此刻看起来健康」，
+   * 不是「这一轮不会塌」。2026-11-20 20:00 那轮 2400 字放行、15500 字塌进六行
+   * 循环、183901 字撞满上限，中间判据一次没跑。所以 `holding` 落下之后判据照跑，
+   * 判中就 `cancel()` 上游并写一条错误帧 —— 此时正文已经在客户端那边了，重发会
+   * 让同一段文字出现两次，唯一能做的止损就是掐断并让客户端按失败重试。
+   *
    * 代价：带工具且「只有正文」的回合，正文会等到回合结束才一次出现。这类回合在
    * Codex goal 循环里通常只有一两句计划（本机实测 ~4-11 s）；长正文回合很少。
    * 换来的是客户端历史里不会再落进 16 KB 的 `执行。` 复读。
@@ -384,9 +445,19 @@ router.post('/responses', async (ctx: Context) => {
   const runAttempt = async (incoming: Response, attempt: number): Promise<AttemptResult> => {
     const translator = makeTranslator()
     const held: Held = { pieces: [], translator }
-    let holding = true
+    // 守卫关掉时不押正文：没有重发就没有「客户端还没看到」这个前提。
+    let holding = repetitionGuard.enabled
+    // 交付之后的监视与「押着还是放手」是两件事：放行的三种理由（工具调用、早放行、
+    // `holdTimeoutMs` 兜底）都不等于「这一轮不会塌」。2026-11-20 20:00 那轮就是
+    // 2400 字早放行、15500 字塌进循环、183901 字撞满上限，中间判据一次没跑。
+    let watching = repetitionGuard.enabled
+    let nextWatchAt = RUNAWAY_MIN_CHARS
     const probe = createChatStreamProbe()
     let raw = ''
+    // 早放行探测的节拍与上一窗去重率：只在每 `earlyReleaseMinChars` 字探一次，
+    // 不让判据变成逐块的全量正则。
+    let nextProbeAt = Math.max(1, Number(repetitionGuard.earlyReleaseMinChars) || 0)
+    let lastEarlyRatio: number | undefined
     const flush = (): void => {
       holding = false
       if (out.destroyed) return
@@ -405,6 +476,26 @@ router.post('/responses', async (ctx: Context) => {
         const piece = translator.push(chunk)
         if (!holding) {
           if (piece !== '' && !out.destroyed) out.write(piece)
+          // 已交付不等于已判过：早放行 / 超时兜底只说明「开头不像复读」。
+          // 塌陷发生在放行之后的，这里当场掐断 —— 攒到 18 万字再交收尾帧就晚了。
+          const released = probe.reading()
+          if (released.toolCallDeltas > 0) {
+            watching = false
+            continue
+          }
+          if (watching && released.contentChars >= nextWatchAt) {
+            // 步长随已收正文增长：`judgeRunawayTurn` 每次都要重扫全文，固定步长在
+            // 长篇上是二次方复杂度。几何增长让整轮的判据总开销保持线性量级。
+            nextWatchAt = released.contentChars + Math.max(RUNAWAY_WATCH_CHARS, Math.floor(released.contentChars / 8))
+            const verdict = judgeRunawayTurn(raw, toolsOffered, repetitionGuard)
+            if (verdict.degenerate) {
+              await reader.cancel().catch(() => {})
+              logRunawayAbort(relayRequestId, requestedModel, verdict)
+              const frame = translator.fail(RUNAWAY_ABORT_MESSAGE)
+              if (frame !== '' && !out.destroyed) out.write(frame)
+              return { kind: 'aborted', verdict }
+            }
+          }
           continue
         }
         if (piece !== '') held.pieces.push(piece)
@@ -413,7 +504,36 @@ router.post('/responses', async (ctx: Context) => {
           flush()
           continue
         }
-        if (reading.contentChars < RUNAWAY_MIN_CHARS) continue
+        // 硬上限：上游慢预热 + 长正文的回合不该被防复读闸门变成无限等待。
+        if (repetitionGuard.holdTimeoutMs > 0 && Date.now() - started > repetitionGuard.holdTimeoutMs) {
+          flush()
+          continue
+        }
+        if (reading.contentChars < RUNAWAY_MIN_CHARS) {
+          // 早放行：两窗去重率不下降 = 不在复读，交出去比让客户端干等整轮更值。
+          // 一旦下降就继续押着，等 6000 字那道判据说话。
+          if (
+            repetitionGuard.earlyReleaseMinChars > 0 &&
+            reading.contentChars >= nextProbeAt
+          ) {
+            const window = measureTextRepetition(extractStreamText(raw), repetitionGuard)
+            // 只有本来就健康的窗口才够格早放行：「不下降」本身不够 —— 一整段从头
+            // 就在复读的流，两窗去重率可以同样低、同样「不下降」。
+            if (
+              window !== null &&
+              !window.degraded &&
+              window.dedupRatio > repetitionGuard.maxDedupRatio
+            ) {
+              if (lastEarlyRatio !== undefined && window.dedupRatio >= lastEarlyRatio) {
+                flush()
+                continue
+              }
+              lastEarlyRatio = window.dedupRatio
+            }
+            nextProbeAt = reading.contentChars + repetitionGuard.earlyReleaseMinChars
+          }
+          continue
+        }
         const verdict = judgeRunawayTurn(raw, toolsOffered, repetitionGuard)
         if (!verdict.degenerate || attempt >= maxAttempts) continue
         await reader.cancel().catch(() => {})
@@ -459,6 +579,9 @@ router.post('/responses', async (ctx: Context) => {
     for (let attempt = 1; ; attempt += 1) {
       const result = await runAttempt(current, attempt)
       if (result.kind === 'delivered') return
+      // 交付后掐断：错误帧已经写出去了，这里既不能重发（正文已在客户端）也不能
+      // 再补 `response.completed`（会把这次失败读成一次短回答）。
+      if (result.kind === 'aborted') return
       if (result.kind === 'end') {
         finishHeld(result.held)
         return

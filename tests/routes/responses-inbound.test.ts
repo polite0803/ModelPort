@@ -26,7 +26,7 @@ const UPSTREAM_PORT = 18972
 type Payload = Record<string, any>
 
 let seenBodies: Payload[] = []
-let upstreamMode: 'ok' | 'stream' | 'tool' | 'patch' | 'error' | 'runaway' = 'ok'
+let upstreamMode: 'ok' | 'stream' | 'tool' | 'patch' | 'error' | 'runaway' | 'late-collapse' = 'ok'
 
 const upstream = createServer((req, res) => {
   const chunks: Buffer[] = []
@@ -83,6 +83,46 @@ const upstream = createServer((req, res) => {
         choices: [{ index: 0, message: { role: 'assistant', content: 'hello from upstream' }, finish_reason: 'stop' }],
         usage: { prompt_tokens: 21, completion_tokens: 7, total_tokens: 28 },
       }))
+      return
+    }
+
+    // 健康开头 + 中途塌陷（2026-11-20 20:00 现网形状）：前 ~3000 字是一段干净的
+    // 中文计划（两窗去重率都是 1.000），之后的正文才滚进六行循环。早放行必然在
+    // 塌陷之前就把正文交了，所以只有「交付后继续监判」才拦得住它。
+    //
+    // 必须**分批**写出：一次性 `res.end` 会让网关只读到一大块，那时正文早已越过
+    // 6000 字，走的是「判中即整发丢弃重发」那条既有分支，证明不了「交付后监判」。
+    if (upstreamMode === 'late-collapse' && body.stream === true) {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+      const emit = (text: string): void => {
+        res.write(`data: ${JSON.stringify({ id: 'chatcmpl-late', object: 'chat.completion.chunk', choices: [{ index: 0, delta: { content: text } }] })}\n\n`)
+      }
+      // ~3800 字的干净计划：早放行的探测节拍是 `earlyReleaseMinChars`（1200）字一次，
+      // 需要**两窗**都健康才放行，所以计划必须长过 2400 字，否则第二窗根本没到，
+      // 正文会一路押到 6000 字那道判据上，走成「整发丢弃重发」而不是「交付后掐断」。
+      const plan = Array.from({ length: 100 }, (_, index) => `第 ${index} 步：先读模板生成器，再核对清单脚本的根目录解析，然后修工作流模板。`)
+      const cycle = ["Let's.", 'Go.', 'Tool.', 'Now.', "I'll call.", 'Okay.']
+      // 每批之间留足间隔：2 ms 时网关一次 read 会合并好几批，`contentChars` 直接从
+      // 2280 跳到 6230，早放行的第二窗与「交付后监判」两条路径都被跳过。
+      const batch = (lines: string[]): Promise<void> => new Promise(resolve => {
+        for (const line of lines) emit(`${line}\n`)
+        setTimeout(resolve, 15)
+      })
+      void (async () => {
+        try {
+          for (let index = 0; index < plan.length; index += 20) await batch(plan.slice(index, index + 20))
+          // 塌陷：模型开始滚六行循环，一直滚到 6000 字被交付后监判抓住。
+          for (let index = 0; index < 600; index += 20) {
+            await batch(Array.from({ length: 20 }, (_, offset) => cycle[(index + offset) % cycle.length]))
+          }
+          res.write('data: {"id":"chatcmpl-late","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}\n\n')
+          res.write('data: [DONE]\n\n')
+        } catch {
+          // 客户端（网关）掐断上游连接时 write 会报错：这正是被测行为本身。
+        } finally {
+          res.end()
+        }
+      })()
       return
     }
 
@@ -561,6 +601,30 @@ test('没带工具时不判跑飞：长正文照常交付，不重发', async ()
   assert.equal(response.status, 200)
   assert.ok(response.text.includes('执行。'), '纯问答客户端里长正文就是答案，不许吞')
   assert.equal(seenBodies.length, 1)
+})
+
+// 2026-11-20 20:00：早放行在 2400 字（去重率 1.000）就把正文交了，之后模型从
+// 15500 字起滚进六行循环、一直到 183901 字撞满 65536 输出 token。放行不等于判过，
+// 交付之后必须继续盯 —— 塌陷发生在放行之后的，掐断而不是重发。
+test('流式：放行之后才塌陷的回合被掐断，客户端拿到失败帧而不是整轮复读', async () => {
+  upstreamMode = 'late-collapse'
+  const response = await proxy.request('POST', '/v1/responses', {
+    body: responsesBody('auto', { stream: true, tools: [execTool] }),
+  })
+
+  assert.equal(response.status, 200)
+  const cycleChars = response.text.match(/I'll call\./g)?.length ?? 0
+  const diag = JSON.stringify({
+    cycleChars,
+    len: response.text.length,
+    bodies: seenBodies.length,
+    names: [...new Set(response.text.split('\n\n').filter(f => f.startsWith('event:')).map(f => f.split('\n')[0].slice(6).trim()))],
+  })
+  assert.ok(response.text.includes('先读模板生成器'), `放行前后已交付的健康正文属于模型原文，不能被收回 ${diag}`)
+  assert.ok(cycleChars < 600, `塌陷之后必须当场掐断，实际放出了 ${cycleChars} 个循环行 ${diag}`)
+  assert.ok(response.text.includes('event: response.failed'), `掐断要明说失败：客户端不能把它读成完整回答 ${diag}`)
+  assert.ok(!response.text.includes('response.completed'), `掐断的一轮不许补完成帧 ${diag}`)
+  assert.equal(seenBodies.length, 1, '正文已在客户端那边，重发会让同一段文字出现两次')
 })
 
 test('非流式：零工具调用的跑飞正文同样重发一次', async () => {
