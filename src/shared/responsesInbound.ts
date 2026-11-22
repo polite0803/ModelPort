@@ -307,6 +307,17 @@ function injectionFingerprint(content: string): string {
   return content.replace(/\d+/g, '#').replace(/\s+/g, ' ').trim()
 }
 
+/**
+ * 把 goal 块里逐轮递增的 `Tokens used: N` 归一成 `Tokens used: #`，其余字节原样保留。
+ *
+ * 真实 goal 块对拍（1344 份）确认这一行是唯一逐轮变化的文本。上游按前缀缓存，
+ * 只折叠不归一的话请求体字节仍每轮变，缓存照样整段失效。只匹配这一个键，
+ * 避免把 Objective 里的版本号之类的数字也改掉；已经是 `#` 时原样返回（幂等）。
+ */
+function stabilizeClientInjection(content: string): string {
+  return content.replace(/(Tokens used:\s*)\d+/g, '$1#')
+}
+
 function hasToolCalls(message: Payload): boolean {
   return Array.isArray(message.tool_calls) && message.tool_calls.length > 0
 }
@@ -316,7 +327,8 @@ function textOf(message: Payload): string | null {
 }
 
 /**
- * 同一个指纹的注入块只留**最新**一份。
+ * 同一个指纹的注入块只留**最新**一份，并把逐轮变化的 `Tokens used: N` 归一成 `#`
+ * ——字节稳定是上游前缀缓存命中的前提。
  *
  * 删掉旧块之后，两侧的 assistant 会相邻。多数上游容忍同角色相邻，但严格上游会拒，
  * 所以把它们并成一条（文本与 `reasoning_content` 都保留，不丢模型说过的话）。
@@ -331,7 +343,7 @@ export function collapseRepeatedClientInjections(messages: Payload[]): Payload[]
     if (!first.has(key)) first.set(key, index)
     latest.set(key, message)
   })
-  // 同组只留**组内第一条的位置**，文本用组内最新那份（目标不变、计数最新）。
+  // 同组只留**组内第一条的位置**，文本用组内最新那份并把计数归一（目标最新、字节稳定）。
   // 留最新那条的位置会把 user 排到它后面的 assistant 之后，序列开头可能变成
   // assistant —— 严格上游当场 400。
   const replacement = new Map<number, Payload>()
@@ -345,10 +357,13 @@ export function collapseRepeatedClientInjections(messages: Payload[]): Payload[]
       drop.add(index)
       return
     }
-    const newest = latest.get(key)
-    if (newest !== undefined && newest !== message) replacement.set(index, newest)
+    const newest = latest.get(key) ?? message
+    const original = newest.content as string
+    const stabilized = stabilizeClientInjection(original)
+    replacement.set(index, stabilized === original ? newest : { ...newest, content: stabilized })
   })
-  if (drop.size === 0) return messages
+  // 单份注入也要归一：它每轮同样会带着新的 Tokens used 断掉缓存前缀。
+  if (drop.size === 0 && replacement.size === 0) return messages
 
   const kept: Payload[] = []
   messages.forEach((raw, index) => {

@@ -953,8 +953,9 @@ test('非流式：缺 call_id 时造稳定 id，空名字的调用丢弃', () =>
 
 // Codex 每步追加一份 `<codex_internal_context source="goal">`，除 `Tokens used: N`
 // 之外逐字相同。几十份堆在历史里，模型读到一轮一轮「再读一遍目标」，退化成整段复读。
-// 折叠成一份：位置留在**第一份**（否则序列开头会变成 assistant），文本用最新那份。
-test('重复的 goal 注入只留一份，位置在原处、文本取最新', () => {
+// 折叠成一份：位置留在**第一份**（否则序列开头会变成 assistant），文本用最新那份，
+// 但计数归一成 `#` ——否则字节每轮变，上游前缀缓存整段失效。
+test('重复的 goal 注入只留一份，位置在原处、文本取最新并归一计数', () => {
   const injection = (tokens: number): Payload => ({
     role: 'user',
     content: [{
@@ -974,10 +975,37 @@ test('重复的 goal 注入只留一份，位置在原处、文本取最新', ()
 
   const messages = request.messages as Payload[]
   assert.equal(messages.length, 2, '只应剩一份注入与一条合并后的 assistant')
-  assert.match(String(messages[0]?.content), /Tokens used: 300/)
+  assert.match(String(messages[0]?.content), /Objective: ship 1\.8\.34/)
+  assert.match(String(messages[0]?.content), /Tokens used: #/)
+  assert.doesNotMatch(String(messages[0]?.content), /Tokens used: \d+/)
   assert.equal(messages[0]?.role, 'user')
   assert.equal(messages[1]?.role, 'assistant')
   assert.equal(messages[1]?.content, '我会执行。\n\n现在调用。')
+})
+
+test('每轮 Tokens used 递增时，折叠后的请求体字节逐轮一致', () => {
+  const build = (tokens: number): string => {
+    const request = responsesToChatRequest({
+      input: [
+        { role: 'user', content: [{ type: 'input_text', text: `<codex_internal_context source="goal">\nTokens used: ${tokens}\n</codex_internal_context>` }] },
+        { role: 'assistant', content: [{ type: 'output_text', text: '继续。' }] },
+        { role: 'user', content: [{ type: 'input_text', text: `<codex_internal_context source="goal">\nTokens used: ${tokens + 100}\n</codex_internal_context>` }] },
+      ],
+    }, { model: 'auto', stream: false })
+    return JSON.stringify(request.messages)
+  }
+  assert.equal(build(100), build(999999), '缓存命中的判据是请求体字节一致')
+})
+
+test('只有一份 goal 注入也归一计数', () => {
+  const request = responsesToChatRequest({
+    input: [
+      { role: 'user', content: [{ type: 'input_text', text: '<codex_internal_context source="goal">Tokens used: 42</codex_internal_context>' }] },
+    ],
+  }, { model: 'auto', stream: false })
+  const messages = request.messages as Payload[]
+  assert.equal(messages.length, 1)
+  assert.equal(messages[0]?.content, '<codex_internal_context source="goal">Tokens used: #</codex_internal_context>')
 })
 
 test('内容不同的注入一份都不删', () => {
