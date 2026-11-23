@@ -665,7 +665,8 @@ export class RequestForwarder {
       // 一次失败的尝试同样占掉了这一家的当日额度与一次完整往返，只数成功会让
       // 一直失败的候选停在「没被派过」上，被公平规则一遍遍重新推上来。
       // 本地 AIMD 准入被拒（上面 break 那条）不进账：那一次根本没出网关。
-      if (!isProbe) dispatchLedger.record(provider.id, actualModel)
+      // 第四参数是路由作用域：硬比例配额只数本路由的欠债，全局公平轮转读无前缀的合计。
+      if (!isProbe) dispatchLedger.record(provider.id, actualModel, undefined, context.routeName)
       try {
         result = await this.doForward(modifiedRequest, account, provider, actualModel, context)
       } catch (error) {

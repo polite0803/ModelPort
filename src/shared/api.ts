@@ -34,6 +34,7 @@ import type {
   ModelsFetchFailure,
   ModelRoute,
   ModelCapabilityHint,
+  KeyModels,
   RoutePreviewResult,
   RoutePreviewSample,
   RouteMenuResult,
@@ -314,6 +315,18 @@ const providersAPI = {
 
   getModelMarks: (): Promise<Record<string, Record<string, ModelCapabilityHint>>> =>
     wire.invoke(IpcChannels.PROVIDERS_GET_MODEL_MARKS),
+
+  /** 模型管理页的「重点」名单：派发意图，与能力标注分开存。 */
+  getKeyModels: (): Promise<KeyModels> =>
+    wire.invoke(IpcChannels.PROVIDERS_GET_KEY_MODELS),
+
+  /** 翻动模型管理页一行的「重点」开关。 */
+  setKeyModel: (providerId: string, displayName: string, enabled: boolean): Promise<{
+    success: boolean
+    keyModels: KeyModels
+    error?: string
+  }> =>
+    wire.invoke(IpcChannels.PROVIDERS_SET_KEY_MODEL, providerId, displayName, enabled),
 
   /** 标准库逐字段采用台账（只读）：行内回显批量补全结果用。 */
   getCatalogAdoptions: (): Promise<CatalogAdoption[]> =>
@@ -980,7 +993,7 @@ const contextManagementAPI = {
 }
 
 const visionRelayAPI = {
-  readers: (): Promise<{ readers: Array<{ displayName: string; providerName: string }> }> =>
+  readers: (): Promise<{ readers: Array<{ displayName: string; providerName: string; paid?: boolean }> }> =>
     wire.invoke(IpcChannels.VISION_RELAY_READERS),
 }
 

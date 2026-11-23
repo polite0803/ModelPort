@@ -308,7 +308,7 @@ export const TRAE: TraeProduct = {
   consoleHost: TRAE_CONSOLE_HOST,
   clientId: 'en1oxy7wnw8j9n',
   appId: '6eefa01c-1036-4c7e-9ca5-d891f63bfcd8',
-  ideVersion: '3.4.15',
+  ideVersion: '3.4.24',
   deviceBrand: 'Apple',
   osVersion: 'macOS 15.7.4',
   function: 'solo_work_lite',
@@ -319,6 +319,6 @@ export const TRAE: TraeProduct = {
   hideInternalModels: isTruthyFlag(process.env.DSH_TRAE_HIDE_INTERNAL),
   pluginVersion: '2.3.62834',
   defaultCredentialRef: 'TRAE_ACCESS_TOKEN',
-  userAgent: 'Trae/3.4.15',
+  userAgent: 'Trae/3.4.24',
   fallbackModels: TRAE_FALLBACK_MODELS,
 }

@@ -38,3 +38,38 @@ test('三个计量出口都把入站时刻交给缺口分类', () => {
 test('具名模型路径也按同一口径算会话键', () => {
   assert.match(chatRoute, /autoRouter\.conversationKeyFor\(request, clientSession\)/)
 })
+
+test('token 落账带上账号，但既有分类实参一行不动', () => {
+  const start = chatRoute.indexOf('storeManager.recordTokenUsage({')
+  assert.ok(start >= 0)
+  const block = chatRoute.slice(start, start + 1800)
+  assert.match(block, /\n      accountId,\n/)
+  assert.match(block, /cacheMissClass: missReading\.class/)
+  assert.match(block, /cacheMissDetail: missReading\.detail/)
+  assert.match(block, /cacheMissIdleGap: missReading\.idleGap/)
+})
+
+test('诊断环只在 coldResumed 旁路记录，位于 classify 之后、warm 之前', () => {
+  const classifyAt = chatRoute.indexOf('const missReading = cacheMissLedger.classify(')
+  const appendAt = chatRoute.indexOf('coldResumeTrace.append(')
+  const warmAt = chatRoute.indexOf('// 压缩后预热')
+  assert.ok(classifyAt >= 0 && appendAt > classifyAt && appendAt < warmAt)
+  assert.match(chatRoute, /missReading\?\.idleGap !== undefined && \(missReading\.detail\?\.coldResumed \?\? 0\) > 0/)
+})
+
+test('诊断环不进任何判决链路，也不读请求日志/存储/日志', () => {
+  const coldTrace = readFileSync('src/main/proxy/coldResumeTrace.ts', 'utf-8')
+  for (const file of ['autoRouter.ts', 'forwarder.ts', 'cacheWarm.ts', 'accountAffinity.ts']) {
+    const source = readFileSync(`src/main/proxy/${file}`, 'utf-8')
+    assert.doesNotMatch(source, /coldResumeTrace/, `${file} must not read the diagnostic ring`)
+  }
+  assert.doesNotMatch(coldTrace, /requestLog|storeManager|console\./)
+})
+
+test('只读诊断通道在 IPC 与 handler 中登记', () => {
+  const channels = readFileSync('src/main/ipc/channels.ts', 'utf-8')
+  const handlers = readFileSync('src/main/ipc/handlers.ts', 'utf-8')
+  assert.match(channels, /DIAGNOSTICS_GET_COLD_RESUME_TRACE: 'diagnostics:getColdResumeTrace'/)
+  assert.match(handlers, /IpcChannels\.DIAGNOSTICS_GET_COLD_RESUME_TRACE/)
+  assert.match(handlers, /coldResumeTrace\.snapshot\(\)/)
+})

@@ -22,12 +22,12 @@ import {
 import { useProvidersStore } from '@/stores/providersStore'
 import { useProxyStore } from '@/stores/proxyStore'
 import { useToast } from '@/hooks/use-toast'
-import { Search, Copy, CheckCircle2, XCircle, Cpu, Check, Square, Database, ChevronLeft, ChevronRight, Loader2, Ban, Wifi, RefreshCw } from 'lucide-react'
+import { Search, Copy, CheckCircle2, XCircle, Cpu, Check, Square, Database, ChevronLeft, ChevronRight, Loader2, Ban, Wifi, RefreshCw, Star } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { weightTone } from '@/lib/costTone'
 import { Switch } from '@/components/ui/switch'
 import type { Account, CatalogueModel } from '@/types/electron'
-import type { ProviderModelTestResult, ProviderModelSyncResult, ModelCapabilityHint } from '@shared/types'
+import type { ProviderModelTestResult, ProviderModelSyncResult, ModelCapabilityHint, KeyModels } from '@shared/types'
 import type { ChannelCredits, CostBucket } from '@shared/channels'
 import { costBucketOf } from '@shared/channels'
 import {
@@ -103,6 +103,8 @@ interface ModelInfo {
   baseWeight?: number
   /** 倍率来自手工标注（manual > 渠道）；界面要说清出处，否则「同步会覆盖标注」会被误解 */
   weightManual?: boolean
+  /** 模型管理页单独翻开的「重点」开关：路由会把所有重点模型按等份纳入硬配额。 */
+  keyModel?: boolean
   /** 折扣窗口的可读说明（`discountWindowLabel`）；没有时变价时缺省。 */
   priceWindow?: string
   /** 窗口此刻是否开着：徽标据此换色，开着才算「现在就是这个价」。 */
@@ -133,6 +135,8 @@ interface ModelRowProps {
   /** 供应商维度的当前余额/积分；缺省表示上游没有这份数据 */
   credits: Record<string, ChannelCredits | 'loading'>
   onToggleServed: (model: ModelInfo, served: boolean) => void
+  /** 模型管理页的「重点」开关；与能力标注独立 */
+  onToggleKeyModel: (model: ModelInfo, enabled: boolean) => void
   /** 这一行正在测试 */
   testing: boolean
   /** 任何一行在测试：同一时刻只放一条真实请求出去 */
@@ -198,6 +202,7 @@ const ModelRow = memo(({
   t,
   credits,
   onToggleServed,
+  onToggleKeyModel,
   testing,
   testBusy,
   testResult,
@@ -363,6 +368,29 @@ const ModelRow = memo(({
           <span className="text-sm text-muted-foreground">-</span>
         )}
       </TableCell>
+      {/* 重点是独立的派发意图开关，不进「标注」对话框：标注回答「能做什么」，
+          这里回答「要不要给它硬配额」。只有供应商目录里的模型能标，别名没有落点。 */}
+      <TableCell>
+        <Button
+          variant="ghost"
+          size="sm"
+          className={cn('h-7 px-2', model.keyModel === true && 'text-warning')}
+          disabled={model.source === undefined}
+          title={model.source === undefined
+            ? t('models.keyModelUnavailableHint')
+            : t('models.keyModelHint')}
+          onClick={(event) => {
+            event.stopPropagation()
+            onToggleKeyModel(model, model.keyModel !== true)
+          }}
+        >
+          <Star
+            className="mr-1.5 h-3.5 w-3.5"
+            {...(model.keyModel === true ? { fill: 'currentColor' } : {})}
+          />
+          {model.keyModel === true ? t('models.keyModelOn') : t('models.keyModelOff')}
+        </Button>
+      </TableCell>
       <TableCell>
         <div className="flex items-center gap-2">
           {(model.source !== undefined || model.alias !== undefined) && (
@@ -472,6 +500,8 @@ export function ModelList() {
   const [costClasses, setCostClasses] = useState<Record<string, AggregateCostClass>>({})
   /** providerId -> 展示名 -> 手工标注：倍率/免费按 manual > 渠道目录 合并 */
   const [modelMarks, setModelMarks] = useState<Record<string, Record<string, ModelCapabilityHint>>>({})
+  /** 模型管理页的「重点」名单：派发意图，与能力标注分开存、分开展示 */
+  const [keyModels, setKeyModels] = useState<KeyModels>({})
 
   /** `<provider>/<model>` -> 目录是否声明接受图片；缺失表示没有这份信息 */
   const [modalityFlags, setModalityFlags] = useState<Record<string, boolean>>({})
@@ -668,6 +698,21 @@ export function ModelList() {
     }
   }, [modelsLastUpdated])
 
+  /** 重点名单单独读：它不是能力标注，不能靠 getModelMarks 带回来。 */
+  useEffect(() => {
+    const api = window.electronAPI?.providers
+    if (!api?.getKeyModels) return
+    let cancelled = false
+    api.getKeyModels()
+      .then(table => {
+        if (!cancelled) setKeyModels(table)
+      })
+      .catch(error => console.error('Failed to load key models:', error))
+    return () => {
+      cancelled = true
+    }
+  }, [modelsLastUpdated])
+
   /**
    * 余额/积分是**渠道级**数据，不是模型级：走渠道包的 `credits.balances`。
    * 没有账号的渠道不查；查不到（不支持/未登录/超时）就不显示上标，也不写 0。
@@ -808,6 +853,8 @@ export function ModelList() {
                 priceWindowOpen: isDiscountWindowActive(price.window, priceClock),
               },
           weightManual: manual?.weight !== undefined,
+          // 重点来自独立名单，不再从能力标注里读；两者互不覆盖。
+          keyModel: keyModels[provider.id]?.includes(model.displayName) === true,
           weightApplicable: provider.type === 'account',
           costClass,
           costBucket,
@@ -842,7 +889,7 @@ export function ModelList() {
     }
     
     return models
-  }, [providers, accounts, modelMappings, catalogueMap, freeFlags, weightFlags, priceFlags, modalityFlags, modelMarks, costClasses, priceClock, t])
+  }, [providers, accounts, modelMappings, catalogueMap, freeFlags, weightFlags, priceFlags, modalityFlags, modelMarks, keyModels, costClasses, priceClock, t])
   
   const filteredModels = useMemo(() => {
     let filtered = modelList
@@ -997,6 +1044,33 @@ export function ModelList() {
   const handleToggleServed = useCallback((model: ModelInfo, served: boolean) => {
     changeServed([model], served)
   }, [changeServed])
+
+  /** 重点开关：只改独立的 `keyModels` 表，不经过任何能力标注对话框。 */
+  const handleToggleKeyModel = useCallback(async (model: ModelInfo, enabled: boolean) => {
+    const api = window.electronAPI?.providers
+    if (!api?.setKeyModel) {
+      toast({ title: t('common.error'), description: t('models.keyModelChangeFailed'), variant: 'destructive' })
+      return
+    }
+    try {
+      const result = await api.setKeyModel(model.providerId, model.name, enabled)
+      if (!result.success) {
+        toast({
+          title: t('common.error'),
+          description: result.error || t('models.keyModelChangeFailed'),
+          variant: 'destructive',
+        })
+        return
+      }
+      setKeyModels(result.keyModels)
+    } catch (error) {
+      toast({
+        title: t('common.error'),
+        description: error instanceof Error ? error.message : t('models.keyModelChangeFailed'),
+        variant: 'destructive',
+      })
+    }
+  }, [t, toast])
 
   /**
    * 一次「测试」= 一条最小真实请求。别名行把名字交给主进程按映射表解析落点，
@@ -1381,6 +1455,7 @@ export function ModelList() {
                     <TableHead>{t('models.modelName')}</TableHead>
                     <TableHead>{t('models.provider')}</TableHead>
                     <TableHead>{t('models.account')}</TableHead>
+                    <TableHead title={t('models.keyModelHint')}>{t('models.keyModel')}</TableHead>
                     <TableHead>{t('models.status')}</TableHead>
                     <TableHead>{t('models.testModel')}</TableHead>
                   </TableRow>
@@ -1395,6 +1470,7 @@ export function ModelList() {
                       t={t}
                       credits={credits}
                       onToggleServed={handleToggleServed}
+                      onToggleKeyModel={handleToggleKeyModel}
                       testing={testingModelId === model.id}
                       testBusy={testingModelId !== null}
                       {...(testResults[model.id] === undefined ? {} : { testResult: testResults[model.id] })}

@@ -20,6 +20,7 @@ import { modelMapper } from '../modelMapper'
 import { autoRouter, AUTO_SKIPPED_REPORT_LIMIT, describeTransientCause, summarizeTransientSkips } from '../autoRouter'
 import { accountAffinityKey } from '../accountAffinity'
 import { cacheMissLedger } from '../cacheMissLedger'
+import { coldResumeTrace } from '../coldResumeTrace'
 import {
   compactionTurnOf,
   type CompactionTurn,
@@ -32,6 +33,7 @@ import { promptCacheOf } from '../../../shared/promptCache'
 import type { AutoCandidate, AutoRouteDecision } from '../autoRouter'
 import { profileRequest } from '../autoRouting'
 import { applyVisionRelay, routeDecisionNeedsVisionRelay } from '../visionRelay'
+import { normalizeVisionRelay } from '../../../shared/visionRelayConfig.ts'
 import { resolveRouteRequest, routePoolBreakMessage } from '../../store/modelRoutes'
 import type {
   AutoAttemptFailure,
@@ -480,6 +482,27 @@ function meterQuota(
     now: requestStartedAt,
   })
 
+  // 纯观测旁路：只记录丢锚现场，绝不参与任何判决或改写请求。
+  // 这里刻意吞异常——诊断失败不能改变这次请求的结果；项目规则禁止吞异常，
+  // 唯一例外就是这种不产生任何值的旁路观测。
+  if (missReading?.idleGap !== undefined && (missReading.detail?.coldResumed ?? 0) > 0) {
+    try {
+      coldResumeTrace.append({
+        at: requestStartedAt,
+        providerId: provider.id,
+        accountId,
+        modelId,
+        ...(missConversationKey === undefined ? {} : { conversationKey: missConversationKey }),
+        prevPromptTokens: missReading.prevPromptTokens ?? 0,
+        promptTokens: reading.promptTokens,
+        idleGap: missReading.idleGap,
+        missTokens: Math.max(0, reading.promptTokens - (reading.cacheReadTokens ?? 0)),
+      })
+    } catch {
+      // 观测失败不影响请求，这是有意的静默。
+    }
+  }
+
   try {
     storeManager.recordTokenUsage({
       promptTokens: reading.promptTokens,
@@ -491,6 +514,7 @@ function meterQuota(
       cacheReadReported: reading.cacheReadReported,
       providerId: provider.id,
       modelId,
+      accountId,
       costUsd: estimateRequestCost(provider, modelId, reading),
       ...(compression === undefined ? {} : { compression }),
       ...(missReading === undefined
@@ -1383,6 +1407,23 @@ router.post('/completions', async (ctx: Context) => {
         code: 'no_available_model',
         // 被钉住的模型挡下这一轮时，缺的能力来自那颗钉而不是整池：不单说一句，
         // 客户端只能读到「这条路由没有可用模型」，而用户明明固定了一个模型。
+        ...(() => {
+          // 带图请求踩到视觉硬过滤却没进两段式时，把「为什么没进」写进错误体：
+          // 开关关 / 没有读图器 / 点名不中或转述失败过去都只是静默跳过，客户端只看到
+          // 一句 vision required，用户无从知道该开哪一道门。这里只报可证事实：
+          // 配置态能从 normalizeVisionRelay 读到，hop 成没成不重复推断。
+          if (!routeDecisionNeedsVisionRelay(autoDecision)) return {}
+          const settings = normalizeVisionRelay(config.visionRelay)
+          if (settings === undefined || !settings.enabled) {
+            return { vision_relay: { skipped: 'disabled' } }
+          }
+          return {
+            vision_relay: {
+              skipped: settings.reader === undefined ? 'no_usable_free_reader' : 'reader_failed_or_not_found',
+              ...(settings.reader === undefined ? {} : { reader: settings.reader }),
+            },
+          }
+        })(),
         details: autoDecision.pinBlocked !== undefined
           ? { pin: autoDecision.pinBlocked.displayName, missing: autoDecision.pinBlocked.missing }
           : autoDecision.missing.length > 0
@@ -1466,6 +1507,7 @@ router.post('/completions', async (ctx: Context) => {
     clientUserAgent: ctx.headers['user-agent'],
     ...(missConversationKey === undefined ? {} : { sessionKey: missConversationKey }),
     ...(clientSession === undefined ? {} : { clientSession }),
+    ...(autoDecision === null ? {} : { routeName: autoDecision.routeName }),
   }
 
   proxyStatusManager.recordRequestStart(request.model, provider.id, account.id)

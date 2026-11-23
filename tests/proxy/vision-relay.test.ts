@@ -170,6 +170,24 @@ test('读图器链：免费 + vision 才算；套餐内剔除；同模型去重�
   assert.equal(chain.some(reader => reader.displayName === 'zai_api/glm-4.7-flash'), false)
 })
 
+test('设置页下拉：includePaid 列出全部视觉候选，免费标记仍由自动链判据给出', () => {
+  const free = candidate({ providerId: 'zai_api', displayName: 'zai_api/glm-4.6v-flash', actualModelId: 'glm-4.6v-flash' })
+  const paid = candidate({ providerId: 'zai_api', displayName: 'zai_api/glm-4.6v', actualModelId: 'glm-4.6v', costBucket: 'above-base', costClass: 'priced' })
+  const noVision = candidate({ providerId: 'zai_api', displayName: 'zai_api/glm-4.7-flash', actualModelId: 'glm-4.7-flash', thirdPartyHint: { modalities: ['text'] } })
+  const auto = relayReaderChainOf([paid, free, noVision])
+  const all = relayReaderChainOf([paid, free, noVision], undefined, { includePaid: true })
+  assert.deepEqual(auto.map(reader => reader.displayName), ['zai_api/glm-4.6v-flash'])
+  // 下拉包含付费候选；排序仍按既有证据秩（免费官方证据优先），不改主链口径
+  assert.deepEqual(new Set(all.map(reader => reader.displayName)), new Set(['zai_api/glm-4.6v', 'zai_api/glm-4.6v-flash']))
+  const freeNames = new Set(auto.map(reader => reader.displayName))
+  assert.deepEqual(
+    all.map(reader => freeNames.has(reader.displayName) ? undefined : reader.displayName).filter(Boolean),
+    ['zai_api/glm-4.6v'],
+  )
+  // 非视觉模型无论哪个口径都不能进下拉
+  assert.equal(all.some(reader => reader.displayName === 'zai_api/glm-4.7-flash'), false)
+})
+
 test('显式读图器：点名优先、必须是 vision=yes、失败不换家', () => {
   const official = candidate({ providerId: 'zai_api', displayName: 'zai_api/glm-4.6v-flash', actualModelId: 'glm-4.6v-flash' })
   const paid = candidate({ providerId: 'zai_api', displayName: 'zai_api/glm-4.6v', actualModelId: 'glm-4.6v', costBucket: 'above-base', costClass: 'priced' })

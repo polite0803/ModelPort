@@ -22,9 +22,19 @@ import type {
   ModelScope,
   RouteModelRating,
   RouteModelRef,
+  RouteModelWeight,
   WriteToolTier,
 } from '../../shared/types.ts'
-import { isAutoPoolStrategyId, AUTO_MODEL_TIERS, FAIRNESS_LEAD_MAX, MODEL_SCOPES, ROUTE_RATING_MAX_STARS, WRITE_TOOL_TIERS } from '../../shared/types.ts'
+import {
+  AUTO_MODEL_TIERS,
+  DEFAULT_UNLISTED_SHARE,
+  FAIRNESS_LEAD_MAX,
+  isAutoPoolStrategyId,
+  MAX_MODEL_WEIGHT_SHARE,
+  MODEL_SCOPES,
+  ROUTE_RATING_MAX_STARS,
+  WRITE_TOOL_TIERS,
+} from '../../shared/types.ts'
 import { normalizeAutoRoutingConfig } from './autoRoutingConfig.ts'
 import type { ModelRouteError } from '../../shared/modelRouteName.ts'
 import {
@@ -156,6 +166,44 @@ export function normalizeRouteModelRatings(input: unknown): RouteModelRating[] {
 }
 
 /**
+ * 归一硬比例配额表。非法条目整条丢弃（与手工增删/星级同口径），份额只认
+ * 大于 0、不超过上限的有限数：0 或负数没有配额语义，NaN/Infinity 会让缺陷
+ * 排序全是 NaN。同名模型保留首次出现的份额，避免手写配置里两条互相打架。
+ */
+export function normalizeRouteModelWeights(input: unknown): RouteModelWeight[] {
+  if (!Array.isArray(input)) return []
+
+  const out: RouteModelWeight[] = []
+  const seen = new Set<string>()
+  for (const entry of input as unknown[]) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+    const rawProvider = (entry as { providerId?: unknown }).providerId
+    const rawName = (entry as { displayName?: unknown }).displayName
+    const rawShare = (entry as { share?: unknown }).share
+    if (typeof rawProvider !== 'string' || typeof rawName !== 'string') continue
+    const providerId = rawProvider.trim()
+    const displayName = rawName.trim()
+    if (providerId.length === 0 || displayName.length === 0) continue
+    if (typeof rawShare !== 'number' || !Number.isFinite(rawShare)
+      || rawShare <= 0 || rawShare > MAX_MODEL_WEIGHT_SHARE) continue
+
+    const key = `${providerId.toLowerCase()}\u0000${displayName.toLowerCase()}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({ providerId, displayName, share: rawShare })
+    if (out.length >= MAX_MANUAL_MODEL_REFS) break
+  }
+  return out
+}
+
+/** 未列入份额：缺省不落键，0 是合法值（只在重点模型全挂时回退）。 */
+export function normalizeUnlistedShare(input: unknown): number | undefined {
+  if (typeof input !== 'number' || !Number.isFinite(input)
+    || input < 0 || input > MAX_MODEL_WEIGHT_SHARE) return undefined
+  return input
+}
+
+/**
  * 写入侧的模型引用校验（`pinModels` / `includeModels` / `excludeModels` 同一口径）：
  * 只校验**结构**，不校验模型是否还存在。
  *
@@ -218,6 +266,50 @@ export function checkRouteModelRatings(input: unknown): ModelRouteError | undefi
 }
 
 /**
+ * 写入侧的硬比例配额校验。份额是「真实改变下一轮派谁」的配置，静默丢弃
+ * 会让用户以为配额生效了却没有，因此与星级同口径：非法值返回可读错误。
+ */
+export function checkRouteModelWeights(input: unknown): ModelRouteError | undefined {
+  if (input === undefined) return undefined
+  if (!Array.isArray(input)) {
+    return { code: 'invalid_input', message: `Route field 'modelWeights' must be an array` }
+  }
+  for (const entry of input as unknown[]) {
+    const providerId = (entry as { providerId?: unknown } | null)?.providerId
+    const displayName = (entry as { displayName?: unknown } | null)?.displayName
+    const share = (entry as { share?: unknown } | null)?.share
+    if (typeof providerId !== 'string' || providerId.trim().length === 0
+      || typeof displayName !== 'string' || displayName.trim().length === 0) {
+      return {
+        code: 'invalid_input',
+        message: `Route field 'modelWeights' entries need a non-empty providerId and displayName`,
+      }
+    }
+    if (typeof share !== 'number' || !Number.isFinite(share)
+      || share <= 0 || share > MAX_MODEL_WEIGHT_SHARE) {
+      return {
+        code: 'invalid_input',
+        message: `Route field 'modelWeights' share must be a finite number in (0, ${MAX_MODEL_WEIGHT_SHARE}]`,
+      }
+    }
+  }
+  return undefined
+}
+
+/** 未列入份额：0 合法，NaN/Infinity/越界报错（返回 undefined 表示没配）。 */
+export function checkUnlistedShare(input: unknown): ModelRouteError | undefined {
+  if (input === undefined) return undefined
+  if (typeof input !== 'number' || !Number.isFinite(input)
+    || input < 0 || input > MAX_MODEL_WEIGHT_SHARE) {
+    return {
+      code: 'invalid_input',
+      message: `Route field 'unlistedShare' must be a finite number in [0, ${MAX_MODEL_WEIGHT_SHARE}] (default ${DEFAULT_UNLISTED_SHARE})`,
+    }
+  }
+  return undefined
+}
+
+/**
  * 逐条归一：per-route 字段一律走既有的 `normalizeAutoRoutingConfig`，
  * 保持与 legacy **同一兜底**（maxAttempts 1–5、stickyMinutes 0–1440、
  * 未知 prefer→balanced、非法 pool strategy id 剔除、undefined→出厂默认）。
@@ -271,6 +363,9 @@ function normalizeRouteFields(name: string, entry: Record<string, unknown>, opti
   )[0]
   // 星级推荐：空列表不落键（与 `preferredModel` 同形），盘上每条路由才不多出这一格。
   const modelRatings = normalizeRouteModelRatings(entry.modelRatings)
+  // 硬比例配额：空列表表示「没配配额」，回到 score → fairnessLead 原路径。
+  const modelWeights = normalizeRouteModelWeights(entry.modelWeights)
+  const unlistedShare = normalizeUnlistedShare(entry.unlistedShare)
 
   return {
     name,
@@ -290,6 +385,8 @@ function normalizeRouteFields(name: string, entry: Record<string, unknown>, opti
     ...(writeToolTier === undefined ? {} : { writeToolTier }),
     ...(preferredModel === undefined ? {} : { preferredModel }),
     ...(modelRatings.length === 0 ? {} : { modelRatings }),
+    ...(modelWeights.length === 0 ? {} : { modelWeights }),
+    ...(unlistedShare === undefined ? {} : { unlistedShare }),
     // 只在显式关掉时落键：缺省即硬钉（见 `ModelRoute.stickyHardPin`）。把「没配」也归一成
     // `true` 会让盘上每条路由多出这一格，而读侧两处判断（`!== false`）本来就同形。
     ...(entry.stickyHardPin === false ? { stickyHardPin: false } : {}),
@@ -793,6 +890,14 @@ export function validateRoutesForWrite(
     if (ratingError !== undefined) {
       errors.push(`routes.${name}: ${ratingError.message}`)
     }
+    const weightError = checkRouteModelWeights(record.modelWeights)
+    if (weightError !== undefined) {
+      errors.push(`routes.${name}: ${weightError.message}`)
+    }
+    const unlistedError = checkUnlistedShare(record.unlistedShare)
+    if (unlistedError !== undefined) {
+      errors.push(`routes.${name}: ${unlistedError.message}`)
+    }
     if (record.modelScope !== undefined
       && record.modelScope !== 'single'
       && record.modelScope !== 'family'
@@ -883,6 +988,10 @@ export function mergeRouteTables(
           // 空数组表示用户清空了它 —— 这两种必须能区分。
           includeModels: route.includeModels ?? previous.includeModels,
           excludeModels: route.excludeModels ?? previous.excludeModels,
+          // 配额是整表替换：`modelWeights: []` 明确表示清掉配额，省略才是沿用。
+          // 用 `in` 而不是 `??`，否则空数组/显式 undefined 都捞回旧配额，清不掉。
+          ...('modelWeights' in route ? { modelWeights: route.modelWeights } : {}),
+          ...('unlistedShare' in route ? { unlistedShare: route.unlistedShare } : {}),
         }
   }
 

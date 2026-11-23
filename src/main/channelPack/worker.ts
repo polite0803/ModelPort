@@ -116,7 +116,12 @@ const attachments = {
     const id = randomUUID()
     const path = join(attachmentDir, `${id}.${IMAGE_EXT[input.mediaType] ?? 'bin'}`)
     await writeFile(path, input.data)
-    return { id, mediaType: input.mediaType, path }
+    // ⚠️ vendor 渠道包按 `attachment.attachmentId` 键控图片引用（openai-compat.ts
+    // 的 collectImages、minimax/gemini-messages 的内联都读这个字段）。真实 DSH
+    // 附件服务的返回形状是 `{ attachmentId, mediaType, … }`；只返回 `id` 会让
+    // 收集侧永远拿不到引用 ⇒ 适配器抛「图片未能内联」（1.8.39 实测，走账号
+    // 渠道的带图请求 100% 失败）。`path` 是本桥自有的读回通道，一并保留。
+    return { attachmentId: id, id, mediaType: input.mediaType, path }
   },
   async readImage(ref: unknown) {
     const descriptor = ref as { path?: string; mediaType?: string }

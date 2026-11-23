@@ -202,6 +202,16 @@ export interface ModelCapabilityHint {
   free?: boolean
 }
 
+/**
+ * 模型管理页的「重点」名单：`providerId -> displayName[]`。
+ *
+ * 这不是能力标注，不进 `ModelCapabilityHint` / `userModelMarks` —— 标注回答
+ * 「这个模型能做什么」，重点回答「网关应该把多少派发留给这个模型」，两者来源和
+ * 撤销语义都不同（标注错了改一格，重点不需要理由，随时可翻）。它只决定路由内
+ * 硬比例配额：当前可用的重点模型等分 100-unlistedShare，其余共享残额。
+ */
+export type KeyModels = Record<string, string[]>
+
 /** Where one resolved capability field came from, highest evidence first. */
 export type CapabilitySource =
   | 'manual'
@@ -267,6 +277,19 @@ export const ROUTE_RATING_MAX_STARS = 5
 export interface RouteModelRating extends RouteModelRef {
   /** 1–5 的整数；清除评分 = 删掉这一条，而不是写 0。 */
   stars: number
+}
+
+/**
+ * 路由内硬比例配额的一条：这个模型在 30 分钟派发窗口里应占的相对份额。
+ *
+ * `share` 是相对数，不是成本倍率（`RankCandidate.weight`）—— 5 个模型各写 16、
+ * 未列入的候选共享 20，总份数就是 100，读数恰好等于百分比。份额只在**可用**
+ * 的重点模型之间归一化；某个重点模型冷却/硬筛掉时它的份额由其余重点模型按
+ * 原比例吸收，未列入的候选始终保持 `unlistedShare` 那份。
+ */
+export interface RouteModelWeight extends RouteModelRef {
+  /** 大于 0、不大于 `MAX_MODEL_WEIGHT_SHARE` 的有限数。 */
+  share: number
 }
 
 /** 空池原因。前四个是请求画像缺能力，后两个是路由配置把池筛光。 */
@@ -463,6 +486,17 @@ export const DEFAULT_FAIRNESS_LEAD = 2
 export const FAIRNESS_LEAD_MAX = 20
 
 /**
+ * 路由内硬比例配额：未列入 `modelWeights` 的候选共享的份额。
+ *
+ * 取 20 而不是 0：一条路由的备用/0 额度渠道不能因为一次权重配置就永久零流量，
+ * 额度恢复后才可能重新接单；重点模型全部不可用时，这份份额自动放大到 100%。
+ */
+export const DEFAULT_UNLISTED_SHARE = 20
+
+/** 单个模型份额的上限；只防手滑写进超出量级的数，不参与归一化。 */
+export const MAX_MODEL_WEIGHT_SHARE = 1000
+
+/**
  * One named route the caller can ask for instead of a model.
  *
  * A route is a *request-time pool decision*, not a membership list: the pool is
@@ -635,6 +669,25 @@ export interface ModelRoute {
    * 缺省（不落键）= 没有任何评分；空数组归一时同样不落键。
    */
   modelRatings?: RouteModelRating[]
+  /**
+   * 路由内按模型硬比例派发的份额表（`routes:update` 写入）。
+   *
+   * 与 `modelRatings` 是两件事：星级是纯标注，份额会真的改变下一轮派谁。
+   * 与 `fairnessLead` 也不同：那是全池统一的轮转窗口，这里是按模型指定的目标
+   * 占比，用 30 分钟滚动窗口的派发账本做缺陷纠偏（欠得最多的先派）。配置后
+   * `fairnessLead` 与本路由的硬粘性提升都让位给配额，`preferredModel` 硬钉仍
+   * 优先（那是用户明示的单模型独占）。冷却、能力硬筛、契约过滤仍先生效 ——
+   * 配额只决定**可用候选之间**的占比，不会把一个不该派的模型拉回来。
+   *
+   * 缺省（不落键）= 不启用配额，走原有「分数 → fairnessLead 轮转」路径；
+   * 空数组归一后同样不落键。
+   */
+  modelWeights?: RouteModelWeight[]
+  /**
+   * 未列入 `modelWeights` 的候选共享的份额，缺省 `DEFAULT_UNLISTED_SHARE`（20）。
+   * 0 表示只在重点模型全部不可用时才回退；范围 0..MAX_MODEL_WEIGHT_SHARE。
+   */
+  unlistedShare?: number
 }
 
 /** 一轮请求内的模型换家范围（见 `ModelRoute.modelScope`）。 */

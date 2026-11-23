@@ -43,6 +43,18 @@ export function dispatchKeyOf(providerId: string, actualModel: string): string {
   return `${providerId}\u0000${actualModel}`
 }
 
+/**
+ * 路由作用域前缀。硬比例配额要数「这条路由自己派了几次」，但全池公平轮转仍要数
+ * 所有路由的合计。两套账共用一个桶表，用前缀隔开；`snapshot(route)` 只返回该前缀的
+ * 读数，并把前缀剥掉，键口径因此仍是 `dispatchKeyOf(providerId, actualModel)`。
+ */
+const ROUTE_SCOPE_PREFIX = '\u0001route\u0001'
+
+function scopedKeyOf(providerId: string, actualModel: string, route?: string): string {
+  const base = dispatchKeyOf(providerId, actualModel)
+  return route === undefined || route === '' ? base : `${ROUTE_SCOPE_PREFIX}${route}\u0000${base}`
+}
+
 /** `snapshot()` 的读数：窗口内每键派发次数与总数 */
 export interface DispatchSnapshot {
   counts: Map<string, number>
@@ -67,8 +79,8 @@ class DispatchLedger {
    * O(1)：不排序、不扫描。出窗的桶交给 `snapshot()` 摘 —— 一个不再被派发的模型
    * 不该靠写路径清自己的历史，而高并发下写比读频繁得多。
    */
-  record(providerId: string, actualModel: string, now: number = Date.now()): void {
-    const key = dispatchKeyOf(providerId, actualModel)
+  record(providerId: string, actualModel: string, now: number = Date.now(), route?: string): void {
+    const key = scopedKeyOf(providerId, actualModel, route)
     let perKey = this.buckets.get(key)
     if (perKey === undefined) {
       this.boundTable(now)
@@ -84,11 +96,19 @@ class DispatchLedger {
    *
    * 每请求读一遍（`collectCandidates` 取一次），逐候选读会让一次选号扫一遍全表。
    */
-  snapshot(now: number = Date.now()): DispatchSnapshot {
+  snapshot(now: number = Date.now(), route?: string): DispatchSnapshot {
     const from = now - DISPATCH_WINDOW_MS
+    const scope = route === undefined || route === ''
+      ? undefined
+      : `${ROUTE_SCOPE_PREFIX}${route}\u0000`
     const counts = new Map<string, number>()
     let total = 0
     for (const [key, perKey] of this.buckets) {
+      if (scope !== undefined) {
+        if (!key.startsWith(scope)) continue
+      } else if (key.startsWith(ROUTE_SCOPE_PREFIX)) {
+        continue
+      }
       let sum = 0
       for (const [bucketStart, hitCount] of perKey) {
         if (bucketStart < from) perKey.delete(bucketStart)
@@ -98,7 +118,7 @@ class DispatchLedger {
         this.buckets.delete(key)
         continue
       }
-      counts.set(key, sum)
+      counts.set(scope === undefined ? key : key.slice(scope.length), sum)
       total += sum
     }
     return { counts, total }
@@ -109,10 +129,24 @@ class DispatchLedger {
     this.buckets.clear()
   }
 
+  /**
+   * 摘掉全表（含路由作用域）出窗的桶。不能复用 `snapshot(now)`：它按调用方的
+   * 作用域过滤，全局快照看不到路由键，那些键就再也没机会自己过期了。
+   */
+  private pruneAll(now: number): void {
+    const from = now - DISPATCH_WINDOW_MS
+    for (const [key, perKey] of this.buckets) {
+      for (const bucketStart of perKey.keys()) {
+        if (bucketStart < from) perKey.delete(bucketStart)
+      }
+      if (perKey.size === 0) this.buckets.delete(key)
+    }
+  }
+
   /** 新键入场前的表大小闸门：先摘窗口内已空的，仍满才按插入序摘最旧 */
   private boundTable(now: number): void {
     if (this.buckets.size < MAX_LEDGER_KEYS) return
-    this.snapshot(now)
+    this.pruneAll(now)
     if (this.buckets.size < MAX_LEDGER_KEYS) return
     const oldest = this.buckets.keys().next()
     if (!oldest.done) this.buckets.delete(oldest.value)

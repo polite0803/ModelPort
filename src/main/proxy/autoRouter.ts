@@ -13,6 +13,7 @@
  */
 
 import { storeManager } from '../store/store'
+import { isKeyModel } from '../store/keyModels.ts'
 import type { CacheAffinityMap } from '../store/cacheAffinity'
 import { accountChannelManager } from '../providers/accountChannels/manager'
 import { resolvePoolRoute } from '../store/modelRoutes'
@@ -40,7 +41,7 @@ import type {
   RouteSwitchRequest,
   RouteSwitchResult,
 } from '../../shared/types'
-import { DEFAULT_FAIRNESS_LEAD } from '../../shared/types'
+import { DEFAULT_FAIRNESS_LEAD, DEFAULT_UNLISTED_SHARE } from '../../shared/types'
 import type { ChatCompletionRequest } from './types'
 import type { CatalogAdoption } from '../../shared/modelCatalog.ts'
 import { adoptionsForModel, catalogAdoptionHint } from '../../shared/modelCatalog.ts'
@@ -81,6 +82,7 @@ import {
   type PoolStrategyCandidate,
   type RequestProfile,
   type StickyHint,
+  type WeightedDispatchOptions,
 } from './autoRouting'
 import {
   createQuotaGateContext,
@@ -227,6 +229,60 @@ export function modelFamilyKey(displayName: string): string {
  */
 export function modelRowKey(providerId: string, displayName: string): string {
   return `${providerId}\u0000${displayName.trim().toLowerCase()}`
+}
+
+/**
+ * 把「用户配置的模型份额 + 这条路由自己的派发读数」拼成排序层能用的入参。
+ *
+ * 账本按 `(providerId, actualModelId)` 记（与转发器实际发出的模型号一致），排序层
+ * 按展示名归一后的模型键读；这里只做一次映射。同一模型多账号共享一份模型欠债，
+ * 所以只取第一条候选的读数，不能按账号累加成几倍。
+ */
+function weightedDispatchOptionsFor(
+  route: ModelRoute,
+  candidates: readonly RankCandidateLike[],
+  now: number
+): WeightedDispatchOptions | undefined {
+  // 模型管理页的「重点」开关是默认来源：一处勾选，所有路由生效，代码里没有任何
+  // 模型白名单。这份名单与能力标注分开存；路由级 modelWeights 只是高级覆盖
+  // （比如给某个模型不等份额），清掉后又回到普通模型由 unlistedShare 兜底。
+  const configured = route.modelWeights
+  const shares = new Map<string, number>()
+  if (configured !== undefined && configured.length > 0) {
+    for (const item of configured) {
+      shares.set(modelRowKey(item.providerId, item.displayName), item.share)
+    }
+  } else {
+    const keyModels = storeManager.getKeyModels()
+    for (const candidate of candidates) {
+      if (!isKeyModel(keyModels, candidate.providerId, candidate.displayName)) continue
+      shares.set(modelRowKey(candidate.providerId, candidate.displayName), 1)
+    }
+  }
+  if (shares.size === 0) return undefined
+  // 「重点」是布尔开关，没有逐模型数字可填。残额之外的份额由所有重点模型等分：
+  // 默认 20% 残额 → 5 个重点各 16%，2 个重点各 40%。路由级 modelWeights 不在这里重算。
+  if (configured === undefined || configured.length === 0) {
+    const each = Math.max(0, 100 - (route.unlistedShare ?? DEFAULT_UNLISTED_SHARE)) / shares.size
+    for (const key of shares.keys()) shares.set(key, each)
+  }
+  const routeDispatches = dispatchLedger.snapshot(now, route.name)
+  const counts = new Map<string, number>()
+  for (const candidate of candidates) {
+    const key = modelRowKey(candidate.providerId, candidate.displayName)
+    if (counts.has(key)) continue
+    const count = routeDispatches.counts.get(
+      dispatchKeyOf(candidate.providerId, candidate.actualModelId ?? candidate.displayName)
+    )
+    if (count !== undefined) counts.set(key, count)
+  }
+  return { counts, shares, unlistedShare: route.unlistedShare ?? DEFAULT_UNLISTED_SHARE }
+}
+
+interface RankCandidateLike {
+  providerId: string
+  displayName: string
+  actualModelId?: string
 }
 
 export interface AutoRouteDecision {
@@ -946,12 +1002,17 @@ class AutoRouter {
 
   /**
    * 读图两段式（visionRelay）的候选采集：与选路同一个 `collectCandidates`，
-   * 不另造一套池判据。扣瞬时可用性（默认口径）——一个正在限流/额度打满的模型
-   * 不该被选去读图；`ignoreTransientAvailability` 留给「链上还有谁」的诊断展示。
+   * 不另造一套池判据。
+   *
+   * 默认扣瞬时可用性——正在限流/额度打满的模型不该被自动链选去读图。
+   * `ignoreTransientAvailability: true` 只给**用户显式点名**与设置页下拉用：
+   * 用户已经指名某模型时，它正在限流是「这一发可能失败」的事实，不是
+   * 「假装没有这个读图器」的理由（静默跳过会让两段式永远不触发，客户端
+   * 只收到 `vision required` 的 503，无从知道自己点名过什么）。
    */
-  relayCandidatePool(): PoolStrategyCandidate[] {
+  relayCandidatePool(options: { ignoreTransientAvailability?: boolean } = {}): PoolStrategyCandidate[] {
     const probe = { messages: [] } as unknown as ChatCompletionRequest
-    return this.collectCandidates(probe, Date.now()).rankInputs
+    return this.collectCandidates(probe, Date.now(), options).rankInputs
   }
 
   /**
@@ -1582,6 +1643,9 @@ class AutoRouter {
     // （账号故障类撞满 `baseCap`、墙钟 `AUTO_WALL_CLOCK_BUDGET_MS`）。以前这里是
     // `maxAttempts + AUTO_RECOVERABLE_EXTRA_ATTEMPTS` 家，等于在选号阶段就把池子
     // 砍到 6 家 —— 与「供应商只做配额/积分筛选，打分基于全池展开」直接冲突。
+    const weightedDispatch = route === undefined
+      ? undefined
+      : weightedDispatchOptionsFor(route, contractPool, now)
     const ranked = rankCandidates(profile, contractPool, {
       now,
       limit: contractPool.length,
@@ -1589,9 +1653,11 @@ class AutoRouter {
       strategy: effectiveStrategy,
       prefer,
       sticky,
-      // 份额轮转：分数决定的是轮转次序，不再是「谁能一直代表这家被派出」。
-      // `fairnessLead` 缺省 1（每个模型连发 2 次再换），0 = 严格轮流，取大 = 接近纯分数。
-      fairness: { lead: route?.fairnessLead ?? DEFAULT_FAIRNESS_LEAD },
+      // 配额与轮转互斥：配了 modelWeights 就按缺陷派发，`fairnessLead` 让位。
+      // 没有配额时保持原路径：分数决定轮转次序，缺省 1（每个模型连发 2 次再换）。
+      ...(weightedDispatch === undefined
+        ? { fairness: { lead: route?.fairnessLead ?? DEFAULT_FAIRNESS_LEAD } }
+        : { weightedDispatch }),
     })
 
     // 候选池非空却排不出结果时，说明缺的是某种能力，而不是没有供应商。钉收窄后
@@ -1641,7 +1707,9 @@ class AutoRouter {
     const latencyGateMs = poolLatencyGateMs(gatePool.length > 0 ? gatePool : ranked)
     const stickyGated = route?.stickyHardPin !== false
       && stickyLatencyExceeded(ranked, sticky, latencyGateMs)
-    const stickyOrdered = route?.stickyHardPin === false || stickyGated
+    // 配额按模型欠债决定队首；会话粘性如果还硬提升，同一会话会一直把刚派过的模型
+    // 拉回第一位，比例就永远收敛不了。显式硬钉（pinRef）仍在下一节优先，不受影响。
+    const stickyOrdered = weightedDispatch !== undefined || route?.stickyHardPin === false || stickyGated
       ? ranked
       : promoteSticky(ranked, sticky)
 

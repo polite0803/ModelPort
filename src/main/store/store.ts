@@ -34,6 +34,7 @@ import {
   UserModelOverrides,
   DEFAULT_USER_MODEL_MARKS,
   UserModelMarks,
+  DEFAULT_KEY_MODELS,
   DEFAULT_CATALOG_ADOPTIONS,
   CustomModel,
   FetchedModel,
@@ -92,6 +93,8 @@ import {
   checkPoolStrategyIds,
   checkRouteModelRatings,
   checkRouteModelRefs,
+  checkRouteModelWeights,
+  checkUnlistedShare,
   checkRouteName,
   findModelRoute,
   isRouteMinTierValue,
@@ -103,8 +106,9 @@ import {
   presetRouteFields,
   routesFromLegacyAutoRouting,
 } from './modelRoutes'
-import type { ModelCapabilityHint, ModelRoute } from '../../shared/types'
+import type { KeyModels, ModelCapabilityHint, ModelRoute } from '../../shared/types'
 import { normalizeModelMark } from './modelMarks'
+import { normalizeKeyModels } from './keyModels'
 import type {
   ModelRouteError,
   ModelRouteMutation,
@@ -156,6 +160,7 @@ const STRUCTURAL_KEYS = [
   'config',
   'userModelOverrides',
   'userModelMarks',
+  'keyModels',
   'catalogAdoptions',
 ] as const
 type StructuralKey = (typeof STRUCTURAL_KEYS)[number]
@@ -715,6 +720,7 @@ class StoreManager {
       tokenUsage: {},
       userModelOverrides: DEFAULT_USER_MODEL_OVERRIDES,
       userModelMarks: DEFAULT_USER_MODEL_MARKS,
+      keyModels: DEFAULT_KEY_MODELS,
       // 标准库 adoption 从空开始；升级安装没有「采用过哪一格」的历史。
       catalogAdoptions: DEFAULT_CATALOG_ADOPTIONS,
       // 实时额度快照从空开始：一次升级安装没有"上次问过谁"，闸门随之不参与（fail-open）。
@@ -2517,6 +2523,8 @@ class StoreManager {
     cacheMissTokens?: number
     /** 续轮丢锚距上一轮的间隔档。 */
     cacheMissIdleGap?: CacheMissIdleGap
+    /** 服务这一轮的账号 id；只写 coldResumed 的目标明细，不改任何命中口径。 */
+    accountId?: string
     nowMs?: number
   }): void {
     this.ensureInitialized()
@@ -2690,6 +2698,41 @@ class StoreManager {
     }
 
     this.store!.set('userModelMarks', next)
+    return next
+  }
+
+  /**
+   * 模型管理页「重点」名单（只读）。
+   *
+   * 与 `getUserModelMarks` 分开存储：标注是「模型能做什么」，重点是「派发要留多少
+   * 给它」。模型列表同步只碰 overrides / 目录，不会把用户翻过的重点开关冲掉。
+   */
+  getKeyModels(): KeyModels {
+    this.ensureInitialized()
+    return normalizeKeyModels(this.store!.get('keyModels') || DEFAULT_KEY_MODELS)
+  }
+
+  /** 翻动一行「重点」开关；`enabled=false` 是从名单里移除，不是写一条 false。 */
+  setKeyModel(providerId: string, displayName: string, enabled: boolean): KeyModels {
+    this.ensureInitialized()
+    if (typeof enabled !== 'boolean') throw new Error('enabled must be a boolean')
+    if (!this.getProviderById(providerId)) throw new Error(`Provider not found: ${providerId}`)
+    const name = typeof displayName === 'string' ? displayName.trim() : ''
+    if (name.length === 0) throw new Error('Model display name is required')
+    if (!this.getModelCatalogue(providerId).some(model => model.displayName === name)) {
+      throw new Error(`Model not in the catalogue of ${providerId}: ${name}`)
+    }
+
+    const current = this.getKeyModels()
+    const names = (current[providerId] ?? []).filter(existing => existing !== name)
+    if (enabled) names.push(name)
+    const next: KeyModels = { ...current }
+    if (names.length === 0) {
+      delete next[providerId]
+    } else {
+      next[providerId] = names
+    }
+    this.store!.set('keyModels', next)
     return next
   }
 

@@ -94,6 +94,8 @@ export interface BackupData {
   config?: Record<string, unknown>
   userModelOverrides?: Record<string, unknown>
   userModelMarks?: Record<string, unknown>
+  /** 模型管理页单独维护的「重点」名单，不与能力标注混存。 */
+  keyModels?: Record<string, unknown>
   catalogAdoptions?: unknown[]
   aggregateCreditSnapshots?: Record<string, unknown>
   statistics?: Record<string, unknown>
@@ -146,6 +148,7 @@ export interface BackupPreviewCounts {
   modelMappings: number
   apiKeys: number
   userModelMarks: number
+  keyModels: number
   channelAccounts: number
   requestLogs: number
   appLogs: number
@@ -329,6 +332,7 @@ export function summarizeBackup(
       modelMappings: Object.keys(asObject(config.modelMappings)).length,
       apiKeys: asArray(config.apiKeys).length,
       userModelMarks: Object.keys(asObject(data.userModelMarks)).length,
+      keyModels: Object.keys(asObject(data.keyModels)).length,
       channelAccounts: asArray(asObject(data.channels).accounts).length,
       requestLogs: asArray(data.requestLogs).length,
       appLogs: asArray(data.appLogs).length,

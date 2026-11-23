@@ -224,7 +224,8 @@ function relayEvidenceRank(candidate: PoolStrategyCandidate): number {
  */
 export function relayReaderChainOf(
   pool: readonly PoolStrategyCandidate[],
-  explicitReader?: string
+  explicitReader?: string,
+  options: { includePaid?: boolean } = {}
 ): RelayReader[] {
   const toReader = (candidate: PoolStrategyCandidate): RelayReader => ({
     providerId: candidate.providerId,
@@ -242,9 +243,12 @@ export function relayReaderChainOf(
       || `${candidate.providerId}/${candidate.actualModelId}`.toLowerCase() === wanted)
     return match === undefined ? [] : [toReader(match)]
   }
+  // 自动链仍只收免费模型（2026-11-19 拍板：绝不静默用付费模型）。设置页若想看
+  // 全部可点名的视觉模型，用 `includePaid: true`；成本门槛是拍板语义，不随
+  // `ignoreTransientAvailability` 这类诊断口径松动。
   const seen = new Set<string>()
   const deduped: PoolStrategyCandidate[] = []
-  for (const candidate of visionCapable.filter(isFreeRelayCandidate)) {
+  for (const candidate of visionCapable.filter(item => options.includePaid === true || isFreeRelayCandidate(item))) {
     const key = `${candidate.providerId}\u0000${candidate.displayName}`
     if (seen.has(key)) continue
     seen.add(key)
@@ -466,7 +470,13 @@ export async function applyVisionRelay(
   const images = collectRelayImages(request)
   if (images === null) return null
   const { autoRouter } = await import('./autoRouter.ts')
-  const chain = relayReaderChainOf(autoRouter.relayCandidatePool(), settings.reader)
+  // 显式点名时按「目录里有没有这个读图器」找，而不是按「它此刻是否限流」找：
+  // 用户已经承担了点名的代价，限流失败会落 probe 日志，但静默跳过只会让
+  // 客户端拿到一句 `vision required`，永远不知道两段式为什没跑。
+  const chain = relayReaderChainOf(
+    autoRouter.relayCandidatePool(settings.reader === undefined ? {} : { ignoreTransientAvailability: true }),
+    settings.reader,
+  )
   if (chain.length === 0) return null
 
   const deadline = Date.now() + RELAY_WALL_CLOCK_MS

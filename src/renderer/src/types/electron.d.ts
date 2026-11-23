@@ -32,6 +32,7 @@ import type {
   AppLogTrendPoint,
   ModelsFetchFailure,
   ModelCapabilityHint,
+  KeyModels,
   ModelListRefreshConfig,
   SchedulerTaskStatus,
   RoutePreviewResult,
@@ -248,6 +249,13 @@ interface ProvidersAPI {
   }>
   /** 全部手动标注，`providerId -> displayName -> hint`。 */
   getModelMarks: () => Promise<Record<string, Record<string, ModelCapabilityHint>>>
+  /** 模型管理页的「重点」名单，与能力标注分开存。 */
+  getKeyModels: () => Promise<KeyModels>
+  setKeyModel: (providerId: string, displayName: string, enabled: boolean) => Promise<{
+    success: boolean
+    keyModels: KeyModels
+    error?: string
+  }>
   /** 标准库逐字段采用台账（只读），行内回显批量补全结果用。 */
   getCatalogAdoptions: () => Promise<CatalogAdoption[]>
   /** `mark: null` 清除该模型的手动标注（回到自动解析结果）。 */

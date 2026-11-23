@@ -101,6 +101,9 @@ export const IpcChannels = {
   // 手工能力标注（vision/tools/reasoning/context/...），优先级高于所有自动标注
   PROVIDERS_GET_MODEL_MARKS: 'providers:getModelMarks',
   PROVIDERS_SET_MODEL_MARK: 'providers:setModelMark',
+  // 模型管理页的「重点」开关：独立的派发意图表，不进能力标注
+  PROVIDERS_GET_KEY_MODELS: 'providers:getKeyModels',
+  PROVIDERS_SET_KEY_MODEL: 'providers:setKeyModel',
   // 标准库逐字段采用台账：聚合页/渠道页回显批量补全结果（写入方是 modelCatalogService）
   PROVIDERS_GET_CATALOG_ADOPTIONS: 'providers:getCatalogAdoptions',
   // 元数据解析报表（覆盖率 + 待标注队列）与手动探测（打开页面不发起请求）
@@ -209,6 +212,8 @@ export const IpcChannels = {
   STATISTICS_GET_TOKEN_USAGE_DAYS: 'statistics:getTokenUsageDays',
   /** Requests per client (attributed name) per day; survives the request-log window. */
   STATISTICS_GET_CLIENT_USAGE: 'statistics:getClientUsage',
+  /** Read-only in-memory trace of recent coldResumed targets; empty after restart. */
+  DIAGNOSTICS_GET_COLD_RESUME_TRACE: 'diagnostics:getColdResumeTrace',
 
   APP_GET_VERSION: 'app:getVersion',
   APP_CHECK_UPDATE: 'app:checkUpdate',

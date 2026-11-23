@@ -17,6 +17,7 @@ import type {
   ModelRoute,
   AggregateWire,
   ModelCapabilityHint,
+  KeyModels,
   CompressionConfig,
   AnthropicInboundConfig,
   ModelListRefreshConfig,
@@ -807,6 +808,9 @@ export type UserModelMarks = Record<string, Record<string, ModelCapabilityHint>>
 
 export const DEFAULT_USER_MODEL_MARKS: UserModelMarks = {}
 
+/** 模型管理页的「重点」名单出厂为空；升级安装不替用户挑模型。 */
+export const DEFAULT_KEY_MODELS: KeyModels = {}
+
 /** 标准模型库 adoption 出厂为空：未采用任何第三方字段。 */
 export const DEFAULT_CATALOG_ADOPTIONS: CatalogAdoption[] = []
 
@@ -844,6 +848,14 @@ export interface StoreSchema {
   userModelOverrides: UserModelOverrides
   /** Manual capability corrections; merged on top of every automatic mark */
   userModelMarks: UserModelMarks
+  /**
+   * 模型管理页单独维护的「重点」名单。
+   *
+   * 与 `userModelMarks` 分开：标注描述模型能力（来源可以是目录/探针/人工），
+   * 重点是用户对派发经济的决定，只有这一处能写、一处能撤销。混在一张表里会让
+   * 「同步覆盖标注」和「切换重点」互相牵连，也会让标注页被迫解释一个非能力字段。
+   */
+  keyModels: KeyModels
   /**
    * 标准模型库的逐字段采用记录。
    *

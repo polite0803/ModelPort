@@ -54,18 +54,23 @@ export const CODEBUDDY_FALLBACK_VERSION = '5.11.3'
 /** 本机没有安装 Qoder、官网也取不到时的兜底值。 */
 export const QODER_FALLBACK_VERSION = '0.5.3'
 
-/** Trae 的兜底值（本机 Trae CN 1.107.1 的 product.json）。 */
-export const TRAE_FALLBACK_APP_VERSION = '3.4.15'
+/**
+ * Trae 的兜底值，取自 **官方最新稳定版 3.4.24** 安装包的 `resources/app/product.json`
+ * （2026-11-24 从 `https://api.trae.cn/icube/api/v1/native/version/trae/cn/latest`
+ * 查到的最新版，构建号 `2.3.106768`；包内 `vscodeVersion` 仍是 1.107.1）。
+ */
+export const TRAE_FALLBACK_APP_VERSION = '3.4.24'
 export const TRAE_FALLBACK_IDE_VERSION = '1.107.1'
 /**
- * 版本码兜底值 = 官方客户端的**构建日期**（`product.json.date` = 2026-11-03）。
+ * 版本码兜底值 = 官方客户端的**构建日期**（同一份 `product.json.date` =
+ * `2026-11-20T15:13:27.560Z`）。
  *
- * ⚠️ **不要用 `product.json.traeVersionCode`**（本机 20250325）：它是早已过期的
- * 常量，不是构建日期。上游按 `X-Ide-Version-Code` 卡客户端下限 —— 2026-11-09 实测
- * `20260810` 可用、`20260805` 被拒；低于下限时**所有模型**（含 glm-5.3-flash、
- * doubao-seed-code）一律回 `4001 param is invalid`，与具体模型无关。
+ * ⚠️ **不要用 `product.json.traeVersionCode`**（官方 3.4.24 里仍是 20250325）：
+ * 它是早已过期的常量，不是构建日期。上游按 `X-Ide-Version-Code` 卡客户端下限 ——
+ * 2026-11-09 实测 `20260810` 可用、`20260805` 被拒；低于下限时**所有模型**
+ * （含 glm-5.3-flash、doubao-seed-code）一律回 `4001 param is invalid`，与具体模型无关。
  */
-export const TRAE_FALLBACK_VERSION_CODE = '20261103'
+export const TRAE_FALLBACK_VERSION_CODE = '20261120'
 
 const VERSION_PATTERN = /^\d+(?:\.\d+){1,3}$/
 /** 日期式版本码（`20250325` / `20260811`），不是语义版本。 */
@@ -121,7 +126,7 @@ export function normalizeVersionCode(value: unknown): string | undefined {
 }
 
 /**
- * `product.json` 的 `build_time` / `date`（`2026-11-03T10:29:58.368Z`）→ `20261103`。
+ * `product.json` 的 `build_time` / `date`（`2026-11-20T15:13:27.560Z`）→ `20261120`。
  *
  * 官方工作台把 `build_time`（= `productService.date`）放进 common params 交给
  * native 层，`X-Ide-Version-Code` 就是这种「构建日期」形态（trae-mate 抓到的
@@ -280,7 +285,7 @@ export interface TraeClientIdentity {
  * Trae 现役客户端的身份字段。
  *
  * 官方工作台在 `productService.appVersion` 里读 `product.json` 的 `appVersion`
- * （本机 3.4.15），`X-Ide-Version` 与 `X-Ide-Version-Code` 由 native 从
+ * （官方 3.4.24），`X-Ide-Version` 与 `X-Ide-Version-Code` 由 native 从
  * common params 填入；`X-Device-Type` / `X-OS-Version` / `X-Device-Brand`
  * 分别来自运行时的 `os_name` / `os_version` / `device_model`（见
  * `workbench.desktop.main.js` 的 `icube.event.getCommonParams` 映射）。

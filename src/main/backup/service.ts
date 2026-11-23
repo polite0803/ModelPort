@@ -36,6 +36,7 @@ import type {
 import { DEFAULT_STATISTICS } from '../store/types.ts'
 import type { AppConfig } from '../store/types.ts'
 import { normalizeModelMark } from '../store/modelMarks.ts'
+import { normalizeKeyModels } from '../store/keyModels.ts'
 import {
   mergeById,
   mergeNamedTables,
@@ -149,6 +150,7 @@ async function collectBundle(options: BackupExportOptions): Promise<BackupBundle
     config: storeManager.getConfig() as unknown as Record<string, unknown>,
     userModelOverrides: sanitizeRecord(store.get('userModelOverrides')),
     userModelMarks: sanitizeRecord(store.get('userModelMarks')),
+    keyModels: sanitizeRecord(storeManager.getKeyModels()),
     catalogAdoptions: sanitizeObjectArray(store.get('catalogAdoptions')),
     aggregateCreditSnapshots: sanitizeRecord(store.get('aggregateCreditSnapshots')),
   }
@@ -371,6 +373,7 @@ function applyReplace(data: BackupData): void {
   storeManager.restoreConfig(data.config)
   store.set('userModelOverrides', sanitizeRecord(data.userModelOverrides))
   store.set('userModelMarks', normalizeMarksTable(sanitizeRecord(data.userModelMarks)))
+  store.set('keyModels', normalizeKeyModels(sanitizeRecord(data.keyModels)))
   store.set('catalogAdoptions', sanitizeObjectArray(data.catalogAdoptions))
   store.set('aggregateCreditSnapshots', sanitizeRecord(data.aggregateCreditSnapshots))
 
@@ -444,6 +447,14 @@ function applyMerge(data: BackupData): BackupSkippedBlock[] {
   const incomingOverrides = sanitizeRecord(data.userModelOverrides)
   if (Object.keys(incomingOverrides).length > 0) {
     store.set('userModelOverrides', { ...incomingOverrides, ...sanitizeRecord(store.get('userModelOverrides')) })
+  }
+  const incomingKeyModels = normalizeKeyModels(sanitizeRecord(data.keyModels))
+  if (Object.keys(incomingKeyModels).length > 0) {
+    const merged = { ...incomingKeyModels }
+    for (const [providerId, names] of Object.entries(storeManager.getKeyModels())) {
+      merged[providerId] = [...new Set([...(merged[providerId] ?? []), ...names])]
+    }
+    store.set('keyModels', merged)
   }
 
   const skipped: BackupSkippedBlock[] = []

@@ -61,6 +61,7 @@ import { relayReaderChainOf } from '../proxy/visionRelay'
 import { syncCodexCatalogs } from '../proxy/catalogSync'
 import type { ChannelAccountCounts, RoutePreviewResult, RoutePreviewSample } from '../proxy/autoRouter'
 import { proxyStatusManager } from '../proxy/status'
+import { coldResumeTrace } from '../proxy/coldResumeTrace'
 import { ConfigManager } from '../store/config'
 import { generateManagementSecret } from '../proxy/middleware/managementAuth'
 import { buildRequestDiagnosticBundle } from '../logging/diagnosticBundle'
@@ -525,15 +526,26 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
    * 视觉读图两段式的读图器候选链（只读，设置页下拉用）。
    *
    * 判据与 hop 同一份：`relayCandidatePool`（与选路同源采集）＋ `relayReaderChainOf`
-   * （vision=yes 且免费、官方证据优先、元路由最后）。设置页只展示名字，不在这里
-   * 造第二套免费/视觉判断；catalogue 变化后下拉下一次打开即刷新。
+   * （vision=yes、免费优先）。自动链仍只用免费模型（拍板语义），但下拉额外列出
+   * 付费视觉候选并打 `paid: true` —— 显式点名付费读图器是用户自己的选择（hop
+   * 走 probe 记账），若下拉看不到它们，自动链为空时两段式就无法被打通。
    */
   registerMainHandler(
     IpcChannels.VISION_RELAY_READERS,
-    async (): Promise<{ readers: Array<{ displayName: string; providerName: string }> }> => {
+    async (): Promise<{ readers: Array<{ displayName: string; providerName: string; paid?: boolean }> }> => {
       try {
-        const chain = relayReaderChainOf(autoRouter.relayCandidatePool())
-        return { readers: chain.map(reader => ({ displayName: reader.displayName, providerName: reader.providerName })) }
+        // 设置页要的是「目录里此刻能用的读图器」，不能因为某个模型正在限流就让它
+        // 从下拉消失；自动链的免费门槛仍在 `relayReaderChainOf` 里，这里不松动。
+        const pool = autoRouter.relayCandidatePool({ ignoreTransientAvailability: true })
+        const free = new Set(relayReaderChainOf(pool).map(reader => reader.displayName))
+        const readers = relayReaderChainOf(pool, undefined, { includePaid: true })
+        return {
+          readers: readers.map(reader => ({
+            displayName: reader.displayName,
+            providerName: reader.providerName,
+            ...(free.has(reader.displayName) ? {} : { paid: true }),
+          })),
+        }
       } catch (error) {
         console.error('[VisionRelay] failed to build reader chain:', error)
         return { readers: [] }
@@ -1293,6 +1305,27 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
           success: false,
           error: error instanceof Error ? error.message : 'Failed to set model mark',
           marks: storeManager.getUserModelMarks(),
+        }
+      }
+    }
+  )
+
+  registerMainHandler(IpcChannels.PROVIDERS_GET_KEY_MODELS, async () => {
+    return storeManager.getKeyModels()
+  })
+
+  registerMainHandler(
+    IpcChannels.PROVIDERS_SET_KEY_MODEL,
+    async (_, providerId: string, displayName: string, enabled: boolean) => {
+      try {
+        const keyModels = storeManager.setKeyModel(providerId, displayName, enabled)
+        return { success: true, keyModels }
+      } catch (error) {
+        console.error('[IPC] Failed to set key model:', error)
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to set key model',
+          keyModels: storeManager.getKeyModels(),
         }
       }
     }
@@ -2144,6 +2177,11 @@ export async function registerIpcHandlers(mainWindow: RendererSink | null): Prom
   // the user picks without another round trip.
   registerMainHandler(IpcChannels.STATISTICS_GET_TOKEN_USAGE_DAYS, async () => {
     return storeManager.getTokenUsageDays()
+  })
+
+  // 只读诊断环：进程内最近 128 次续轮丢锚的现场。不参与任何判决，重启即清空。
+  registerMainHandler(IpcChannels.DIAGNOSTICS_GET_COLD_RESUME_TRACE, async () => {
+    return coldResumeTrace.snapshot()
   })
 
   // ==================== 桌面专属通道 ====================

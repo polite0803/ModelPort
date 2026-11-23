@@ -845,3 +845,35 @@ health 200、`NRestarts=0`。基线 `/root/modelport-cache-baseline-2026-11-21T0
 后续轮次与压缩改写仍同键；既有 `tests/routes/routes-pool-and-sticky.test.ts` 的压缩粘性
 用例保持原样通过。完整 `npm run gate` 3288/3288 通过。**尚未部署**；部署后的同口径
 一小时差值才能判断命中率能否达到 99%。
+
+## 9.16 2026-11-22 续轮丢锚的目标回溯：两条纯观测通道
+
+**为什么**：`opencode_go::deepseek-v4.1-flash` 的 11-21 按天命中只有 88.40%（621 次），
+8.6M 未命中 token 中 `coldResumed=51` 独占 4.87M（57%），且 51 次全在 `under5m`。
+滚动请求日志只覆盖 11-22 13 时那一小时，那批证据已经滚掉，无法回答"是哪一次目标
+变化造成整段丢锚"。11-22 全天累计 93.95%，同日百炼同模型 97.98%，差距不是上游
+的物理上限。
+
+**为什么不抬请求日志上限**：`autoRouter.select()` 每次选号读 `getRequestLogs()` 跑 24h
+Bandit，`forwarder.foldDuplicates()` 读同一窗口判决且 fold=true 会改写
+`request.messages`。抬高上限会改变这两条链路的输入，有降命中风险，已否决。
+
+**两条互不干扰的旁路**：
+
+1. 按天桶新增可选 `cacheMissColdResumedByAccount`（`tokenAccounting.ts`），只在
+   `coldResumed` 且带 `accountId` 时写 `{requests, missTokens}`；每模型行最多 16 个账号，
+   溢出折进该行内部的 `__other__`，累加与读回两侧各限幅一次。旧桶缺字段返回
+   `undefined`，不造空表。经 `store.recordTokenUsage` / `accumulateDayBucket` 透传，
+   `statistics:getTokenUsageDays` 自动可读，不碰模型桶键与命中率分母。
+2. `src/main/proxy/coldResumeTrace.ts` 是进程内固定容量 128 的 FIFO，只记录
+   `coldResumed` 现场的目标、间隔、token 量与会话键哈希（不存原文），经只读通道
+   `diagnostics:getColdResumeTrace` 由管理 RPC 读取；重启即清空。它不被选号、压缩、
+   预热或请求日志引用，也不写日志。
+
+**对账口径**：逐账号 `requests` / `missTokens` 之和应等于同一模型行的
+`cacheMissDetail.coldResumed` / `cacheMissTokenDetail.coldResumed`；差额就是调用方
+没带 `accountId` 的观测，不用差额去凑命中率。
+
+**门禁与边界**：`npm run gate` 3314/3314 通过。**本次是取证能力建设，不是命中率
+修复**：部署后 88% 不会自动变 99%，下一次低命中才能当场定位目标；真正的修复要等
+证据到手后另行提案。**尚未部署**。

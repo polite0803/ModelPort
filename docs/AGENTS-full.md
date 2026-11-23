@@ -1205,6 +1205,24 @@ state, cooling) and `src/main/proxy/autoRouting.ts` (all pure decision logic, un
 Its candidate pool is exactly `getEffectiveModels(provider)`, i.e. the models the user kept served -
 auto never widens that.
 
+**Priority marks drive a per-route hard quota, with no model names in code.** A user flips a
+dedicated **Priority** switch in the model list on the model-management page; it writes the separate
+`keyModels[providerId] = displayName[]` table, never `userModelMarks`. Capability annotations answer
+"what can this model do"; priority answers "how much dispatch should it get" — mixing the two would
+make a model sync able to change token economics and force the annotation dialog to explain a
+non-capability field. `autoRouter.select()` turns the marked models present in the current candidate
+pool into equal shares of the 80% outside the 20% unmarked reserve (`DEFAULT_UNLISTED_SHARE`);
+`rankCandidates` renormalizes those shares over the models that survived cooldown/capability filters,
+so a marked model going cold gives
+its slice to the other marked models while unmarked models keep exactly the 20% reserve. Sorting is
+by dispatch deficit over a 30-minute route-scoped `dispatchLedger` window (cooldown/capability
+filters still run first). `proxy/forwarder.ts` records every real upstream attempt under
+`ProxyContext.routeName`, so routes do not borrow one another's history. Explicit hard pins still
+win; fairness rotation and hard session stickiness stand aside while a quota is active. A route can
+override the marks with `modelWeights` + `unlistedShare` via `routes:update`, but the UI deliberately
+only exposes the boolean switch - one switch applies to every route, so changing token economics never
+requires editing gateway code or each route separately.
+
 **Preset routes are seeded once, the same way `auto` was migrated.** Since R2 (`/v1/models`
 advertises enabled route names only), both a client that can only send one fixed model name and a
 user picking a chat tier need a route of their own, so `store/modelRoutes.ts::PRESET_ROUTE_SEEDS`
@@ -3038,7 +3056,8 @@ Ruling (2026-11-19, 用户拍板): 当这一轮**真正服务的模型**不能�
 - **读图器链**：`autoRouter.relayCandidatePool()`（与选路同源采集）∩ vision=yes ∩ 免费
   （`costClass==='free'` 或渠道 `costBucket==='free'`；**`included` 套餐内不进**）；
   官方免费证据优先、目录其次、`openrouter/free` 元路由最后；同模型只取一个账号。
-  显式 `visionRelay.reader` 点名时不换家。链为空 = 不介入，绝不静默用付费模型。
+  显式 `visionRelay.reader` 点名时不换家，且按目录查（忽略瞬时限流，避免静默跳过）；
+  设置页下拉额外列付费候选并标 `paid`，由用户显式点名。自动链为空 = 不介入，绝不静默用付费模型。
 - **图片全部转述、绝不删除**（当轮 + 历史 + 工具结果）：1.8.29 的铁律是「不静默丢图」，
   替换成自解释标记 `[Image relayed via <reader>: <description>]`（`GATEWAY-TEXT:
   vision-relay-marker`）是合法形态。转述指令只进 hop 请求（`GATEWAY-TEXT: vision-relay-prompt`）。

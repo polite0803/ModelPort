@@ -561,6 +561,20 @@ export interface FairnessOptions {
   lead: number
 }
 
+/**
+ * 路由内硬比例配额的入参。键一律是 `providerId\u0000displayName.trim().toLowerCase()`
+ * （与 `autoRouter.modelRowKey` 同口径）：`shares` 由路由配置的 `modelWeights` 展开，
+ * `counts` 由该路由作用域的派发账本按候选的实际模型号回填。
+ *
+ * 与 `fairness` 互斥：轮转是「领先池内最小值就退后」，配额是「目标份额欠得最多的先派」。
+ * 两者叠加会互相抵消，调用方有权重时只传这一项。
+ */
+export interface WeightedDispatchOptions {
+  counts: ReadonlyMap<string, number>
+  shares: ReadonlyMap<string, number>
+  unlistedShare: number
+}
+
 export interface RankOptions {
   now?: number
   /**
@@ -581,6 +595,8 @@ export interface RankOptions {
   sticky?: StickyHint
   /** 份额轮转；不传 = 不轮转（纯分数序） */
   fairness?: FairnessOptions
+  /** 路由内硬比例配额；不传 = 维持原有 score → fairnessLead 路径 */
+  weightedDispatch?: WeightedDispatchOptions
 }
 
 export interface StickyHint {
@@ -1640,6 +1656,75 @@ function soonestCooling(candidates: RankCandidate[]): RankCandidate[] {
  * - 档位匹配决定能力取向；
  * - `round-robin` 打散、`fill-first` 优先填满已用账号、`failover` 只看配额与健康度。
  */
+/** 与 `autoRouter.modelRowKey` 同一口径；不要让两套大小写/空白归一各自漂移。 */
+function weightedModelKey(candidate: RankCandidate): string {
+  return `${candidate.providerId}\u0000${candidate.displayName.trim().toLowerCase()}`
+}
+
+/**
+ * 硬比例配额的缺陷排序：按窗口内欠得最多先派，多个账号服务同一模型时把模型目标
+ * 均分给这些候选（账本也按模型记，不能让同模型的两个账号各拿一份完整欠债）。
+ *
+ * 目标只在**这一轮可用**的重点模型之间归一化；冷却、能力硬筛、契约过滤已经在上游
+ * 做完，权重不救回不可用模型。未列入的模型平分 `unlistedShare`，重点模型全挂时
+ * 那份份额自然变成 100%。`totalDispatches` 只数池内模型，池外历史不参与这一轮。
+ */
+function orderByWeightedDeficit(
+  scored: { candidate: RankCandidate; score: number }[],
+  weighted: WeightedDispatchOptions
+): { candidate: RankCandidate; score: number }[] {
+  const byModel = new Map<string, { candidates: typeof scored; actual: number; share: number }>()
+  for (const item of scored) {
+    const key = weightedModelKey(item.candidate)
+    let group = byModel.get(key)
+    if (group === undefined) {
+      group = {
+        candidates: [],
+        actual: weighted.counts.get(key) ?? 0,
+        share: weighted.shares.get(key) ?? 0,
+      }
+      byModel.set(key, group)
+    }
+    group.candidates.push(item)
+  }
+
+  let totalDispatches = 0
+  for (const group of byModel.values()) totalDispatches += group.actual
+  const listedTotal = [...byModel.values()].reduce((sum, group) => sum + group.share, 0)
+  const unlistedCount = [...byModel.values()].filter(group => group.share === 0).length
+  const hasUnlisted = unlistedCount > 0
+  // 残额是**聚合**目标：重点模型合计占 100-unlistedShare，未列入的合计占
+  // unlistedShare。某个重点模型冷却/硬筛掉之后，剩余重点的份额按原比例放大回这个
+  // 合计，否则「20% 残额」会在少一个重点模型时被悄悄稀释成 24%。
+  // 池里根本没有未列入模型时，整轮 100% 都给重点模型。
+  const listedBudget = hasUnlisted ? Math.max(0, 100 - weighted.unlistedShare) : 100
+  // 重点模型全挂、或压根没配残额时，剩下的可用模型平分这一轮 —— 空分母不能让
+  // 所有缺陷变成 NaN（NaN 比较会让排序结果依赖原数组顺序）。
+  const denominator = (listedTotal > 0 && listedBudget > 0 ? listedBudget : 0)
+    + (hasUnlisted ? weighted.unlistedShare : 0)
+
+  const withDeficit = [...byModel.values()].flatMap(group => {
+    const share = group.share > 0
+      ? (listedTotal > 0 && listedBudget > 0 ? group.share / listedTotal * listedBudget : 0)
+      : (denominator > 0 ? weighted.unlistedShare : 1) / Math.max(1, unlistedCount)
+    const target = denominator > 0
+      ? (totalDispatches * share) / denominator
+      : totalDispatches / Math.max(1, byModel.size)
+    const perCandidate = group.candidates.length
+    const deficit = (target - group.actual) / perCandidate
+    return group.candidates.map(item => ({ ...item, deficit }))
+  })
+
+  withDeficit.sort((a, b) => {
+    if (b.deficit !== a.deficit) return b.deficit - a.deficit
+    if (b.score !== a.score) return b.score - a.score
+    const keyA = `${a.candidate.providerId}:${a.candidate.displayName}:${a.candidate.accountId}`
+    const keyB = `${b.candidate.providerId}:${b.candidate.displayName}:${b.candidate.accountId}`
+    return keyA.localeCompare(keyB)
+  })
+  return withDeficit.map(({ candidate, score }) => ({ candidate, score }))
+}
+
 export function rankCandidates(
   profile: RequestProfile,
   candidates: RankCandidate[],
@@ -1708,19 +1793,22 @@ export function rankCandidates(
   // 领先 `lead` 次的候选退下，下一个模型接手；全部转完之后最小值抬起来，第二轮接着转。
   // 不这么算而用账本的全局最小值，会在「表里只剩一个热键」时把门槛抬到那个键自己
   // 头上 —— 最需要轮转的时候轮转恰好不生效。
-  const ordered = fairness === undefined
-    ? scored
-    : (() => {
-      const lead = Math.max(0, Math.round(fairness.lead))
-      const minDispatches = pool.reduce(
-        (min, candidate) => Math.min(min, candidate.dispatchCount ?? 0),
-        Number.POSITIVE_INFINITY
-      )
-      const ceiling = minDispatches + lead
-      const eligible = scored.filter(item => (item.candidate.dispatchCount ?? 0) <= ceiling)
-      const deferred = scored.filter(item => (item.candidate.dispatchCount ?? 0) > ceiling)
-      return deferred.length === 0 ? scored : [...eligible, ...deferred]
-    })()
+  // 配额与轮转互斥：轮转会按「领先就退后」重写整组次序，叠在缺陷上会把刚纠回来的
+  // 欠债又推回去。调用方一旦配了 modelWeights，就只走缺陷排序。
+  let ordered = scored
+  if (options.weightedDispatch !== undefined) {
+    ordered = orderByWeightedDeficit(scored, options.weightedDispatch)
+  } else if (fairness !== undefined) {
+    const lead = Math.max(0, Math.round(fairness.lead))
+    const minDispatches = pool.reduce(
+      (min, candidate) => Math.min(min, candidate.dispatchCount ?? 0),
+      Number.POSITIVE_INFINITY
+    )
+    const ceiling = minDispatches + lead
+    const eligible = scored.filter(item => (item.candidate.dispatchCount ?? 0) <= ceiling)
+    const deferred = scored.filter(item => (item.candidate.dispatchCount ?? 0) > ceiling)
+    if (deferred.length > 0) ordered = [...eligible, ...deferred]
+  }
 
   const ranked: RankCandidate[] = []
   for (const item of ordered) {

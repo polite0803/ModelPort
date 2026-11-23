@@ -30,11 +30,16 @@
 ## 读图器候选链
 
 - 配置 `visionRelay.reader` 显式点名：按显示名或 `<provider>/<model>` 精确命中，
-  必须是 vision=yes；失败**不换家**。
+  必须是 vision=yes；失败**不换家**。显式点名时按「目录里有没有这个读图器」查
+  （`ignoreTransientAvailability: true`），正在限流不再让候选静默消失 —— 那会让
+  两段式永远不触发，客户端只收到 `vision required`。
 - 缺省自动链：`autoRouter.relayCandidatePool()`（与选路同源采集）里 **vision=yes 且免费**
   的模型（`costClass='free'` 或渠道 `costBucket='free'`；`included` 套餐内**不进**），
   官方免费证据优先、目录免费其次、`open_router/openrouter/free` 这种元路由最后；
   同模型只取一个账号。链为空 → 两段式不介入（绝不静默用付费模型）。
+- 设置页下拉额外列出**付费**视觉候选并标「付费」——自动链仍只免费，但用户可显式
+  点名付费读图器（hop 走 `probe` 记账、不并进主请求 usage）；令自动链为空的池
+  不至于把两段式锁死。
 
 ## 转述与替换
 
@@ -67,8 +72,11 @@
 | `maxImageBytes` | 8388608 | 单图字节上限（data URL 解码后） |
 
 设置页路径：上下文管理区「视觉读图两段式」卡片；读图器下拉的数据来自只读 IPC
-`visionRelay:readers`（`autoRouter.relayCandidatePool()` + `relayReaderChainOf` 同一判据）。
-读到持久化配置之前不渲染可编辑控件。
+`visionRelay:readers`（`autoRouter.relayCandidatePool()` + `relayReaderChainOf` 同一判据，
+额外列出付费候选并标 `paid`）。读到持久化配置之前不渲染可编辑控件。
+两段式没跑起来时 `no_available_model` 错误体带 `vision_relay.skipped`
+（`disabled` / `no_usable_free_reader` / `reader_failed_or_not_found`），不用再靠
+耗时猜是哪道门没开。
 
 ## 已知代价
 

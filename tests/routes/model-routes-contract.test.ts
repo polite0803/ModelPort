@@ -19,7 +19,9 @@ import {
   LEGACY_AUTO_ROUTE_NAME,
   allModelRoutes,
   checkPoolStrategyIds,
+  checkRouteModelWeights,
   checkRouteName,
+  checkUnlistedShare,
   enabledModelRoutes,
   findModelRoute,
   isRouteStrategyValue,
@@ -479,4 +481,63 @@ test('`mergeRouteTables` 写入侧的池策略是替换而不是追加（否则�
   const merged = mergeRouteTables(base, { fast: { ...base.fast, poolStrategies: [{ id: 'free-only', operator: 'or' }] } })
 
   assert.deepEqual(merged.fast.poolStrategies, [{ id: 'free-only', operator: 'or' }])
+})
+
+// ---------------------------------------------------------------- 硬比例配额字段
+
+test('`modelWeights` 读取侧归一：空份额/非法引用/重复项被安全丢弃，空列表不落键', () => {
+  const normalized = normalizeModelRoutes({
+    fast: {
+      modelWeights: [
+        { providerId: ' pa ', displayName: ' Model-A ', share: 16 },
+        { providerId: 'pa', displayName: 'model-a', share: 99 }, // 大小写不敏感重复，保留第一条
+        { providerId: 'pb', displayName: 'Model-B', share: 0 }, // 0 没有配额语义
+        { providerId: 'pc', displayName: '', share: 16 },
+        { providerId: 'pd', displayName: 'Model-D', share: Number.NaN },
+      ],
+      unlistedShare: 20,
+    },
+    empty: { modelWeights: [{ providerId: 'pa', displayName: 'Model-A', share: -1 }] },
+  })
+
+  assert.deepEqual(normalized.fast.modelWeights, [
+    { providerId: 'pa', displayName: 'Model-A', share: 16 },
+  ])
+  assert.equal(normalized.fast.unlistedShare, 20)
+  assert.equal(Object.prototype.hasOwnProperty.call(normalized.empty, 'modelWeights'), false)
+  assert.equal(Object.prototype.hasOwnProperty.call(normalized.empty, 'unlistedShare'), false)
+})
+
+test('写入侧拒绝坏份额而不是静默丢：否则用户以为配额已经生效', () => {
+  assert.equal(checkRouteModelWeights(undefined), undefined)
+  assert.match(checkRouteModelWeights({})?.message ?? '', /must be an array/)
+  assert.match(
+    checkRouteModelWeights([{ providerId: 'pa', displayName: 'A', share: 0 }])?.message ?? '',
+    /finite number/,
+  )
+  assert.match(checkUnlistedShare(-1)?.message ?? '', /finite number/)
+  assert.equal(checkUnlistedShare(0), undefined)
+
+  const errors = validateRoutesForWrite({
+    fast: {
+      modelWeights: [{ providerId: 'pa', displayName: 'A', share: Number.POSITIVE_INFINITY }],
+      unlistedShare: 1001,
+    },
+  }, normalizeModelRoutes({ fast: {} }), { modelNames: [], aliases: [] })
+  assert.equal(errors.length, 2)
+  assert.match(errors.join('\n'), /modelWeights/)
+  assert.match(errors.join('\n'), /unlistedShare/)
+})
+
+test('`mergeRouteTables` 的空数组是清空配额，不是沿用旧表', () => {
+  const base = normalizeModelRoutes({
+    fast: { modelWeights: [{ providerId: 'pa', displayName: 'A', share: 16 }], unlistedShare: 20 },
+  })
+  const cleared = mergeRouteTables(base, { fast: { ...base.fast, modelWeights: [], unlistedShare: 5 } as never })
+  assert.deepEqual(cleared.fast.modelWeights, [], '整表写入的空列表要盖掉旧配额')
+  assert.equal(normalizeModelRoutes({ fast: cleared.fast }).fast.modelWeights, undefined)
+  assert.equal(cleared.fast.unlistedShare, 5)
+
+  const omitted = mergeRouteTables(base, { fast: { enabled: false } as never })
+  assert.deepEqual(omitted.fast.modelWeights, base.fast.modelWeights)
 })

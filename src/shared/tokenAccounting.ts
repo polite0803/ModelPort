@@ -144,6 +144,17 @@ export interface CacheMissTokenDetail {
 }
 
 /**
+ * 续轮丢锚按账号的观测切片。这是纯旁路明细，绝不参与命中率分母或模型桶键：
+ * 它只回答"这 51 次 coldResumed 落在哪些账号上"，不改变任何既有计数。
+ */
+export interface CacheMissColdResumedAccount {
+  requests: number
+  missTokens: number
+}
+
+export type CacheMissColdResumedByAccount = Record<string, CacheMissColdResumedAccount>
+
+/**
  * One local day's counters for one `(provider, model)` pair.
  *
  * The pair is the key on purpose: a model served by two endpoints has two cache
@@ -184,12 +195,20 @@ export interface ModelDayUsage {
   cacheMissIdleGap?: CacheMissIdleGapCounts
   /** 续轮丢锚按间隔分档的未命中 token；缺省同上。 */
   cacheMissIdleGapTokens?: CacheMissIdleGapTokens
+  /**
+   * 续轮丢锚的目标账号明细；缺省 = 这个模型没有带账号的 coldResumed 观测，
+   * 不是「所有账号都是 0」。与命中率分母、模型桶键完全无关。
+   */
+  cacheMissColdResumedByAccount?: CacheMissColdResumedByAccount
 }
 
 export type ModelDayUsageMap = Record<string, ModelDayUsage>
 
 /** Cap on model rows per day; overflow folds into {@link OTHER_MODEL_KEY}. */
 export const MAX_MODEL_KEYS_PER_DAY = 200
+
+/** Cap on account keys inside one model row; overflow folds into {@link OTHER_MODEL_KEY}. */
+export const MAX_COLD_RESUMED_ACCOUNT_KEYS = 16
 
 /** Aggregation bucket for models beyond the per-day cap. */
 export const OTHER_MODEL_KEY = '__other__'
@@ -792,6 +811,63 @@ function emptyModelUsage(providerId: string, model: string): ModelDayUsage {
   }
 }
 
+/**
+ * 读回一条持久化的账号明细。旧桶没有这个字段，所以缺字段返回 undefined 而不是
+ * 一张空表 —— 空表会把「没观测」伪装成「观测过但没有丢锚」。
+ */
+export function normalizeCacheMissColdResumedByAccount(
+  input: unknown
+): CacheMissColdResumedByAccount | undefined {
+  if (input === null || input === undefined || typeof input !== 'object' || Array.isArray(input)) return undefined
+  const merged: CacheMissColdResumedByAccount = {}
+  for (const [rawKey, rawValue] of Object.entries(input as Record<string, unknown>)) {
+    const trimmed = typeof rawKey === 'string' ? rawKey.trim() : ''
+    if (trimmed === '') continue
+    // 与 modelBucketKey 同一转义来源（这里内联，避免改动既有函数）。
+    const key = trimmed.replace(/::/g, '_')
+    if (rawValue === null || typeof rawValue !== 'object' || Array.isArray(rawValue)) continue
+    const value = rawValue as Record<string, unknown>
+    if (value.requests === undefined && value.missTokens === undefined) continue
+    const previous = merged[key] ?? { requests: 0, missTokens: 0 }
+    merged[key] = {
+      requests: previous.requests + nonNegative(value.requests as number),
+      missTokens: previous.missTokens + nonNegative(value.missTokens as number),
+    }
+  }
+  const keys = Object.keys(merged).filter(key => key !== OTHER_MODEL_KEY)
+  if (keys.length <= MAX_COLD_RESUMED_ACCOUNT_KEYS) {
+    return Object.keys(merged).length > 0 ? merged : undefined
+  }
+  const overflow = { ...(merged[OTHER_MODEL_KEY] ?? { requests: 0, missTokens: 0 }) }
+  const limited: CacheMissColdResumedByAccount = {}
+  for (const key of keys.slice(0, MAX_COLD_RESUMED_ACCOUNT_KEYS)) limited[key] = merged[key]
+  for (const key of keys.slice(MAX_COLD_RESUMED_ACCOUNT_KEYS)) {
+    overflow.requests += merged[key].requests
+    overflow.missTokens += merged[key].missTokens
+  }
+  limited[OTHER_MODEL_KEY] = overflow
+  return limited
+}
+
+/** 纯累加器：只在 coldResumed 这一切片上 +1，不触碰任何既有命中口径。 */
+export function addColdResumedAccount(
+  base: CacheMissColdResumedByAccount | undefined,
+  accountId: string,
+  missTokens: number
+): CacheMissColdResumedByAccount {
+  const counts = normalizeCacheMissColdResumedByAccount(base) ?? {}
+  const key = accountId.trim().replace(/::/g, '_')
+  const overflow = key === '' || key === OTHER_MODEL_KEY
+    || (counts[key] === undefined
+      && Object.keys(counts).filter(candidate => candidate !== OTHER_MODEL_KEY).length >= MAX_COLD_RESUMED_ACCOUNT_KEYS)
+  const target = overflow ? OTHER_MODEL_KEY : key
+  const previous = counts[target] ?? { requests: 0, missTokens: 0 }
+  return {
+    ...counts,
+    [target]: { requests: previous.requests + 1, missTokens: previous.missTokens + nonNegative(missTokens) },
+  }
+}
+
 export function normalizeModelUsage(input: unknown): ModelDayUsageMap | undefined {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined
   const next: ModelDayUsageMap = {}
@@ -807,6 +883,7 @@ export function normalizeModelUsage(input: unknown): ModelDayUsageMap | undefine
     const missTokenDetail = normalizeCacheMissTokenDetail(raw.cacheMissTokenDetail)
     const idleGap = normalizeCacheMissIdleGap(raw.cacheMissIdleGap)
     const idleGapTokens = normalizeCacheMissIdleGapTokens(raw.cacheMissIdleGapTokens)
+    const coldResumedByAccount = normalizeCacheMissColdResumedByAccount(raw.cacheMissColdResumedByAccount)
     next[key] = {
       providerId,
       model,
@@ -822,6 +899,9 @@ export function normalizeModelUsage(input: unknown): ModelDayUsageMap | undefine
       ...(missTokenDetail === undefined ? {} : { cacheMissTokenDetail: missTokenDetail }),
       ...(idleGap === undefined ? {} : { cacheMissIdleGap: idleGap }),
       ...(idleGapTokens === undefined ? {} : { cacheMissIdleGapTokens: idleGapTokens }),
+      ...(coldResumedByAccount === undefined
+        ? {}
+        : { cacheMissColdResumedByAccount: coldResumedByAccount }),
     }
   }
   return Object.keys(next).length > 0 ? next : undefined
@@ -835,7 +915,13 @@ function accumulateModelUsage(
   prompt: number,
   cacheRead: number,
   cacheReported: boolean,
-  miss?: { class: CacheMissClass; detail?: CacheMissDetail; idleGap?: CacheMissIdleGap; missTokens: number }
+  miss?: {
+    class: CacheMissClass
+    detail?: CacheMissDetail
+    idleGap?: CacheMissIdleGap
+    missTokens: number
+    accountId?: string
+  }
 ): ModelDayUsageMap {
   const known = base ?? {}
   const key = modelBucketKey(providerId, model)
@@ -883,6 +969,19 @@ function accumulateModelUsage(
             cacheMissTokenDetail: addCacheMissTokenDetail(
               previous.cacheMissTokenDetail,
               missTokenDetailOf(miss.detail, miss.missTokens)
+            ),
+          }),
+      // 纯观测旁路：只有带账号的 coldResumed 才写，既有分类与 token 合计一行不动。
+      ...(miss?.detail === undefined
+        || (miss.detail.coldResumed ?? 0) <= 0
+        || miss.accountId === undefined
+        || miss.accountId.trim() === ''
+        ? {}
+        : {
+            cacheMissColdResumedByAccount: addColdResumedAccount(
+              previous.cacheMissColdResumedByAccount,
+              miss.accountId,
+              miss.missTokens
             ),
           }),
     },
@@ -972,6 +1071,11 @@ export function accumulateDayBucket(
     cacheMissTokens?: number
     /** 续轮丢锚距上一轮的间隔档；只有 `coldResumed` 才有。 */
     cacheMissIdleGap?: CacheMissIdleGap
+    /**
+     * 服务这一轮的账号 id；只用于 `coldResumed` 的目标明细，
+     * 绝不进入模型桶键或命中率分母。
+     */
+    accountId?: string
   }
 ): DayTokenBucket {
   // ⚠️ 走 `normalizeDayBucket` 而不是直接信任入参：调用方喂的是**磁盘上读出来**
@@ -1046,6 +1150,9 @@ export function accumulateDayBucket(
           class: input.cacheMissClass,
           ...(input.cacheMissDetail === undefined ? {} : { detail: input.cacheMissDetail }),
           ...(input.cacheMissIdleGap === undefined ? {} : { idleGap: input.cacheMissIdleGap }),
+          ...(typeof input.accountId === 'string' && input.accountId.trim() !== ''
+            ? { accountId: input.accountId }
+            : {}),
           missTokens: nonNegative(input.cacheMissTokens),
         }
       : undefined

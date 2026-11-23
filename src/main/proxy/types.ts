@@ -282,6 +282,11 @@ export interface ProxyContext {
    * 必须用同一个原值口径，否则回环头带来的会话在出站时退化成按账号派生。
    */
   clientSession?: ClientSessionKey
+  /**
+   * 命中的路由名。仅用于按路由作用域的派发账本：硬比例配额只数这条路由自己
+   * 派出去的尝试，不能把别的路由流量算进欠债。无路由（裸模型直连）时不带。
+   */
+  routeName?: string
 }
 
 /**

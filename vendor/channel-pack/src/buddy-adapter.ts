@@ -1222,12 +1222,19 @@ export class BuddyAdapter extends LlmAdapter {
   listAllModels(): readonly {
     id: string
     name: string
+    supportsImage?: boolean
     discount?: RpcModelDiscount
   }[] {
     const source = this.remoteModels ?? this.staticFallbackModels()
     return source.map((model) => ({
       id: model.id,
       name: displayNameFor(model, source),
+      // 图片能力必须与 `listModels` 的 `inputModalitiesFor` 同源上抛：RPC 目录走
+      // 本方法（而非 listModels），漏掉它宿主就把全部 buddy 模型记成「视觉未知」
+      // ⇒ auto 路由的 vision 硬过滤判空池 ⇒ `no_available_model (vision required)`
+      // （1.8.39 实测，pin 到 glm-5.3-flash 的带图请求 65ms 内 503）。判据与
+      // `inputModalitiesFor` 同一份（远端 supportsImages 优先、IMAGE_MODELS 兜底）。
+      ...this.inputModalitiesFor(model.id).includes('image') ? { supportsImage: true } : {},
       // `discount` 与展示名**互补而不是重复**：名字里那半段折后价只在窗口开着时
       // 出现，而窗口本身要一直上抛，宿主才能自己算「此刻该用哪个价」。
       ...model.discount !== undefined ? { discount: model.discount } : {},

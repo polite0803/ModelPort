@@ -145,5 +145,6 @@ export function normalizeModelMark(input: unknown): ModelCapabilityHint | undefi
     mark.free = raw.free
   }
 
+  // 「重点」不在这里：它是模型管理页的独立开关（`keyModels`），不是能力标注。
   return Object.keys(mark).length === 0 ? undefined : mark
 }

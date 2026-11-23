@@ -81,7 +81,7 @@ export function ContextManagement() {
   // 否则默认值会在用户没碰过的情况下被保存回盘，把「出厂关闭」伪装成用户的选择。
   const { appConfig, isLoading, saveAppConfig } = useProxyStore()
   const [visionRelay, setVisionRelay] = useState<VisionRelaySettings | null>(null)
-  const [relayReaders, setRelayReaders] = useState<Array<{ displayName: string; providerName: string }>>([])
+  const [relayReaders, setRelayReaders] = useState<Array<{ displayName: string; providerName: string; paid?: boolean }>>([])
   const [relaySaving, setRelaySaving] = useState(false)
 
   useEffect(() => {
@@ -393,6 +393,7 @@ export function ContextManagement() {
                         {relayReaders.map(reader => (
                           <SelectItem key={reader.displayName} value={reader.displayName}>
                             {reader.displayName}
+                            {reader.paid === true ? ` (${t('contextManagement.visionRelay.paid')})` : ''}
                           </SelectItem>
                         ))}
                         {visionRelay.reader !== undefined
